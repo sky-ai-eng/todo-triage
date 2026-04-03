@@ -43,12 +43,21 @@ export default function Cards() {
   const [undoTask, setUndoTask] = useState<{ id: string; action: string } | null>(null)
   const hasFetched = useRef(false)
 
-  const fetchQueue = useCallback(async () => {
+  const fetchQueue = useCallback(async (preserveCurrent = false) => {
     const res = await fetch('/api/queue')
     if (res.ok) {
       const data: Task[] = await res.json()
-      setTasks(data)
-      setCardStart(Date.now())
+      setTasks((prev) => {
+        if (preserveCurrent && prev.length > 0) {
+          // Keep the current top card in place, merge updated queue behind it
+          const currentId = prev[0].id
+          const updated = data.find((t) => t.id === currentId)
+          const rest = data.filter((t) => t.id !== currentId)
+          return [updated ?? prev[0], ...rest]
+        }
+        return data
+      })
+      if (!preserveCurrent) setCardStart(Date.now())
       setLoadState(data.length === 0 ? (hasFetched.current ? 'empty' : 'loading') : 'ready')
       hasFetched.current = true
     }
@@ -61,8 +70,8 @@ export default function Cards() {
   // Handle WS events for live triage pipeline updates
   useWebSocket(useCallback((event: WSEvent) => {
     if (event.type === 'tasks_updated') {
-      // New tasks arrived from poller — refetch the queue
-      fetchQueue()
+      // New tasks arrived from poller — refetch but keep current card stable
+      fetchQueue(true)
     }
 
     if (event.type === 'scoring_started') {
@@ -72,8 +81,8 @@ export default function Cards() {
 
     if (event.type === 'scoring_completed') {
       setScoringIds(new Set())
-      // Refetch to get updated scores and re-sorted order
-      fetchQueue()
+      // Refetch to get updated scores — keep current card stable
+      fetchQueue(true)
     }
   }, [fetchQueue]))
 

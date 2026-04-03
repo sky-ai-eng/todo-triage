@@ -213,6 +213,12 @@ func (s *Spawner) runPRReview(runID string, task domain.Task, owner, repo string
 				}
 			}
 			db.CompleteAgentRun(s.database, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultLink, resultSummary)
+			// Move the task to "done" on successful completion
+			if status == "completed" {
+				if _, err := s.database.Exec(`UPDATE tasks SET status = 'done' WHERE id = ?`, task.ID); err != nil {
+					log.Printf("[delegate] warning: failed to update task %s to done: %v", task.ID, err)
+				}
+			}
 			s.broadcastRunUpdate(runID, status)
 			cmd.Wait()
 			return

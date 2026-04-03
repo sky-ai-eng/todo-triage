@@ -77,7 +77,7 @@ func (p *GitHubPoller) poll() {
 	// 1. PRs where the user's review is requested
 	reviewPRs, err := p.searchPRs(
 		fmt.Sprintf("review-requested:%s+type:pr+state:open", p.username),
-		"review_requested",
+		"review_requested", false,
 	)
 	if err != nil {
 		log.Printf("[github] error fetching review-requested PRs: %v", err)
@@ -85,26 +85,21 @@ func (p *GitHubPoller) poll() {
 		allTasks = append(allTasks, reviewPRs...)
 	}
 
-	// 2. Self-authored open PRs (for CI tracking)
+	// 2. Self-authored open PRs (with CI status — no extra API call, uses head SHA from details)
 	authoredPRs, err := p.searchPRs(
 		fmt.Sprintf("author:%s+type:pr+state:open", p.username),
-		"authored",
+		"authored", true,
 	)
 	if err != nil {
 		log.Printf("[github] error fetching authored PRs: %v", err)
 	} else {
-		// Fetch CI status for authored PRs
-		for i := range authoredPRs {
-			ciStatus := p.fetchCIStatus(authoredPRs[i].Repo, authoredPRs[i].SourceID)
-			authoredPRs[i].CIStatus = ciStatus
-		}
 		allTasks = append(allTasks, authoredPRs...)
 	}
 
 	// 3. PRs where the user was @mentioned
 	mentionedPRs, err := p.searchPRs(
 		fmt.Sprintf("mentions:%s+type:pr+state:open", p.username),
-		"mentioned",
+		"mentioned", false,
 	)
 	if err != nil {
 		log.Printf("[github] error fetching mentioned PRs: %v", err)
@@ -138,7 +133,9 @@ func (p *GitHubPoller) poll() {
 }
 
 // searchPRs runs a GitHub search query and returns tasks tagged with the given relevance reason.
-func (p *GitHubPoller) searchPRs(query, reason string) ([]domain.Task, error) {
+// If fetchCI is true, also fetches CI check status using the head SHA from the PR details
+// (no extra API call since the details endpoint already returns it).
+func (p *GitHubPoller) searchPRs(query, reason string, fetchCI bool) ([]domain.Task, error) {
 	url := fmt.Sprintf("%s/search/issues?q=%s&per_page=50", p.baseURL, query)
 
 	body, err := p.get(url)
@@ -158,16 +155,21 @@ func (p *GitHubPoller) searchPRs(query, reason string) ([]domain.Task, error) {
 		t := item.toTask()
 		t.RelevanceReason = reason
 
-		// Fetch diff stats
+		// Fetch PR details (diff stats + head SHA)
 		repoName := item.repoFullName()
 		if item.PullRequest != nil && repoName != "" {
-			stats, err := p.fetchPRStats(repoName, item.Number)
+			details, err := p.fetchPRDetails(repoName, item.Number)
 			if err != nil {
-				log.Printf("[github] could not fetch PR stats for %s#%d: %v", repoName, item.Number, err)
+				log.Printf("[github] could not fetch PR details for %s#%d: %v", repoName, item.Number, err)
 			} else {
-				t.DiffAdditions = stats.Additions
-				t.DiffDeletions = stats.Deletions
-				t.FilesChanged = stats.ChangedFiles
+				t.DiffAdditions = details.Additions
+				t.DiffDeletions = details.Deletions
+				t.FilesChanged = details.ChangedFiles
+
+				// CI status from the same details response — no extra API call
+				if fetchCI && details.Head.SHA != "" {
+					t.CIStatus = p.fetchCIStatusBySHA(repoName, details.Head.SHA)
+				}
 			}
 		}
 		tasks = append(tasks, t)
@@ -175,36 +177,19 @@ func (p *GitHubPoller) searchPRs(query, reason string) ([]domain.Task, error) {
 	return tasks, nil
 }
 
-// fetchCIStatus gets the combined check-run conclusion for a PR's head commit.
+// fetchCIStatusBySHA gets the combined check-run conclusion for a commit SHA.
 // Returns "success", "failure", "pending", or "" if unavailable.
-func (p *GitHubPoller) fetchCIStatus(repoFullName, prNumber string) string {
-	if repoFullName == "" {
-		return ""
-	}
-
-	// First get the PR to find the head SHA
-	url := fmt.Sprintf("%s/repos/%s/pulls/%s", p.baseURL, repoFullName, prNumber)
-	body, err := p.get(url)
-	if err != nil {
-		log.Printf("[github] could not fetch PR %s#%s for CI status: %v", repoFullName, prNumber, err)
-		return ""
-	}
-
-	var pr struct {
-		Head struct {
-			SHA string `json:"sha"`
-		} `json:"head"`
-	}
-	if err := json.Unmarshal(body, &pr); err != nil || pr.Head.SHA == "" {
+func (p *GitHubPoller) fetchCIStatusBySHA(repoFullName, sha string) string {
+	if repoFullName == "" || sha == "" {
 		return ""
 	}
 
 	// Use the combined status endpoint (covers both status checks and check runs)
-	url = fmt.Sprintf("%s/repos/%s/commits/%s/status", p.baseURL, repoFullName, pr.Head.SHA)
-	body, err = p.get(url)
+	url := fmt.Sprintf("%s/repos/%s/commits/%s/status", p.baseURL, repoFullName, sha)
+	body, err := p.get(url)
 	if err != nil {
 		// Try check-runs endpoint as fallback (GitHub Actions use check runs, not statuses)
-		return p.fetchCheckRunStatus(repoFullName, pr.Head.SHA)
+		return p.fetchCheckRunStatus(repoFullName, sha)
 	}
 
 	var status struct {
@@ -217,7 +202,7 @@ func (p *GitHubPoller) fetchCIStatus(repoFullName, prNumber string) string {
 
 	// If no legacy statuses exist, check the check-runs API
 	if len(status.Statuses) == 0 {
-		return p.fetchCheckRunStatus(repoFullName, pr.Head.SHA)
+		return p.fetchCheckRunStatus(repoFullName, sha)
 	}
 
 	return status.State
@@ -268,23 +253,26 @@ func (p *GitHubPoller) fetchCheckRunStatus(repoFullName, sha string) string {
 	return "success"
 }
 
-type prStats struct {
+type prDetails struct {
 	Additions    int `json:"additions"`
 	Deletions    int `json:"deletions"`
 	ChangedFiles int `json:"changed_files"`
+	Head         struct {
+		SHA string `json:"sha"`
+	} `json:"head"`
 }
 
-func (p *GitHubPoller) fetchPRStats(repoFullName string, number int) (*prStats, error) {
+func (p *GitHubPoller) fetchPRDetails(repoFullName string, number int) (*prDetails, error) {
 	url := fmt.Sprintf("%s/repos/%s/pulls/%d", p.baseURL, repoFullName, number)
 	body, err := p.get(url)
 	if err != nil {
 		return nil, err
 	}
-	var stats prStats
-	if err := json.Unmarshal(body, &stats); err != nil {
+	var details prDetails
+	if err := json.Unmarshal(body, &details); err != nil {
 		return nil, err
 	}
-	return &stats, nil
+	return &details, nil
 }
 
 func (p *GitHubPoller) get(url string) ([]byte, error) {

@@ -31,6 +31,7 @@ export default function Board() {
   const [delegated, setDelegated] = useState<Task[]>([])
   const [done, setDone] = useState<Task[]>([])
   const [filter, setFilter] = useState<InProgressFilter>('all')
+  const [loading, setLoading] = useState(true)
 
   // Agent run state
   const [agentRuns, setAgentRuns] = useState<Record<string, AgentRun>>({})
@@ -72,6 +73,8 @@ export default function Board() {
       }
     } catch {
       // Network error — keep stale data
+    } finally {
+      setLoading(false)
     }
   }, [])
 
@@ -200,8 +203,8 @@ export default function Board() {
 
     // Cross-column move — map to swipe action
     const actionMap: Record<string, Record<string, string>> = {
-      queue: { in_progress: 'claim', done: 'dismiss' },
-      in_progress: { queue: 'undo', done: 'dismiss' },
+      queue: { in_progress: 'claim' },
+      in_progress: { queue: 'undo' },
       done: { queue: 'undo', in_progress: 'claim' },
     }
 
@@ -240,6 +243,14 @@ export default function Board() {
   }
 
   const activeTask = activeId ? allTasks.get(activeId) : null
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-[70vh]">
+        <p className="text-[13px] text-text-tertiary">Loading board...</p>
+      </div>
+    )
+  }
 
   return (
     <DndContext
