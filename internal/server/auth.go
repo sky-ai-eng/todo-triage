@@ -84,6 +84,11 @@ func (s *Server) handleAuthSetup(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[auth] warning: failed to save config: %v", err)
 	}
 
+	// Restart pollers and spawner with new credentials
+	if s.onCredentialsChanged != nil {
+		go s.onCredentialsChanged()
+	}
+
 	writeJSON(w, http.StatusOK, resp)
 }
 

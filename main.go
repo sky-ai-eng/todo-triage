@@ -1,23 +1,24 @@
 package main
 
 import (
-	"database/sql"
 	"fmt"
 	"log"
 	"os"
 	"strconv"
+	"sync"
 
 	"github.com/sky-ai-eng/todo-tinder/internal/ai"
 	"github.com/sky-ai-eng/todo-tinder/internal/auth"
-	"github.com/sky-ai-eng/todo-tinder/internal/delegate"
-	ghclient "github.com/sky-ai-eng/todo-tinder/internal/github"
-	"github.com/sky-ai-eng/todo-tinder/internal/worktree"
 	"github.com/sky-ai-eng/todo-tinder/internal/config"
 	"github.com/sky-ai-eng/todo-tinder/internal/db"
-	"github.com/sky-ai-eng/todo-tinder/cmd/exec"
+	"github.com/sky-ai-eng/todo-tinder/internal/delegate"
+	ghclient "github.com/sky-ai-eng/todo-tinder/internal/github"
 	"github.com/sky-ai-eng/todo-tinder/internal/poller"
 	"github.com/sky-ai-eng/todo-tinder/internal/server"
+	"github.com/sky-ai-eng/todo-tinder/internal/worktree"
 	"github.com/sky-ai-eng/todo-tinder/pkg/websocket"
+
+	"github.com/sky-ai-eng/todo-tinder/cmd/exec"
 )
 
 const defaultPort = 3000
@@ -83,28 +84,8 @@ func main() {
 	// Clean up any orphaned worktrees from crashed runs
 	worktree.Cleanup()
 
-	// Start pollers if credentials are configured
-	cfg, _ := config.Load()
-	creds, _ := auth.Load()
-	startPollers(database, cfg, creds, srv.WSHub())
-
-	// Set up delegation spawner if GitHub is configured
-	if creds.GitHubPAT != "" && creds.GitHubURL != "" {
-		ghClient := ghclient.NewClient(creds.GitHubURL, creds.GitHubPAT)
-		spawner := delegate.NewSpawner(database, ghClient, srv.WSHub(), cfg.AI.Model)
-		srv.SetSpawner(spawner)
-		log.Println("[delegate] spawner ready")
-	}
-
-	if err := srv.ListenAndServe(addr); err != nil {
-		log.Fatalf("server error: %v", err)
-	}
-}
-
-// startPollers launches GitHub and Jira pollers as background goroutines
-// if the corresponding credentials are configured. Also starts the AI scorer.
-func startPollers(database *sql.DB, cfg config.Config, creds auth.Credentials, wsHub *websocket.Hub) {
-	// Start AI scoring runner with WS callbacks
+	// Start AI scoring runner (long-lived, doesn't depend on credentials)
+	wsHub := srv.WSHub()
 	scorer := ai.NewRunner(database, ai.RunnerCallbacks{
 		OnScoringStarted: func(taskIDs []string) {
 			wsHub.Broadcast(websocket.Event{
@@ -122,32 +103,57 @@ func startPollers(database *sql.DB, cfg config.Config, creds auth.Credentials, w
 	scorer.Start()
 	log.Println("[ai] scorer started (model: haiku)")
 
-	// onNewTasks triggers scoring AND broadcasts to frontend
-	onNewTasks := func() {
+	// Poller manager — handles starting/stopping pollers on credential changes
+	pollerMgr := poller.NewManager(database, func() {
 		wsHub.Broadcast(websocket.Event{
 			Type: "tasks_updated",
 			Data: map[string]any{},
 		})
 		scorer.Trigger()
-	}
+	})
 
-	if creds.GitHubPAT != "" && creds.GitHubURL != "" {
-		ghUser, err := auth.ValidateGitHub(creds.GitHubURL, creds.GitHubPAT)
-		if err != nil {
-			log.Printf("[github] token validation failed, skipping poller: %v", err)
+	// Spawner state — protected by mutex for hot-reload
+	var spawnerMu sync.Mutex
+
+	// Wire up credential change callback: restarts pollers + spawner
+	srv.SetOnCredentialsChanged(func() {
+		log.Println("[server] credentials changed, restarting pollers and spawner...")
+
+		pollerMgr.Restart()
+
+		// Recreate spawner with fresh credentials
+		cfg, _ := config.Load()
+		creds, _ := auth.Load()
+
+		spawnerMu.Lock()
+		defer spawnerMu.Unlock()
+
+		if creds.GitHubPAT != "" && creds.GitHubURL != "" {
+			ghClient := ghclient.NewClient(creds.GitHubURL, creds.GitHubPAT)
+			spawner := delegate.NewSpawner(database, ghClient, wsHub, cfg.AI.Model)
+			srv.SetSpawner(spawner)
+			log.Println("[delegate] spawner restarted")
 		} else {
-			ghPoller := poller.NewGitHubPoller(creds.GitHubURL, creds.GitHubPAT, ghUser.Login, database, cfg.GitHub.PollInterval, onNewTasks)
-			ghPoller.Start()
-			log.Printf("[github] poller started (interval: %s, user: %s)", cfg.GitHub.PollInterval, ghUser.Login)
+			srv.SetSpawner(nil)
 		}
+	})
+
+	// Initial start with current credentials
+	pollerMgr.Restart()
+
+	cfg, _ := config.Load()
+	creds, _ := auth.Load()
+	if creds.GitHubPAT != "" && creds.GitHubURL != "" {
+		ghClient := ghclient.NewClient(creds.GitHubURL, creds.GitHubPAT)
+		spawner := delegate.NewSpawner(database, ghClient, wsHub, cfg.AI.Model)
+		srv.SetSpawner(spawner)
+		log.Println("[delegate] spawner ready")
 	}
 
-	if creds.JiraPAT != "" && creds.JiraURL != "" {
-		jiraPoller := poller.NewJiraPoller(creds.JiraURL, creds.JiraPAT, cfg.Jira.Projects, database, cfg.Jira.PollInterval, onNewTasks)
-		jiraPoller.Start()
-		log.Printf("[jira] poller started (interval: %s, projects: %v)", cfg.Jira.PollInterval, cfg.Jira.Projects)
-	}
-
-	// Trigger an initial scoring run for any tasks already in the DB without scores
+	// Score any tasks already in the DB without scores
 	scorer.Trigger()
+
+	if err := srv.ListenAndServe(addr); err != nil {
+		log.Fatalf("server error: %v", err)
+	}
 }

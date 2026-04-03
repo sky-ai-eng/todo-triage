@@ -11,13 +11,18 @@ import (
 	"github.com/sky-ai-eng/todo-tinder/pkg/websocket"
 )
 
+// OnCredentialsChanged is called after credentials are saved. The caller
+// wires this to restart pollers and the delegation spawner.
+type OnCredentialsChanged func()
+
 // Server is the main HTTP server for Todo Tinder.
 type Server struct {
-	db      *sql.DB
-	mux     *http.ServeMux
-	static  fs.FS
-	ws      *websocket.Hub
-	spawner *delegate.Spawner
+	db                    *sql.DB
+	mux                   *http.ServeMux
+	static                fs.FS
+	ws                    *websocket.Hub
+	spawner               *delegate.Spawner
+	onCredentialsChanged  OnCredentialsChanged
 }
 
 // New creates a new server with the given database and registers all routes.
@@ -105,6 +110,11 @@ func (s *Server) SetStatic(f fs.FS) {
 // SetSpawner sets the delegation spawner for agent runs.
 func (s *Server) SetSpawner(sp *delegate.Spawner) {
 	s.spawner = sp
+}
+
+// SetOnCredentialsChanged registers a callback for when credentials are updated.
+func (s *Server) SetOnCredentialsChanged(fn OnCredentialsChanged) {
+	s.onCredentialsChanged = fn
 }
 
 // --- Stub handlers (to be implemented) ---

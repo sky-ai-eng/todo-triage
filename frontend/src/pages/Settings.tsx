@@ -96,7 +96,7 @@ export default function Settings() {
       if (!res.ok) {
         setMessage({ type: 'error', text: body.error || 'Save failed' })
       } else {
-        setMessage({ type: 'success', text: 'Settings saved. Restart to apply connection changes.' })
+        setMessage({ type: 'success', text: 'Settings saved.' })
         setForm((f) => ({ ...f, github_pat: '', jira_pat: '' }))
       }
     } catch {

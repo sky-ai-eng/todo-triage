@@ -209,5 +209,10 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Restart pollers and spawner with new credentials/config
+	if s.onCredentialsChanged != nil {
+		go s.onCredentialsChanged()
+	}
+
 	writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})
 }
