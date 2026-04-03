@@ -1,0 +1,68 @@
+import { useEffect, useRef, useCallback } from 'react'
+import type { WSEvent } from '../types'
+
+type Handler = (event: WSEvent) => void
+
+// --- Singleton connection manager ---
+// Lives outside React's lifecycle so StrictMode double-mounts and page
+// navigations don't tear down the socket.
+
+let globalWs: WebSocket | null = null
+let listeners = new Set<Handler>()
+
+function ensureConnected() {
+  if (globalWs && (globalWs.readyState === WebSocket.OPEN || globalWs.readyState === WebSocket.CONNECTING)) {
+    return
+  }
+
+  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  const ws = new WebSocket(`${proto}//${window.location.host}/api/ws`)
+
+  ws.onmessage = (e) => {
+    try {
+      const event = JSON.parse(e.data) as WSEvent
+      for (const fn of listeners) {
+        fn(event)
+      }
+    } catch {
+      // ignore non-JSON messages (pings, etc.)
+    }
+  }
+
+  ws.onclose = () => {
+    globalWs = null
+    // Only reconnect if there are still listeners
+    if (listeners.size > 0) {
+      setTimeout(ensureConnected, 2000)
+    }
+  }
+
+  globalWs = ws
+}
+
+function subscribe(handler: Handler) {
+  listeners.add(handler)
+  ensureConnected()
+
+  return () => {
+    listeners.delete(handler)
+    // Don't close — other pages may still need the connection.
+    // The socket will naturally stop reconnecting when listeners hits 0.
+  }
+}
+
+// --- React hook ---
+
+export function useWebSocket(handler: Handler) {
+  const handlerRef = useRef(handler)
+  handlerRef.current = handler
+
+  // Stable wrapper so the subscription identity doesn't change on re-renders
+  const stableHandler = useCallback((event: WSEvent) => {
+    handlerRef.current(event)
+  }, [])
+
+  useEffect(() => {
+    return subscribe(stableHandler)
+  }, [stableHandler])
+}

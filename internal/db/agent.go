@@ -1,0 +1,238 @@
+package db
+
+import (
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"time"
+
+	"github.com/sky-ai-eng/todo-tinder/internal/domain"
+)
+
+
+// CreateAgentRun inserts a new agent run.
+func CreateAgentRun(database *sql.DB, run domain.AgentRun) error {
+	_, err := database.Exec(`
+		INSERT INTO agent_runs (id, task_id, status, model, worktree_path)
+		VALUES (?, ?, ?, ?, ?)
+	`, run.ID, run.TaskID, run.Status, run.Model, run.WorktreePath)
+	return err
+}
+
+// CompleteAgentRun updates a run with completion info.
+func CompleteAgentRun(database *sql.DB, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultLink, resultSummary string) error {
+	now := time.Now()
+	_, err := database.Exec(`
+		UPDATE agent_runs
+		SET status = ?, completed_at = ?, total_cost_usd = ?, duration_ms = ?, num_turns = ?, stop_reason = ?, result_link = ?, result_summary = ?
+		WHERE id = ?
+	`, status, now, costUSD, durationMs, numTurns, stopReason, resultLink, resultSummary, runID)
+	return err
+}
+
+// GetAgentRun returns a single agent run by ID.
+func GetAgentRun(database *sql.DB, runID string) (*domain.AgentRun, error) {
+	row := database.QueryRow(`
+		SELECT id, task_id, status, model, started_at, completed_at,
+		       total_cost_usd, duration_ms, num_turns, stop_reason, worktree_path,
+		       result_link, result_summary
+		FROM agent_runs WHERE id = ?
+	`, runID)
+
+	var r domain.AgentRun
+	var completedAt sql.NullTime
+	var costUSD sql.NullFloat64
+	var durationMs, numTurns sql.NullInt64
+	var stopReason, worktreePath, model, resultLink, resultSummary sql.NullString
+
+	err := row.Scan(&r.ID, &r.TaskID, &r.Status, &model, &r.StartedAt, &completedAt,
+		&costUSD, &durationMs, &numTurns, &stopReason, &worktreePath,
+		&resultLink, &resultSummary)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	r.Model = model.String
+	r.StopReason = stopReason.String
+	r.WorktreePath = worktreePath.String
+	r.ResultLink = resultLink.String
+	r.ResultSummary = resultSummary.String
+	if completedAt.Valid {
+		r.CompletedAt = &completedAt.Time
+	}
+	if costUSD.Valid {
+		r.TotalCostUSD = &costUSD.Float64
+	}
+	if durationMs.Valid {
+		v := int(durationMs.Int64)
+		r.DurationMs = &v
+	}
+	if numTurns.Valid {
+		v := int(numTurns.Int64)
+		r.NumTurns = &v
+	}
+
+	return &r, nil
+}
+
+// AgentRunsForTask returns all runs for a given task.
+func AgentRunsForTask(database *sql.DB, taskID string) ([]domain.AgentRun, error) {
+	rows, err := database.Query(`
+		SELECT id, task_id, status, model, started_at, completed_at,
+		       total_cost_usd, duration_ms, num_turns, stop_reason, worktree_path,
+		       result_link, result_summary
+		FROM agent_runs WHERE task_id = ? ORDER BY started_at DESC
+	`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var runs []domain.AgentRun
+	for rows.Next() {
+		var r domain.AgentRun
+		var completedAt sql.NullTime
+		var costUSD sql.NullFloat64
+		var durationMs, numTurns sql.NullInt64
+		var stopReason, worktreePath, model, resultLink, resultSummary sql.NullString
+
+		if err := rows.Scan(&r.ID, &r.TaskID, &r.Status, &model, &r.StartedAt, &completedAt,
+			&costUSD, &durationMs, &numTurns, &stopReason, &worktreePath,
+			&resultLink, &resultSummary); err != nil {
+			return nil, err
+		}
+
+		r.Model = model.String
+		r.StopReason = stopReason.String
+		r.WorktreePath = worktreePath.String
+		r.ResultLink = resultLink.String
+		r.ResultSummary = resultSummary.String
+		if completedAt.Valid {
+			r.CompletedAt = &completedAt.Time
+		}
+		if costUSD.Valid {
+			r.TotalCostUSD = &costUSD.Float64
+		}
+		if durationMs.Valid {
+			v := int(durationMs.Int64)
+			r.DurationMs = &v
+		}
+		if numTurns.Valid {
+			v := int(numTurns.Int64)
+			r.NumTurns = &v
+		}
+
+		runs = append(runs, r)
+	}
+	return runs, rows.Err()
+}
+
+// InsertAgentMessage inserts a message and returns its ID.
+func InsertAgentMessage(database *sql.DB, msg domain.AgentMessage) (int64, error) {
+	var toolCallsJSON, metadataJSON sql.NullString
+
+	if len(msg.ToolCalls) > 0 {
+		b, err := json.Marshal(msg.ToolCalls)
+		if err != nil {
+			return 0, fmt.Errorf("marshal tool_calls: %w", err)
+		}
+		toolCallsJSON = sql.NullString{String: string(b), Valid: true}
+	}
+	if len(msg.Metadata) > 0 {
+		b, err := json.Marshal(msg.Metadata)
+		if err != nil {
+			return 0, fmt.Errorf("marshal metadata: %w", err)
+		}
+		metadataJSON = sql.NullString{String: string(b), Valid: true}
+	}
+
+	result, err := database.Exec(`
+		INSERT INTO agent_messages (run_id, role, content, subtype, tool_calls, tool_call_id, is_error, metadata, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		msg.RunID, msg.Role, msg.Content, msg.Subtype,
+		toolCallsJSON, nullStr(msg.ToolCallID), msg.IsError, metadataJSON,
+		nullStr(msg.Model), nullInt(msg.InputTokens), nullInt(msg.OutputTokens),
+		nullInt(msg.CacheReadTokens), nullInt(msg.CacheCreationTokens),
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.LastInsertId()
+}
+
+// MessagesForRun returns all messages for a given agent run, ordered by ID.
+func MessagesForRun(database *sql.DB, runID string) ([]domain.AgentMessage, error) {
+	rows, err := database.Query(`
+		SELECT id, run_id, role, content, subtype, tool_calls, tool_call_id, is_error, metadata,
+		       model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at
+		FROM agent_messages WHERE run_id = ? ORDER BY id ASC
+	`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var messages []domain.AgentMessage
+	for rows.Next() {
+		var m domain.AgentMessage
+		var content, subtype, toolCallsStr, toolCallID, metadataStr, model sql.NullString
+		var inputTok, outputTok, cacheReadTok, cacheCreateTok sql.NullInt64
+
+		if err := rows.Scan(
+			&m.ID, &m.RunID, &m.Role, &content, &subtype, &toolCallsStr,
+			&toolCallID, &m.IsError, &metadataStr, &model,
+			&inputTok, &outputTok, &cacheReadTok, &cacheCreateTok, &m.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+
+		m.Content = content.String
+		m.Subtype = subtype.String
+		m.ToolCallID = toolCallID.String
+		m.Model = model.String
+
+		if toolCallsStr.Valid {
+			_ = json.Unmarshal([]byte(toolCallsStr.String), &m.ToolCalls)
+		}
+		if metadataStr.Valid {
+			_ = json.Unmarshal([]byte(metadataStr.String), &m.Metadata)
+		}
+		if inputTok.Valid {
+			v := int(inputTok.Int64)
+			m.InputTokens = &v
+		}
+		if outputTok.Valid {
+			v := int(outputTok.Int64)
+			m.OutputTokens = &v
+		}
+		if cacheReadTok.Valid {
+			v := int(cacheReadTok.Int64)
+			m.CacheReadTokens = &v
+		}
+		if cacheCreateTok.Valid {
+			v := int(cacheCreateTok.Int64)
+			m.CacheCreationTokens = &v
+		}
+
+		messages = append(messages, m)
+	}
+	return messages, rows.Err()
+}
+
+func nullStr(s string) sql.NullString {
+	if s == "" {
+		return sql.NullString{}
+	}
+	return sql.NullString{String: s, Valid: true}
+}
+
+func nullInt(p *int) sql.NullInt64 {
+	if p == nil {
+		return sql.NullInt64{}
+	}
+	return sql.NullInt64{Int64: int64(*p), Valid: true}
+}

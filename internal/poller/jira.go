@@ -1,0 +1,228 @@
+package poller
+
+import (
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/sky-ai-eng/todo-tinder/internal/db"
+	"github.com/sky-ai-eng/todo-tinder/internal/domain"
+)
+
+// JiraPoller fetches tasks from the Jira API on an interval.
+type JiraPoller struct {
+	baseURL    string
+	pat        string
+	projects   []string
+	database   *sql.DB
+	client     *http.Client
+	interval   time.Duration
+	stop       chan struct{}
+	onNewTasks func()
+}
+
+func NewJiraPoller(baseURL, pat string, projects []string, database *sql.DB, interval time.Duration, onNewTasks func()) *JiraPoller {
+	return &JiraPoller{
+		baseURL:    strings.TrimRight(baseURL, "/"),
+		pat:        pat,
+		projects:   projects,
+		database:   database,
+		client:     &http.Client{Timeout: 15 * time.Second},
+		interval:   interval,
+		stop:       make(chan struct{}),
+		onNewTasks: onNewTasks,
+	}
+}
+
+func (p *JiraPoller) Start() {
+	go func() {
+		p.poll()
+		ticker := time.NewTicker(p.interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				p.poll()
+			case <-p.stop:
+				return
+			}
+		}
+	}()
+}
+
+func (p *JiraPoller) Stop() {
+	close(p.stop)
+}
+
+func (p *JiraPoller) poll() {
+	log.Println("[jira] polling for tasks...")
+
+	assigned, err := p.fetchAssigned()
+	if err != nil {
+		log.Printf("[jira] error fetching assigned tickets: %v", err)
+	}
+
+	unassigned, err := p.fetchUnassignedBacklog()
+	if err != nil {
+		log.Printf("[jira] error fetching unassigned backlog: %v", err)
+	}
+
+	// Merge and deduplicate by source_id (ticket key)
+	seen := map[string]bool{}
+	var tasks []domain.Task
+	for _, t := range append(assigned, unassigned...) {
+		if !seen[t.SourceID] {
+			seen[t.SourceID] = true
+			tasks = append(tasks, t)
+		}
+	}
+
+	inserted := 0
+	for _, t := range tasks {
+		if err := db.UpsertTask(p.database, t); err != nil {
+			log.Printf("[jira] error upserting task %s: %v", t.SourceID, err)
+			continue
+		}
+		inserted++
+	}
+	log.Printf("[jira] poll complete: %d tasks processed", inserted)
+	if inserted > 0 && p.onNewTasks != nil {
+		p.onNewTasks()
+	}
+}
+
+// fetchAssigned gets tickets assigned to the current user that aren't done.
+func (p *JiraPoller) fetchAssigned() ([]domain.Task, error) {
+	jql := "assignee=currentUser() AND status != Done"
+	return p.search(jql)
+}
+
+// fetchUnassignedBacklog gets unassigned To Do items in configured projects.
+func (p *JiraPoller) fetchUnassignedBacklog() ([]domain.Task, error) {
+	if len(p.projects) == 0 {
+		return nil, nil
+	}
+
+	projectList := strings.Join(p.projects, ", ")
+	jql := fmt.Sprintf(`project IN (%s) AND status = "To Do" AND assignee IS EMPTY`, projectList)
+	return p.search(jql)
+}
+
+func (p *JiraPoller) search(jql string) ([]domain.Task, error) {
+	apiURL := fmt.Sprintf("%s/rest/api/2/search?jql=%s&maxResults=50&fields=summary,description,status,assignee,priority,labels,created",
+		p.baseURL, url.QueryEscape(jql))
+
+	body, err := p.get(apiURL)
+	if err != nil {
+		return nil, err
+	}
+
+	var result jiraSearchResult
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("parse search results: %w", err)
+	}
+
+	tasks := make([]domain.Task, 0, len(result.Issues))
+	for _, issue := range result.Issues {
+		tasks = append(tasks, issue.toTask(p.baseURL))
+	}
+	return tasks, nil
+}
+
+func (p *JiraPoller) get(url string) ([]byte, error) {
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+p.pat)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response body: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("GET %s returned %d: %s", url, resp.StatusCode, string(body))
+	}
+	return body, nil
+}
+
+// --- Jira API types ---
+
+type jiraSearchResult struct {
+	Issues []jiraIssue `json:"issues"`
+}
+
+type jiraIssue struct {
+	Key    string      `json:"key"`
+	Fields jiraFields  `json:"fields"`
+}
+
+type jiraFields struct {
+	Summary     string        `json:"summary"`
+	Description string        `json:"description"`
+	Status      jiraStatus    `json:"status"`
+	Assignee    *jiraUser     `json:"assignee"`
+	Priority    *jiraPriority `json:"priority"`
+	Labels      []string      `json:"labels"`
+	Created     string        `json:"created"`
+}
+
+type jiraStatus struct {
+	Name string `json:"name"`
+}
+
+type jiraUser struct {
+	DisplayName string `json:"displayName"`
+	Key         string `json:"key"`
+}
+
+type jiraPriority struct {
+	Name string `json:"name"`
+	ID   string `json:"id"`
+}
+
+func (issue jiraIssue) toTask(baseURL string) domain.Task {
+	var severity string
+	if issue.Fields.Priority != nil {
+		severity = issue.Fields.Priority.Name
+	}
+
+	var author string
+	if issue.Fields.Assignee != nil {
+		author = issue.Fields.Assignee.DisplayName
+	}
+
+	createdAt := time.Now()
+	if t, err := time.Parse("2006-01-02T15:04:05.000-0700", issue.Fields.Created); err == nil {
+		createdAt = t
+	}
+
+	return domain.Task{
+		ID:          uuid.New().String(),
+		Source:      "jira",
+		SourceID:    issue.Key,
+		SourceURL:   fmt.Sprintf("%s/browse/%s", baseURL, issue.Key),
+		Title:       issue.Fields.Summary,
+		Description: issue.Fields.Description,
+		Author:      author,
+		Labels:      issue.Fields.Labels,
+		Severity:    severity,
+		CreatedAt:   createdAt,
+		FetchedAt:   time.Now(),
+		Status:      "queued",
+	}
+}

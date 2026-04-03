@@ -1,0 +1,26 @@
+@import "tailwindcss";
+
+@theme {
+  /* Warm neutral palette — Shanghai hotel lobby meets Her */
+  --color-surface: #f7f5f2;
+  --color-surface-raised: rgba(255, 255, 255, 0.65);
+  --color-surface-overlay: rgba(255, 255, 255, 0.45);
+  --color-border-glass: rgba(255, 255, 255, 0.7);
+  --color-border-subtle: rgba(0, 0, 0, 0.06);
+  --color-text-primary: #1a1a1a;
+  --color-text-secondary: #6b6560;
+  --color-text-tertiary: #a09a94;
+  --color-accent: #c47a5a;
+  --color-accent-soft: rgba(196, 122, 90, 0.12);
+  --color-dismiss: #c45a5a;
+  --color-claim: #5a8c6a;
+  --color-delegate: #7a6aad;
+  --color-snooze: #b8943a;
+}
+
+body {
+  background: var(--color-surface);
+  color: var(--color-text-primary);
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
