@@ -9,6 +9,13 @@ import (
 )
 
 
+// taskColumns is the canonical SELECT column list for queryTasks. Every query that
+// feeds into queryTasks must use this exact list so the Scan stays in sync.
+const taskColumns = `id, source, source_id, source_url, title, description, repo, author, labels, severity,
+       diff_additions, diff_deletions, files_changed, ci_status, relevance_reason, source_status,
+       created_at, fetched_at, status, priority_score, ai_summary,
+       priority_reasoning, agent_confidence, snooze_until`
+
 // UpsertTask inserts a new task or updates an existing one matched by (source, source_id).
 // Only updates metadata fields — does not overwrite status, priority_score, ai_summary,
 // or agent_confidence so that user/AI state is preserved across polls.
@@ -48,37 +55,21 @@ func UpsertTask(db *sql.DB, t domain.Task) error {
 
 // QueuedTasks returns all tasks with status 'queued', ordered by priority_score descending.
 func QueuedTasks(db *sql.DB) ([]domain.Task, error) {
-	return queryTasks(db, `
-		SELECT id, source, source_id, source_url, title, description, repo, author, labels, severity,
-		       diff_additions, diff_deletions, files_changed, ci_status, relevance_reason, source_status, created_at, fetched_at, status, priority_score, ai_summary,
-		       priority_reasoning, agent_confidence, snooze_until
-		FROM tasks
+	return queryTasks(db, `SELECT `+taskColumns+` FROM tasks
 		WHERE status = 'queued' AND (snooze_until IS NULL OR snooze_until <= datetime('now'))
-		ORDER BY COALESCE(priority_score, 0.5) DESC
-	`)
+		ORDER BY COALESCE(priority_score, 0.5) DESC`)
 }
 
 // TasksByStatus returns tasks filtered by status.
 func TasksByStatus(db *sql.DB, status string) ([]domain.Task, error) {
-	return queryTasks(db, `
-		SELECT id, source, source_id, source_url, title, description, repo, author, labels, severity,
-		       diff_additions, diff_deletions, files_changed, ci_status, relevance_reason, source_status, created_at, fetched_at, status, priority_score, ai_summary,
-		       priority_reasoning, agent_confidence, snooze_until
-		FROM tasks
+	return queryTasks(db, `SELECT `+taskColumns+` FROM tasks
 		WHERE status = ?
-		ORDER BY COALESCE(priority_score, 0.5) DESC
-	`, status)
+		ORDER BY COALESCE(priority_score, 0.5) DESC`, status)
 }
 
 // GetTask returns a single task by ID.
 func GetTask(db *sql.DB, id string) (*domain.Task, error) {
-	tasks, err := queryTasks(db, `
-		SELECT id, source, source_id, source_url, title, description, repo, author, labels, severity,
-		       diff_additions, diff_deletions, files_changed, ci_status, relevance_reason, source_status, created_at, fetched_at, status, priority_score, ai_summary,
-		       priority_reasoning, agent_confidence, snooze_until
-		FROM tasks
-		WHERE id = ?
-	`, id)
+	tasks, err := queryTasks(db, `SELECT `+taskColumns+` FROM tasks WHERE id = ?`, id)
 	if err != nil {
 		return nil, err
 	}

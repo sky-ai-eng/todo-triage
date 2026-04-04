@@ -36,12 +36,7 @@ func UpdateTaskScores(database *sql.DB, updates []domain.TaskScoreUpdate) error 
 
 // UnscoredTasks returns queued tasks that don't have an AI summary yet.
 func UnscoredTasks(database *sql.DB) ([]domain.Task, error) {
-	return queryTasks(database, `
-		SELECT id, source, source_id, source_url, title, description, repo, author, labels, severity,
-		       diff_additions, diff_deletions, files_changed, ci_status, relevance_reason, created_at, fetched_at, status, priority_score, ai_summary,
-		       priority_reasoning, agent_confidence, snooze_until
-		FROM tasks
+	return queryTasks(database, `SELECT `+taskColumns+` FROM tasks
 		WHERE status = 'queued' AND ai_summary IS NULL
-		ORDER BY created_at DESC
-	`)
+		ORDER BY created_at DESC`)
 }
