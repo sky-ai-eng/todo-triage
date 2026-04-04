@@ -86,8 +86,17 @@ func (c *Client) AssignToSelf(issueKey string) error {
 // Unassign removes the assignee from an issue.
 func (c *Client) Unassign(issueKey string) error {
 	url := fmt.Sprintf("%s/rest/api/2/issue/%s/assignee", c.baseURL, issueKey)
-	// Setting assignee to null/nil clears the assignee on both Cloud and Server.
-	return c.put(url, map[string]*string{"accountId": nil, "name": nil})
+	// Detect Cloud vs Server the same way AssignToSelf does.
+	myself, err := c.currentUser()
+	if err != nil {
+		return fmt.Errorf("get current user: %w", err)
+	}
+	if myself.AccountID != "" {
+		// Jira Cloud: null accountId clears assignee
+		return c.put(url, map[string]*string{"accountId": nil})
+	}
+	// Jira Server/DC: empty name clears assignee
+	return c.put(url, map[string]string{"name": ""})
 }
 
 // TransitionTo transitions an issue to the target status name.
