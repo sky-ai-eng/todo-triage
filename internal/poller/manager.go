@@ -72,8 +72,8 @@ func (m *Manager) Restart() {
 		if interval < 10*time.Second {
 			interval = time.Minute
 		}
-		m.jira = NewJiraPoller(creds.JiraURL, creds.JiraPAT, cfg.Jira.Projects, m.database, interval, m.onNewTasks)
+		m.jira = NewJiraPoller(creds.JiraURL, creds.JiraPAT, cfg.Jira.Projects, cfg.Jira.PickupStatuses, m.database, interval, m.onNewTasks)
 		m.jira.Start()
-		log.Printf("[jira] poller started (interval: %s, projects: %v)", interval, cfg.Jira.Projects)
+		log.Printf("[jira] poller started (interval: %s, projects: %v, statuses: %v)", interval, cfg.Jira.Projects, cfg.Jira.PickupStatuses)
 	}
 }

@@ -7,6 +7,7 @@ import (
 
 	"github.com/sky-ai-eng/todo-tinder/internal/auth"
 	"github.com/sky-ai-eng/todo-tinder/internal/config"
+	"github.com/sky-ai-eng/todo-tinder/internal/jira"
 )
 
 // settingsResponse combines config values with auth status so the frontend
@@ -26,11 +27,13 @@ type githubSettings struct {
 }
 
 type jiraSettings struct {
-	Enabled      bool     `json:"enabled"`
-	BaseURL      string   `json:"base_url"`
-	HasToken     bool     `json:"has_token"`
-	PollInterval string   `json:"poll_interval"`
-	Projects     []string `json:"projects"`
+	Enabled          bool     `json:"enabled"`
+	BaseURL          string   `json:"base_url"`
+	HasToken         bool     `json:"has_token"`
+	PollInterval     string   `json:"poll_interval"`
+	Projects         []string `json:"projects"`
+	PickupStatuses   []string `json:"pickup_statuses"`
+	InProgressStatus string   `json:"in_progress_status"`
 }
 
 type serverSettings struct {
@@ -59,11 +62,13 @@ func (s *Server) handleSettingsGet(w http.ResponseWriter, r *http.Request) {
 			PollInterval: cfg.GitHub.PollInterval.String(),
 		},
 		Jira: jiraSettings{
-			Enabled:      creds.JiraPAT != "",
-			BaseURL:      cfg.Jira.BaseURL,
-			HasToken:     creds.JiraPAT != "",
-			PollInterval: cfg.Jira.PollInterval.String(),
-			Projects:     cfg.Jira.Projects,
+			Enabled:          creds.JiraPAT != "",
+			BaseURL:          cfg.Jira.BaseURL,
+			HasToken:         creds.JiraPAT != "",
+			PollInterval:     cfg.Jira.PollInterval.String(),
+			Projects:         cfg.Jira.Projects,
+			PickupStatuses:   cfg.Jira.PickupStatuses,
+			InProgressStatus: cfg.Jira.InProgressStatus,
 		},
 		Server: serverSettings{
 			Port: cfg.Server.Port,
@@ -77,6 +82,9 @@ func (s *Server) handleSettingsGet(w http.ResponseWriter, r *http.Request) {
 
 	if resp.Jira.Projects == nil {
 		resp.Jira.Projects = []string{}
+	}
+	if resp.Jira.PickupStatuses == nil {
+		resp.Jira.PickupStatuses = []string{}
 	}
 
 	writeJSON(w, http.StatusOK, resp)
@@ -92,11 +100,13 @@ type settingsUpdateRequest struct {
 	JiraPAT       string `json:"jira_pat"` // empty means "keep existing"
 
 	// Config
-	GitHubPollInterval string   `json:"github_poll_interval"`
-	JiraPollInterval   string   `json:"jira_poll_interval"`
-	JiraProjects       []string `json:"jira_projects"`
-	AIModel            string   `json:"ai_model"`
-	ServerPort         int      `json:"server_port"`
+	GitHubPollInterval   string   `json:"github_poll_interval"`
+	JiraPollInterval     string   `json:"jira_poll_interval"`
+	JiraProjects         []string `json:"jira_projects"`
+	JiraPickupStatuses   []string `json:"jira_pickup_statuses"`
+	JiraInProgressStatus string   `json:"jira_in_progress_status"`
+	AIModel              string   `json:"ai_model"`
+	ServerPort           int      `json:"server_port"`
 }
 
 func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
@@ -192,6 +202,12 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 	if req.JiraProjects != nil {
 		cfg.Jira.Projects = req.JiraProjects
 	}
+	if req.JiraPickupStatuses != nil {
+		cfg.Jira.PickupStatuses = req.JiraPickupStatuses
+	}
+	if req.JiraInProgressStatus != "" {
+		cfg.Jira.InProgressStatus = req.JiraInProgressStatus
+	}
 	if req.AIModel != "" {
 		cfg.AI.Model = req.AIModel
 	}
@@ -215,4 +231,45 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})
+}
+
+// handleJiraStatuses returns available statuses for given Jira projects.
+// Query params: ?project=PROJ1&project=PROJ2 (or uses configured projects if omitted).
+func (s *Server) handleJiraStatuses(w http.ResponseWriter, r *http.Request) {
+	creds, _ := auth.Load()
+	if creds.JiraPAT == "" || creds.JiraURL == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Jira not configured"})
+		return
+	}
+
+	projects := r.URL.Query()["project"]
+	if len(projects) == 0 {
+		cfg, _ := config.Load()
+		projects = cfg.Jira.Projects
+	}
+	if len(projects) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no projects specified"})
+		return
+	}
+
+	client := jira.NewClient(creds.JiraURL, creds.JiraPAT)
+
+	// Collect statuses across all projects, deduplicated
+	seen := map[string]bool{}
+	var statuses []jira.Status
+	for _, proj := range projects {
+		projectStatuses, err := client.ProjectStatuses(proj)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to fetch statuses for " + proj + ": " + err.Error()})
+			return
+		}
+		for _, st := range projectStatuses {
+			if !seen[st.Name] {
+				seen[st.Name] = true
+				statuses = append(statuses, st)
+			}
+		}
+	}
+
+	writeJSON(w, http.StatusOK, statuses)
 }

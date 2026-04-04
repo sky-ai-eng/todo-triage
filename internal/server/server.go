@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/sky-ai-eng/todo-tinder/internal/delegate"
+	"github.com/sky-ai-eng/todo-tinder/internal/jira"
 	"github.com/sky-ai-eng/todo-tinder/pkg/websocket"
 )
 
@@ -22,6 +23,8 @@ type Server struct {
 	static                fs.FS
 	ws                    *websocket.Hub
 	spawner               *delegate.Spawner
+	jiraClient            *jira.Client
+	jiraInProgressStatus  string
 	onCredentialsChanged  OnCredentialsChanged
 }
 
@@ -67,6 +70,7 @@ func (s *Server) routes() {
 
 	s.mux.HandleFunc("GET /api/settings", s.handleSettingsGet)
 	s.mux.HandleFunc("POST /api/settings", s.handleSettingsPost)
+	s.mux.HandleFunc("GET /api/jira/statuses", s.handleJiraStatuses)
 
 	s.mux.HandleFunc("GET /api/prompts", s.handlePromptsList)
 	s.mux.HandleFunc("GET /api/prompts/{type}", s.handlePromptGet)
@@ -115,6 +119,12 @@ func (s *Server) SetSpawner(sp *delegate.Spawner) {
 // SetOnCredentialsChanged registers a callback for when credentials are updated.
 func (s *Server) SetOnCredentialsChanged(fn OnCredentialsChanged) {
 	s.onCredentialsChanged = fn
+}
+
+// SetJiraClient sets the Jira client and in-progress status for claim actions.
+func (s *Server) SetJiraClient(client *jira.Client, inProgressStatus string) {
+	s.jiraClient = client
+	s.jiraInProgressStatus = inProgressStatus
 }
 
 // --- Stub handlers (to be implemented) ---

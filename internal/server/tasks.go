@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"time"
 
@@ -139,8 +140,25 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Trigger delegation on swipe-up
 	response := map[string]any{"status": newStatus}
+
+	// On claim: if Jira task, assign to self and transition to in-progress
+	if req.Action == "claim" && s.jiraClient != nil && s.jiraInProgressStatus != "" {
+		task, err := db.GetTask(s.db, id)
+		if err == nil && task != nil && task.Source == "jira" {
+			go func(issueKey, targetStatus string) {
+				if err := s.jiraClient.AssignToSelf(issueKey); err != nil {
+					log.Printf("[jira] failed to assign %s: %v", issueKey, err)
+					return
+				}
+				if err := s.jiraClient.TransitionTo(issueKey, targetStatus); err != nil {
+					log.Printf("[jira] failed to transition %s to %q: %v", issueKey, targetStatus, err)
+				}
+			}(task.SourceID, s.jiraInProgressStatus)
+		}
+	}
+
+	// Trigger delegation on swipe-up
 	if req.Action == "delegate" && s.spawner != nil {
 		task, err := db.GetTask(s.db, id)
 		if err == nil && task != nil && task.Source == "github" {

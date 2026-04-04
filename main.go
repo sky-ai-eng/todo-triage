@@ -13,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/todo-tinder/internal/db"
 	"github.com/sky-ai-eng/todo-tinder/internal/delegate"
 	ghclient "github.com/sky-ai-eng/todo-tinder/internal/github"
+	"github.com/sky-ai-eng/todo-tinder/internal/jira"
 	"github.com/sky-ai-eng/todo-tinder/internal/poller"
 	"github.com/sky-ai-eng/todo-tinder/internal/server"
 	"github.com/sky-ai-eng/todo-tinder/internal/worktree"
@@ -136,6 +137,12 @@ func main() {
 		} else {
 			srv.SetSpawner(nil)
 		}
+
+		if creds.JiraPAT != "" && creds.JiraURL != "" {
+			srv.SetJiraClient(jira.NewClient(creds.JiraURL, creds.JiraPAT), cfg.Jira.InProgressStatus)
+		} else {
+			srv.SetJiraClient(nil, "")
+		}
 	})
 
 	// Initial start with current credentials
@@ -148,6 +155,9 @@ func main() {
 		spawner := delegate.NewSpawner(database, ghClient, wsHub, cfg.AI.Model)
 		srv.SetSpawner(spawner)
 		log.Println("[delegate] spawner ready")
+	}
+	if creds.JiraPAT != "" && creds.JiraURL != "" {
+		srv.SetJiraClient(jira.NewClient(creds.JiraURL, creds.JiraPAT), cfg.Jira.InProgressStatus)
 	}
 
 	// Score any tasks already in the DB without scores

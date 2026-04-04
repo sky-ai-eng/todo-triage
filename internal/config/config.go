@@ -22,9 +22,11 @@ type GitHubConfig struct {
 }
 
 type JiraConfig struct {
-	BaseURL      string        `yaml:"base_url"`
-	PollInterval time.Duration `yaml:"poll_interval"`
-	Projects     []string      `yaml:"projects"`
+	BaseURL          string        `yaml:"base_url"`
+	PollInterval     time.Duration `yaml:"poll_interval"`
+	Projects         []string      `yaml:"projects"`
+	PickupStatuses   []string      `yaml:"pickup_statuses"`
+	InProgressStatus string        `yaml:"in_progress_status"`
 }
 
 type ServerConfig struct {

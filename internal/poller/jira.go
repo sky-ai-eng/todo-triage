@@ -18,26 +18,28 @@ import (
 
 // JiraPoller fetches tasks from the Jira API on an interval.
 type JiraPoller struct {
-	baseURL    string
-	pat        string
-	projects   []string
-	database   *sql.DB
-	client     *http.Client
-	interval   time.Duration
-	stop       chan struct{}
-	onNewTasks func()
+	baseURL        string
+	pat            string
+	projects       []string
+	pickupStatuses []string
+	database       *sql.DB
+	client         *http.Client
+	interval       time.Duration
+	stop           chan struct{}
+	onNewTasks     func()
 }
 
-func NewJiraPoller(baseURL, pat string, projects []string, database *sql.DB, interval time.Duration, onNewTasks func()) *JiraPoller {
+func NewJiraPoller(baseURL, pat string, projects, pickupStatuses []string, database *sql.DB, interval time.Duration, onNewTasks func()) *JiraPoller {
 	return &JiraPoller{
-		baseURL:    strings.TrimRight(baseURL, "/"),
-		pat:        pat,
-		projects:   projects,
-		database:   database,
-		client:     &http.Client{Timeout: 15 * time.Second},
-		interval:   interval,
-		stop:       make(chan struct{}),
-		onNewTasks: onNewTasks,
+		baseURL:        strings.TrimRight(baseURL, "/"),
+		pat:            pat,
+		projects:       projects,
+		pickupStatuses: pickupStatuses,
+		database:       database,
+		client:         &http.Client{Timeout: 15 * time.Second},
+		interval:       interval,
+		stop:           make(chan struct{}),
+		onNewTasks:     onNewTasks,
 	}
 }
 
@@ -64,24 +66,10 @@ func (p *JiraPoller) Stop() {
 func (p *JiraPoller) poll() {
 	log.Println("[jira] polling for tasks...")
 
-	assigned, err := p.fetchAssigned()
+	tasks, err := p.fetchPickupTasks()
 	if err != nil {
-		log.Printf("[jira] error fetching assigned tickets: %v", err)
-	}
-
-	unassigned, err := p.fetchUnassignedBacklog()
-	if err != nil {
-		log.Printf("[jira] error fetching unassigned backlog: %v", err)
-	}
-
-	// Merge and deduplicate by source_id (ticket key)
-	seen := map[string]bool{}
-	var tasks []domain.Task
-	for _, t := range append(assigned, unassigned...) {
-		if !seen[t.SourceID] {
-			seen[t.SourceID] = true
-			tasks = append(tasks, t)
-		}
+		log.Printf("[jira] error fetching tasks: %v", err)
+		return
 	}
 
 	inserted := 0
@@ -98,20 +86,23 @@ func (p *JiraPoller) poll() {
 	}
 }
 
-// fetchAssigned gets tickets assigned to the current user that aren't done.
-func (p *JiraPoller) fetchAssigned() ([]domain.Task, error) {
-	jql := "assignee=currentUser() AND status != Done"
-	return p.search(jql)
-}
-
-// fetchUnassignedBacklog gets unassigned To Do items in configured projects.
-func (p *JiraPoller) fetchUnassignedBacklog() ([]domain.Task, error) {
-	if len(p.projects) == 0 {
+// fetchPickupTasks gets unassigned tickets in configured projects that are
+// in one of the configured pickup statuses.
+func (p *JiraPoller) fetchPickupTasks() ([]domain.Task, error) {
+	if len(p.projects) == 0 || len(p.pickupStatuses) == 0 {
 		return nil, nil
 	}
 
 	projectList := strings.Join(p.projects, ", ")
-	jql := fmt.Sprintf(`project IN (%s) AND status = "To Do" AND assignee IS EMPTY`, projectList)
+
+	// Quote each status name for JQL
+	quoted := make([]string, len(p.pickupStatuses))
+	for i, s := range p.pickupStatuses {
+		quoted[i] = fmt.Sprintf("%q", s)
+	}
+	statusList := strings.Join(quoted, ", ")
+
+	jql := fmt.Sprintf(`project IN (%s) AND status IN (%s) AND assignee IS EMPTY`, projectList, statusList)
 	return p.search(jql)
 }
 
