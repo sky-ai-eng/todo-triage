@@ -272,10 +272,10 @@ function basename(path: string): string {
 
 function formatStatus(status: string): string {
   const map: Record<string, string> = {
-    cloning: 'Cloning repo',
-    fetching: 'Fetching refs',
-    worktree_created: 'Setting up',
-    agent_starting: 'Starting agent',
+    cloning: 'Pulling repo',
+    fetching: 'Fetching PR details',
+    worktree_created: 'Creating worktree',
+    agent_starting: 'Starting Claude Code',
     running: 'Running',
     completed: 'Completed',
     cancelled: 'Cancelled',
