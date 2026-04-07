@@ -3,6 +3,7 @@ package delegate
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -29,8 +31,8 @@ type Spawner struct {
 	wsHub    *websocket.Hub
 	model    string
 
-	mu       sync.Mutex
-	procs    map[string]*os.Process // runID → running claude process
+	mu      sync.Mutex
+	cancels map[string]context.CancelFunc // runID → cancel the entire run
 }
 
 func NewSpawner(database *sql.DB, ghClient *ghclient.Client, wsHub *websocket.Hub, model string) *Spawner {
@@ -39,25 +41,22 @@ func NewSpawner(database *sql.DB, ghClient *ghclient.Client, wsHub *websocket.Hu
 		ghClient: ghClient,
 		wsHub:    wsHub,
 		model:    model,
-		procs:    make(map[string]*os.Process),
+		cancels:  make(map[string]context.CancelFunc),
 	}
 }
 
-// Cancel kills a running agent process and marks the run as failed.
+// Cancel aborts a run at any phase — clone, fetch, worktree setup, or agent execution.
+// The goroutine handles cleanup (worktree removal, status update).
 func (s *Spawner) Cancel(runID string) error {
 	s.mu.Lock()
-	proc, ok := s.procs[runID]
+	cancel, ok := s.cancels[runID]
 	s.mu.Unlock()
 
 	if !ok {
-		return fmt.Errorf("no running process for run %s", runID)
+		return fmt.Errorf("no active run %s", runID)
 	}
 
-	if err := proc.Kill(); err != nil {
-		return fmt.Errorf("kill process: %w", err)
-	}
-
-	// The goroutine will handle cleanup (worktree, status update) when cmd.Wait() returns
+	cancel()
 	return nil
 }
 
@@ -123,32 +122,64 @@ func (s *Spawner) DelegatePR(task domain.Task, explicitPromptID string) (string,
 
 	s.broadcastRunUpdate(runID, "cloning")
 
+	// Create cancellable context for the entire run lifecycle
+	ctx, cancel := context.WithCancel(context.Background())
+	s.mu.Lock()
+	s.cancels[runID] = cancel
+	s.mu.Unlock()
+
 	// Run async
-	go s.runPRReview(runID, task, owner, repo, prNumber, mission)
+	go func() {
+		defer func() {
+			s.mu.Lock()
+			delete(s.cancels, runID)
+			s.mu.Unlock()
+			cancel() // release context resources
+		}()
+		s.runPRReview(ctx, runID, task, owner, repo, prNumber, mission)
+	}()
 
 	return runID, nil
 }
 
-func (s *Spawner) runPRReview(runID string, task domain.Task, owner, repo string, prNumber int, mission string) {
+func (s *Spawner) runPRReview(ctx context.Context, runID string, task domain.Task, owner, repo string, prNumber int, mission string) {
+	startTime := time.Now()
+
+	// Helper: check if we were cancelled and handle cleanup
+	cancelled := func() bool {
+		if ctx.Err() != nil {
+			elapsed := int(time.Since(startTime).Milliseconds())
+			db.CompleteAgentRun(s.database, runID, "cancelled", 0, elapsed, 0, "cancelled", "", "Cancelled by user")
+			s.broadcastRunUpdate(runID, "cancelled")
+			worktree.Remove(runID) // clean up any partial worktree
+			return true
+		}
+		return false
+	}
+
 	// 1. Get PR details for clone URL and head SHA
 	s.updateStatus(runID, "fetching")
 	pr, err := s.ghClient.GetPR(owner, repo, prNumber, false)
 	if err != nil {
+		if cancelled() {
+			return
+		}
 		s.failRun(runID, "failed to fetch PR: "+err.Error())
 		return
 	}
 
 	// 2. Create worktree
 	s.updateStatus(runID, "cloning")
-	wtPath, err := worktree.Create(owner, repo, pr.CloneURL, pr.HeadSHA, prNumber, runID)
+	wtPath, err := worktree.Create(ctx, owner, repo, pr.CloneURL, pr.HeadSHA, prNumber, runID)
 	if err != nil {
+		if cancelled() {
+			return
+		}
 		s.failRun(runID, "failed to create worktree: "+err.Error())
 		return
 	}
 	s.updateStatus(runID, "worktree_created")
-	defer func() {
-		worktree.Remove(runID)
-	}()
+	defer worktree.Remove(runID)
 
 	// Update run with worktree path
 	if _, err := s.database.Exec(`UPDATE agent_runs SET worktree_path = ? WHERE id = ?`, wtPath, runID); err != nil {
@@ -165,8 +196,12 @@ func (s *Spawner) runPRReview(runID string, task domain.Task, owner, repo string
 	// 4. Build prompt: envelope (tool guidance) + mission (what to do)
 	prompt := buildPrompt(mission, owner, repo, prNumber, selfBin)
 
-	// 5. Spawn claude
+	// 5. Spawn claude in its own process group so we can kill the entire tree
 	s.updateStatus(runID, "agent_starting")
+	if cancelled() {
+		return
+	}
+
 	args := []string{
 		"-p", prompt,
 		"--model", s.model,
@@ -179,6 +214,7 @@ func (s *Spawner) runPRReview(runID string, task domain.Task, owner, repo string
 	cmd := exec.Command("claude", args...)
 	cmd.Dir = wtPath
 	cmd.Env = append(os.Environ(), "TODOTINDER_RUN_ID="+runID)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -194,20 +230,19 @@ func (s *Spawner) runPRReview(runID string, task domain.Task, owner, repo string
 		return
 	}
 
-	log.Printf("[delegate] claude started (pid: %d, cwd: %s)", cmd.Process.Pid, wtPath)
+	pgid := cmd.Process.Pid
+	log.Printf("[delegate] claude started (pid: %d, pgid: %d, cwd: %s)", cmd.Process.Pid, pgid, wtPath)
 
-	// Track process for cancellation
-	s.mu.Lock()
-	s.procs[runID] = cmd.Process
-	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		delete(s.procs, runID)
-		s.mu.Unlock()
+	// Watch for context cancellation and kill the entire process group
+	go func() {
+		<-ctx.Done()
+		// Kill the entire process group (negative PID = group)
+		if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
+			log.Printf("[delegate] warning: failed to kill process group %d: %v", pgid, err)
+		}
 	}()
 
 	s.updateStatus(runID, "running")
-	startTime := time.Now()
 
 	// 6. Parse NDJSON stream
 	stream := newStreamState()
@@ -235,7 +270,6 @@ func (s *Spawner) runPRReview(runID string, task domain.Task, owner, repo string
 
 		// Handle completion
 		if completion != nil {
-			// Parse structured result from the agent's final text
 			resultLink, resultSummary := "", ""
 			status := "completed"
 			if completion.IsError {
@@ -249,7 +283,6 @@ func (s *Spawner) runPRReview(runID string, task domain.Task, owner, repo string
 				}
 			}
 			db.CompleteAgentRun(s.database, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultLink, resultSummary)
-			// Move the task to "done" on successful completion
 			if status == "completed" {
 				if _, err := s.database.Exec(`UPDATE tasks SET status = 'done' WHERE id = ?`, task.ID); err != nil {
 					log.Printf("[delegate] warning: failed to update task %s to done: %v", task.ID, err)
@@ -267,14 +300,10 @@ func (s *Spawner) runPRReview(runID string, task domain.Task, owner, repo string
 
 	// Wait for process to exit
 	if err := cmd.Wait(); err != nil {
-		stderr := stderrBuf.String()
-		// Check if this was a cancellation (killed by us)
-		if strings.Contains(err.Error(), "signal: killed") {
-			elapsed := int(time.Since(startTime).Milliseconds())
-			db.CompleteAgentRun(s.database, runID, "cancelled", 0, elapsed, 0, "cancelled", "", "Cancelled by user")
-			s.broadcastRunUpdate(runID, "cancelled")
+		if cancelled() {
 			return
 		}
+		stderr := stderrBuf.String()
 		s.failRun(runID, fmt.Sprintf("claude exited with error: %v\nstderr: %s", err, stderr))
 		return
 	}

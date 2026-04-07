@@ -1,6 +1,7 @@
 package worktree
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -49,7 +50,7 @@ func runDir(runID string) string {
 // Create sets up an isolated worktree for an agent run.
 // Ensures a bare clone exists, fetches the target PR ref, and creates a worktree at the given SHA.
 // Returns the worktree path.
-func Create(owner, repo, cloneURL, sha string, prNumber int, runID string) (string, error) {
+func Create(ctx context.Context, owner, repo, cloneURL, sha string, prNumber int, runID string) (string, error) {
 	// Serialize git operations per repo to avoid lock conflicts
 	mu := lockRepo(owner, repo)
 	mu.Lock()
@@ -67,7 +68,7 @@ func Create(owner, repo, cloneURL, sha string, prNumber int, runID string) (stri
 			return "", fmt.Errorf("mkdir: %w", err)
 		}
 		start := time.Now()
-		if err := gitRun("", "clone", "--bare", "--filter=blob:none", cloneURL, bareDir); err != nil {
+		if err := gitRunCtx(ctx, "", "clone", "--bare", "--filter=blob:none", cloneURL, bareDir); err != nil {
 			return "", fmt.Errorf("bare clone: %w", err)
 		}
 		log.Printf("[worktree] clone %s/%s completed in %s", owner, repo, time.Since(start).Round(time.Millisecond))
@@ -76,7 +77,7 @@ func Create(owner, repo, cloneURL, sha string, prNumber int, runID string) (stri
 	// Only fetch the specific PR ref we need — not all refs
 	prRef := fmt.Sprintf("+refs/pull/%d/head:refs/pull/%d/head", prNumber, prNumber)
 	start := time.Now()
-	if err := gitRun(bareDir, "fetch", "origin", prRef); err != nil {
+	if err := gitRunCtx(ctx, bareDir, "fetch", "origin", prRef); err != nil {
 		return "", fmt.Errorf("fetch PR refs: %w", err)
 	}
 	log.Printf("[worktree] fetch PR #%d completed in %s", prNumber, time.Since(start).Round(time.Millisecond))
@@ -87,7 +88,7 @@ func Create(owner, repo, cloneURL, sha string, prNumber int, runID string) (stri
 		return "", fmt.Errorf("mkdir runs: %w", err)
 	}
 
-	if err := gitRun(bareDir, "worktree", "add", "--detach", wtDir, sha); err != nil {
+	if err := gitRunCtx(ctx, bareDir, "worktree", "add", "--detach", wtDir, sha); err != nil {
 		return "", fmt.Errorf("worktree add: %w", err)
 	}
 
@@ -156,14 +157,21 @@ func pruneAll(baseDir string) {
 	})
 }
 
-func gitRun(dir string, args ...string) error {
-	cmd := exec.Command("git", args...)
+func gitRunCtx(ctx context.Context, dir string, args ...string) error {
+	cmd := exec.CommandContext(ctx, "git", args...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("cancelled")
+		}
 		return fmt.Errorf("%s: %s", err, string(out))
 	}
 	return nil
+}
+
+func gitRun(dir string, args ...string) error {
+	return gitRunCtx(context.Background(), dir, args...)
 }
