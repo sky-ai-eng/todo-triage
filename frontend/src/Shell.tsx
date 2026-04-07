@@ -1,4 +1,5 @@
 import { NavLink, Outlet } from 'react-router-dom'
+import { Settings } from 'lucide-react'
 
 const navItems = [
   { to: '/', label: 'Triage' },
@@ -6,7 +7,6 @@ const navItems = [
   { to: '/prs', label: 'PRs' },
   { to: '/prompts', label: 'Prompts' },
   { to: '/brief', label: 'Brief' },
-  { to: '/settings', label: 'Settings' },
 ]
 
 export default function Shell() {
@@ -16,7 +16,7 @@ export default function Shell() {
         <span className="text-base font-semibold tracking-tight text-text-primary">
           Todo Tinder
         </span>
-        <div className="flex gap-1">
+        <div className="flex gap-1 flex-1">
           {navItems.map((item) => (
             <NavLink
               key={item.to}
@@ -34,6 +34,18 @@ export default function Shell() {
             </NavLink>
           ))}
         </div>
+        <NavLink
+          to="/settings"
+          className={({ isActive }) =>
+            `p-2 rounded-full transition-all duration-200 ${
+              isActive
+                ? 'bg-accent-soft text-accent'
+                : 'text-text-tertiary hover:text-text-secondary hover:bg-black/[0.03]'
+            }`
+          }
+        >
+          <Settings size={16} />
+        </NavLink>
       </nav>
       <main className="px-8 py-8">
         <Outlet />

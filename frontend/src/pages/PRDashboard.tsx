@@ -40,15 +40,27 @@ interface Stats {
 
 type ColumnId = 'ready' | 'draft'
 
+function loadCached<T>(key: string): T | null {
+  try {
+    const raw = sessionStorage.getItem(key)
+    return raw ? JSON.parse(raw) : null
+  } catch { return null }
+}
+
+function saveCache(key: string, data: unknown) {
+  try { sessionStorage.setItem(key, JSON.stringify(data)) } catch {}
+}
+
 export default function PRDashboard() {
-  const [prs, setPrs] = useState<PRSummary[]>([])
-  const [stats, setStats] = useState<Stats | null>(null)
-  const [loading, setLoading] = useState(true)
+  const [prs, setPrs] = useState<PRSummary[]>(() => loadCached<PRSummary[]>('pr-dash-prs') ?? [])
+  const [stats, setStats] = useState<Stats | null>(() => loadCached<Stats>('pr-dash-stats'))
+  const [loading, setLoading] = useState(prs.length === 0)
   const [activeId, setActiveId] = useState<string | null>(null)
   const [overColumn, setOverColumn] = useState<ColumnId | null>(null)
 
   const fetchAll = useCallback(async () => {
-    setLoading(true)
+    // Only show skeletons if we have no cached data at all
+    if (prs.length === 0 && !stats) setLoading(true)
     try {
       const [prsRes, statsRes] = await Promise.all([
         fetch('/api/dashboard/prs').then((r) => r.json()),
@@ -56,6 +68,8 @@ export default function PRDashboard() {
       ])
       setPrs(prsRes)
       setStats(statsRes)
+      saveCache('pr-dash-prs', prsRes)
+      saveCache('pr-dash-stats', statsRes)
     } finally {
       setLoading(false)
     }
@@ -143,7 +157,7 @@ export default function PRDashboard() {
   const activePR = activeId ? prMap.get(activeId) : null
 
   return (
-    <div className="max-w-5xl mx-auto">
+    <div className="max-w-5xl mx-auto flex flex-col" style={{ minHeight: 'calc(100vh - 120px)' }}>
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-xl font-semibold text-text-primary">Pull Requests</h1>
         <button
@@ -179,7 +193,7 @@ export default function PRDashboard() {
         onDragOver={handleDragOver}
         onDragEnd={handleDragEnd}
       >
-        <div className="grid grid-cols-2 gap-6">
+        <div className="grid grid-cols-2 gap-6 flex-1 min-h-0">
           <DroppableColumn
             id="ready"
             title="Ready for review"
@@ -252,8 +266,8 @@ function DroppableColumn({ id, title, count, isOver, children }: {
   const { setNodeRef } = useSortable({ id, data: { type: 'column' } })
 
   return (
-    <div>
-      <h2 className="text-[13px] font-medium text-text-secondary mb-3 px-1">
+    <div className="flex flex-col min-h-0">
+      <h2 className="text-[13px] font-medium text-text-secondary mb-3 px-1 shrink-0">
         {title}
         <span className="ml-2 text-text-tertiary bg-black/[0.04] rounded-full px-2 py-0.5 text-[11px]">
           {count}
@@ -261,7 +275,7 @@ function DroppableColumn({ id, title, count, isOver, children }: {
       </h2>
       <div
         ref={setNodeRef}
-        className={`rounded-2xl border border-border-subtle p-3 space-y-3 min-h-[200px] transition-colors ${
+        className={`rounded-2xl border border-border-subtle p-3 space-y-3 flex-1 overflow-y-auto transition-colors ${
           isOver ? 'bg-accent/5 border-accent/20' : 'bg-black/[0.01]'
         }`}
       >
@@ -456,10 +470,15 @@ function SkeletonTotals() {
     <div className="space-y-2">
       <div className="text-center">
         <div className={`h-7 w-10 mx-auto mb-1 ${shimmer}`} />
-        <div className={`h-2.5 w-14 mx-auto ${shimmer}`} />
+        <div className={`h-3 w-14 mx-auto ${shimmer}`} />
       </div>
-      <div className="grid grid-cols-2 gap-x-3 gap-y-1.5">
-        {[1, 2, 3, 4].map((i) => <div key={i} className={`h-2.5 w-16 ${shimmer}`} />)}
+      <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
+        {[1, 2, 3, 4].map((i) => (
+          <div key={i} className="flex items-center gap-1.5">
+            <span className={`w-1.5 h-1.5 rounded-full ${shimmer}`} />
+            <span className={`h-3 w-14 ${shimmer}`} />
+          </div>
+        ))}
       </div>
     </div>
   )

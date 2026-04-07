@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
 import type { PromptBinding } from '../types'
 
@@ -16,6 +16,21 @@ const TEMPLATE_VARS = [
   { name: '{{PR_NUMBER}}', desc: 'Pull request number' },
 ]
 
+const MIN_WIDTH = 380
+const MAX_WIDTH = 900
+const STORAGE_KEY = 'prompt-drawer-width'
+
+function loadWidth(): number {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY)
+    if (stored) {
+      const w = parseInt(stored, 10)
+      if (w >= MIN_WIDTH && w <= MAX_WIDTH) return w
+    }
+  } catch {}
+  return 520
+}
+
 export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDeleted }: Props) {
   const [name, setName] = useState('')
   const [body, setBody] = useState('')
@@ -24,6 +39,10 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [error, setError] = useState('')
+  const [width, setWidth] = useState(loadWidth)
+  const dragging = useRef(false)
+  const startX = useRef(0)
+  const startWidth = useRef(0)
 
   const open = promptId !== null || isNew
 
@@ -48,6 +67,39 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
       })
       .catch(() => setError('Failed to load prompt'))
   }, [promptId, isNew])
+
+  // Resize drag handlers
+  const onMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    dragging.current = true
+    startX.current = e.clientX
+    startWidth.current = width
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+  }, [width])
+
+  useEffect(() => {
+    const onMouseMove = (e: MouseEvent) => {
+      if (!dragging.current) return
+      const delta = startX.current - e.clientX
+      const newWidth = Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, startWidth.current + delta))
+      setWidth(newWidth)
+    }
+    const onMouseUp = () => {
+      if (!dragging.current) return
+      dragging.current = false
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+      // Persist on release
+      localStorage.setItem(STORAGE_KEY, String(width))
+    }
+    window.addEventListener('mousemove', onMouseMove)
+    window.addEventListener('mouseup', onMouseUp)
+    return () => {
+      window.removeEventListener('mousemove', onMouseMove)
+      window.removeEventListener('mouseup', onMouseUp)
+    }
+  }, [width])
 
   const save = async () => {
     if (!name.trim() || !body.trim()) {
@@ -110,12 +162,19 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
 
           {/* Drawer */}
           <motion.div
-            className="fixed top-0 right-0 bottom-0 z-50 w-[520px] max-w-[90vw] bg-surface-raised border-l border-border-glass shadow-2xl shadow-black/10 flex flex-col"
+            className="fixed top-0 right-0 bottom-0 z-50 bg-surface-raised border-l border-border-glass shadow-2xl shadow-black/10 flex flex-col"
+            style={{ width: Math.min(width, window.innerWidth * 0.9) }}
             initial={{ x: '100%' }}
             animate={{ x: 0 }}
             exit={{ x: '100%' }}
             transition={{ type: 'spring', damping: 30, stiffness: 300 }}
           >
+            {/* Resize handle */}
+            <div
+              onMouseDown={onMouseDown}
+              className="absolute left-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-accent/20 active:bg-accent/30 transition-colors z-10"
+            />
+
             {/* Header */}
             <div className="px-6 py-5 border-b border-border-subtle flex items-center justify-between shrink-0">
               <h2 className="text-[15px] font-semibold text-text-primary">
