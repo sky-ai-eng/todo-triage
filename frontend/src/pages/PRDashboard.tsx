@@ -1,5 +1,18 @@
 import { useState, useEffect, useCallback } from 'react'
 import { PieChart, Pie, Cell, ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip } from 'recharts'
+import {
+  DndContext,
+  DragOverlay,
+  closestCenter,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragStartEvent,
+  type DragEndEvent,
+  type DragOverEvent,
+} from '@dnd-kit/core'
+import { SortableContext, verticalListSortingStrategy, useSortable } from '@dnd-kit/sortable'
+import { CSS } from '@dnd-kit/utilities'
 import PRCard from '../components/PRCard'
 
 export interface PRSummary {
@@ -25,10 +38,14 @@ interface Stats {
   merged_over_time: { week: string; count: number }[]
 }
 
+type ColumnId = 'ready' | 'draft'
+
 export default function PRDashboard() {
   const [prs, setPrs] = useState<PRSummary[]>([])
   const [stats, setStats] = useState<Stats | null>(null)
   const [loading, setLoading] = useState(true)
+  const [activeId, setActiveId] = useState<string | null>(null)
+  const [overColumn, setOverColumn] = useState<ColumnId | null>(null)
 
   const fetchAll = useCallback(async () => {
     setLoading(true)
@@ -44,25 +61,86 @@ export default function PRDashboard() {
     }
   }, [])
 
-  useEffect(() => {
-    fetchAll()
-  }, [fetchAll])
+  useEffect(() => { fetchAll() }, [fetchAll])
 
-  // Auto-refresh every 2 min while visible
   useEffect(() => {
     const interval = setInterval(fetchAll, 120000)
-    const handleVis = () => {
-      if (document.visibilityState === 'visible') fetchAll()
-    }
+    const handleVis = () => { if (document.visibilityState === 'visible') fetchAll() }
     document.addEventListener('visibilitychange', handleVis)
-    return () => {
-      clearInterval(interval)
-      document.removeEventListener('visibilitychange', handleVis)
-    }
+    return () => { clearInterval(interval); document.removeEventListener('visibilitychange', handleVis) }
   }, [fetchAll])
 
   const draftPRs = prs.filter((pr) => pr.draft)
   const readyPRs = prs.filter((pr) => !pr.draft)
+
+  const prKey = (pr: PRSummary) => `${pr.repo}-${pr.number}`
+  const prMap = new Map(prs.map((pr) => [prKey(pr), pr]))
+
+  const getColumn = (id: string): ColumnId | null => {
+    const pr = prMap.get(id)
+    if (!pr) return null
+    return pr.draft ? 'draft' : 'ready'
+  }
+
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
+
+  const handleDragStart = (e: DragStartEvent) => setActiveId(String(e.active.id))
+  const handleDragOver = (e: DragOverEvent) => {
+    if (!e.over) { setOverColumn(null); return }
+    const overId = String(e.over.id)
+    if (overId === 'ready' || overId === 'draft') {
+      setOverColumn(overId)
+    } else {
+      setOverColumn(getColumn(overId))
+    }
+  }
+
+  const handleDragEnd = async (e: DragEndEvent) => {
+    setActiveId(null)
+    setOverColumn(null)
+    if (!e.over) return
+
+    const id = String(e.active.id)
+    const pr = prMap.get(id)
+    if (!pr) return
+
+    const sourceCol = pr.draft ? 'draft' : 'ready'
+    const overId = String(e.over.id)
+    const targetCol: ColumnId = (overId === 'ready' || overId === 'draft')
+      ? overId
+      : getColumn(overId) || sourceCol
+
+    if (sourceCol === targetCol) return
+
+    // Optimistic update
+    const makeDraft = targetCol === 'draft'
+    setPrs((prev) => prev.map((p) =>
+      prKey(p) === id ? { ...p, draft: makeDraft } : p
+    ))
+
+    // Hit the API
+    try {
+      const res = await fetch(`/api/dashboard/prs/${pr.number}/draft?repo=${pr.repo}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ draft: makeDraft }),
+      })
+      if (!res.ok) {
+        // Revert on failure
+        setPrs((prev) => prev.map((p) =>
+          prKey(p) === id ? { ...p, draft: !makeDraft } : p
+        ))
+      }
+    } catch {
+      setPrs((prev) => prev.map((p) =>
+        prKey(p) === id ? { ...p, draft: !makeDraft } : p
+      ))
+    }
+
+    fetchAll()
+  }
+
+  const activePR = activeId ? prMap.get(activeId) : null
 
   return (
     <div className="max-w-5xl mx-auto">
@@ -93,42 +171,107 @@ export default function PRDashboard() {
         </ChartCard>
       </div>
 
-      {/* PR columns */}
-      <div className="grid grid-cols-2 gap-6">
-        <div>
-          <h2 className="text-[13px] font-medium text-text-secondary mb-3 px-1">
-            Ready for review
-            <span className="ml-2 text-text-tertiary bg-black/[0.04] rounded-full px-2 py-0.5 text-[11px]">
-              {readyPRs.length}
-            </span>
-          </h2>
-          <div className="space-y-3">
-            {readyPRs.length === 0 ? (
-              <p className="text-[12px] text-text-tertiary text-center py-8">No open PRs</p>
-            ) : (
-              readyPRs.map((pr) => <PRCard key={`${pr.repo}-${pr.number}`} pr={pr} />)
-            )}
-          </div>
+      {/* PR columns with drag */}
+      <DndContext
+        sensors={sensors}
+        collisionDetection={closestCenter}
+        onDragStart={handleDragStart}
+        onDragOver={handleDragOver}
+        onDragEnd={handleDragEnd}
+      >
+        <div className="grid grid-cols-2 gap-6">
+          <DroppableColumn
+            id="ready"
+            title="Ready for review"
+            count={readyPRs.length}
+            isOver={overColumn === 'ready' && getColumn(activeId!) !== 'ready'}
+          >
+            <SortableContext items={readyPRs.map(prKey)} strategy={verticalListSortingStrategy}>
+              {readyPRs.length === 0 ? (
+                <p className="text-[12px] text-text-tertiary text-center py-8">No open PRs</p>
+              ) : (
+                readyPRs.map((pr) => (
+                  <SortablePRCard key={prKey(pr)} id={prKey(pr)} pr={pr} />
+                ))
+              )}
+            </SortableContext>
+          </DroppableColumn>
+
+          <DroppableColumn
+            id="draft"
+            title="Drafts"
+            count={draftPRs.length}
+            isOver={overColumn === 'draft' && getColumn(activeId!) !== 'draft'}
+          >
+            <SortableContext items={draftPRs.map(prKey)} strategy={verticalListSortingStrategy}>
+              {draftPRs.length === 0 ? (
+                <p className="text-[12px] text-text-tertiary text-center py-8">No drafts</p>
+              ) : (
+                draftPRs.map((pr) => (
+                  <SortablePRCard key={prKey(pr)} id={prKey(pr)} pr={pr} />
+                ))
+              )}
+            </SortableContext>
+          </DroppableColumn>
         </div>
-        <div>
-          <h2 className="text-[13px] font-medium text-text-secondary mb-3 px-1">
-            Drafts
-            <span className="ml-2 text-text-tertiary bg-black/[0.04] rounded-full px-2 py-0.5 text-[11px]">
-              {draftPRs.length}
-            </span>
-          </h2>
-          <div className="space-y-3">
-            {draftPRs.length === 0 ? (
-              <p className="text-[12px] text-text-tertiary text-center py-8">No drafts</p>
-            ) : (
-              draftPRs.map((pr) => <PRCard key={`${pr.repo}-${pr.number}`} pr={pr} />)
-            )}
-          </div>
-        </div>
+
+        <DragOverlay>
+          {activePR ? (
+            <div className="opacity-80 rotate-2">
+              <PRCard pr={activePR} />
+            </div>
+          ) : null}
+        </DragOverlay>
+      </DndContext>
+    </div>
+  )
+}
+
+function SortablePRCard({ id, pr }: { id: string; pr: PRSummary }) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id })
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.3 : 1,
+  }
+
+  return (
+    <div ref={setNodeRef} style={style} className="cursor-grab active:cursor-grabbing" {...attributes} {...listeners}>
+      <PRCard pr={pr} />
+    </div>
+  )
+}
+
+function DroppableColumn({ id, title, count, isOver, children }: {
+  id: string
+  title: string
+  count: number
+  isOver: boolean
+  children: React.ReactNode
+}) {
+  const { setNodeRef } = useSortable({ id, data: { type: 'column' } })
+
+  return (
+    <div>
+      <h2 className="text-[13px] font-medium text-text-secondary mb-3 px-1">
+        {title}
+        <span className="ml-2 text-text-tertiary bg-black/[0.04] rounded-full px-2 py-0.5 text-[11px]">
+          {count}
+        </span>
+      </h2>
+      <div
+        ref={setNodeRef}
+        className={`rounded-2xl border border-border-subtle p-3 space-y-3 min-h-[200px] transition-colors ${
+          isOver ? 'bg-accent/5 border-accent/20' : 'bg-black/[0.01]'
+        }`}
+      >
+        {children}
       </div>
     </div>
   )
 }
+
+// --- Charts ---
 
 function ChartCard({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -155,28 +298,15 @@ function StatusDonut({ stats }: { stats: Stats }) {
   ].filter((d) => d.value > 0)
 
   const total = data.reduce((sum, d) => sum + d.value, 0)
-
-  if (total === 0) {
-    return <p className="text-[12px] text-text-tertiary text-center py-4">No data</p>
-  }
+  if (total === 0) return <p className="text-[12px] text-text-tertiary text-center py-4">No data</p>
 
   return (
     <div className="flex items-center gap-3">
       <div className="w-16 h-16">
         <ResponsiveContainer>
           <PieChart>
-            <Pie
-              data={data}
-              cx="50%"
-              cy="50%"
-              innerRadius={18}
-              outerRadius={30}
-              dataKey="value"
-              stroke="none"
-            >
-              {data.map((d, i) => (
-                <Cell key={i} fill={d.color} />
-              ))}
+            <Pie data={data} cx="50%" cy="50%" innerRadius={18} outerRadius={30} dataKey="value" stroke="none">
+              {data.map((d, i) => <Cell key={i} fill={d.color} />)}
             </Pie>
           </PieChart>
         </ResponsiveContainer>
@@ -194,9 +324,7 @@ function StatusDonut({ stats }: { stats: Stats }) {
 }
 
 function MergedTimeline({ data }: { data: { week: string; count: number }[] }) {
-  if (data.length === 0) {
-    return <p className="text-[12px] text-text-tertiary text-center py-4">No data</p>
-  }
+  if (data.length === 0) return <p className="text-[12px] text-text-tertiary text-center py-4">No data</p>
 
   const formatted = data.map((d) => ({
     ...d,
@@ -217,23 +345,14 @@ function MergedTimeline({ data }: { data: { week: string; count: number }[] }) {
           <YAxis hide />
           <Tooltip
             contentStyle={{
-              background: 'rgba(255,255,255,0.8)',
-              backdropFilter: 'blur(12px)',
-              border: '1px solid rgba(255,255,255,0.7)',
-              borderRadius: '8px',
-              fontSize: '11px',
-              boxShadow: '0 4px 12px rgba(0,0,0,0.05)',
+              background: 'rgba(255,255,255,0.8)', backdropFilter: 'blur(12px)',
+              border: '1px solid rgba(255,255,255,0.7)', borderRadius: '8px',
+              fontSize: '11px', boxShadow: '0 4px 12px rgba(0,0,0,0.05)',
             }}
             formatter={(value: any) => [`${value} PR${value !== 1 ? 's' : ''}`, 'Merged']}
             labelFormatter={(label: any) => `Week of ${label}`}
           />
-          <Area
-            type="monotone"
-            dataKey="count"
-            stroke="var(--color-claim)"
-            strokeWidth={2}
-            fill="url(#mergedGrad)"
-          />
+          <Area type="monotone" dataKey="count" stroke="var(--color-claim)" strokeWidth={2} fill="url(#mergedGrad)" />
         </AreaChart>
       </ResponsiveContainer>
     </div>
@@ -242,9 +361,7 @@ function MergedTimeline({ data }: { data: { week: string; count: number }[] }) {
 
 function ReviewBalance({ given, received }: { given: number; received: number }) {
   const total = given + received
-  if (total === 0) {
-    return <p className="text-[12px] text-text-tertiary text-center py-4">No reviews yet</p>
-  }
+  if (total === 0) return <p className="text-[12px] text-text-tertiary text-center py-4">No reviews yet</p>
 
   const givenPct = (given / total) * 100
   const net = given - received
@@ -253,14 +370,8 @@ function ReviewBalance({ given, received }: { given: number; received: number })
   return (
     <div className="space-y-2">
       <div className="flex h-2.5 rounded-full overflow-hidden bg-black/[0.04]">
-        <div
-          className="h-full rounded-l-full"
-          style={{ width: `${givenPct}%`, background: 'var(--color-delegate)' }}
-        />
-        <div
-          className="h-full rounded-r-full"
-          style={{ width: `${100 - givenPct}%`, background: 'var(--color-accent)' }}
-        />
+        <div className="h-full rounded-l-full" style={{ width: `${givenPct}%`, background: 'var(--color-delegate)' }} />
+        <div className="h-full rounded-r-full" style={{ width: `${100 - givenPct}%`, background: 'var(--color-accent)' }} />
       </div>
       <div className="flex justify-between text-[11px]">
         <span className="text-delegate">{given} given</span>
@@ -302,7 +413,6 @@ function TotalsSummary({ stats }: { stats: Stats }) {
 }
 
 // --- Skeletons ---
-
 const shimmer = 'animate-pulse bg-black/[0.04] rounded'
 
 function SkeletonDonut() {
@@ -349,9 +459,7 @@ function SkeletonTotals() {
         <div className={`h-2.5 w-14 mx-auto ${shimmer}`} />
       </div>
       <div className="grid grid-cols-2 gap-x-3 gap-y-1.5">
-        {[1, 2, 3, 4].map((i) => (
-          <div key={i} className={`h-2.5 w-16 ${shimmer}`} />
-        ))}
+        {[1, 2, 3, 4].map((i) => <div key={i} className={`h-2.5 w-16 ${shimmer}`} />)}
       </div>
     </div>
   )

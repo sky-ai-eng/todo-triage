@@ -119,6 +119,55 @@ func (c *Client) GetPRStatus(owner, repo string, number int) (*PRStatus, error) 
 	return status, nil
 }
 
+// MarkPRReady marks a draft PR as ready for review. Requires GraphQL.
+func (c *Client) MarkPRReady(owner, repo string, number int) error {
+	// Get node_id
+	data, err := c.Get(fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, number))
+	if err != nil {
+		return err
+	}
+	var pr map[string]any
+	json.Unmarshal(data, &pr)
+	nodeID := strVal(pr, "node_id")
+	if nodeID == "" {
+		return fmt.Errorf("could not get node_id for PR %d", number)
+	}
+
+	mutation := map[string]any{
+		"query": `mutation($id: ID!) { markPullRequestReadyForReview(input: {pullRequestId: $id}) { pullRequest { isDraft } } }`,
+		"variables": map[string]any{
+			"id": nodeID,
+		},
+	}
+	_, err = c.PostGraphQL(mutation)
+	return err
+}
+
+// ConvertPRToDraft converts a PR back to draft. Requires GraphQL.
+func (c *Client) ConvertPRToDraft(owner, repo string, number int) error {
+	// First get the node_id for the PR
+	data, err := c.Get(fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, number))
+	if err != nil {
+		return err
+	}
+	var pr map[string]any
+	json.Unmarshal(data, &pr)
+	nodeID := strVal(pr, "node_id")
+	if nodeID == "" {
+		return fmt.Errorf("could not get node_id for PR %d", number)
+	}
+
+	// GraphQL mutation
+	mutation := map[string]any{
+		"query": `mutation($id: ID!) { convertPullRequestToDraft(input: {pullRequestId: $id}) { pullRequest { isDraft } } }`,
+		"variables": map[string]any{
+			"id": nodeID,
+		},
+	}
+	_, err = c.PostGraphQL(mutation)
+	return err
+}
+
 // SearchUserPRs returns open PRs authored by the given username.
 func (c *Client) SearchUserPRs(username string) ([]PRSummary, error) {
 	data, err := c.Get(fmt.Sprintf("/search/issues?q=author:%s+type:pr+state:open&per_page=50&sort=updated", username))

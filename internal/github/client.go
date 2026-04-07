@@ -83,6 +83,48 @@ func (c *Client) GetRaw(path, accept string) ([]byte, error) {
 	return data, nil
 }
 
+// PostGraphQL sends a GraphQL query to GitHub's GraphQL API.
+func (c *Client) PostGraphQL(body any) ([]byte, error) {
+	// GraphQL endpoint is always at the same base, just /graphql instead of REST
+	url := strings.TrimSuffix(c.baseURL, "/api/v3") + "/graphql"
+	if strings.Contains(c.baseURL, "api.github.com") {
+		url = "https://api.github.com/graphql"
+	}
+
+	b, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", url, bytes.NewReader(b))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.pat)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	data, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("GraphQL returned %d: %s", resp.StatusCode, string(data))
+	}
+
+	// Check for GraphQL-level errors
+	var gqlResp struct {
+		Errors []struct{ Message string } `json:"errors"`
+	}
+	if json.Unmarshal(data, &gqlResp) == nil && len(gqlResp.Errors) > 0 {
+		return nil, fmt.Errorf("GraphQL error: %s", gqlResp.Errors[0].Message)
+	}
+
+	return data, nil
+}
+
 func (c *Client) do(method, path string, body any) ([]byte, error) {
 	url := c.baseURL + path
 
