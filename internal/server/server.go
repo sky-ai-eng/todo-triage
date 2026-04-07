@@ -65,6 +65,9 @@ func (s *Server) routes() {
 	// Websocket
 	s.mux.HandleFunc("GET /api/ws", s.ws.HandleWS)
 
+	s.mux.HandleFunc("GET /api/dashboard/prs", s.handleDashboardPRs)
+	s.mux.HandleFunc("GET /api/dashboard/prs/{number}/status", s.handleDashboardPRStatus)
+
 	s.mux.HandleFunc("GET /api/brief", s.handleBrief)
 	s.mux.HandleFunc("GET /api/preferences", s.handlePreferences)
 
