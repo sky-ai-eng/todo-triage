@@ -27,12 +27,12 @@ import (
 // Spawner manages delegated agent runs.
 type Spawner struct {
 	database *sql.DB
-	ghClient *ghclient.Client
 	wsHub    *websocket.Hub
-	model    string
 
-	mu      sync.Mutex
-	cancels map[string]context.CancelFunc // runID → cancel the entire run
+	mu       sync.Mutex
+	ghClient *ghclient.Client
+	model    string
+	cancels  map[string]context.CancelFunc // runID → cancel the entire run
 }
 
 func NewSpawner(database *sql.DB, ghClient *ghclient.Client, wsHub *websocket.Hub, model string) *Spawner {
@@ -43,6 +43,15 @@ func NewSpawner(database *sql.DB, ghClient *ghclient.Client, wsHub *websocket.Hu
 		model:    model,
 		cancels:  make(map[string]context.CancelFunc),
 	}
+}
+
+// UpdateCredentials hot-swaps the GitHub client and model without
+// disrupting in-flight runs.
+func (s *Spawner) UpdateCredentials(ghClient *ghclient.Client, model string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ghClient = ghClient
+	s.model = model
 }
 
 // Cancel aborts a run at any phase — clone, fetch, worktree setup, or agent execution.
@@ -61,10 +70,18 @@ func (s *Spawner) Cancel(runID string) error {
 }
 
 // DelegatePR kicks off an async PR review agent run.
-// It creates the run record, sets up the worktree, spawns claude, and returns the run ID immediately.
-// DelegatePR kicks off an async PR review agent run.
 // If explicitPromptID is non-empty, that prompt is used instead of the default lookup.
 func (s *Spawner) DelegatePR(task domain.Task, explicitPromptID string) (string, error) {
+	// Snapshot mutable config under lock
+	s.mu.Lock()
+	ghClient := s.ghClient
+	model := s.model
+	s.mu.Unlock()
+
+	if ghClient == nil {
+		return "", fmt.Errorf("GitHub credentials not configured")
+	}
+
 	// Parse owner/repo from task
 	owner, repo := parseOwnerRepo(task.Repo)
 	if owner == "" || repo == "" {
@@ -115,7 +132,7 @@ func (s *Spawner) DelegatePR(task domain.Task, explicitPromptID string) (string,
 		TaskID:   task.ID,
 		PromptID: promptID,
 		Status:   "cloning",
-		Model:    s.model,
+		Model:    model,
 	}); err != nil {
 		return "", fmt.Errorf("create agent run: %w", err)
 	}
@@ -128,7 +145,7 @@ func (s *Spawner) DelegatePR(task domain.Task, explicitPromptID string) (string,
 	s.cancels[runID] = cancel
 	s.mu.Unlock()
 
-	// Run async
+	// Run async — pass snapshotted ghClient/model so credential changes don't affect in-flight runs
 	go func() {
 		defer func() {
 			s.mu.Lock()
@@ -136,13 +153,13 @@ func (s *Spawner) DelegatePR(task domain.Task, explicitPromptID string) (string,
 			s.mu.Unlock()
 			cancel() // release context resources
 		}()
-		s.runPRReview(ctx, runID, task, owner, repo, prNumber, mission)
+		s.runPRReview(ctx, runID, task, owner, repo, prNumber, mission, ghClient, model)
 	}()
 
 	return runID, nil
 }
 
-func (s *Spawner) runPRReview(ctx context.Context, runID string, task domain.Task, owner, repo string, prNumber int, mission string) {
+func (s *Spawner) runPRReview(ctx context.Context, runID string, task domain.Task, owner, repo string, prNumber int, mission string, ghClient *ghclient.Client, model string) {
 	startTime := time.Now()
 
 	// Helper: check if we were cancelled and handle cleanup
@@ -159,7 +176,7 @@ func (s *Spawner) runPRReview(ctx context.Context, runID string, task domain.Tas
 
 	// 1. Get PR details for clone URL and head SHA
 	s.updateStatus(runID, "fetching")
-	pr, err := s.ghClient.GetPR(owner, repo, prNumber, false)
+	pr, err := ghClient.GetPR(owner, repo, prNumber, false)
 	if err != nil {
 		if cancelled() {
 			return
@@ -204,7 +221,7 @@ func (s *Spawner) runPRReview(ctx context.Context, runID string, task domain.Tas
 
 	args := []string{
 		"-p", prompt,
-		"--model", s.model,
+		"--model", model,
 		"--output-format", "stream-json",
 		"--verbose",
 		"--allowedTools", fmt.Sprintf("Bash(%s exec *),Read,Glob,Grep,WebSearch,WebFetch", selfBin),

@@ -5,7 +5,6 @@ import (
 	"log"
 	"os"
 	"strconv"
-	"sync"
 
 	"github.com/sky-ai-eng/todo-tinder/internal/ai"
 	"github.com/sky-ai-eng/todo-tinder/internal/auth"
@@ -150,29 +149,25 @@ func main() {
 	// Poller manager — uses event bus instead of direct callbacks
 	pollerMgr := poller.NewManager(database, bus)
 
-	// Spawner state — protected by mutex for hot-reload
-	var spawnerMu sync.Mutex
+	// Create spawner once — credentials are hot-swapped in place
+	spawner := delegate.NewSpawner(database, nil, wsHub, "")
+	srv.SetSpawner(spawner)
 
-	// Wire up credential change callback: restarts pollers + spawner
+	// Wire up credential change callback: restarts pollers + updates spawner
 	srv.SetOnCredentialsChanged(func() {
-		log.Println("[server] credentials changed, restarting pollers and spawner...")
+		log.Println("[server] credentials changed, restarting pollers...")
 
 		pollerMgr.Restart()
 
-		// Recreate spawner with fresh credentials
 		cfg, _ := config.Load()
 		creds, _ := auth.Load()
 
-		spawnerMu.Lock()
-		defer spawnerMu.Unlock()
-
 		if creds.GitHubPAT != "" && creds.GitHubURL != "" {
 			ghClient := ghclient.NewClient(creds.GitHubURL, creds.GitHubPAT)
-			spawner := delegate.NewSpawner(database, ghClient, wsHub, cfg.AI.Model)
-			srv.SetSpawner(spawner)
-			log.Println("[delegate] spawner restarted")
+			spawner.UpdateCredentials(ghClient, cfg.AI.Model)
+			log.Println("[delegate] spawner credentials updated")
 		} else {
-			srv.SetSpawner(nil)
+			spawner.UpdateCredentials(nil, "")
 		}
 
 		if creds.JiraPAT != "" && creds.JiraURL != "" {
@@ -189,8 +184,7 @@ func main() {
 	creds, _ := auth.Load()
 	if creds.GitHubPAT != "" && creds.GitHubURL != "" {
 		ghClient := ghclient.NewClient(creds.GitHubURL, creds.GitHubPAT)
-		spawner := delegate.NewSpawner(database, ghClient, wsHub, cfg.AI.Model)
-		srv.SetSpawner(spawner)
+		spawner.UpdateCredentials(ghClient, cfg.AI.Model)
 		log.Println("[delegate] spawner ready")
 	}
 	if creds.JiraPAT != "" && creds.JiraURL != "" {
