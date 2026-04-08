@@ -165,9 +165,11 @@ func main() {
 		if creds.GitHubPAT != "" && creds.GitHubURL != "" {
 			ghClient := ghclient.NewClient(creds.GitHubURL, creds.GitHubPAT)
 			spawner.UpdateCredentials(ghClient, cfg.AI.Model)
+			srv.SetGitHubClient(ghClient)
 			log.Println("[delegate] spawner credentials updated")
 		} else {
 			spawner.UpdateCredentials(nil, "")
+			srv.SetGitHubClient(nil)
 		}
 
 		if creds.JiraPAT != "" && creds.JiraURL != "" {
@@ -185,6 +187,7 @@ func main() {
 	if creds.GitHubPAT != "" && creds.GitHubURL != "" {
 		ghClient := ghclient.NewClient(creds.GitHubURL, creds.GitHubPAT)
 		spawner.UpdateCredentials(ghClient, cfg.AI.Model)
+		srv.SetGitHubClient(ghClient)
 		log.Println("[delegate] spawner ready")
 	}
 	if creds.JiraPAT != "" && creds.JiraURL != "" {
