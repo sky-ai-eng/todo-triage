@@ -95,8 +95,8 @@ func (c *Client) Unassign(issueKey string) error {
 		// Jira Cloud: null accountId clears assignee
 		return c.put(url, map[string]*string{"accountId": nil})
 	}
-	// Jira Server/DC: empty name clears assignee
-	return c.put(url, map[string]string{"name": ""})
+	// Jira Server/DC: null name clears assignee
+	return c.put(url, map[string]*string{"name": nil})
 }
 
 // TransitionTo transitions an issue to the target status name.
