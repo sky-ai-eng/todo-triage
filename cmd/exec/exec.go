@@ -5,10 +5,12 @@ import (
 	"os"
 
 	"github.com/sky-ai-eng/todo-tinder/cmd/exec/gh"
+	jiraexec "github.com/sky-ai-eng/todo-tinder/cmd/exec/jira"
 	"github.com/sky-ai-eng/todo-tinder/internal/auth"
 	"github.com/sky-ai-eng/todo-tinder/internal/config"
 	"github.com/sky-ai-eng/todo-tinder/internal/db"
 	ghclient "github.com/sky-ai-eng/todo-tinder/internal/github"
+	jiraclient "github.com/sky-ai-eng/todo-tinder/internal/jira"
 )
 
 // Handle dispatches exec subcommands.
@@ -54,8 +56,12 @@ func Handle(args []string) {
 		gh.Handle(client, database, cmdArgs)
 
 	case "jira":
-		fmt.Fprintln(os.Stderr, "jira exec commands not yet implemented")
-		os.Exit(1)
+		if creds.JiraPAT == "" || creds.JiraURL == "" {
+			fmt.Fprintln(os.Stderr, "Jira not configured. Run todotinder and complete setup first.")
+			os.Exit(1)
+		}
+		jClient := jiraclient.NewClient(creds.JiraURL, creds.JiraPAT)
+		jiraexec.Handle(jClient, cmdArgs)
 
 	default:
 		fmt.Fprintf(os.Stderr, "unknown exec command: %s\nRun 'todotinder exec --help' for usage.\n", cmd)
@@ -90,6 +96,17 @@ Direct Comments (hit GitHub API immediately):
   gh pr comment-react <comment_id> --repo o/r --emoji <e> React to a comment
   gh pr comment-update <comment_id> --body <text>         Edit (local pending or remote)
   gh pr comment-delete <comment_id>                       Delete (local pending or remote)
+
+Jira Ticket Commands:
+  jira ticket view <key>                                  Issue details (summary, status, assignee, etc.)
+  jira ticket transition <key> --status <status>          Transition to a workflow status
+  jira ticket list-transitions <key>                      List available transitions
+  jira ticket comment <key> --body <text>                 Add a comment
+  jira ticket assign <key>                                Assign to the authenticated user
+  jira ticket unassign <key>                              Remove assignee
+  jira ticket create <project> --type <type> --summary <text> [--description <text>] [--parent <key>]
+  jira ticket set-parent <key> --parent <parent_key>      Link issue under a parent
+  jira ticket list-types <project>                        List available issue types
 
 All commands print JSON to stdout on success, errors to stderr.`)
 }
