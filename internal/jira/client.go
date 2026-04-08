@@ -278,27 +278,25 @@ func (c *Client) CreateIssue(projectKey, issueType, summary, description, parent
 	}
 
 	if parentKey != "" {
-		myself, err := c.currentUser()
-		if err != nil {
-			return "", fmt.Errorf("detect cloud/server: %w", err)
-		}
-		if myself.AccountID != "" {
-			// Jira Cloud: native parent field
-			fields["parent"] = map[string]string{"key": parentKey}
-		} else {
-			// Jira Server/DC: discover Epic Link custom field
-			epicField, err := c.epicLinkField()
-			if err != nil {
-				return "", fmt.Errorf("discover epic link field: %w", err)
-			}
-			if epicField != "" {
-				fields[epicField] = parentKey
-			}
-		}
+		fields["parent"] = map[string]string{"key": parentKey}
 	}
 
 	payload := map[string]any{"fields": fields}
-	respBody, err := c.postJSON(fmt.Sprintf("%s/rest/api/2/issue", c.baseURL), payload)
+	createURL := fmt.Sprintf("%s/rest/api/2/issue", c.baseURL)
+	respBody, err := c.postJSON(createURL, payload)
+
+	// If parent field failed on Server/DC, retry with Epic Link
+	if err != nil && parentKey != "" {
+		if strings.Contains(err.Error(), "gh.epic.error") || strings.Contains(err.Error(), "parent") {
+			delete(fields, "parent")
+			epicField, epicErr := c.epicLinkField()
+			if epicErr == nil && epicField != "" {
+				fields[epicField] = parentKey
+				payload = map[string]any{"fields": fields}
+				respBody, err = c.postJSON(createURL, payload)
+			}
+		}
+	}
 	if err != nil {
 		return "", err
 	}
@@ -313,29 +311,30 @@ func (c *Client) CreateIssue(projectKey, issueType, summary, description, parent
 }
 
 // SetParent links an existing issue under a parent.
-// Cloud: updates fields.parent. Server/DC: updates the Epic Link custom field.
+// Tries fields.parent first (works for Cloud + Server/DC subtasks).
+// Falls back to Epic Link custom field on Server/DC if parent is an Epic.
 func (c *Client) SetParent(issueKey, parentKey string) error {
-	myself, err := c.currentUser()
-	if err != nil {
-		return fmt.Errorf("detect cloud/server: %w", err)
-	}
-
-	fields := map[string]any{}
-	if myself.AccountID != "" {
-		fields["parent"] = map[string]string{"key": parentKey}
-	} else {
-		epicField, err := c.epicLinkField()
-		if err != nil {
-			return fmt.Errorf("discover epic link field: %w", err)
-		}
-		if epicField == "" {
-			return fmt.Errorf("could not find Epic Link custom field on this Jira instance")
-		}
-		fields[epicField] = parentKey
-	}
-
 	url := fmt.Sprintf("%s/rest/api/2/issue/%s", c.baseURL, issueKey)
-	return c.put(url, map[string]any{"fields": fields})
+
+	// Try native parent field first
+	err := c.put(url, map[string]any{"fields": map[string]any{
+		"parent": map[string]string{"key": parentKey},
+	}})
+	if err == nil {
+		return nil
+	}
+
+	// Fall back to Epic Link if the parent field failed
+	if strings.Contains(err.Error(), "gh.epic.error") || strings.Contains(err.Error(), "parent") {
+		epicField, epicErr := c.epicLinkField()
+		if epicErr == nil && epicField != "" {
+			return c.put(url, map[string]any{"fields": map[string]any{
+				epicField: parentKey,
+			}})
+		}
+	}
+
+	return err
 }
 
 // epicLinkField discovers the custom field ID for Epic Link on Server/DC.
