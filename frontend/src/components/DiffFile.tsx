@@ -70,13 +70,15 @@ export default function DiffFile({
   const tokens = useMemo(() => {
     const lang = languageForPath(displayPath);
     try {
-      return tokenize(file.hunks, {
+      const result = tokenize(file.hunks, {
         ...(lang
           ? { highlight: true, refractor, language: lang }
           : { highlight: false }),
         enhancers: [markEdits(file.hunks, { type: "block" })],
       });
-    } catch {
+      return result;
+    } catch (err) {
+      console.warn("[DiffFile] tokenize failed for", displayPath, err);
       return undefined;
     }
   }, [file.hunks, displayPath]);
