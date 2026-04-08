@@ -120,13 +120,189 @@ func (c *Client) TransitionTo(issueKey, targetStatusName string) error {
 	return fmt.Errorf("no transition to %q found (available: %s)", targetStatusName, strings.Join(available, ", "))
 }
 
-// --- internal helpers ---
+// Issue represents core fields of a Jira issue.
+type Issue struct {
+	Key    string `json:"key"`
+	Self   string `json:"self"`
+	Fields struct {
+		Summary     string  `json:"summary"`
+		Description string  `json:"description"`
+		Status      *Status `json:"status,omitempty"`
+		IssueType   *struct {
+			Name string `json:"name"`
+		} `json:"issuetype,omitempty"`
+		Priority *struct {
+			Name string `json:"name"`
+		} `json:"priority,omitempty"`
+		Assignee *struct {
+			DisplayName string `json:"displayName"`
+			AccountID   string `json:"accountId"`
+			Name        string `json:"name"`
+		} `json:"assignee,omitempty"`
+		Parent *struct {
+			Key string `json:"key"`
+		} `json:"parent,omitempty"`
+		Labels []string `json:"labels,omitempty"`
+	} `json:"fields"`
+}
 
-type transition struct {
+// IssueType represents a Jira issue type for a project.
+type IssueType struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Subtask  bool   `json:"subtask"`
+	IconURL  string `json:"iconUrl,omitempty"`
+}
+
+// Transition represents an available workflow transition.
+type Transition struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
 	To   Status `json:"to"`
 }
+
+// GetIssue fetches a single issue by key.
+func (c *Client) GetIssue(issueKey string) (*Issue, error) {
+	url := fmt.Sprintf("%s/rest/api/2/issue/%s", c.baseURL, issueKey)
+	body, err := c.get(url)
+	if err != nil {
+		return nil, err
+	}
+	var issue Issue
+	if err := json.Unmarshal(body, &issue); err != nil {
+		return nil, fmt.Errorf("parse issue: %w", err)
+	}
+	return &issue, nil
+}
+
+// AddComment posts a comment on an issue.
+func (c *Client) AddComment(issueKey, body string) error {
+	url := fmt.Sprintf("%s/rest/api/2/issue/%s/comment", c.baseURL, issueKey)
+	return c.post(url, map[string]string{"body": body})
+}
+
+// GetTransitions returns the available workflow transitions for an issue.
+func (c *Client) GetTransitions(issueKey string) ([]Transition, error) {
+	return c.getTransitions(issueKey)
+}
+
+// ListIssueTypes returns the issue types available in a project.
+func (c *Client) ListIssueTypes(projectKey string) ([]IssueType, error) {
+	url := fmt.Sprintf("%s/rest/api/2/project/%s", c.baseURL, projectKey)
+	body, err := c.get(url)
+	if err != nil {
+		return nil, err
+	}
+	var project struct {
+		IssueTypes []IssueType `json:"issueTypes"`
+	}
+	if err := json.Unmarshal(body, &project); err != nil {
+		return nil, fmt.Errorf("parse project: %w", err)
+	}
+	return project.IssueTypes, nil
+}
+
+// CreateIssue creates a new issue. If parentKey is non-empty, the issue is
+// linked as a child (Cloud uses fields.parent, Server/DC uses Epic Link).
+func (c *Client) CreateIssue(projectKey, issueType, summary, description, parentKey string) (string, error) {
+	fields := map[string]any{
+		"project":   map[string]string{"key": projectKey},
+		"issuetype": map[string]string{"name": issueType},
+		"summary":   summary,
+	}
+	if description != "" {
+		fields["description"] = description
+	}
+
+	if parentKey != "" {
+		myself, err := c.currentUser()
+		if err != nil {
+			return "", fmt.Errorf("detect cloud/server: %w", err)
+		}
+		if myself.AccountID != "" {
+			// Jira Cloud: native parent field
+			fields["parent"] = map[string]string{"key": parentKey}
+		} else {
+			// Jira Server/DC: discover Epic Link custom field
+			epicField, err := c.epicLinkField()
+			if err != nil {
+				return "", fmt.Errorf("discover epic link field: %w", err)
+			}
+			if epicField != "" {
+				fields[epicField] = parentKey
+			}
+		}
+	}
+
+	payload := map[string]any{"fields": fields}
+	respBody, err := c.postJSON(fmt.Sprintf("%s/rest/api/2/issue", c.baseURL), payload)
+	if err != nil {
+		return "", err
+	}
+
+	var result struct {
+		Key string `json:"key"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", fmt.Errorf("parse create response: %w", err)
+	}
+	return result.Key, nil
+}
+
+// SetParent links an existing issue under a parent.
+// Cloud: updates fields.parent. Server/DC: updates the Epic Link custom field.
+func (c *Client) SetParent(issueKey, parentKey string) error {
+	myself, err := c.currentUser()
+	if err != nil {
+		return fmt.Errorf("detect cloud/server: %w", err)
+	}
+
+	fields := map[string]any{}
+	if myself.AccountID != "" {
+		fields["parent"] = map[string]string{"key": parentKey}
+	} else {
+		epicField, err := c.epicLinkField()
+		if err != nil {
+			return fmt.Errorf("discover epic link field: %w", err)
+		}
+		if epicField == "" {
+			return fmt.Errorf("could not find Epic Link custom field on this Jira instance")
+		}
+		fields[epicField] = parentKey
+	}
+
+	url := fmt.Sprintf("%s/rest/api/2/issue/%s", c.baseURL, issueKey)
+	return c.put(url, map[string]any{"fields": fields})
+}
+
+// epicLinkField discovers the custom field ID for Epic Link on Server/DC.
+// It looks for the field with schema type "com.pyxis.greenhopper.jira:gh-epic-link".
+// Returns empty string (not an error) if not found.
+func (c *Client) epicLinkField() (string, error) {
+	body, err := c.get(fmt.Sprintf("%s/rest/api/2/field", c.baseURL))
+	if err != nil {
+		return "", err
+	}
+
+	var fields []struct {
+		ID     string `json:"id"`
+		Schema struct {
+			Custom string `json:"custom"`
+		} `json:"schema"`
+	}
+	if err := json.Unmarshal(body, &fields); err != nil {
+		return "", fmt.Errorf("parse fields: %w", err)
+	}
+
+	for _, f := range fields {
+		if f.Schema.Custom == "com.pyxis.greenhopper.jira:gh-epic-link" {
+			return f.ID, nil
+		}
+	}
+	return "", nil
+}
+
+// --- internal helpers ---
 
 type currentUserResponse struct {
 	Name      string `json:"name"`      // Jira Server/DC
@@ -145,7 +321,7 @@ func (c *Client) currentUser() (*currentUserResponse, error) {
 	return &user, nil
 }
 
-func (c *Client) getTransitions(issueKey string) ([]transition, error) {
+func (c *Client) getTransitions(issueKey string) ([]Transition, error) {
 	url := fmt.Sprintf("%s/rest/api/2/issue/%s/transitions", c.baseURL, issueKey)
 	body, err := c.get(url)
 	if err != nil {
@@ -153,7 +329,7 @@ func (c *Client) getTransitions(issueKey string) ([]transition, error) {
 	}
 
 	var result struct {
-		Transitions []transition `json:"transitions"`
+		Transitions []Transition `json:"transitions"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
 		return nil, fmt.Errorf("parse transitions: %w", err)
@@ -216,6 +392,31 @@ func (c *Client) put(url string, payload any) error {
 		return fmt.Errorf("PUT %s returned %d: %s", url, resp.StatusCode, string(body))
 	}
 	return nil
+}
+
+func (c *Client) postJSON(url string, payload any) ([]byte, error) {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest("POST", url, bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.pat)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("POST %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("POST %s returned %d: %s", url, resp.StatusCode, string(body))
+	}
+	return body, nil
 }
 
 func (c *Client) post(url string, payload any) error {
