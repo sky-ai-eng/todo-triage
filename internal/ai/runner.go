@@ -105,10 +105,16 @@ func (r *Runner) run() {
 		r.callbacks.OnScoringStarted(taskIDs)
 	}
 
-	scores, err := ScoreTasks(tasks)
+	scores, err := ScoreTasks(r.database, tasks)
 	if err != nil {
 		log.Printf("[ai] scoring failed: %v", err)
 		return
+	}
+
+	// Build a source map for repo-match blocked_reason logic.
+	sourceByID := make(map[string]string, len(tasks))
+	for _, t := range tasks {
+		sourceByID[t.ID] = t.Source
 	}
 
 	updates := make([]domain.TaskScoreUpdate, len(scores))
@@ -119,6 +125,18 @@ func (r *Runner) run() {
 			AgentConfidence:   s.AgentConfidence,
 			PriorityReasoning: s.PriorityReasoning,
 			Summary:           s.Summary,
+		}
+
+		// Determine blocked reason for repo matching.
+		blockedReason := ""
+		if len(s.Repos) > 1 {
+			blockedReason = "multi_repo"
+		} else if len(s.Repos) == 0 && sourceByID[s.ID] == "jira" {
+			blockedReason = "no_repo_match"
+		}
+
+		if err := db.UpdateTaskRepoMatch(r.database, s.ID, s.Repos, blockedReason); err != nil {
+			log.Printf("[ai] error storing repo match for %s: %v", s.ID, err)
 		}
 	}
 

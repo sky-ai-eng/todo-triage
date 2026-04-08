@@ -73,6 +73,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     ai_summary TEXT,
     priority_reasoning TEXT,
     agent_confidence REAL,
+    matched_repos TEXT,
+    blocked_reason TEXT,
     snooze_until DATETIME,
     UNIQUE(source, source_id)
 );

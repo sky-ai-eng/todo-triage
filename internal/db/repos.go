@@ -2,6 +2,8 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
+	"fmt"
 
 	"github.com/sky-ai-eng/todo-tinder/internal/domain"
 )
@@ -27,5 +29,45 @@ func UpsertRepoProfile(database *sql.DB, p domain.RepoProfile) error {
 		nullIfEmpty(p.ProfileText),
 		p.ProfiledAt,
 	)
+	return err
+}
+
+// GetRepoProfilesWithContent returns all repo profiles that have a non-null profile_text.
+func GetRepoProfilesWithContent(database *sql.DB) ([]domain.RepoProfile, error) {
+	rows, err := database.Query(`
+		SELECT id, owner, repo, description, has_readme, has_claude_md, has_agents_md, profile_text
+		FROM repo_profiles
+		WHERE profile_text IS NOT NULL AND profile_text != ''
+		ORDER BY id
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var profiles []domain.RepoProfile
+	for rows.Next() {
+		var p domain.RepoProfile
+		var description sql.NullString
+		var profileText sql.NullString
+		if err := rows.Scan(&p.ID, &p.Owner, &p.Repo, &description, &p.HasReadme, &p.HasClaudeMd, &p.HasAgentsMd, &profileText); err != nil {
+			return nil, err
+		}
+		p.Description = description.String
+		p.ProfileText = profileText.String
+		profiles = append(profiles, p)
+	}
+	return profiles, rows.Err()
+}
+
+// UpdateTaskRepoMatch stores the repo match results for a task.
+func UpdateTaskRepoMatch(database *sql.DB, taskID string, repos []string, blockedReason string) error {
+	reposJSON, err := json.Marshal(repos)
+	if err != nil {
+		return fmt.Errorf("marshal repos: %w", err)
+	}
+	_, err = database.Exec(`
+		UPDATE tasks SET matched_repos = ?, blocked_reason = ? WHERE id = ?
+	`, string(reposJSON), nullIfEmpty(blockedReason), taskID)
 	return err
 }
