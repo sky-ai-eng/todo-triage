@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"log"
 	"net/http"
 
@@ -151,4 +152,116 @@ func (s *Server) handleReviewSubmit(w http.ResponseWriter, r *http.Request) {
 		"event":            actualEvent,
 		"comments_posted":  len(ghComments),
 	})
+}
+
+// handleRunReview looks up the pending review associated with an agent run.
+func (s *Server) handleRunReview(w http.ResponseWriter, r *http.Request) {
+	runID := r.PathValue("runID")
+
+	review, err := db.PendingReviewByRunID(s.db, runID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if review == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no pending review for this run"})
+		return
+	}
+
+	// Delegate to the full review GET which includes comments
+	comments, err := db.ListPendingReviewComments(s.db, review.ID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	result := pendingReviewJSON{
+		ID:          review.ID,
+		PRNumber:    review.PRNumber,
+		Owner:       review.Owner,
+		Repo:        review.Repo,
+		CommitSHA:   review.CommitSHA,
+		RunID:       review.RunID,
+		ReviewBody:  review.ReviewBody,
+		ReviewEvent: review.ReviewEvent,
+		Comments:    make([]pendingReviewCommentJSON, len(comments)),
+	}
+	for i, c := range comments {
+		result.Comments[i] = pendingReviewCommentJSON{
+			ID:        c.ID,
+			ReviewID:  c.ReviewID,
+			Path:      c.Path,
+			Line:      c.Line,
+			StartLine: c.StartLine,
+			Body:      c.Body,
+		}
+	}
+
+	writeJSON(w, http.StatusOK, result)
+}
+
+// handleReviewCommentUpdate edits the body of a pending review comment.
+func (s *Server) handleReviewCommentUpdate(w http.ResponseWriter, r *http.Request) {
+	commentID := r.PathValue("commentId")
+
+	var req struct {
+		Body string `json:"body"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	if req.Body == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "body is required"})
+		return
+	}
+
+	if err := db.UpdatePendingReviewComment(s.db, commentID, req.Body); err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleReviewCommentDelete removes a pending review comment.
+func (s *Server) handleReviewCommentDelete(w http.ResponseWriter, r *http.Request) {
+	commentID := r.PathValue("commentId")
+
+	if err := db.DeletePendingReviewComment(s.db, commentID); err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleReviewDiff proxies the PR diff from GitHub for the review's PR.
+func (s *Server) handleReviewDiff(w http.ResponseWriter, r *http.Request) {
+	reviewID := r.PathValue("id")
+
+	if s.ghClient == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "GitHub credentials not configured"})
+		return
+	}
+
+	review, err := db.GetPendingReview(s.db, reviewID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if review == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "review not found"})
+		return
+	}
+
+	file := r.URL.Query().Get("file")
+	diff, err := s.ghClient.GetPRDiff(review.Owner, review.Repo, review.PRNumber, file)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error: " + err.Error()})
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Write([]byte(diff))
 }
