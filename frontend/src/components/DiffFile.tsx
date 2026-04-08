@@ -2,7 +2,7 @@ import { useState, useMemo } from "react";
 import { Diff, Hunk, markEdits, tokenize, getChangeKey } from "react-diff-view";
 import type { FileData, HunkData, ChangeData } from "react-diff-view";
 import ReviewComment from "./ReviewComment";
-import { refractor, languageForPath } from "../lib/highlight";
+import { diffViewRefractor, languageForPath } from "../lib/highlight";
 
 export interface FileComment {
   id: string;
@@ -72,7 +72,7 @@ export default function DiffFile({
     try {
       const result = tokenize(file.hunks, {
         ...(lang
-          ? { highlight: true, refractor, language: lang }
+          ? { highlight: true, refractor: diffViewRefractor, language: lang }
           : { highlight: false }),
         enhancers: [markEdits(file.hunks, { type: "block" })],
       });

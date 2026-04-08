@@ -54,6 +54,21 @@ refractor.register(csharp);
 refractor.register(cpp);
 refractor.register(c);
 
+type HighlightCode = Parameters<typeof refractor.highlight>[0];
+type HighlightLanguage = Parameters<typeof refractor.highlight>[1];
+type HighlightResult = ReturnType<typeof refractor.highlight>;
+
+/**
+ * react-diff-view@3 expects `refractor.highlight()` to return an array of nodes.
+ * refractor@5 returns a `{type: "root", children: [...]}` node instead, so unwrap
+ * to `.children` while keeping a compatible compile-time type for tokenize().
+ */
+export const diffViewRefractor = {
+  highlight(code: HighlightCode, language: HighlightLanguage): HighlightResult {
+    return refractor.highlight(code, language).children as unknown as HighlightResult;
+  },
+};
+
 const EXT_MAP: Record<string, string> = {
   ".go": "go",
   ".ts": "typescript",
