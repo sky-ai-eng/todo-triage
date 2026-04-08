@@ -24,3 +24,92 @@ body {
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
   -webkit-font-smoothing: antialiased;
 }
+
+/* ── react-diff-view overrides ── */
+.diff-unified, .diff-split {
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 12.5px;
+  line-height: 1.6;
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.diff-unified .diff-gutter,
+.diff-split .diff-gutter {
+  width: 48px;
+  min-width: 48px;
+  padding: 0 8px;
+  text-align: right;
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+  user-select: none;
+  vertical-align: top;
+  background: transparent;
+  border-right: 1px solid var(--color-border-subtle);
+}
+
+.diff-unified .diff-code,
+.diff-split .diff-code {
+  padding: 0 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  vertical-align: top;
+  background: transparent;
+}
+
+/* Addition lines — warm sage green, very soft */
+.diff-unified .diff-line-insert .diff-code,
+.diff-split .diff-line-insert .diff-code {
+  background: rgba(90, 140, 106, 0.06);
+}
+.diff-unified .diff-line-insert .diff-gutter,
+.diff-split .diff-line-insert .diff-gutter {
+  background: rgba(90, 140, 106, 0.04);
+  color: var(--color-claim);
+}
+
+/* Deletion lines — warm rose, very soft */
+.diff-unified .diff-line-delete .diff-code,
+.diff-split .diff-line-delete .diff-code {
+  background: rgba(196, 90, 90, 0.06);
+}
+.diff-unified .diff-line-delete .diff-gutter,
+.diff-split .diff-line-delete .diff-gutter {
+  background: rgba(196, 90, 90, 0.04);
+  color: var(--color-dismiss);
+}
+
+/* Word-level edit highlights */
+.diff-unified .diff-code-edit .diff-code-insert,
+.diff-split .diff-code-edit .diff-code-insert {
+  background: rgba(90, 140, 106, 0.16);
+  border-radius: 2px;
+}
+.diff-unified .diff-code-edit .diff-code-delete,
+.diff-split .diff-code-edit .diff-code-delete {
+  background: rgba(196, 90, 90, 0.16);
+  border-radius: 2px;
+}
+
+/* Widget rows (inline comments) */
+.diff-unified .diff-widget,
+.diff-split .diff-widget {
+  background: transparent;
+}
+.diff-unified .diff-widget td,
+.diff-split .diff-widget td {
+  padding: 0;
+}
+
+/* Hunk headers */
+.diff-unified .diff-hunk-header,
+.diff-split .diff-hunk-header {
+  background: rgba(0, 0, 0, 0.015);
+}
+.diff-unified .diff-hunk-header td,
+.diff-split .diff-hunk-header td {
+  padding: 4px 12px;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  font-style: italic;
+}
