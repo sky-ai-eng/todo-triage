@@ -22,4 +22,17 @@ func seedDefaultPrompts(database *sql.DB) {
 	if err != nil {
 		log.Printf("[seed] warning: failed to seed PR review prompt: %v", err)
 	}
+
+	// Default Jira implementation prompt — bound to assigned issues
+	err = db.SeedPrompt(database, domain.Prompt{
+		ID:     "system-jira-implement",
+		Name:   "Jira Issue Implementation",
+		Body:   ai.JiraImplementPromptTemplate,
+		Source: "system",
+	}, []domain.PromptBinding{
+		{PromptID: "system-jira-implement", EventType: "jira:issue:assigned", IsDefault: true},
+	})
+	if err != nil {
+		log.Printf("[seed] warning: failed to seed Jira implement prompt: %v", err)
+	}
 }

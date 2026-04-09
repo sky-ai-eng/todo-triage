@@ -30,6 +30,9 @@ var JiraToolsTemplate string
 //go:embed prompts/pr-review.txt
 var PRReviewPromptTemplate string
 
+//go:embed prompts/jira-implement.txt
+var JiraImplementPromptTemplate string
+
 //go:embed prompts/repo-profile.txt
 var RepoProfilePrompt string
 
