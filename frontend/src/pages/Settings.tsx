@@ -11,7 +11,6 @@ interface SettingsData {
     base_url: string
     has_token: boolean
     poll_interval: string
-    repos: string[]
   }
   jira: {
     enabled: boolean
