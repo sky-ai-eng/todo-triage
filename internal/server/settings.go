@@ -364,7 +364,7 @@ func (s *Server) handleRepoProfiles(w http.ResponseWriter, r *http.Request) {
 			ProfileText: p.ProfileText,
 		}
 		if p.ProfiledAt != nil {
-			t := p.ProfiledAt.Format("2006-01-02T15:04:05Z")
+			t := p.ProfiledAt.UTC().Format(time.RFC3339)
 			result[i].ProfiledAt = &t
 		}
 	}
