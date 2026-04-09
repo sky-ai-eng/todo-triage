@@ -43,6 +43,51 @@ func (c *Client) ListUserRepos() ([]UserRepo, error) {
 	return all, nil
 }
 
+// RepoMeta is a subset of the GitHub repo object.
+type RepoMeta struct {
+	DefaultBranch string `json:"default_branch"`
+	CloneURL      string `json:"clone_url"`
+}
+
+// GetRepoMeta fetches the default branch and clone URL for a repository.
+func (c *Client) GetRepoMeta(owner, repo string) (*RepoMeta, error) {
+	data, err := c.Get(fmt.Sprintf("/repos/%s/%s", owner, repo))
+	if err != nil {
+		return nil, err
+	}
+	var meta RepoMeta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return nil, fmt.Errorf("parse repo meta: %w", err)
+	}
+	return &meta, nil
+}
+
+// Branch is a branch returned by the GitHub branches API.
+type Branch struct {
+	Name string `json:"name"`
+}
+
+// ListBranches returns branches for a repo, optionally filtered by prefix.
+// Uses GitHub's server-side filtering to avoid fetching all branches.
+func (c *Client) ListBranches(owner, repo, query string, limit int) ([]Branch, error) {
+	if limit <= 0 {
+		limit = 30
+	}
+	path := fmt.Sprintf("/repos/%s/%s/branches?per_page=%d", owner, repo, limit)
+	if query != "" {
+		path += "&query=" + query
+	}
+	data, err := c.Get(path)
+	if err != nil {
+		return nil, err
+	}
+	var branches []Branch
+	if err := json.Unmarshal(data, &branches); err != nil {
+		return nil, fmt.Errorf("parse branches: %w", err)
+	}
+	return branches, nil
+}
+
 // fileContent is the GitHub API response for a repository file.
 type fileContent struct {
 	Content  string `json:"content"`  // base64-encoded, newline-wrapped

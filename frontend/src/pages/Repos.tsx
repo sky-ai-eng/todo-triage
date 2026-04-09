@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import RepoPickerModal from '../components/RepoPickerModal'
 import { useWebSocket } from '../hooks/useWebSocket'
 
@@ -11,7 +11,129 @@ interface RepoProfile {
   has_claude_md: boolean
   has_agents_md: boolean
   profile_text?: string
+  default_branch?: string
+  base_branch?: string
   profiled_at?: string
+}
+
+function BranchInput({ profile, onSave }: { profile: RepoProfile; onSave: (branch: string) => void }) {
+  const [value, setValue] = useState(profile.base_branch || '')
+  const [open, setOpen] = useState(false)
+  const [branches, setBranches] = useState<string[]>([])
+  const [loading, setLoading] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  const debounceRef = useRef<ReturnType<typeof setTimeout>>()
+
+  const placeholder = profile.default_branch || 'main'
+
+  const fetchBranches = useCallback(async (query: string) => {
+    setLoading(true)
+    try {
+      const res = await fetch(`/api/repos/${profile.owner}/${profile.repo}/branches?q=${encodeURIComponent(query)}`)
+      if (res.ok) {
+        const data: string[] = await res.json()
+        setBranches(data)
+      }
+    } catch {
+      // non-critical
+    } finally {
+      setLoading(false)
+    }
+  }, [profile.owner, profile.repo])
+
+  const handleFocus = () => {
+    setOpen(true)
+    fetchBranches(value)
+  }
+
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const v = e.target.value
+    setValue(v)
+    clearTimeout(debounceRef.current)
+    debounceRef.current = setTimeout(() => fetchBranches(v), 200)
+  }
+
+  const handleSelect = (branch: string) => {
+    setValue(branch)
+    setOpen(false)
+    onSave(branch)
+  }
+
+  const handleBlur = () => {
+    // Delay to allow click on dropdown item
+    setTimeout(() => {
+      setOpen(false)
+      const effective = value.trim()
+      if (effective !== (profile.base_branch || '')) {
+        onSave(effective)
+      }
+    }, 150)
+  }
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') {
+      setOpen(false)
+      ;(e.target as HTMLInputElement).blur()
+      const effective = value.trim()
+      if (effective !== (profile.base_branch || '')) {
+        onSave(effective)
+      }
+    }
+    if (e.key === 'Escape') {
+      setOpen(false)
+      setValue(profile.base_branch || '')
+    }
+  }
+
+  // Close on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [])
+
+  return (
+    <div ref={ref} className="relative">
+      <input
+        type="text"
+        value={value}
+        onChange={handleChange}
+        onFocus={handleFocus}
+        onBlur={handleBlur}
+        onKeyDown={handleKeyDown}
+        placeholder={placeholder}
+        className="w-40 text-[12px] bg-transparent border border-border-subtle rounded-lg px-2.5 py-1.5 text-text-primary placeholder:text-text-tertiary/50 focus:outline-none focus:border-accent/40 transition-colors"
+      />
+      {open && (
+        <div className="absolute z-10 top-full mt-1 w-56 max-h-48 overflow-y-auto backdrop-blur-xl bg-surface-raised border border-border-glass rounded-xl shadow-lg shadow-black/[0.08]">
+          {loading && branches.length === 0 ? (
+            <div className="px-3 py-2 text-[11px] text-text-tertiary">Loading...</div>
+          ) : branches.length === 0 ? (
+            <div className="px-3 py-2 text-[11px] text-text-tertiary">No branches found</div>
+          ) : (
+            branches.map((b) => (
+              <button
+                key={b}
+                type="button"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => handleSelect(b)}
+                className={`w-full text-left px-3 py-1.5 text-[12px] hover:bg-accent/[0.06] transition-colors ${
+                  b === placeholder ? 'text-text-secondary font-medium' : 'text-text-primary'
+                }`}
+              >
+                {b}
+                {b === profile.default_branch && (
+                  <span className="ml-1.5 text-[10px] text-text-tertiary">default</span>
+                )}
+              </button>
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  )
 }
 
 export default function Repos() {
@@ -202,6 +324,27 @@ export default function Repos() {
                       No documentation files found — profile cannot be generated.
                     </p>
                   )}
+
+                  <div className="flex items-center gap-2 mt-3">
+                    <span className="text-[11px] text-text-tertiary">Base branch:</span>
+                    <BranchInput
+                      profile={profile}
+                      onSave={async (branch) => {
+                        try {
+                          await fetch(`/api/repos/${profile.owner}/${profile.repo}`, {
+                            method: 'PATCH',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ base_branch: branch || null }),
+                          })
+                          setProfiles((prev) => prev.map((p) =>
+                            p.id === profile.id ? { ...p, base_branch: branch } : p
+                          ))
+                        } catch {
+                          // non-critical
+                        }
+                      }}
+                    />
+                  </div>
                 </div>
 
                 {profile.profiled_at && (
