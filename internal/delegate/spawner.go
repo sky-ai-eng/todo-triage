@@ -210,8 +210,9 @@ func (s *Spawner) runPRReview(ctx context.Context, runID string, task domain.Tas
 		return
 	}
 
-	// 4. Build prompt: envelope (tool guidance) + mission (what to do)
-	prompt := buildPrompt(mission, owner, repo, prNumber, selfBin)
+	// 4. Build prompt: envelope (scope + tools + completion) + mission
+	scope := fmt.Sprintf("Repository: %s/%s\nPR: #%d", owner, repo, prNumber)
+	prompt := buildPrompt(mission, scope, ai.GHToolsTemplate, selfBin)
 
 	// 5. Spawn claude in its own process group so we can kill the entire tree
 	s.updateStatus(runID, "agent_starting")
@@ -293,7 +294,7 @@ func (s *Spawner) runPRReview(ctx context.Context, runID string, task domain.Tas
 				status = "failed"
 			}
 			if parsed := parseAgentResult(completion.Result); parsed != nil {
-				resultLink = parsed.Link
+				resultLink = parsed.PrimaryLink()
 				resultSummary = parsed.Summary
 				if parsed.Status == "failed" {
 					status = "failed"
@@ -389,9 +390,34 @@ func (s *Spawner) broadcastMessage(runID string, msg *domain.AgentMessage) {
 }
 
 type agentResult struct {
-	Status  string `json:"status"`
-	Link    string `json:"link"`
-	Summary string `json:"summary"`
+	Status  string            `json:"status"`
+	Link    string            `json:"link"`    // legacy — single URL
+	Summary string            `json:"summary"`
+	Links   map[string]any    `json:"links"`   // new — keyed URLs (pr_review, pr, jira_issues)
+}
+
+// PrimaryLink returns the most relevant URL from the result.
+// Checks the new links map first, falls back to the legacy link field.
+func (r *agentResult) PrimaryLink() string {
+	if r.Link != "" {
+		return r.Link
+	}
+	// Prefer pr_review > pr > first jira issue
+	for _, key := range []string{"pr_review", "pr"} {
+		if v, ok := r.Links[key]; ok {
+			if s, ok := v.(string); ok && s != "" {
+				return s
+			}
+		}
+	}
+	if v, ok := r.Links["jira_issues"]; ok {
+		if arr, ok := v.([]any); ok && len(arr) > 0 {
+			if s, ok := arr[0].(string); ok {
+				return s
+			}
+		}
+	}
+	return ""
 }
 
 // parseAgentResult extracts the structured {status, link, summary} JSON from
@@ -438,19 +464,21 @@ func parseAgentResult(text string) *agentResult {
 	return nil
 }
 
-// buildPrompt composes the system envelope + mission body, with variable substitution.
-// The envelope provides tool guidance, repo scoping, and completion format.
-// The mission is the user/system prompt that describes what the agent should do.
-func buildPrompt(mission, owner, repo string, prNumber int, binaryPath string) string {
-	r := strings.NewReplacer(
-		"{{OWNER}}", owner,
-		"{{REPO}}", repo,
-		"{{PR_NUMBER}}", fmt.Sprintf("%d", prNumber),
-		"todotinder exec", binaryPath+" exec",
-	)
-	envelope := r.Replace(ai.EnvelopeTemplate)
-	body := r.Replace(mission)
-	return body + "\n\n" + envelope
+// buildPrompt composes: mission + envelope (scope, tools, completion contract).
+// scope describes what the agent is authorized to access (may be empty for no-repo runs).
+// toolsRef is the injected tool documentation (from gh-tools.txt, jira-tools.txt, etc.).
+func buildPrompt(mission, scope, toolsRef, binaryPath string) string {
+	// First pass: inject structured content into envelope placeholders
+	envelope := strings.NewReplacer(
+		"{{SCOPE}}", scope,
+		"{{TOOLS_REFERENCE}}", toolsRef,
+	).Replace(ai.EnvelopeTemplate)
+
+	// Second pass: substitute binary path across the entire prompt
+	// (tools reference and mission both contain {{BINARY_PATH}} / "todotinder exec")
+	body := strings.ReplaceAll(mission, "todotinder exec", binaryPath+" exec")
+	full := body + "\n\n" + envelope
+	return strings.ReplaceAll(full, "{{BINARY_PATH}}", binaryPath)
 }
 
 func parseOwnerRepo(s string) (string, string) {

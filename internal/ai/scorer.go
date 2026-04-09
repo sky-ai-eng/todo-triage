@@ -21,6 +21,12 @@ var batchPrioritizePrompt string
 //go:embed prompts/envelope.txt
 var EnvelopeTemplate string
 
+//go:embed prompts/gh-tools.txt
+var GHToolsTemplate string
+
+//go:embed prompts/jira-tools.txt
+var JiraToolsTemplate string
+
 //go:embed prompts/pr-review.txt
 var PRReviewPromptTemplate string
 
