@@ -185,7 +185,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, runID string, task domain.Tas
 	}
 
 	return runConfig{
-		scope:    fmt.Sprintf("Repository: %s/%s\nPR: #%d", owner, repo, prNumber),
+		scope:    fmt.Sprintf("Repository: %s/%s\nPR: #%d\nBranch: %s", owner, repo, prNumber, pr.HeadRef),
 		toolsRef: ai.GHToolsTemplate,
 		wtPath:   wtPath,
 		hasWT:    true,
@@ -238,7 +238,7 @@ func (s *Spawner) setupJira(ctx context.Context, runID string, task domain.Task,
 
 		// Agent gets both GH and Jira tools when it has a repo (may need to create PRs)
 		return runConfig{
-			scope:    fmt.Sprintf("Repository: %s\nJira issue: %s", repoID, task.SourceID),
+			scope:    fmt.Sprintf("Repository: %s\nJira issue: %s\nBranch: %s", repoID, task.SourceID, featureBranch),
 			toolsRef: ai.GHToolsTemplate + "\n\n" + ai.JiraToolsTemplate,
 			wtPath:   wtPath,
 			hasWT:    true,
