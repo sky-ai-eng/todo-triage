@@ -208,7 +208,13 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 		creds.JiraURL = ""
 		creds.JiraPAT = ""
 		cfg.Jira.BaseURL = ""
-		db.ClearTrackedItems(s.db, "jira")
+		if err := db.ClearTrackedItems(s.db, "jira"); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{
+				"error": "failed to clear Jira tracked items: " + err.Error(),
+				"field": "jira",
+			})
+			return
+		}
 	}
 
 	// --- Update config fields ---
