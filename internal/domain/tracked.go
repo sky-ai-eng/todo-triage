@@ -52,6 +52,7 @@ type PRSnapshot struct {
 	// Metadata
 	Labels       []string `json:"labels"`
 	CommentCount int      `json:"comment_count"`
+	CreatedAt    string   `json:"created_at"`
 	UpdatedAt    string   `json:"updated_at"`
 }
 

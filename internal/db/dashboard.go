@@ -158,6 +158,7 @@ func GetDashboardPRs(database *sql.DB) ([]PRSummaryRow, error) {
 			State:     stateToLower(snap.State),
 			Draft:     snap.IsDraft,
 			Labels:    snap.Labels,
+			CreatedAt: snap.CreatedAt,
 			UpdatedAt: snap.UpdatedAt,
 			HTMLURL:   snap.URL,
 		})

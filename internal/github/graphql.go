@@ -53,6 +53,7 @@ fragment PRFields on PullRequest {
 	}
 	labels(first: 10) { nodes { name } }
 	comments { totalCount }
+	createdAt
 	updatedAt
 }
 `
@@ -184,6 +185,7 @@ type gqlPR struct {
 	Commits         gqlCommits    `json:"commits"`
 	Labels          gqlLabelNodes `json:"labels"`
 	Comments        gqlCount      `json:"comments"`
+	CreatedAt       string        `json:"createdAt"`
 	UpdatedAt       string        `json:"updatedAt"`
 }
 
@@ -258,6 +260,7 @@ func (pr gqlPR) toSnapshot() domain.PRSnapshot {
 		ChangedFiles: pr.ChangedFiles,
 		ReviewCount:  pr.Reviews.TotalCount,
 		CommentCount: pr.Comments.TotalCount,
+		CreatedAt:    pr.CreatedAt,
 		UpdatedAt:    pr.UpdatedAt,
 	}
 
