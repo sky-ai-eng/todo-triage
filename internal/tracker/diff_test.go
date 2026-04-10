@@ -201,6 +201,31 @@ func TestDiffJira_PriorityChange(t *testing.T) {
 	assertEventTypes(t, events, []string{domain.EventJiraIssuePriorityChanged})
 }
 
+func TestDiffJira_NewComment(t *testing.T) {
+	prev := domain.JiraSnapshot{Key: "SKY-1", CommentCount: 2}
+	curr := domain.JiraSnapshot{Key: "SKY-1", CommentCount: 3}
+
+	events := DiffJiraSnapshots(prev, curr, "SKY-1")
+	assertEventTypes(t, events, []string{domain.EventJiraIssueCommented})
+}
+
+func TestDiffJira_MultipleNewComments(t *testing.T) {
+	prev := domain.JiraSnapshot{Key: "SKY-1", CommentCount: 1}
+	curr := domain.JiraSnapshot{Key: "SKY-1", CommentCount: 4}
+
+	// Should fire once, not three times — it's "new comments detected", not per-comment
+	events := DiffJiraSnapshots(prev, curr, "SKY-1")
+	assertEventTypes(t, events, []string{domain.EventJiraIssueCommented})
+}
+
+func TestDiffJira_NoNewComments(t *testing.T) {
+	prev := domain.JiraSnapshot{Key: "SKY-1", CommentCount: 3}
+	curr := domain.JiraSnapshot{Key: "SKY-1", CommentCount: 3}
+
+	events := DiffJiraSnapshots(prev, curr, "SKY-1")
+	assertEventTypes(t, events, nil)
+}
+
 // --- test helpers ---
 
 func eventTypes(events []domain.Event) []string {

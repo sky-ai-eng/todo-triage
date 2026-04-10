@@ -144,6 +144,9 @@ type Issue struct {
 			Key string `json:"key"`
 		} `json:"parent,omitempty"`
 		Labels []string `json:"labels,omitempty"`
+		Comment *struct {
+			Total int `json:"total"`
+		} `json:"comment,omitempty"`
 	} `json:"fields"`
 }
 

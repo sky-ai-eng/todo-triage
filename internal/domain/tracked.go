@@ -74,5 +74,6 @@ type JiraSnapshot struct {
 	Labels       []string `json:"labels"`
 	IssueType    string   `json:"issue_type"`
 	ParentKey    string   `json:"parent_key"`
+	CommentCount int      `json:"comment_count"`
 	URL          string   `json:"url"`
 }

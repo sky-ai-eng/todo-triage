@@ -301,7 +301,7 @@ func (t *Tracker) discoverJira(client *jiraclient.Client, baseURL string, projec
 	seen := map[string]bool{}
 	var all []domain.JiraSnapshot
 
-	fields := []string{"summary", "status", "assignee", "priority", "labels", "issuetype", "parent"}
+	fields := []string{"summary", "status", "assignee", "priority", "labels", "issuetype", "parent", "comment"}
 
 	for _, jql := range queries {
 		issues, err := client.SearchIssues(jql, fields, 100)
@@ -324,7 +324,7 @@ func (t *Tracker) discoverJira(client *jiraclient.Client, baseURL string, projec
 // Batches in groups of jiraBatchSize to stay under JQL length limits.
 func (t *Tracker) batchFetchJira(client *jiraclient.Client, baseURL string, keys []string) (map[string]domain.JiraSnapshot, error) {
 	results := make(map[string]domain.JiraSnapshot, len(keys))
-	fields := []string{"summary", "status", "assignee", "priority", "labels", "issuetype", "parent"}
+	fields := []string{"summary", "status", "assignee", "priority", "labels", "issuetype", "parent", "comment"}
 
 	for i := 0; i < len(keys); i += jiraBatchSize {
 		end := i + jiraBatchSize
@@ -368,6 +368,9 @@ func issueToSnapshot(issue jiraclient.Issue, baseURL string) domain.JiraSnapshot
 	}
 	if issue.Fields.Parent != nil {
 		snap.ParentKey = issue.Fields.Parent.Key
+	}
+	if issue.Fields.Comment != nil {
+		snap.CommentCount = issue.Fields.Comment.Total
 	}
 	snap.Labels = issue.Fields.Labels
 	return snap

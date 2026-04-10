@@ -1,6 +1,7 @@
 package tracker
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/sky-ai-eng/todo-tinder/internal/domain"
@@ -155,6 +156,14 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, sourceID string) []domain
 	if prev.Priority != curr.Priority && curr.Priority != "" {
 		emit(domain.EventJiraIssuePriorityChanged, map[string]string{
 			"prev_priority": prev.Priority, "new_priority": curr.Priority,
+		})
+	}
+
+	// New comments
+	if curr.CommentCount > prev.CommentCount {
+		emit(domain.EventJiraIssueCommented, map[string]string{
+			"prev_count": fmt.Sprintf("%d", prev.CommentCount),
+			"new_count":  fmt.Sprintf("%d", curr.CommentCount),
 		})
 	}
 
