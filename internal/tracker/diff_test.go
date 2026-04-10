@@ -65,8 +65,8 @@ func TestDiffPR_OpenToClosed(t *testing.T) {
 	assertEventTypes(t, events, []string{domain.EventGitHubPRClosed})
 }
 
-func TestDiffPR_OpenToClosed_NotMerged(t *testing.T) {
-	// Merged PRs (Merged=true) should not also emit github:pr:closed
+func TestDiffPR_OpenToMerged_EmitsMergedNotClosed(t *testing.T) {
+	// Merged PRs (Merged=true) should emit github:pr:merged, not github:pr:closed
 	prev := domain.PRSnapshot{Number: 42, State: "OPEN", Merged: false}
 	curr := domain.PRSnapshot{Number: 42, State: "MERGED", Merged: true}
 
