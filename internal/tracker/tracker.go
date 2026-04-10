@@ -52,13 +52,11 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, repos 
 		sid := ghSourceID(d.Snapshot.Repo, d.Snapshot.Number)
 		taskID := t.resolveTaskID("github", sid)
 
-		snapJSON, _ := json.Marshal(d.Snapshot)
 		item := domain.TrackedItem{
 			Source:   "github",
 			SourceID: sid,
 			TaskID:   taskID,
 			NodeID:   d.NodeID,
-			Snapshot: string(snapJSON),
 		}
 		if err := db.UpsertTrackedItem(t.database, item); err != nil {
 			log.Printf("[tracker] error registering tracked item %s: %v", sid, err)
@@ -222,12 +220,10 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 		}
 		taskID := t.resolveTaskID("jira", snap.Key)
 
-		snapJSON, _ := json.Marshal(snap)
 		item := domain.TrackedItem{
 			Source:   "jira",
 			SourceID: snap.Key,
 			TaskID:   taskID,
-			Snapshot: string(snapJSON),
 		}
 		if err := db.UpsertTrackedItem(t.database, item); err != nil {
 			log.Printf("[tracker] error registering tracked item %s: %v", snap.Key, err)

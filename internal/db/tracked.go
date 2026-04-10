@@ -12,11 +12,11 @@ import (
 func UpsertTrackedItem(database *sql.DB, item domain.TrackedItem) error {
 	_, err := database.Exec(`
 		INSERT INTO tracked_items (source, source_id, task_id, node_id, snapshot, tracked_since, last_polled)
-		VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+		VALUES (?, ?, ?, ?, '{}', datetime('now'), datetime('now'))
 		ON CONFLICT(source, source_id) DO UPDATE SET
 			task_id = excluded.task_id,
 			node_id = COALESCE(excluded.node_id, tracked_items.node_id)
-	`, item.Source, item.SourceID, nullIfEmpty(item.TaskID), nullIfEmpty(item.NodeID), item.Snapshot)
+	`, item.Source, item.SourceID, nullIfEmpty(item.TaskID), nullIfEmpty(item.NodeID))
 	return err
 }
 
