@@ -17,8 +17,7 @@ import (
 )
 
 const (
-	jiraBatchSize     = 100 // max issues per JQL key IN (...) query
-	terminalPruneDays = 30  // remove terminal items after this many days
+	jiraBatchSize = 100 // max issues per JQL key IN (...) query
 )
 
 // Tracker manages the discover → refresh → diff → emit cycle for both GitHub and Jira.
@@ -527,18 +526,6 @@ func (t *Tracker) resolveTaskID(source, sourceID string) string {
 	var id string
 	t.database.QueryRow(`SELECT id FROM tasks WHERE source = ? AND source_id = ?`, source, sourceID).Scan(&id)
 	return id
-}
-
-// Prune removes terminal items older than the configured threshold.
-func (t *Tracker) Prune() {
-	removed, err := db.PruneTerminalItems(t.database, terminalPruneDays)
-	if err != nil {
-		log.Printf("[tracker] prune error: %v", err)
-		return
-	}
-	if removed > 0 {
-		log.Printf("[tracker] pruned %d terminal items", removed)
-	}
 }
 
 // EmitPollComplete publishes the system poll-completed sentinel.

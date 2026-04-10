@@ -126,15 +126,3 @@ func ClearTrackedItems(database *sql.DB, source string) error {
 	_, err := database.Exec(`DELETE FROM tracked_items WHERE source = ?`, source)
 	return err
 }
-
-// PruneTerminalItems removes tracked items that have been terminal for longer than the given duration.
-func PruneTerminalItems(database *sql.DB, olderThanDays int) (int64, error) {
-	result, err := database.Exec(`
-		DELETE FROM tracked_items
-		WHERE terminal_at IS NOT NULL AND terminal_at < datetime('now', ? || ' days')
-	`, -olderThanDays)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
-}

@@ -141,7 +141,6 @@ func (m *Manager) startGitHub(cfg config.Config, creds auth.Credentials) {
 		if _, err := m.tracker.RefreshGitHub(client, creds.GitHubUsername, repos); err != nil {
 			log.Printf("[github] tracker error: %v", err)
 		}
-		m.tracker.Prune()
 
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
