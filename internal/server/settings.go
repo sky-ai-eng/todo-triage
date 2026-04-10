@@ -324,7 +324,11 @@ func (s *Server) handleJiraConnect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Persist URL in config too
-	cfg, _ := config.Load()
+	cfg, err := config.Load()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load config: " + err.Error()})
+		return
+	}
 	cfg.Jira.BaseURL = req.URL
 	if err := config.Save(cfg); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save config: " + err.Error()})
