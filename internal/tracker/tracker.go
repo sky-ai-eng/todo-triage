@@ -139,12 +139,14 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, repos 
 			eventsEmitted++
 		}
 
-		// Update task status for terminal PRs
+		// Sync task status when PR state changes
+		if item.TaskID != "" && prevSnap.State != newSnap.State {
+			newTaskStatus := prStateToTaskStatus(newSnap)
+			t.database.Exec(`UPDATE tasks SET status = ? WHERE id = ? AND status != ?`, newTaskStatus, item.TaskID, newTaskStatus)
+		}
+
 		if newSnap.Merged || newSnap.State == "CLOSED" {
 			db.MarkTerminal(t.database, "github", item.SourceID)
-			if item.TaskID != "" {
-				t.database.Exec(`UPDATE tasks SET status = 'done' WHERE id = ? AND status != 'done'`, item.TaskID)
-			}
 		}
 	}
 
@@ -279,6 +281,12 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 
 		events := DiffJiraSnapshots(prevSnap, newSnap, item.SourceID)
 
+		// Sync task status when the source status changes
+		if item.TaskID != "" && prevSnap.Status != newSnap.Status {
+			newTaskStatus := jiraStatusToTaskStatus(newSnap)
+			t.database.Exec(`UPDATE tasks SET status = ? WHERE id = ? AND status != ?`, newTaskStatus, item.TaskID, newTaskStatus)
+		}
+
 		snapJSON, _ := json.Marshal(newSnap)
 		if err := db.UpdateTrackedSnapshot(t.database, "jira", item.SourceID, string(snapJSON)); err != nil {
 			log.Printf("[tracker] error updating snapshot for %s: %v", item.ID, err)
@@ -300,9 +308,6 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 
 		if isJiraTerminal(newSnap.Status) {
 			db.MarkTerminal(t.database, "jira", item.SourceID)
-			if item.TaskID != "" {
-				t.database.Exec(`UPDATE tasks SET status = 'done' WHERE id = ? AND status != 'done'`, item.TaskID)
-			}
 		}
 	}
 
@@ -495,6 +500,25 @@ func issueToSnapshot(issue jiraclient.Issue, baseURL string) domain.JiraSnapshot
 }
 
 // --- Helpers ---
+
+// prStateToTaskStatus maps a PR's GraphQL state to a task status.
+func prStateToTaskStatus(snap domain.PRSnapshot) string {
+	if snap.Merged || snap.State == "CLOSED" {
+		return "done"
+	}
+	return "queued"
+}
+
+// jiraStatusToTaskStatus maps a Jira issue's current state to a task status.
+func jiraStatusToTaskStatus(snap domain.JiraSnapshot) string {
+	if isJiraTerminal(snap.Status) {
+		return "done"
+	}
+	if snap.Assignee != "" {
+		return "claimed"
+	}
+	return "queued"
+}
 
 // resolveTaskID looks up the task ID for a source+sourceID pair.
 func (t *Tracker) resolveTaskID(source, sourceID string) string {
