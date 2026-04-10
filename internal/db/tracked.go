@@ -15,8 +15,7 @@ func UpsertTrackedItem(database *sql.DB, item domain.TrackedItem) error {
 		VALUES (?, ?, ?, ?, '{}', datetime('now'), datetime('now'))
 		ON CONFLICT(source, source_id) DO UPDATE SET
 			task_id = excluded.task_id,
-			node_id = COALESCE(excluded.node_id, tracked_items.node_id),
-			terminal_at = NULL
+			node_id = COALESCE(excluded.node_id, tracked_items.node_id)
 	`, item.Source, item.SourceID, nullIfEmpty(item.TaskID), nullIfEmpty(item.NodeID))
 	return err
 }
@@ -111,6 +110,20 @@ func UpdateTrackedSnapshot(database *sql.DB, source, sourceID, snapshot string) 
 		WHERE source = ? AND source_id = ?
 	`, snapshot, source, sourceID)
 	return err
+}
+
+// ReactivateTrackedItem clears terminal_at for an item that has reappeared in a non-terminal state
+// (e.g., a closed PR was reopened). Returns true if a row was actually reactivated.
+func ReactivateTrackedItem(database *sql.DB, source, sourceID string) (bool, error) {
+	result, err := database.Exec(`
+		UPDATE tracked_items SET terminal_at = NULL
+		WHERE source = ? AND source_id = ? AND terminal_at IS NOT NULL
+	`, source, sourceID)
+	if err != nil {
+		return false, err
+	}
+	n, _ := result.RowsAffected()
+	return n > 0, nil
 }
 
 // MarkTerminal sets terminal_at on a tracked item (merged, closed, done).

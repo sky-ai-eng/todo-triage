@@ -60,6 +60,15 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, repos 
 		if err := db.UpsertTrackedItem(t.database, item); err != nil {
 			log.Printf("[tracker] error registering tracked item %s: %v", sid, err)
 		}
+
+		// Reactivate if a previously-terminal item is now open (e.g., reopened PR)
+		if !d.Snapshot.Merged && d.Snapshot.State != "CLOSED" {
+			if reactivated, err := db.ReactivateTrackedItem(t.database, "github", sid); err != nil {
+				log.Printf("[tracker] error reactivating %s: %v", sid, err)
+			} else if reactivated {
+				log.Printf("[tracker] reactivated %s (reopened)", sid)
+			}
+		}
 	}
 
 	// Phase 2: Refresh all tracked items via GraphQL batch
@@ -228,6 +237,15 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 		}
 		if err := db.UpsertTrackedItem(t.database, item); err != nil {
 			log.Printf("[tracker] error registering tracked item %s: %v", snap.Key, err)
+		}
+
+		// Reactivate if a previously-terminal item is now active (e.g., reopened issue)
+		if !isJiraTerminal(snap.Status) {
+			if reactivated, err := db.ReactivateTrackedItem(t.database, "jira", snap.Key); err != nil {
+				log.Printf("[tracker] error reactivating %s: %v", snap.Key, err)
+			} else if reactivated {
+				log.Printf("[tracker] reactivated %s (reopened)", snap.Key)
+			}
 		}
 	}
 
