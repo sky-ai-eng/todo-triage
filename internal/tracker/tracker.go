@@ -438,7 +438,7 @@ func prSnapshotToTask(snap domain.PRSnapshot, username string) domain.Task {
 		FilesChanged:    snap.ChangedFiles,
 		CIStatus:        ciStatus,
 		RelevanceReason: reason,
-		CreatedAt:       time.Now(),
+		CreatedAt:       parseTimeOrNow(snap.CreatedAt),
 		FetchedAt:       time.Now(),
 		Status:          status,
 	}
@@ -503,6 +503,14 @@ func issueToSnapshot(issue jiraclient.Issue, baseURL string) domain.JiraSnapshot
 }
 
 // --- Helpers ---
+
+// parseTimeOrNow parses an RFC3339 timestamp, falling back to time.Now().
+func parseTimeOrNow(s string) time.Time {
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t
+	}
+	return time.Now()
+}
 
 // prStateToTaskStatus maps a PR's GraphQL state to a task status.
 func prStateToTaskStatus(snap domain.PRSnapshot) string {
