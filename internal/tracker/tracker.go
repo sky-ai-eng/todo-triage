@@ -277,7 +277,7 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 		events := DiffJiraSnapshots(prevSnap, newSnap, item.SourceID)
 
 		// Sync task status when the source status changes
-		if item.TaskID != "" && prevSnap.Status != newSnap.Status {
+		if item.TaskID != "" && (prevSnap.Status != newSnap.Status || prevSnap.Assignee != newSnap.Assignee) {
 			newTaskStatus := jiraStatusToTaskStatus(newSnap)
 			t.database.Exec(`UPDATE tasks SET status = ? WHERE id = ? AND status != ?`, newTaskStatus, item.TaskID, newTaskStatus)
 		}
