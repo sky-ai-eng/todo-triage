@@ -10,18 +10,20 @@ const service = "todotinder"
 
 // Keychain keys
 const (
-	keyGitHubURL = "github_url"
-	keyGitHubPAT = "github_pat"
-	keyJiraURL   = "jira_url"
-	keyJiraPAT   = "jira_pat"
+	keyGitHubURL      = "github_url"
+	keyGitHubPAT      = "github_pat"
+	keyGitHubUsername  = "github_username"
+	keyJiraURL        = "jira_url"
+	keyJiraPAT        = "jira_pat"
 )
 
 // Credentials holds the stored auth configuration.
 type Credentials struct {
-	GitHubURL string
-	GitHubPAT string
-	JiraURL   string
-	JiraPAT   string
+	GitHubURL      string
+	GitHubPAT      string
+	GitHubUsername  string
+	JiraURL        string
+	JiraPAT        string
 }
 
 // Store saves all credentials to the OS keychain.
@@ -29,6 +31,7 @@ func Store(creds Credentials) error {
 	pairs := []struct{ key, val string }{
 		{keyGitHubURL, creds.GitHubURL},
 		{keyGitHubPAT, creds.GitHubPAT},
+		{keyGitHubUsername, creds.GitHubUsername},
 		{keyJiraURL, creds.JiraURL},
 		{keyJiraPAT, creds.JiraPAT},
 	}
@@ -57,6 +60,10 @@ func Load() (Credentials, error) {
 	if err != nil {
 		return creds, err
 	}
+	creds.GitHubUsername, err = get(keyGitHubUsername)
+	if err != nil {
+		return creds, err
+	}
 	creds.JiraURL, err = get(keyJiraURL)
 	if err != nil {
 		return creds, err
@@ -71,7 +78,7 @@ func Load() (Credentials, error) {
 
 // Clear removes all credentials from the OS keychain.
 func Clear() error {
-	for _, key := range []string{keyGitHubURL, keyGitHubPAT, keyJiraURL, keyJiraPAT} {
+	for _, key := range []string{keyGitHubURL, keyGitHubPAT, keyGitHubUsername, keyJiraURL, keyJiraPAT} {
 		if err := keyring.Delete(service, key); err != nil && err != keyring.ErrNotFound {
 			return fmt.Errorf("keychain delete %s: %w", key, err)
 		}

@@ -115,9 +115,8 @@ func (m *Manager) startGitHub(cfg config.Config, creds auth.Credentials) {
 		return
 	}
 
-	ghUser, err := auth.ValidateGitHub(creds.GitHubURL, creds.GitHubPAT)
-	if err != nil {
-		log.Printf("[github] token validation failed, skipping poller: %v", err)
+	if creds.GitHubUsername == "" {
+		log.Println("[github] no username stored, skipping poller")
 		return
 	}
 
@@ -126,14 +125,14 @@ func (m *Manager) startGitHub(cfg config.Config, creds auth.Credentials) {
 		interval = time.Minute
 	}
 
-	poller := NewGitHubPoller(creds.GitHubURL, creds.GitHubPAT, ghUser.Login, repos, m.database, interval, m.bus)
+	poller := NewGitHubPoller(creds.GitHubURL, creds.GitHubPAT, creds.GitHubUsername, repos, m.database, interval, m.bus)
 
 	m.mu.Lock()
 	m.github = poller
 	m.mu.Unlock()
 
 	poller.Start()
-	log.Printf("[github] poller started (interval: %s, user: %s, repos: %d)", interval, ghUser.Login, len(repos))
+	log.Printf("[github] poller started (interval: %s, user: %s, repos: %d)", interval, creds.GitHubUsername, len(repos))
 }
 
 // startJira does validation outside the lock, then locks only to assign.

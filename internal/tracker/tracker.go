@@ -143,10 +143,17 @@ const maxSearchQueryLen = 256
 // If repos are configured, scopes queries with repo: qualifiers, batching
 // to stay under GitHub's 256-char query limit.
 func (t *Tracker) discoverGitHub(client *ghclient.Client, username string, repos []string) ([]ghclient.DiscoveredPR, error) {
+	since := time.Now().AddDate(0, 0, -30).Format("2006-01-02")
 	bases := []string{
+		// Active / actionable
 		fmt.Sprintf("is:pr is:open review-requested:%s", username),
 		fmt.Sprintf("is:pr is:open author:%s", username),
 		fmt.Sprintf("is:pr is:open mentions:%s", username),
+		// Backfill for dashboard — reviewed and merged/closed in last 30 days
+		fmt.Sprintf("is:pr is:open reviewed-by:%s", username),
+		fmt.Sprintf("is:pr is:merged author:%s merged:>=%s", username, since),
+		fmt.Sprintf("is:pr is:merged reviewed-by:%s merged:>=%s", username, since),
+		fmt.Sprintf("is:pr is:closed is:unmerged author:%s closed:>=%s", username, since),
 	}
 
 	// Expand each base query with repo scoping, batching if needed

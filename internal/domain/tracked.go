@@ -21,6 +21,8 @@ type TrackedItem struct {
 type PRSnapshot struct {
 	// Identity
 	Number    int    `json:"number"`
+	Title     string `json:"title"`
+	Author    string `json:"author"`     // login of the PR author
 	Repo      string `json:"repo"`       // "owner/repo"
 	HeadRepo  string `json:"head_repo"`  // fork repo if different
 	URL       string `json:"url"`

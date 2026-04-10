@@ -152,7 +152,7 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "GitHub URL is required"})
 				return
 			}
-			_, err := auth.ValidateGitHub(url, req.GitHubPAT)
+			ghUser, err := auth.ValidateGitHub(url, req.GitHubPAT)
 			if err != nil {
 				writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
 					"error": "GitHub: " + err.Error(),
@@ -161,11 +161,13 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			creds.GitHubPAT = req.GitHubPAT
+			creds.GitHubUsername = ghUser.Login
 		}
 	} else {
 		// Disabled — clear GitHub credentials
 		creds.GitHubURL = ""
 		creds.GitHubPAT = ""
+		creds.GitHubUsername = ""
 		cfg.GitHub.BaseURL = ""
 	}
 

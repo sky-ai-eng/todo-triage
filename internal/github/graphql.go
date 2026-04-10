@@ -14,6 +14,7 @@ fragment PRFields on PullRequest {
 	id
 	number
 	title
+	author { login }
 	state
 	isDraft
 	merged
@@ -164,6 +165,7 @@ type gqlPR struct {
 	ID              string        `json:"id"`
 	Number          int           `json:"number"`
 	Title           string        `json:"title"`
+	Author          gqlAuthor     `json:"author"`
 	State           string        `json:"state"`
 	IsDraft         bool          `json:"isDraft"`
 	Merged          bool          `json:"merged"`
@@ -241,6 +243,8 @@ type gqlLabelNodes struct {
 func (pr gqlPR) toSnapshot() domain.PRSnapshot {
 	snap := domain.PRSnapshot{
 		Number:       pr.Number,
+		Title:        pr.Title,
+		Author:       pr.Author.Login,
 		Repo:         pr.Repository.NameWithOwner,
 		URL:          pr.URL,
 		State:        pr.State,
