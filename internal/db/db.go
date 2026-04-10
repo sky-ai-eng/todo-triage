@@ -244,5 +244,6 @@ CREATE TABLE IF NOT EXISTS tracked_items (
     PRIMARY KEY (source, source_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_tracked_items_active ON tracked_items(terminal_at) WHERE terminal_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_tracked_items_active ON tracked_items(source, tracked_since) WHERE terminal_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_tracked_items_active_polled ON tracked_items(source, last_polled) WHERE terminal_at IS NULL;
 `
