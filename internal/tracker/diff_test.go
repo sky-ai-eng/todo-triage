@@ -10,8 +10,9 @@ func TestDiffPR_FirstSeen_ReviewRequested(t *testing.T) {
 	events := DiffPRSnapshots(domain.PRSnapshot{}, domain.PRSnapshot{
 		Number:         42,
 		State:          "OPEN",
+		Author:         "bob",
 		ReviewRequests: []string{"alice"},
-	}, "42")
+	}, "42", "alice")
 
 	assertEventTypes(t, events, []string{domain.EventGitHubPRReviewRequested})
 }
@@ -20,9 +21,20 @@ func TestDiffPR_FirstSeen_Authored(t *testing.T) {
 	events := DiffPRSnapshots(domain.PRSnapshot{}, domain.PRSnapshot{
 		Number: 42,
 		State:  "OPEN",
-	}, "42")
+		Author: "alice",
+	}, "42", "alice")
 
 	assertEventTypes(t, events, []string{domain.EventGitHubPROpened})
+}
+
+func TestDiffPR_FirstSeen_Mentioned(t *testing.T) {
+	events := DiffPRSnapshots(domain.PRSnapshot{}, domain.PRSnapshot{
+		Number: 42,
+		State:  "OPEN",
+		Author: "bob",
+	}, "42", "alice")
+
+	assertEventTypes(t, events, []string{domain.EventGitHubPRMentioned})
 }
 
 func TestDiffPR_FirstSeen_Merged(t *testing.T) {
@@ -30,7 +42,7 @@ func TestDiffPR_FirstSeen_Merged(t *testing.T) {
 		Number: 42,
 		State:  "MERGED",
 		Merged: true,
-	}, "42")
+	}, "42", "alice")
 
 	assertEventTypes(t, events, []string{domain.EventGitHubPRMerged})
 }
@@ -39,15 +51,15 @@ func TestDiffPR_CITransition(t *testing.T) {
 	prev := domain.PRSnapshot{Number: 42, CIState: "PENDING"}
 
 	// success
-	events := DiffPRSnapshots(prev, domain.PRSnapshot{Number: 42, CIState: "SUCCESS"}, "42")
+	events := DiffPRSnapshots(prev, domain.PRSnapshot{Number: 42, CIState: "SUCCESS"}, "42", "")
 	assertEventTypes(t, events, []string{domain.EventGitHubPRCIPassed})
 
 	// failure
-	events = DiffPRSnapshots(prev, domain.PRSnapshot{Number: 42, CIState: "FAILURE"}, "42")
+	events = DiffPRSnapshots(prev, domain.PRSnapshot{Number: 42, CIState: "FAILURE"}, "42", "")
 	assertEventTypes(t, events, []string{domain.EventGitHubPRCIFailed})
 
 	// no change → no events
-	events = DiffPRSnapshots(prev, domain.PRSnapshot{Number: 42, CIState: "PENDING"}, "42")
+	events = DiffPRSnapshots(prev, domain.PRSnapshot{Number: 42, CIState: "PENDING"}, "42", "")
 	assertEventTypes(t, events, nil)
 }
 
@@ -55,7 +67,7 @@ func TestDiffPR_Merged(t *testing.T) {
 	prev := domain.PRSnapshot{Number: 42, State: "OPEN", Merged: false}
 	curr := domain.PRSnapshot{Number: 42, State: "MERGED", Merged: true}
 
-	events := DiffPRSnapshots(prev, curr, "42")
+	events := DiffPRSnapshots(prev, curr, "42", "")
 	assertEventTypes(t, events, []string{domain.EventGitHubPRMerged})
 }
 
@@ -63,7 +75,7 @@ func TestDiffPR_DraftToReady(t *testing.T) {
 	prev := domain.PRSnapshot{Number: 42, IsDraft: true}
 	curr := domain.PRSnapshot{Number: 42, IsDraft: false}
 
-	events := DiffPRSnapshots(prev, curr, "42")
+	events := DiffPRSnapshots(prev, curr, "42", "")
 	assertEventTypes(t, events, []string{domain.EventGitHubPRReadyForReview})
 }
 
@@ -71,7 +83,7 @@ func TestDiffPR_Conflicts(t *testing.T) {
 	prev := domain.PRSnapshot{Number: 42, Mergeable: "MERGEABLE"}
 	curr := domain.PRSnapshot{Number: 42, Mergeable: "CONFLICTING"}
 
-	events := DiffPRSnapshots(prev, curr, "42")
+	events := DiffPRSnapshots(prev, curr, "42", "")
 	assertEventTypes(t, events, []string{domain.EventGitHubPRConflicts})
 }
 
@@ -79,7 +91,7 @@ func TestDiffPR_ReviewRequestAdded(t *testing.T) {
 	prev := domain.PRSnapshot{Number: 42, ReviewRequests: []string{"alice"}}
 	curr := domain.PRSnapshot{Number: 42, ReviewRequests: []string{"alice", "bob"}}
 
-	events := DiffPRSnapshots(prev, curr, "42")
+	events := DiffPRSnapshots(prev, curr, "42", "")
 	assertEventTypes(t, events, []string{domain.EventGitHubPRReviewRequested})
 	assertMetaContains(t, events[0], "requested_reviewer", "bob")
 }
@@ -89,7 +101,7 @@ func TestDiffPR_ReviewRequestReAdded(t *testing.T) {
 	prev := domain.PRSnapshot{Number: 42, ReviewRequests: nil}
 	curr := domain.PRSnapshot{Number: 42, ReviewRequests: []string{"alice"}}
 
-	events := DiffPRSnapshots(prev, curr, "42")
+	events := DiffPRSnapshots(prev, curr, "42", "")
 	assertEventTypes(t, events, []string{domain.EventGitHubPRReviewRequested})
 }
 
@@ -103,7 +115,7 @@ func TestDiffPR_ReviewApproved(t *testing.T) {
 		Reviews: []domain.ReviewState{{Author: "alice", State: "APPROVED"}},
 	}
 
-	events := DiffPRSnapshots(prev, curr, "42")
+	events := DiffPRSnapshots(prev, curr, "42", "")
 	assertEventTypes(t, events, []string{domain.EventGitHubPRApproved})
 }
 
@@ -117,7 +129,7 @@ func TestDiffPR_ChangesRequested(t *testing.T) {
 		Reviews: []domain.ReviewState{{Author: "alice", State: "CHANGES_REQUESTED"}},
 	}
 
-	events := DiffPRSnapshots(prev, curr, "42")
+	events := DiffPRSnapshots(prev, curr, "42", "")
 	assertEventTypes(t, events, []string{domain.EventGitHubPRChangesReq})
 }
 
@@ -135,7 +147,7 @@ func TestDiffPR_MultipleEvents(t *testing.T) {
 		IsDraft:   false,
 	}
 
-	events := DiffPRSnapshots(prev, curr, "42")
+	events := DiffPRSnapshots(prev, curr, "42", "")
 	types := eventTypes(events)
 
 	assertContains(t, types, domain.EventGitHubPRCIPassed)
@@ -151,7 +163,7 @@ func TestDiffPR_NoChange(t *testing.T) {
 		Reviews:   []domain.ReviewState{{Author: "alice", State: "APPROVED"}},
 	}
 
-	events := DiffPRSnapshots(snap, snap, "42")
+	events := DiffPRSnapshots(snap, snap, "42", "")
 	assertEventTypes(t, events, nil)
 }
 

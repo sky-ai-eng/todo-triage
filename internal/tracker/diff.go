@@ -8,8 +8,9 @@ import (
 )
 
 // DiffPRSnapshots compares two PR snapshots and returns events for every detected transition.
-// A zero-value prev (Number == 0) indicates first-seen and emits initial events. Pure function — no IO.
-func DiffPRSnapshots(prev, curr domain.PRSnapshot, sourceID string) []domain.Event {
+// A zero-value prev (Number == 0) indicates first-seen and emits initial events.
+// username is the authenticated user, used to classify first-seen events. Pure function — no IO.
+func DiffPRSnapshots(prev, curr domain.PRSnapshot, sourceID, username string) []domain.Event {
 	now := time.Now()
 	var events []domain.Event
 
@@ -24,7 +25,7 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, sourceID string) []domain.Eve
 
 	if prev.Number == 0 {
 		// First snapshot — emit the initial event based on current state
-		return initialPREvents(curr, sourceID, now)
+		return initialPREvents(curr, sourceID, username, now)
 	}
 
 	// --- State transitions ---
@@ -171,7 +172,8 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, sourceID string) []domain
 }
 
 // initialPREvents returns the events for a newly-discovered PR.
-func initialPREvents(snap domain.PRSnapshot, sourceID string, now time.Time) []domain.Event {
+// username is used to determine the relationship: authored, review requested, or mentioned.
+func initialPREvents(snap domain.PRSnapshot, sourceID, username string, now time.Time) []domain.Event {
 	var events []domain.Event
 	add := func(eventType string) {
 		events = append(events, domain.Event{
@@ -188,10 +190,17 @@ func initialPREvents(snap domain.PRSnapshot, sourceID string, now time.Time) []d
 	}
 
 	// Emit the most specific event for why we discovered this PR
-	if len(snap.ReviewRequests) > 0 {
-		add(domain.EventGitHubPRReviewRequested)
-	} else {
+	for _, rr := range snap.ReviewRequests {
+		if rr == username {
+			add(domain.EventGitHubPRReviewRequested)
+			return events
+		}
+	}
+
+	if snap.Author == username {
 		add(domain.EventGitHubPROpened)
+	} else {
+		add(domain.EventGitHubPRMentioned)
 	}
 
 	return events

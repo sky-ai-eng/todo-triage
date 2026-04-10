@@ -111,7 +111,7 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, repos 
 			json.Unmarshal([]byte(item.Snapshot), &prevSnap)
 		}
 
-		events := DiffPRSnapshots(prevSnap, newSnap, item.SourceID)
+		events := DiffPRSnapshots(prevSnap, newSnap, item.SourceID, username)
 
 		// Persist new snapshot
 		snapJSON, _ := json.Marshal(newSnap)
