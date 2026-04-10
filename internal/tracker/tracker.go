@@ -69,7 +69,7 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, repos 
 		return 0, fmt.Errorf("list node IDs: %w", err)
 	}
 	if len(nodeIDs) == 0 {
-		return len(discovered), nil
+		return 0, nil
 	}
 
 	refreshed, err := client.RefreshPRs(nodeIDs)
@@ -236,7 +236,7 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 		return 0, fmt.Errorf("list tracked jira items: %w", err)
 	}
 	if len(tracked) == 0 {
-		return len(discovered), nil
+		return 0, nil
 	}
 
 	keys := make([]string, len(tracked))

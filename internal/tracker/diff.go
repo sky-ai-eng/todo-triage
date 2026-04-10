@@ -8,7 +8,7 @@ import (
 )
 
 // DiffPRSnapshots compares two PR snapshots and returns events for every detected transition.
-// prev may be nil (first time tracking). Pure function — no IO.
+// A zero-value prev (Number == 0) indicates first-seen and emits initial events. Pure function — no IO.
 func DiffPRSnapshots(prev, curr domain.PRSnapshot, sourceID string) []domain.Event {
 	now := time.Now()
 	var events []domain.Event
