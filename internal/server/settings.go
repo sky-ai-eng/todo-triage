@@ -8,6 +8,7 @@ import (
 
 	"github.com/sky-ai-eng/todo-tinder/internal/auth"
 	"github.com/sky-ai-eng/todo-tinder/internal/config"
+	"github.com/sky-ai-eng/todo-tinder/internal/db"
 	"github.com/sky-ai-eng/todo-tinder/internal/jira"
 )
 
@@ -152,7 +153,7 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "GitHub URL is required"})
 				return
 			}
-			_, err := auth.ValidateGitHub(url, req.GitHubPAT)
+			ghUser, err := auth.ValidateGitHub(url, req.GitHubPAT)
 			if err != nil {
 				writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
 					"error": "GitHub: " + err.Error(),
@@ -161,12 +162,34 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			creds.GitHubPAT = req.GitHubPAT
+			creds.GitHubUsername = ghUser.Login
+		}
+		// Backfill username if we have a PAT but no stored username (e.g. upgrade)
+		if creds.GitHubPAT != "" && creds.GitHubUsername == "" {
+			url := creds.GitHubURL
+			if url == "" {
+				url = cfg.GitHub.BaseURL
+			}
+			if url != "" {
+				if ghUser, err := auth.ValidateGitHub(url, creds.GitHubPAT); err == nil {
+					creds.GitHubUsername = ghUser.Login
+				}
+			}
 		}
 	} else {
-		// Disabled — clear GitHub credentials
+		// Disabled — clear GitHub credentials, keychain entries, and tracked data
 		creds.GitHubURL = ""
 		creds.GitHubPAT = ""
+		creds.GitHubUsername = ""
 		cfg.GitHub.BaseURL = ""
+		auth.ClearGitHub()
+		if err := db.ClearTrackedItems(s.db, "github"); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{
+				"error": "failed to clear GitHub tracked items: " + err.Error(),
+				"field": "github",
+			})
+			return
+		}
 	}
 
 	// --- Handle Jira ---
@@ -198,6 +221,14 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 		creds.JiraURL = ""
 		creds.JiraPAT = ""
 		cfg.Jira.BaseURL = ""
+		auth.ClearJira()
+		if err := db.ClearTrackedItems(s.db, "jira"); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{
+				"error": "failed to clear Jira tracked items: " + err.Error(),
+				"field": "jira",
+			})
+			return
+		}
 	}
 
 	// --- Update config fields ---

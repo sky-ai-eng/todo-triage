@@ -164,7 +164,9 @@ func (s *Spawner) setupGitHub(ctx context.Context, runID string, task domain.Tas
 	}
 
 	prNumber := 0
-	fmt.Sscanf(task.SourceID, "%d", &prNumber)
+	if idx := strings.LastIndex(task.SourceID, "#"); idx >= 0 {
+		fmt.Sscanf(task.SourceID[idx+1:], "%d", &prNumber)
+	}
 	if prNumber == 0 {
 		return runConfig{}, fmt.Errorf("invalid PR number from task.SourceID: %q", task.SourceID)
 	}

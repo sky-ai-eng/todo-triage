@@ -96,7 +96,7 @@ export default function AgentCard({ task, run, messages, onRequeue, onReview }: 
             {task.source === 'github' ? 'GH' : 'Jira'}
           </span>
           {task.repo && <span>{task.repo}</span>}
-          {task.source === 'github' && <span>#{task.source_id}</span>}
+          {task.source === 'github' && <span>#{task.source_id.split('#').pop()}</span>}
         </div>
       </div>
 

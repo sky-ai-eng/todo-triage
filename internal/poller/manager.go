@@ -10,27 +10,32 @@ import (
 	"github.com/sky-ai-eng/todo-tinder/internal/config"
 	"github.com/sky-ai-eng/todo-tinder/internal/db"
 	"github.com/sky-ai-eng/todo-tinder/internal/eventbus"
+	ghclient "github.com/sky-ai-eng/todo-tinder/internal/github"
+	jiraclient "github.com/sky-ai-eng/todo-tinder/internal/jira"
+	"github.com/sky-ai-eng/todo-tinder/internal/tracker"
 )
 
-// Manager manages the lifecycle of pollers, allowing them to be
+// Manager manages the lifecycle of polling loops, allowing them to be
 // stopped and restarted when credentials or config change.
 type Manager struct {
 	database *sql.DB
 	bus      *eventbus.Bus
+	tracker  *tracker.Tracker
 
-	mu     sync.Mutex
-	github *GitHubPoller
-	jira   *JiraPoller
+	mu         sync.Mutex
+	ghStop     chan struct{}
+	jiraStop   chan struct{}
 }
 
 func NewManager(database *sql.DB, bus *eventbus.Bus) *Manager {
 	return &Manager{
 		database: database,
 		bus:      bus,
+		tracker:  tracker.New(database, bus),
 	}
 }
 
-// RestartAll stops all pollers and restarts any that are fully configured.
+// RestartAll stops all polling loops and restarts any that are fully configured.
 func (m *Manager) RestartAll() {
 	m.stopAll()
 
@@ -41,13 +46,13 @@ func (m *Manager) RestartAll() {
 	m.startJira(cfg, creds)
 }
 
-// RestartGitHub stops and restarts only the GitHub poller.
+// RestartGitHub stops and restarts only the GitHub polling loop.
 func (m *Manager) RestartGitHub() {
 	m.mu.Lock()
-	if m.github != nil {
-		m.github.Stop()
-		m.github = nil
-		log.Println("[github] poller stopped")
+	if m.ghStop != nil {
+		close(m.ghStop)
+		m.ghStop = nil
+		log.Println("[github] tracker stopped")
 	}
 	m.mu.Unlock()
 
@@ -56,13 +61,13 @@ func (m *Manager) RestartGitHub() {
 	m.startGitHub(cfg, creds)
 }
 
-// RestartJira stops and restarts only the Jira poller.
+// RestartJira stops and restarts only the Jira polling loop.
 func (m *Manager) RestartJira() {
 	m.mu.Lock()
-	if m.jira != nil {
-		m.jira.Stop()
-		m.jira = nil
-		log.Println("[jira] poller stopped")
+	if m.jiraStop != nil {
+		close(m.jiraStop)
+		m.jiraStop = nil
+		log.Println("[jira] tracker stopped")
 	}
 	m.mu.Unlock()
 
@@ -71,12 +76,12 @@ func (m *Manager) RestartJira() {
 	m.startJira(cfg, creds)
 }
 
-// StopAll stops all running pollers without restarting.
+// StopAll stops all running polling loops without restarting.
 func (m *Manager) StopAll() {
 	m.stopAll()
 }
 
-// Restart is a convenience alias for RestartAll (backwards compat).
+// Restart is a convenience alias for RestartAll.
 func (m *Manager) Restart() {
 	m.RestartAll()
 }
@@ -85,23 +90,22 @@ func (m *Manager) stopAll() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.github != nil {
-		m.github.Stop()
-		m.github = nil
-		log.Println("[github] poller stopped")
+	if m.ghStop != nil {
+		close(m.ghStop)
+		m.ghStop = nil
+		log.Println("[github] tracker stopped")
 	}
-	if m.jira != nil {
-		m.jira.Stop()
-		m.jira = nil
-		log.Println("[jira] poller stopped")
+	if m.jiraStop != nil {
+		close(m.jiraStop)
+		m.jiraStop = nil
+		log.Println("[jira] tracker stopped")
 	}
 }
 
-// startGitHub does all I/O (DB query, auth validation) outside the lock,
-// then locks only to assign the poller pointer.
+// startGitHub launches the GitHub tracking loop.
 func (m *Manager) startGitHub(cfg config.Config, creds auth.Credentials) {
 	if !cfg.GitHub.Ready(creds.GitHubPAT, creds.GitHubURL) {
-		log.Println("[github] credentials not configured, skipping poller")
+		log.Println("[github] credentials not configured, skipping tracker")
 		return
 	}
 
@@ -111,13 +115,12 @@ func (m *Manager) startGitHub(cfg config.Config, creds auth.Credentials) {
 		return
 	}
 	if len(repos) == 0 {
-		log.Println("[github] no repos configured, skipping poller")
+		log.Println("[github] no repos configured, skipping tracker")
 		return
 	}
 
-	ghUser, err := auth.ValidateGitHub(creds.GitHubURL, creds.GitHubPAT)
-	if err != nil {
-		log.Printf("[github] token validation failed, skipping poller: %v", err)
+	if creds.GitHubUsername == "" {
+		log.Println("[github] no username stored, skipping tracker")
 		return
 	}
 
@@ -126,20 +129,40 @@ func (m *Manager) startGitHub(cfg config.Config, creds auth.Credentials) {
 		interval = time.Minute
 	}
 
-	poller := NewGitHubPoller(creds.GitHubURL, creds.GitHubPAT, ghUser.Login, repos, m.database, interval, m.bus)
+	client := ghclient.NewClient(creds.GitHubURL, creds.GitHubPAT)
+	stop := make(chan struct{})
 
 	m.mu.Lock()
-	m.github = poller
+	m.ghStop = stop
 	m.mu.Unlock()
 
-	poller.Start()
-	log.Printf("[github] poller started (interval: %s, user: %s, repos: %d)", interval, ghUser.Login, len(repos))
+	go func() {
+		// Initial poll
+		if _, err := m.tracker.RefreshGitHub(client, creds.GitHubUsername, repos); err != nil {
+			log.Printf("[github] tracker error: %v", err)
+		}
+
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if _, err := m.tracker.RefreshGitHub(client, creds.GitHubUsername, repos); err != nil {
+					log.Printf("[github] tracker error: %v", err)
+				}
+			case <-stop:
+				return
+			}
+		}
+	}()
+
+	log.Printf("[github] tracker started (interval: %s, user: %s, repos: %d)", interval, creds.GitHubUsername, len(repos))
 }
 
-// startJira does validation outside the lock, then locks only to assign.
+// startJira launches the Jira tracking loop.
 func (m *Manager) startJira(cfg config.Config, creds auth.Credentials) {
 	if !cfg.Jira.Ready(creds.JiraPAT, creds.JiraURL) {
-		log.Println("[jira] not fully configured, skipping poller")
+		log.Println("[jira] not fully configured, skipping tracker")
 		return
 	}
 
@@ -148,12 +171,32 @@ func (m *Manager) startJira(cfg config.Config, creds auth.Credentials) {
 		interval = time.Minute
 	}
 
-	poller := NewJiraPoller(creds.JiraURL, creds.JiraPAT, cfg.Jira.Projects, cfg.Jira.PickupStatuses, m.database, interval, m.bus)
+	client := jiraclient.NewClient(creds.JiraURL, creds.JiraPAT)
+	stop := make(chan struct{})
 
 	m.mu.Lock()
-	m.jira = poller
+	m.jiraStop = stop
 	m.mu.Unlock()
 
-	poller.Start()
-	log.Printf("[jira] poller started (interval: %s, projects: %v)", interval, cfg.Jira.Projects)
+	go func() {
+		// Initial poll
+		if _, err := m.tracker.RefreshJira(client, creds.JiraURL, cfg.Jira.Projects, cfg.Jira.PickupStatuses); err != nil {
+			log.Printf("[jira] tracker error: %v", err)
+		}
+
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if _, err := m.tracker.RefreshJira(client, creds.JiraURL, cfg.Jira.Projects, cfg.Jira.PickupStatuses); err != nil {
+					log.Printf("[jira] tracker error: %v", err)
+				}
+			case <-stop:
+				return
+			}
+		}
+	}()
+
+	log.Printf("[jira] tracker started (interval: %s, projects: %v)", interval, cfg.Jira.Projects)
 }

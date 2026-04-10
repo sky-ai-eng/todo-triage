@@ -52,11 +52,12 @@ const (
 
 // Jira events
 const (
-	EventJiraIssueAvailable     = "jira:issue:available"
-	EventJiraIssueAssigned      = "jira:issue:assigned"
-	EventJiraIssueStatusChanged = "jira:issue:status_changed"
-	EventJiraIssueCompleted     = "jira:issue:completed"
+	EventJiraIssueAvailable       = "jira:issue:available"
+	EventJiraIssueAssigned        = "jira:issue:assigned"
+	EventJiraIssueStatusChanged   = "jira:issue:status_changed"
+	EventJiraIssueCompleted       = "jira:issue:completed"
 	EventJiraIssuePriorityChanged = "jira:issue:priority_changed"
+	EventJiraIssueCommented       = "jira:issue:commented"
 )
 
 // System events
@@ -85,6 +86,7 @@ func AllEventTypes() []EventType {
 		{ID: EventGitHubPRMentioned, Source: "github", Category: "pr", Label: "Mentioned", Description: "You were @mentioned in a PR", DefaultPriority: 0.5, Enabled: true, SortOrder: 8},
 		{ID: EventJiraIssueAvailable, Source: "jira", Category: "issue", Label: "Issue Available", Description: "New unassigned issue in pickup queue", DefaultPriority: 0.5, Enabled: true, SortOrder: 9},
 		{ID: EventJiraIssuePriorityChanged, Source: "jira", Category: "issue", Label: "Priority Changed", Description: "Issue priority was changed", DefaultPriority: 0.5, Enabled: true, SortOrder: 10},
+		{ID: EventJiraIssueCommented, Source: "jira", Category: "issue", Label: "New Comment", Description: "A new comment was added to an issue", DefaultPriority: 0.5, Enabled: true, SortOrder: 11},
 
 		// --- Disabled: informational / terminal states ---
 		{ID: EventGitHubPRCIPassed, Source: "github", Category: "pr", Label: "CI Passed", Description: "CI checks passed on your PR", DefaultPriority: 0.6, Enabled: false, SortOrder: 11},

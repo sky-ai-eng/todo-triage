@@ -8,29 +8,19 @@ import (
 
 	"github.com/sky-ai-eng/todo-tinder/internal/auth"
 	"github.com/sky-ai-eng/todo-tinder/internal/config"
+	"github.com/sky-ai-eng/todo-tinder/internal/db"
 	ghclient "github.com/sky-ai-eng/todo-tinder/internal/github"
 )
 
+// handleDashboardStats returns aggregated PR statistics from tracked items.
 func (s *Server) handleDashboardStats(w http.ResponseWriter, r *http.Request) {
 	creds, err := auth.Load()
-	if err != nil || creds.GitHubPAT == "" {
+	if err != nil || creds.GitHubPAT == "" || creds.GitHubUsername == "" {
 		writeJSON(w, http.StatusOK, map[string]any{})
 		return
 	}
-	cfg, _ := config.Load()
-	baseURL := cfg.GitHub.BaseURL
-	if baseURL == "" {
-		baseURL = creds.GitHubURL
-	}
 
-	ghUser, err := auth.ValidateGitHub(baseURL, creds.GitHubPAT)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-
-	client := ghclient.NewClient(baseURL, creds.GitHubPAT)
-	stats, err := client.GetDashboardStats(ghUser.Login)
+	stats, err := db.GetDashboardStats(s.db, creds.GitHubUsername, 30)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -39,35 +29,27 @@ func (s *Server) handleDashboardStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, stats)
 }
 
+// handleDashboardPRs returns open PRs from tracked items.
 func (s *Server) handleDashboardPRs(w http.ResponseWriter, r *http.Request) {
 	creds, err := auth.Load()
-	if err != nil || creds.GitHubPAT == "" {
-		writeJSON(w, http.StatusOK, []any{})
-		return
-	}
-	cfg, _ := config.Load()
-	baseURL := cfg.GitHub.BaseURL
-	if baseURL == "" {
-		baseURL = creds.GitHubURL
-	}
-
-	// Validate to get username
-	ghUser, err := auth.ValidateGitHub(baseURL, creds.GitHubPAT)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "GitHub auth failed: " + err.Error()})
+	if err != nil || creds.GitHubPAT == "" || creds.GitHubUsername == "" {
+		writeJSON(w, http.StatusOK, []db.PRSummaryRow{})
 		return
 	}
 
-	client := ghclient.NewClient(baseURL, creds.GitHubPAT)
-	prs, err := client.SearchUserPRs(ghUser.Login)
+	prs, err := db.GetDashboardPRs(s.db)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-
+	if prs == nil {
+		prs = []db.PRSummaryRow{}
+	}
 	writeJSON(w, http.StatusOK, prs)
 }
 
+// handleDashboardPRStatus fetches live CI/review status for a single PR.
+// This stays as a live API call since it's on-demand detail, not aggregated data.
 func (s *Server) handleDashboardPRStatus(w http.ResponseWriter, r *http.Request) {
 	numberStr := r.PathValue("number")
 	number, err := strconv.Atoi(numberStr)

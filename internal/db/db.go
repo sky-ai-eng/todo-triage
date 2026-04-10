@@ -231,4 +231,19 @@ CREATE TABLE IF NOT EXISTS repo_profiles (
 );
 
 CREATE INDEX IF NOT EXISTS idx_repo_profiles_owner_repo ON repo_profiles(owner, repo);
+
+CREATE TABLE IF NOT EXISTS tracked_items (
+    source TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    task_id TEXT,
+    node_id TEXT,
+    snapshot TEXT NOT NULL DEFAULT '{}',
+    tracked_since DATETIME DEFAULT CURRENT_TIMESTAMP,
+    last_polled DATETIME,
+    terminal_at DATETIME,
+    PRIMARY KEY (source, source_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tracked_items_active ON tracked_items(source, tracked_since) WHERE terminal_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_tracked_items_active_polled ON tracked_items(source, last_polled) WHERE terminal_at IS NULL;
 `

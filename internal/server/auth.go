@@ -62,12 +62,17 @@ func (s *Server) handleAuthSetup(w http.ResponseWriter, r *http.Request) {
 		resp.Jira = jiraUser
 	}
 
-	// Store credentials in keychain
+	// Store credentials in keychain (include username if we validated GitHub)
+	ghUsername := ""
+	if resp.GitHub != nil {
+		ghUsername = resp.GitHub.Login
+	}
 	if err := auth.Store(auth.Credentials{
-		GitHubURL: req.GitHubURL,
-		GitHubPAT: req.GitHubPAT,
-		JiraURL:   req.JiraURL,
-		JiraPAT:   req.JiraPAT,
+		GitHubURL:      req.GitHubURL,
+		GitHubPAT:      req.GitHubPAT,
+		GitHubUsername:  ghUsername,
+		JiraURL:        req.JiraURL,
+		JiraPAT:        req.JiraPAT,
 	}); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to store credentials: " + err.Error()})
 		return
