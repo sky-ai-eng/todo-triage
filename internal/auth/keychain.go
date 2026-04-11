@@ -12,7 +12,7 @@ const service = "todotriage"
 const (
 	keyGitHubURL      = "github_url"
 	keyGitHubPAT      = "github_pat"
-	keyGitHubUsername  = "github_username"
+	keyGitHubUsername = "github_username"
 	keyJiraURL        = "jira_url"
 	keyJiraPAT        = "jira_pat"
 )
@@ -21,7 +21,7 @@ const (
 type Credentials struct {
 	GitHubURL      string
 	GitHubPAT      string
-	GitHubUsername  string
+	GitHubUsername string
 	JiraURL        string
 	JiraPAT        string
 }

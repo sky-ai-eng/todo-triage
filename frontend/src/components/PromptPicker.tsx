@@ -17,7 +17,7 @@ export default function PromptPicker({ open, onSelect, onClose, onEditPrompts }:
     if (!open) return
     setLoading(true)
     fetch('/api/prompts')
-      .then(res => res.json())
+      .then((res) => res.json())
       .then((data: Prompt[]) => {
         setPrompts(data)
         setLoading(false)
@@ -51,7 +51,9 @@ export default function PromptPicker({ open, onSelect, onClose, onEditPrompts }:
               <div className="px-5 pt-5 pb-3 flex items-center justify-between shrink-0">
                 <div>
                   <h2 className="text-[15px] font-semibold text-text-primary">Choose a prompt</h2>
-                  <p className="text-[12px] text-text-tertiary mt-0.5">Select a delegation strategy for this task</p>
+                  <p className="text-[12px] text-text-tertiary mt-0.5">
+                    Select a delegation strategy for this task
+                  </p>
                 </div>
                 <button
                   onClick={onClose}
@@ -71,7 +73,7 @@ export default function PromptPicker({ open, onSelect, onClose, onEditPrompts }:
                   </div>
                 ) : (
                   <div className="grid grid-cols-2 gap-3">
-                    {prompts.map(prompt => (
+                    {prompts.map((prompt) => (
                       <button
                         key={prompt.id}
                         onClick={() => onSelect(prompt.id)}
@@ -88,7 +90,8 @@ export default function PromptPicker({ open, onSelect, onClose, onEditPrompts }:
                           )}
                         </div>
                         <p className="text-[11px] text-text-tertiary line-clamp-2 leading-relaxed">
-                          {prompt.body.slice(0, 120)}{prompt.body.length > 120 ? '...' : ''}
+                          {prompt.body.slice(0, 120)}
+                          {prompt.body.length > 120 ? '...' : ''}
                         </p>
                         {prompt.usage_count > 0 && (
                           <span className="text-[10px] text-text-tertiary mt-1.5 inline-block">

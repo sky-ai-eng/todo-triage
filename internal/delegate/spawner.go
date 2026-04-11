@@ -490,7 +490,7 @@ func (s *Spawner) broadcastMessage(runID string, msg *domain.AgentMessage) {
 
 type agentResult struct {
 	Status  string         `json:"status"`
-	Link    string         `json:"link"`  // legacy — single URL
+	Link    string         `json:"link"` // legacy — single URL
 	Summary string         `json:"summary"`
 	Links   map[string]any `json:"links"` // new — keyed URLs (pr_review, pr, jira_issues)
 }

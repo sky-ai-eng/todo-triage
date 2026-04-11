@@ -128,8 +128,8 @@ func (p *Profiler) Run(ctx context.Context, repos []string, force bool) error {
 			p.ws.Broadcast(websocket.Event{
 				Type: "repo_docs_updated",
 				Data: map[string]any{
-					"id":           name,
-					"has_readme":   prof.HasReadme,
+					"id":            name,
+					"has_readme":    prof.HasReadme,
 					"has_claude_md": prof.HasClaudeMd,
 					"has_agents_md": prof.HasAgentsMd,
 				},

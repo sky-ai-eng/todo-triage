@@ -17,7 +17,7 @@ const claudeProjectsDir = ".claude/projects"
 
 // Per-repo mutexes prevent concurrent fetches from racing on the same bare repo.
 var (
-	repoMu   sync.Mutex
+	repoMu    sync.Mutex
 	repoLocks = map[string]*sync.Mutex{}
 )
 

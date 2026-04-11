@@ -7,20 +7,20 @@ import (
 
 // PromptStats holds aggregated performance data for a single prompt.
 type PromptStats struct {
-	TotalRuns      int       `json:"total_runs"`
-	CompletedRuns  int       `json:"completed_runs"`
-	FailedRuns     int       `json:"failed_runs"`
-	SuccessRate    float64   `json:"success_rate"`     // 0-1
-	AvgCostUSD     float64   `json:"avg_cost_usd"`
-	AvgDurationMs  int       `json:"avg_duration_ms"`
-	TotalCostUSD   float64   `json:"total_cost_usd"`
-	LastUsedAt     *string   `json:"last_used_at"`     // RFC3339 or null
-	RunsPerDay     []DayCount `json:"runs_per_day"`    // last 30 days
+	TotalRuns     int        `json:"total_runs"`
+	CompletedRuns int        `json:"completed_runs"`
+	FailedRuns    int        `json:"failed_runs"`
+	SuccessRate   float64    `json:"success_rate"` // 0-1
+	AvgCostUSD    float64    `json:"avg_cost_usd"`
+	AvgDurationMs int        `json:"avg_duration_ms"`
+	TotalCostUSD  float64    `json:"total_cost_usd"`
+	LastUsedAt    *string    `json:"last_used_at"` // RFC3339 or null
+	RunsPerDay    []DayCount `json:"runs_per_day"` // last 30 days
 }
 
 // DayCount is a single day's run count for the sparkline.
 type DayCount struct {
-	Date  string `json:"date"`  // "2026-04-01"
+	Date  string `json:"date"` // "2026-04-01"
 	Count int    `json:"count"`
 }
 

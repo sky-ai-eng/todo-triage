@@ -15,10 +15,10 @@ import (
 // settingsResponse combines config values with auth status so the frontend
 // can render everything on one page.
 type settingsResponse struct {
-	GitHub   githubSettings `json:"github"`
-	Jira     jiraSettings   `json:"jira"`
-	Server   serverSettings `json:"server"`
-	AI       aiSettings     `json:"ai"`
+	GitHub githubSettings `json:"github"`
+	Jira   jiraSettings   `json:"jira"`
+	Server serverSettings `json:"server"`
+	AI     aiSettings     `json:"ai"`
 }
 
 type githubSettings struct {

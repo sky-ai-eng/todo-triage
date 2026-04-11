@@ -7,26 +7,26 @@ import (
 
 // PRStatus is the live status for a single PR, fetched on demand.
 type PRStatus struct {
-	Mergeable    *bool          `json:"mergeable"`    // null = unknown/calculating
-	AutoMerge    bool           `json:"auto_merge"`
-	MergeableState string       `json:"mergeable_state"` // "clean", "dirty", "blocked", "behind", "unknown"
-	Reviews      []ReviewState  `json:"reviews"`
-	ChecksStatus ChecksStatus   `json:"checks_status"`
-	Conflicts    bool           `json:"conflicts"`
-	ReviewDecision string       `json:"review_decision"` // "approved", "changes_requested", "review_required", ""
+	Mergeable      *bool         `json:"mergeable"` // null = unknown/calculating
+	AutoMerge      bool          `json:"auto_merge"`
+	MergeableState string        `json:"mergeable_state"` // "clean", "dirty", "blocked", "behind", "unknown"
+	Reviews        []ReviewState `json:"reviews"`
+	ChecksStatus   ChecksStatus  `json:"checks_status"`
+	Conflicts      bool          `json:"conflicts"`
+	ReviewDecision string        `json:"review_decision"` // "approved", "changes_requested", "review_required", ""
 }
 
 type ReviewState struct {
-	Author    string `json:"author"`
-	State     string `json:"state"` // APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED, PENDING
+	Author      string `json:"author"`
+	State       string `json:"state"` // APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED, PENDING
 	SubmittedAt string `json:"submitted_at"`
 }
 
 type ChecksStatus struct {
-	Total    int `json:"total"`
-	Passing  int `json:"passing"`
-	Failing  int `json:"failing"`
-	Pending  int `json:"pending"`
+	Total   int `json:"total"`
+	Passing int `json:"passing"`
+	Failing int `json:"failing"`
+	Pending int `json:"pending"`
 }
 
 // GetPRStatus fetches the live status for a PR: mergeability, reviews, checks.

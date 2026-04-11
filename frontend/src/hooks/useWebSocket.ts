@@ -8,10 +8,13 @@ type Handler = (event: WSEvent) => void
 // navigations don't tear down the socket.
 
 let globalWs: WebSocket | null = null
-let listeners = new Set<Handler>()
+const listeners = new Set<Handler>()
 
 function ensureConnected() {
-  if (globalWs && (globalWs.readyState === WebSocket.OPEN || globalWs.readyState === WebSocket.CONNECTING)) {
+  if (
+    globalWs &&
+    (globalWs.readyState === WebSocket.OPEN || globalWs.readyState === WebSocket.CONNECTING)
+  ) {
     return
   }
 

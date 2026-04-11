@@ -86,7 +86,10 @@ export default function Setup() {
 
   // Step 3: Optional integrations
   const fetchStatuses = async () => {
-    const projects = jiraForm.projects.split(',').map((s) => s.trim()).filter(Boolean)
+    const projects = jiraForm.projects
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
     if (projects.length === 0) return
     setStatusesLoading(true)
     try {
@@ -110,7 +113,10 @@ export default function Setup() {
     setError('')
     try {
       if (jiraEnabled) {
-        const projects = jiraForm.projects.split(',').map((s) => s.trim()).filter(Boolean)
+        const projects = jiraForm.projects
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean)
         const res = await fetch('/api/settings', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -142,7 +148,6 @@ export default function Setup() {
 
   return (
     <div className="min-h-screen bg-surface flex items-center justify-center p-4">
-
       {/* Step 1: GitHub credentials (mandatory) */}
       {step === 'github' && (
         <form
@@ -150,10 +155,12 @@ export default function Setup() {
           className="w-full max-w-lg backdrop-blur-xl bg-surface-raised border border-border-glass rounded-2xl p-8 space-y-6 shadow-lg shadow-black/[0.04]"
         >
           <div>
-            <h1 className="text-[22px] font-semibold text-text-primary tracking-tight">Connect GitHub</h1>
+            <h1 className="text-[22px] font-semibold text-text-primary tracking-tight">
+              Connect GitHub
+            </h1>
             <p className="text-[13px] text-text-tertiary mt-1.5 leading-relaxed">
-              Todo Triage needs access to your GitHub to watch repositories and manage PRs.
-              Tokens are stored in your OS keychain and never leave your machine.
+              Todo Triage needs access to your GitHub to watch repositories and manage PRs. Tokens
+              are stored in your OS keychain and never leave your machine.
             </p>
           </div>
 
@@ -179,8 +186,10 @@ export default function Setup() {
                 target="_blank"
                 rel="noopener noreferrer"
                 className="text-accent hover:underline"
-              >classic PAT</a>
-              {' '}with <code className="text-text-secondary">repo</code> and{' '}
+              >
+                classic PAT
+              </a>{' '}
+              with <code className="text-text-secondary">repo</code> and{' '}
               <code className="text-text-secondary">read:org</code> scopes.
             </p>
           </div>
@@ -206,7 +215,9 @@ export default function Setup() {
         <RepoPickerModal
           selected={[]}
           onSave={saveRepos}
-          onClose={() => {/* cannot skip */}}
+          onClose={() => {
+            /* cannot skip */
+          }}
           inline
         />
       )}
@@ -215,7 +226,9 @@ export default function Setup() {
       {step === 'integrations' && (
         <div className="w-full max-w-lg backdrop-blur-xl bg-surface-raised border border-border-glass rounded-2xl p-8 space-y-6 shadow-lg shadow-black/[0.04]">
           <div>
-            <h1 className="text-[22px] font-semibold text-text-primary tracking-tight">Integrations</h1>
+            <h1 className="text-[22px] font-semibold text-text-primary tracking-tight">
+              Integrations
+            </h1>
             <p className="text-[13px] text-text-tertiary mt-1.5 leading-relaxed">
               Optionally connect other services. You can always configure these later in Settings.
             </p>
@@ -245,7 +258,9 @@ export default function Setup() {
                   className={inputClass}
                 />
                 <div>
-                  <span className="text-[11px] text-text-tertiary mb-1.5 block">Projects (comma-separated)</span>
+                  <span className="text-[11px] text-text-tertiary mb-1.5 block">
+                    Projects (comma-separated)
+                  </span>
                   <div className="flex gap-2">
                     <input
                       type="text"
@@ -358,7 +373,15 @@ function Toggle({ enabled, onChange }: { enabled: boolean; onChange: (v: boolean
   )
 }
 
-function StatusChip({ label, selected, onClick }: { label: string; selected: boolean; onClick: () => void }) {
+function StatusChip({
+  label,
+  selected,
+  onClick,
+}: {
+  label: string
+  selected: boolean
+  onClick: () => void
+}) {
   return (
     <button
       type="button"
