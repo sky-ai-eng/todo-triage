@@ -80,6 +80,15 @@ type ReviewState struct {
 // "same SHA, same name, new ID" means a re-run, and "new ID with a failing
 // conclusion" means we have a new failure to act on.
 //
+// DetailsURL is GitHub's details_url / detailsUrl — the "more info" link the
+// CI provider attaches to the check run. For GitHub Actions checks this is
+// the workflow-run/job page (/actions/runs/N/job/M); for third-party CI
+// systems it's wherever the provider wants users to land. This is NOT the
+// narrower GitHub check-run page URL (/runs/N) — we deliberately store the
+// details URL because (a) it's the more useful human-facing link across
+// providers and (b) parseWorkflowRunIDFromURL depends on the Actions URL
+// shape exposed here.
+//
 // WorkflowRunID is the GitHub Actions workflow run database ID, pulled from
 // the GraphQL workflowRun field on the containing check suite. It's zero for
 // check runs from third-party CI systems (Supabase, Circle, etc.) — those
@@ -88,9 +97,9 @@ type CheckRun struct {
 	ID            int64  `json:"id"`
 	Name          string `json:"name"`
 	Status        string `json:"status"`     // queued | in_progress | completed
-	Conclusion    string `json:"conclusion"` // success | failure | cancelled | timed_out | action_required | neutral | skipped | ""
+	Conclusion    string `json:"conclusion"` // success | failure | cancelled | timed_out | action_required | neutral | skipped | stale | ""
 	CompletedAt   string `json:"completed_at"`
-	HTMLURL       string `json:"html_url"`
+	DetailsURL    string `json:"details_url"`
 	WorkflowRunID int64  `json:"workflow_run_id,omitempty"`
 }
 

@@ -96,7 +96,7 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, sourceID, username string) []
 				"primary_check_run_id": fmt.Sprintf("%d", primary.ID),
 				"primary_check_name":   primary.Name,
 				"primary_conclusion":   primary.Conclusion,
-				"primary_html_url":     primary.HTMLURL,
+				"primary_details_url":  primary.DetailsURL,
 			}
 			if primary.WorkflowRunID != 0 {
 				meta["primary_workflow_run_id"] = fmt.Sprintf("%d", primary.WorkflowRunID)

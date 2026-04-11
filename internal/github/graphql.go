@@ -365,7 +365,7 @@ func (pr gqlPR) toSnapshot() domain.PRSnapshot {
 					Status:        strings.ToLower(cr.Status),
 					Conclusion:    strings.ToLower(cr.Conclusion),
 					CompletedAt:   cr.CompletedAt,
-					HTMLURL:       cr.DetailsURL,
+					DetailsURL:    cr.DetailsURL,
 					WorkflowRunID: workflowRunID,
 				})
 			}

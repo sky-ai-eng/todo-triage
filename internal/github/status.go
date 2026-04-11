@@ -118,7 +118,7 @@ func (c *Client) GetPRStatus(owner, repo string, number int) (*PRStatus, error) 
 						Status:        strings.ToLower(run.Status),
 						Conclusion:    strings.ToLower(run.Conclusion),
 						CompletedAt:   run.CompletedAt,
-						HTMLURL:       run.DetailsURL,
+						DetailsURL:    run.DetailsURL,
 						WorkflowRunID: parseWorkflowRunIDFromURL(run.DetailsURL),
 					})
 				}
