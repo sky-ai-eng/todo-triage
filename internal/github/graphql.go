@@ -3,6 +3,7 @@ package github
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/sky-ai-eng/todo-triage/internal/domain"
@@ -48,10 +49,12 @@ fragment PRFields on PullRequest {
 		nodes {
 			commit {
 				oid
-				checkSuites(first: 20) {
+				checkSuites(first: 100) {
+					pageInfo { hasNextPage }
 					nodes {
 						workflowRun { databaseId }
-						checkRuns(first: 50) {
+						checkRuns(first: 100) {
+							pageInfo { hasNextPage }
 							nodes {
 								databaseId
 								name
@@ -251,7 +254,8 @@ type gqlCommit struct {
 }
 
 type gqlCheckSuites struct {
-	Nodes []gqlCheckSuite `json:"nodes"`
+	PageInfo gqlPageInfo     `json:"pageInfo"`
+	Nodes    []gqlCheckSuite `json:"nodes"`
 }
 
 type gqlCheckSuite struct {
@@ -267,7 +271,17 @@ type gqlWorkflowRun struct {
 }
 
 type gqlCheckRuns struct {
-	Nodes []gqlCheckRun `json:"nodes"`
+	PageInfo gqlPageInfo   `json:"pageInfo"`
+	Nodes    []gqlCheckRun `json:"nodes"`
+}
+
+// gqlPageInfo is a minimal subset of GitHub's PageInfo used only to detect
+// when a connection was truncated at the first-N limit. We don't paginate
+// (matrix builds deep enough to blow through 100×100 check runs aren't a real
+// case today) but we log a warning if we hit the limit so we notice before
+// missing events becomes a silent failure mode.
+type gqlPageInfo struct {
+	HasNextPage bool `json:"hasNextPage"`
 }
 
 type gqlCheckRun struct {
@@ -325,8 +339,21 @@ func (pr gqlPR) toSnapshot() domain.PRSnapshot {
 		commit := pr.Commits.Nodes[0].Commit
 		snap.HeadSHA = commit.OID
 
+		// Pagination truncation watchdog. The query caps at 100 suites and
+		// 100 runs per suite — plenty for realistic PRs (even a heavy matrix
+		// build caps around ~30 runs per suite × 5-8 suites). If we ever
+		// blow past these, log once so we catch it before missing events
+		// becomes a silent failure. Paginating would mean real cursor
+		// logic; preferring the simpler cap + warning until there's pressure.
+		if commit.CheckSuites.PageInfo.HasNextPage {
+			log.Printf("[github] WARN: check suites truncated at 100 for %s#%d — some CI state may be missing from snapshot", snap.Repo, snap.Number)
+		}
+
 		var raw []domain.CheckRun
 		for _, suite := range commit.CheckSuites.Nodes {
+			if suite.CheckRuns.PageInfo.HasNextPage {
+				log.Printf("[github] WARN: check runs truncated at 100 within a suite for %s#%d — some CI state may be missing from snapshot", snap.Repo, snap.Number)
+			}
 			var workflowRunID int64
 			if suite.WorkflowRun != nil {
 				workflowRunID = suite.WorkflowRun.DatabaseID

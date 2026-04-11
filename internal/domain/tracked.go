@@ -107,9 +107,17 @@ func IsFailingConclusion(conclusion string) bool {
 
 // CIStatusFromCheckRuns derives a lowercase aggregate CI status from a list of
 // check runs. Returns "failure" if any check failed, "pending" if any check is
-// still running, "success" if all completed successfully, or "" if the list is
+// still running, "success" if all completed non-failing, or "" if the list is
 // empty. Values match domain.Task.CIStatus so the tracker can use this
 // directly when building tasks from snapshots.
+//
+// The success bucket is intentionally permissive — *any* completed check whose
+// conclusion isn't in IsFailingConclusion counts as success-like. That covers
+// "success", "neutral", "skipped", "stale" (post-rebase, treated as
+// non-blocking by GitHub), empty conclusion on a completed check, and any
+// future values GitHub adds to the enum. This matches how the aggregate
+// counts in internal/github/status.go classify check runs, so the two paths
+// can't drift out of sync.
 func CIStatusFromCheckRuns(runs []CheckRun) string {
 	if len(runs) == 0 {
 		return ""
@@ -124,10 +132,9 @@ func CIStatusFromCheckRuns(runs []CheckRun) string {
 			hasFailure = true
 			continue
 		}
-		switch r.Conclusion {
-		case "success", "skipped", "neutral":
-			hasSuccess = true
-		}
+		// Completed and not failing — treat as success-like regardless of
+		// the specific conclusion string.
+		hasSuccess = true
 	}
 	switch {
 	case hasFailure:

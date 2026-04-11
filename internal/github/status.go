@@ -95,6 +95,11 @@ func (c *Client) GetPRStatus(owner, repo string, number int) (*PRStatus, error) 
 	// jobs." We dedup by name keeping the highest ID (monotonic creation
 	// order == latest execution) so the display reflects current state, not
 	// the full execution history.
+	//
+	// Check runs are decoded into a typed struct rather than map[string]any
+	// because check-run IDs are int64s that can be larger than float64's
+	// exact-integer range (2^53). Decoding through an any/float64 path would
+	// lose precision and break the ID-based dedup and diff identity.
 	status.CheckRuns = []domain.CheckRun{}
 	headSHA := ""
 	if head, ok := pr["head"].(map[string]any); ok {
@@ -103,28 +108,21 @@ func (c *Client) GetPRStatus(owner, repo string, number int) (*PRStatus, error) 
 	if headSHA != "" {
 		checksData, err := c.Get(fmt.Sprintf("/repos/%s/%s/commits/%s/check-runs?per_page=100", owner, repo, headSHA))
 		if err == nil {
-			var checksResp map[string]any
-			if json.Unmarshal(checksData, &checksResp) == nil {
-				if runs, ok := checksResp["check_runs"].([]any); ok {
-					raw := make([]domain.CheckRun, 0, len(runs))
-					for _, r := range runs {
-						run, ok := r.(map[string]any)
-						if !ok {
-							continue
-						}
-						id, _ := run["id"].(float64)
-						raw = append(raw, domain.CheckRun{
-							ID:            int64(id),
-							Name:          strVal(run, "name"),
-							Status:        strings.ToLower(strVal(run, "status")),
-							Conclusion:    strings.ToLower(strVal(run, "conclusion")),
-							CompletedAt:   strVal(run, "completed_at"),
-							HTMLURL:       strVal(run, "details_url"),
-							WorkflowRunID: parseWorkflowRunIDFromURL(strVal(run, "details_url")),
-						})
-					}
-					status.CheckRuns = domain.DedupCheckRunsByName(raw)
+			var resp restCheckRunsResponse
+			if json.Unmarshal(checksData, &resp) == nil {
+				raw := make([]domain.CheckRun, 0, len(resp.CheckRuns))
+				for _, run := range resp.CheckRuns {
+					raw = append(raw, domain.CheckRun{
+						ID:            run.ID,
+						Name:          run.Name,
+						Status:        strings.ToLower(run.Status),
+						Conclusion:    strings.ToLower(run.Conclusion),
+						CompletedAt:   run.CompletedAt,
+						HTMLURL:       run.DetailsURL,
+						WorkflowRunID: parseWorkflowRunIDFromURL(run.DetailsURL),
+					})
 				}
+				status.CheckRuns = domain.DedupCheckRunsByName(raw)
 			}
 		}
 	}
@@ -145,6 +143,25 @@ func (c *Client) GetPRStatus(owner, repo string, number int) (*PRStatus, error) 
 	}
 
 	return status, nil
+}
+
+// restCheckRunsResponse is the typed decoding of GitHub's REST
+// /repos/{owner}/{repo}/commits/{ref}/check-runs endpoint. Decoding through a
+// typed struct (rather than map[string]any → float64 → int64) keeps check run
+// IDs exact — they're int64s that can eventually exceed float64's 2^53
+// precision limit, and any loss there would silently break dedup and diff
+// identity.
+type restCheckRunsResponse struct {
+	CheckRuns []restCheckRun `json:"check_runs"`
+}
+
+type restCheckRun struct {
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	Status      string `json:"status"`
+	Conclusion  string `json:"conclusion"`
+	CompletedAt string `json:"completed_at"`
+	DetailsURL  string `json:"details_url"`
 }
 
 // parseWorkflowRunIDFromURL extracts the GitHub Actions workflow run ID from a

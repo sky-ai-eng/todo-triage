@@ -185,6 +185,50 @@ func TestDiffPR_CIFailure_Scenario_C_DifferentCheckFails(t *testing.T) {
 	assertMetaContains(t, events[0], "count", "1")
 }
 
+// TestDiffPR_CIPassed_PermissiveConclusions verifies that the aggregate
+// CIPassed transition fires for check-run conclusions outside the narrow
+// success/skipped/neutral set — specifically "stale" (which GitHub emits
+// after a rebase and treats as non-blocking), empty conclusion on a
+// completed run, and any future enum values. Regression guard for a real
+// bug where CIStatusFromCheckRuns only recognized three conclusions,
+// causing stable "stale" PRs to never report the aggregate success state.
+func TestDiffPR_CIPassed_PermissiveConclusions(t *testing.T) {
+	prev := domain.PRSnapshot{
+		Number: 42,
+		CheckRuns: []domain.CheckRun{
+			{ID: 1, Name: "test", Status: "in_progress"},
+		},
+	}
+
+	// stale → success-like, fires CIPassed
+	events := DiffPRSnapshots(prev, domain.PRSnapshot{
+		Number: 42,
+		CheckRuns: []domain.CheckRun{
+			{ID: 1, Name: "test", Status: "completed", Conclusion: "stale"},
+		},
+	}, "42", "")
+	assertEventTypes(t, events, []string{domain.EventGitHubPRCIPassed})
+
+	// empty conclusion on a completed run → also success-like
+	events = DiffPRSnapshots(prev, domain.PRSnapshot{
+		Number: 42,
+		CheckRuns: []domain.CheckRun{
+			{ID: 1, Name: "test", Status: "completed", Conclusion: ""},
+		},
+	}, "42", "")
+	assertEventTypes(t, events, []string{domain.EventGitHubPRCIPassed})
+
+	// Mixed: one stale + one success → still passes
+	events = DiffPRSnapshots(prev, domain.PRSnapshot{
+		Number: 42,
+		CheckRuns: []domain.CheckRun{
+			{ID: 1, Name: "test", Status: "completed", Conclusion: "success"},
+			{ID: 2, Name: "lint", Status: "completed", Conclusion: "stale"},
+		},
+	}, "42", "")
+	assertContains(t, eventTypes(events), domain.EventGitHubPRCIPassed)
+}
+
 // Stable CI — same IDs, same conclusions poll-to-poll — fires nothing.
 func TestDiffPR_CIFailure_StableCI_NoEvent(t *testing.T) {
 	snap := domain.PRSnapshot{
