@@ -260,6 +260,24 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		defer worktree.Remove(runID)
 	}
 
+	// Determine the cwd for the child claude. For tasks without a repo (Jira no-match)
+	// we spin up a throwaway dir so the child's session history lands in a predictable
+	// disposable ~/.claude/projects entry instead of mixing into the parent binary's
+	// own project dir.
+	claudeCwd := cfg.wtPath
+	if claudeCwd == "" {
+		var err error
+		claudeCwd, err = worktree.MakeRunCwd(runID)
+		if err != nil {
+			s.failRun(runID, "failed to create run cwd: "+err.Error())
+			return
+		}
+		defer worktree.RemoveRunCwd(runID)
+	}
+	// Nuke the ghost ~/.claude/projects/<encoded-cwd> that claude auto-creates
+	// for this cwd. Safety-railed to only touch entries under $TMPDIR.
+	defer worktree.RemoveClaudeProjectDir(claudeCwd)
+
 	selfBin, err := os.Executable()
 	if err != nil {
 		s.failRun(runID, "failed to resolve own binary path: "+err.Error())
@@ -284,9 +302,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	}
 
 	cmd := exec.Command("claude", args...)
-	if cfg.wtPath != "" {
-		cmd.Dir = cfg.wtPath
-	}
+	cmd.Dir = claudeCwd
 	cmd.Env = append(os.Environ(), "TODOTRIAGE_RUN_ID="+runID, "TODOTRIAGE_REVIEW_PREVIEW=1")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
@@ -305,7 +321,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	}
 
 	pgid := cmd.Process.Pid
-	log.Printf("[delegate] claude started (pid: %d, pgid: %d, cwd: %s)", cmd.Process.Pid, pgid, cfg.wtPath)
+	log.Printf("[delegate] claude started (pid: %d, pgid: %d, cwd: %s)", cmd.Process.Pid, pgid, claudeCwd)
 
 	go func() {
 		<-ctx.Done()

@@ -12,6 +12,9 @@ import (
 	"time"
 )
 
+// claudeProjectsDir is where Claude Code auto-creates per-cwd session history.
+const claudeProjectsDir = ".claude/projects"
+
 // Per-repo mutexes prevent concurrent fetches from racing on the same bare repo.
 var (
 	repoMu   sync.Mutex
@@ -45,6 +48,68 @@ func repoDir(owner, repo string) (string, error) {
 
 func runDir(runID string) string {
 	return filepath.Join(os.TempDir(), runsDir, runID)
+}
+
+// MakeRunCwd creates a throwaway cwd for delegated runs that have no worktree
+// (e.g. Jira tasks with no matched repo). Lives under the same runs base as
+// real worktrees so the existing Cleanup() sweep catches orphans.
+//
+// Giving every run a unique disposable cwd means the child claude's session
+// history lands in a ~/.claude/projects/<encoded> we can cleanly delete after
+// the run, rather than mixing into the parent binary's own project dir.
+func MakeRunCwd(runID string) (string, error) {
+	dir := filepath.Join(os.TempDir(), runsDir, runID+"-nocwd")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return "", fmt.Errorf("mkdir run cwd: %w", err)
+	}
+	return dir, nil
+}
+
+// RemoveRunCwd removes the throwaway cwd created by MakeRunCwd. Safe if missing.
+func RemoveRunCwd(runID string) {
+	os.RemoveAll(filepath.Join(os.TempDir(), runsDir, runID+"-nocwd"))
+}
+
+// RemoveClaudeProjectDir deletes the ~/.claude/projects/<encoded-cwd> entry that
+// Claude Code auto-creates whenever it's invoked in a new cwd. Called after
+// each delegated run to prevent a ghost project dir from accumulating for every
+// ephemeral worktree path.
+//
+// Safety rail: only touches entries whose cwd resolves under $TMPDIR, so a
+// misuse can never nuke a real project's interactive session history.
+func RemoveClaudeProjectDir(cwd string) {
+	if cwd == "" {
+		return
+	}
+
+	// Claude Code records the symlink-resolved path
+	// (e.g. /var/folders/... → /private/var/folders/... on macOS), so we need
+	// the same resolution to compute the right encoded name.
+	resolved, err := filepath.EvalSymlinks(cwd)
+	if err != nil {
+		return
+	}
+
+	tmpResolved, err := filepath.EvalSymlinks(os.TempDir())
+	if err != nil {
+		return
+	}
+	if !strings.HasPrefix(resolved, tmpResolved) {
+		log.Printf("[worktree] refusing to clean project dir for non-tmp cwd: %s", resolved)
+		return
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	// Claude Code encoding: replace every '/' in the absolute path with '-'.
+	// The leading '/' becomes a leading '-', matching the dir names Claude Code writes.
+	encoded := strings.ReplaceAll(resolved, "/", "-")
+	projectDir := filepath.Join(home, claudeProjectsDir, encoded)
+	if err := os.RemoveAll(projectDir); err != nil {
+		log.Printf("[worktree] remove ghost project dir %s: %v", projectDir, err)
+	}
 }
 
 // ensureBareClone creates a bare clone if it doesn't exist yet.
@@ -200,6 +265,7 @@ func Remove(runID string) error {
 }
 
 // Cleanup removes all orphaned worktrees on startup and prunes bare repos.
+// Also sweeps ~/.claude/projects ghost entries for each orphaned cwd.
 func Cleanup() {
 	runsBase := filepath.Join(os.TempDir(), runsDir)
 	entries, err := os.ReadDir(runsBase)
@@ -210,7 +276,12 @@ func Cleanup() {
 	count := 0
 	for _, e := range entries {
 		if e.IsDir() {
-			os.RemoveAll(filepath.Join(runsBase, e.Name()))
+			fullPath := filepath.Join(runsBase, e.Name())
+			// Each entry here was a live claude cwd at some point — nuke its
+			// ghost ~/.claude/projects entry before removing the dir itself
+			// (EvalSymlinks needs the dir to still exist to resolve).
+			RemoveClaudeProjectDir(fullPath)
+			os.RemoveAll(fullPath)
 			count++
 		}
 	}
