@@ -1,5 +1,15 @@
-import { useState, useEffect, useCallback } from 'react'
-import { PieChart, Pie, Cell, ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip } from 'recharts'
+import { useState, useEffect, useCallback, useRef } from 'react'
+import {
+  PieChart,
+  Pie,
+  Cell,
+  ResponsiveContainer,
+  AreaChart,
+  Area,
+  XAxis,
+  YAxis,
+  Tooltip,
+} from 'recharts'
 import {
   DndContext,
   DragOverlay,
@@ -44,11 +54,17 @@ function loadCached<T>(key: string): T | null {
   try {
     const raw = sessionStorage.getItem(key)
     return raw ? JSON.parse(raw) : null
-  } catch { return null }
+  } catch {
+    return null
+  }
 }
 
 function saveCache(key: string, data: unknown) {
-  try { sessionStorage.setItem(key, JSON.stringify(data)) } catch {}
+  try {
+    sessionStorage.setItem(key, JSON.stringify(data))
+  } catch {
+    // best effort — sessionStorage may be full or disabled
+  }
 }
 
 export default function PRDashboard() {
@@ -58,30 +74,49 @@ export default function PRDashboard() {
   const [activeId, setActiveId] = useState<string | null>(null)
   const [overColumn, setOverColumn] = useState<ColumnId | null>(null)
 
+  // Tracks whether we've completed a first fetch. Used to avoid flashing
+  // skeletons on every interval refresh — they should only show on cold load.
+  // A ref (not state) because flipping it shouldn't trigger a re-render.
+  const hasLoadedOnce = useRef(false)
   const fetchAll = useCallback(async () => {
-    // Only show skeletons if we have no cached data at all
-    if (prs.length === 0 && !stats) setLoading(true)
+    if (!hasLoadedOnce.current) setLoading(true)
+    const parseOrThrow = async (r: Response, label: string) => {
+      if (!r.ok) throw new Error(`${label}: HTTP ${r.status}`)
+      return r.json()
+    }
     try {
       const [prsRes, statsRes] = await Promise.all([
-        fetch('/api/dashboard/prs').then((r) => r.json()),
-        fetch('/api/dashboard/stats').then((r) => r.json()),
+        fetch('/api/dashboard/prs').then((r) => parseOrThrow(r, 'prs')),
+        fetch('/api/dashboard/stats').then((r) => parseOrThrow(r, 'stats')),
       ])
       setPrs(prsRes)
       setStats(statsRes)
       saveCache('pr-dash-prs', prsRes)
       saveCache('pr-dash-stats', statsRes)
+      hasLoadedOnce.current = true
+    } catch (err) {
+      // Surface to console so errors aren't silently swallowed.
+      // Existing cached data (if any) stays on screen.
+      console.error('PRDashboard fetchAll failed:', err)
     } finally {
       setLoading(false)
     }
   }, [])
 
-  useEffect(() => { fetchAll() }, [fetchAll])
+  useEffect(() => {
+    fetchAll()
+  }, [fetchAll])
 
   useEffect(() => {
     const interval = setInterval(fetchAll, 120000)
-    const handleVis = () => { if (document.visibilityState === 'visible') fetchAll() }
+    const handleVis = () => {
+      if (document.visibilityState === 'visible') fetchAll()
+    }
     document.addEventListener('visibilitychange', handleVis)
-    return () => { clearInterval(interval); document.removeEventListener('visibilitychange', handleVis) }
+    return () => {
+      clearInterval(interval)
+      document.removeEventListener('visibilitychange', handleVis)
+    }
   }, [fetchAll])
 
   const byRecent = (a: PRSummary, b: PRSummary) =>
@@ -105,7 +140,10 @@ export default function PRDashboard() {
 
   const handleDragStart = (e: DragStartEvent) => setActiveId(String(e.active.id))
   const handleDragOver = (e: DragOverEvent) => {
-    if (!e.over) { setOverColumn(null); return }
+    if (!e.over) {
+      setOverColumn(null)
+      return
+    }
     const overId = String(e.over.id)
     if (overId === 'ready' || overId === 'draft') {
       setOverColumn(overId)
@@ -125,17 +163,14 @@ export default function PRDashboard() {
 
     const sourceCol = pr.draft ? 'draft' : 'ready'
     const overId = String(e.over.id)
-    const targetCol: ColumnId = (overId === 'ready' || overId === 'draft')
-      ? overId
-      : getColumn(overId) || sourceCol
+    const targetCol: ColumnId =
+      overId === 'ready' || overId === 'draft' ? overId : getColumn(overId) || sourceCol
 
     if (sourceCol === targetCol) return
 
     // Optimistic update
     const makeDraft = targetCol === 'draft'
-    setPrs((prev) => prev.map((p) =>
-      prKey(p) === id ? { ...p, draft: makeDraft } : p
-    ))
+    setPrs((prev) => prev.map((p) => (prKey(p) === id ? { ...p, draft: makeDraft } : p)))
 
     // Hit the API
     try {
@@ -146,14 +181,10 @@ export default function PRDashboard() {
       })
       if (!res.ok) {
         // Revert on failure
-        setPrs((prev) => prev.map((p) =>
-          prKey(p) === id ? { ...p, draft: !makeDraft } : p
-        ))
+        setPrs((prev) => prev.map((p) => (prKey(p) === id ? { ...p, draft: !makeDraft } : p)))
       }
     } catch {
-      setPrs((prev) => prev.map((p) =>
-        prKey(p) === id ? { ...p, draft: !makeDraft } : p
-      ))
+      setPrs((prev) => prev.map((p) => (prKey(p) === id ? { ...p, draft: !makeDraft } : p)))
     }
 
     fetchAll()
@@ -183,7 +214,11 @@ export default function PRDashboard() {
           {stats ? <MergedTimeline data={stats.merged_over_time || []} /> : <SkeletonChart />}
         </ChartCard>
         <ChartCard title="Review balance">
-          {stats ? <ReviewBalance given={stats.reviews_given} received={stats.reviews_received} /> : <SkeletonBar />}
+          {stats ? (
+            <ReviewBalance given={stats.reviews_given} received={stats.reviews_received} />
+          ) : (
+            <SkeletonBar />
+          )}
         </ChartCard>
         <ChartCard title="30-day totals">
           {stats ? <TotalsSummary stats={stats} /> : <SkeletonTotals />}
@@ -209,9 +244,7 @@ export default function PRDashboard() {
               {readyPRs.length === 0 ? (
                 <p className="text-[12px] text-text-tertiary text-center py-8">No open PRs</p>
               ) : (
-                readyPRs.map((pr) => (
-                  <SortablePRCard key={prKey(pr)} id={prKey(pr)} pr={pr} />
-                ))
+                readyPRs.map((pr) => <SortablePRCard key={prKey(pr)} id={prKey(pr)} pr={pr} />)
               )}
             </SortableContext>
           </DroppableColumn>
@@ -226,9 +259,7 @@ export default function PRDashboard() {
               {draftPRs.length === 0 ? (
                 <p className="text-[12px] text-text-tertiary text-center py-8">No drafts</p>
               ) : (
-                draftPRs.map((pr) => (
-                  <SortablePRCard key={prKey(pr)} id={prKey(pr)} pr={pr} />
-                ))
+                draftPRs.map((pr) => <SortablePRCard key={prKey(pr)} id={prKey(pr)} pr={pr} />)
               )}
             </SortableContext>
           </DroppableColumn>
@@ -267,7 +298,9 @@ export default function PRDashboard() {
 }
 
 function SortablePRCard({ id, pr }: { id: string; pr: PRSummary }) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id })
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id,
+  })
   const style = {
     transform: CSS.Transform.toString(transform),
     transition,
@@ -275,13 +308,25 @@ function SortablePRCard({ id, pr }: { id: string; pr: PRSummary }) {
   }
 
   return (
-    <div ref={setNodeRef} style={style} className="cursor-grab active:cursor-grabbing" {...attributes} {...listeners}>
+    <div
+      ref={setNodeRef}
+      style={style}
+      className="cursor-grab active:cursor-grabbing"
+      {...attributes}
+      {...listeners}
+    >
       <PRCard pr={pr} />
     </div>
   )
 }
 
-function DroppableColumn({ id, title, count, isOver, children }: {
+function DroppableColumn({
+  id,
+  title,
+  count,
+  isOver,
+  children,
+}: {
   id: string
   title: string
   count: number
@@ -310,7 +355,15 @@ function DroppableColumn({ id, title, count, isOver, children }: {
   )
 }
 
-function StaticColumn({ title, count, children }: { title: string; count: number; children: React.ReactNode }) {
+function StaticColumn({
+  title,
+  count,
+  children,
+}: {
+  title: string
+  count: number
+  children: React.ReactNode
+}) {
   return (
     <div className="flex flex-col min-h-0">
       <h2 className="text-[13px] font-medium text-text-secondary mb-3 px-1 shrink-0">
@@ -360,8 +413,18 @@ function StatusDonut({ stats }: { stats: Stats }) {
       <div className="w-16 h-16">
         <ResponsiveContainer>
           <PieChart>
-            <Pie data={data} cx="50%" cy="50%" innerRadius={18} outerRadius={30} dataKey="value" stroke="none">
-              {data.map((d, i) => <Cell key={i} fill={d.color} />)}
+            <Pie
+              data={data}
+              cx="50%"
+              cy="50%"
+              innerRadius={18}
+              outerRadius={30}
+              dataKey="value"
+              stroke="none"
+            >
+              {data.map((d, i) => (
+                <Cell key={i} fill={d.color} />
+              ))}
             </Pie>
           </PieChart>
         </ResponsiveContainer>
@@ -370,7 +433,9 @@ function StatusDonut({ stats }: { stats: Stats }) {
         {data.map((d) => (
           <div key={d.name} className="flex items-center gap-1.5 text-[11px]">
             <span className="w-1.5 h-1.5 rounded-full" style={{ background: d.color }} />
-            <span className="text-text-tertiary">{d.value} {d.name.toLowerCase()}</span>
+            <span className="text-text-tertiary">
+              {d.value} {d.name.toLowerCase()}
+            </span>
           </div>
         ))}
       </div>
@@ -379,11 +444,15 @@ function StatusDonut({ stats }: { stats: Stats }) {
 }
 
 function MergedTimeline({ data }: { data: { week: string; count: number }[] }) {
-  if (data.length === 0) return <p className="text-[12px] text-text-tertiary text-center py-4">No data</p>
+  if (data.length === 0)
+    return <p className="text-[12px] text-text-tertiary text-center py-4">No data</p>
 
   const formatted = data.map((d) => ({
     ...d,
-    label: new Date(d.week + 'T00:00:00').toLocaleDateString([], { month: 'short', day: 'numeric' }),
+    label: new Date(d.week + 'T00:00:00').toLocaleDateString([], {
+      month: 'short',
+      day: 'numeric',
+    }),
   }))
 
   return (
@@ -400,14 +469,26 @@ function MergedTimeline({ data }: { data: { week: string; count: number }[] }) {
           <YAxis hide />
           <Tooltip
             contentStyle={{
-              background: 'rgba(255,255,255,0.8)', backdropFilter: 'blur(12px)',
-              border: '1px solid rgba(255,255,255,0.7)', borderRadius: '8px',
-              fontSize: '11px', boxShadow: '0 4px 12px rgba(0,0,0,0.05)',
+              background: 'rgba(255,255,255,0.8)',
+              backdropFilter: 'blur(12px)',
+              border: '1px solid rgba(255,255,255,0.7)',
+              borderRadius: '8px',
+              fontSize: '11px',
+              boxShadow: '0 4px 12px rgba(0,0,0,0.05)',
             }}
-            formatter={(value: any) => [`${value} PR${value !== 1 ? 's' : ''}`, 'Merged']}
-            labelFormatter={(label: any) => `Week of ${label}`}
+            formatter={(value) => {
+              const n = typeof value === 'number' ? value : Number(value)
+              return [`${n} PR${n !== 1 ? 's' : ''}`, 'Merged']
+            }}
+            labelFormatter={(label) => `Week of ${String(label)}`}
           />
-          <Area type="monotone" dataKey="count" stroke="var(--color-claim)" strokeWidth={2} fill="url(#mergedGrad)" />
+          <Area
+            type="monotone"
+            dataKey="count"
+            stroke="var(--color-claim)"
+            strokeWidth={2}
+            fill="url(#mergedGrad)"
+          />
         </AreaChart>
       </ResponsiveContainer>
     </div>
@@ -416,7 +497,8 @@ function MergedTimeline({ data }: { data: { week: string; count: number }[] }) {
 
 function ReviewBalance({ given, received }: { given: number; received: number }) {
   const total = given + received
-  if (total === 0) return <p className="text-[12px] text-text-tertiary text-center py-4">No reviews yet</p>
+  if (total === 0)
+    return <p className="text-[12px] text-text-tertiary text-center py-4">No reviews yet</p>
 
   const givenPct = (given / total) * 100
   const net = given - received
@@ -425,8 +507,14 @@ function ReviewBalance({ given, received }: { given: number; received: number })
   return (
     <div className="space-y-2">
       <div className="flex h-2.5 rounded-full overflow-hidden bg-black/[0.04]">
-        <div className="h-full rounded-l-full" style={{ width: `${givenPct}%`, background: 'var(--color-delegate)' }} />
-        <div className="h-full rounded-r-full" style={{ width: `${100 - givenPct}%`, background: 'var(--color-accent)' }} />
+        <div
+          className="h-full rounded-l-full"
+          style={{ width: `${givenPct}%`, background: 'var(--color-delegate)' }}
+        />
+        <div
+          className="h-full rounded-r-full"
+          style={{ width: `${100 - givenPct}%`, background: 'var(--color-accent)' }}
+        />
       </div>
       <div className="flex justify-between text-[11px]">
         <span className="text-delegate">{given} given</span>
@@ -459,7 +547,10 @@ function TotalsSummary({ stats }: { stats: Stats }) {
           <span className="text-text-tertiary">{stats.awaiting} open</span>
         </div>
         <div className="flex items-center gap-1.5">
-          <span className="w-1.5 h-1.5 rounded-full" style={{ background: 'var(--color-text-tertiary)' }} />
+          <span
+            className="w-1.5 h-1.5 rounded-full"
+            style={{ background: 'var(--color-text-tertiary)' }}
+          />
           <span className="text-text-tertiary">{stats.draft} draft</span>
         </div>
       </div>

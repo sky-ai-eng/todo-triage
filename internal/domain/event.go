@@ -5,10 +5,10 @@ import "time"
 // EventType defines a specific kind of triage event that can occur.
 // These form a closed taxonomy — new types are added by extending the seed list.
 type EventType struct {
-	ID              string  `json:"id"`               // e.g. "github:pr:review_requested"
-	Source          string  `json:"source"`            // "github", "jira", "system"
-	Category        string  `json:"category"`          // "pr", "issue", "scoring", "delegation"
-	Label           string  `json:"label"`             // Human-readable: "Review Requested"
+	ID              string  `json:"id"`       // e.g. "github:pr:review_requested"
+	Source          string  `json:"source"`   // "github", "jira", "system"
+	Category        string  `json:"category"` // "pr", "issue", "scoring", "delegation"
+	Label           string  `json:"label"`    // Human-readable: "Review Requested"
 	Description     string  `json:"description"`
 	DefaultPriority float64 `json:"default_priority"`
 	Enabled         bool    `json:"enabled"`
@@ -28,7 +28,7 @@ type Event struct {
 // PollerState stores the last-known snapshot for a source item, used to diff and detect transitions.
 type PollerState struct {
 	Source    string `json:"source"`
-	SourceID string `json:"source_id"`
+	SourceID  string `json:"source_id"`
 	StateJSON string `json:"state_json"`
 }
 

@@ -11,7 +11,15 @@ interface Props {
 
 export default function AgentCard({ task, run, messages, onRequeue, onReview }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null)
-  const [elapsed, setElapsed] = useState('')
+  const [now, setNow] = useState(() => Date.now())
+
+  const isActive = [
+    'cloning',
+    'fetching',
+    'worktree_created',
+    'agent_starting',
+    'running',
+  ].includes(run.Status)
 
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
@@ -20,36 +28,39 @@ export default function AgentCard({ task, run, messages, onRequeue, onReview }: 
     }
   }, [messages.length])
 
-  // Live elapsed timer — use fixed duration for completed runs
+  // Tick `now` once per second while the run is active so the elapsed display
+  // updates live. When the run ends, we stop ticking and display the fixed
+  // duration derived from run.DurationMs below.
   useEffect(() => {
-    const isRunning = ['cloning', 'fetching', 'worktree_created', 'agent_starting', 'running'].includes(run.Status)
-
-    if (!isRunning && run.DurationMs) {
-      setElapsed(formatDurationMs(run.DurationMs))
-      return
-    }
-
-    const update = () => setElapsed(formatElapsed(run.StartedAt))
-    update()
-    if (!isRunning) return
-    const interval = setInterval(update, 1000)
+    if (!isActive) return
+    const interval = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(interval)
-  }, [run.StartedAt, run.Status, run.DurationMs])
+  }, [isActive])
 
-  const isActive = ['cloning', 'fetching', 'worktree_created', 'agent_starting', 'running'].includes(run.Status)
+  const elapsed =
+    !isActive && run.DurationMs ? formatDurationMs(run.DurationMs) : formatElapsed(run.StartedAt, now)
   const isFailed = run.Status === 'failed'
   const isCancelled = run.Status === 'cancelled'
   const isPendingApproval = run.Status === 'pending_approval'
 
-  const statusColor = isFailed || isCancelled
-    ? 'text-dismiss'
-    : isPendingApproval
-    ? 'text-snooze'
-    : isActive
-    ? 'text-delegate'
-    : 'text-claim'
+  const statusColor =
+    isFailed || isCancelled
+      ? 'text-dismiss'
+      : isPendingApproval
+        ? 'text-snooze'
+        : isActive
+          ? 'text-delegate'
+          : 'text-claim'
 
-  const statusIcon = isFailed ? '✗' : isCancelled ? '◼' : isPendingApproval ? '◉' : isActive ? '●' : '✓'
+  const statusIcon = isFailed
+    ? '✗'
+    : isCancelled
+      ? '◼'
+      : isPendingApproval
+        ? '◉'
+        : isActive
+          ? '●'
+          : '✓'
   const statusLabel = formatStatus(run.Status)
 
   const stats = computeStats(messages, run)
@@ -68,9 +79,7 @@ export default function AgentCard({ task, run, messages, onRequeue, onReview }: 
             )}
           </div>
           <div className="flex items-center gap-2">
-            <span className="text-[11px] text-text-tertiary">
-              {elapsed}
-            </span>
+            <span className="text-[11px] text-text-tertiary">{elapsed}</span>
             {isActive && (
               <button
                 onClick={() => fetch(`/api/agent/runs/${run.ID}/cancel`, { method: 'POST' })}
@@ -79,7 +88,12 @@ export default function AgentCard({ task, run, messages, onRequeue, onReview }: 
               >
                 <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
                   <circle cx="8" cy="8" r="7" stroke="currentColor" strokeWidth="1.5" />
-                  <path d="M5.5 5.5l5 5M10.5 5.5l-5 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                  <path
+                    d="M5.5 5.5l5 5M10.5 5.5l-5 5"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    strokeLinecap="round"
+                  />
                 </svg>
               </button>
             )}
@@ -90,9 +104,11 @@ export default function AgentCard({ task, run, messages, onRequeue, onReview }: 
           {task.title}
         </h3>
         <div className="flex items-center gap-2 text-[11px] text-text-tertiary">
-          <span className={`font-medium uppercase tracking-wider px-1.5 py-0.5 rounded ${
-            task.source === 'github' ? 'bg-black/[0.04]' : 'bg-blue-500/10 text-blue-600'
-          }`}>
+          <span
+            className={`font-medium uppercase tracking-wider px-1.5 py-0.5 rounded ${
+              task.source === 'github' ? 'bg-black/[0.04]' : 'bg-blue-500/10 text-blue-600'
+            }`}
+          >
             {task.source === 'github' ? 'GH' : 'Jira'}
           </span>
           {task.repo && <span>{task.repo}</span>}
@@ -106,9 +122,7 @@ export default function AgentCard({ task, run, messages, onRequeue, onReview }: 
         className="mx-3 mb-3 rounded-xl bg-black/[0.02] border border-border-subtle max-h-[200px] overflow-y-auto"
       >
         {messages.length === 0 && isActive && (
-          <div className="px-4 py-3 text-[12px] text-text-tertiary">
-            Waiting for agent...
-          </div>
+          <div className="px-4 py-3 text-[12px] text-text-tertiary">Waiting for agent...</div>
         )}
         {renderActivityLog(messages, isActive, run)}
       </div>
@@ -150,7 +164,6 @@ export default function AgentCard({ task, run, messages, onRequeue, onReview }: 
           </a>
         </div>
       </div>
-
     </div>
   )
 }
@@ -183,10 +196,15 @@ function renderActivityLog(messages: AgentMessage[], isActive: boolean, run: Age
     if (msg.Content) {
       const text = msg.Content.length > 150 ? msg.Content.slice(0, 147) + '...' : msg.Content
       elements.push(
-        <div key={`text-${msg.ID}`} className="flex items-start gap-2 px-4 py-1.5 text-[12px] border-b border-border-subtle/50">
-          <span className="shrink-0 mt-0.5 text-[10px] text-text-tertiary opacity-60 font-mono">{time}</span>
+        <div
+          key={`text-${msg.ID}`}
+          className="flex items-start gap-2 px-4 py-1.5 text-[12px] border-b border-border-subtle/50"
+        >
+          <span className="shrink-0 mt-0.5 text-[10px] text-text-tertiary opacity-60 font-mono">
+            {time}
+          </span>
           <span className="text-text-secondary leading-snug">{text}</span>
-        </div>
+        </div>,
       )
     }
 
@@ -199,15 +217,19 @@ function renderActivityLog(messages: AgentMessage[], isActive: boolean, run: Age
         elements.push(
           <div key={`tc-${tc.id}`} className="border-b border-border-subtle/50">
             <div className="flex items-start gap-2 px-4 py-1.5 text-[12px]">
-              <span className="shrink-0 mt-0.5 text-[10px] text-text-tertiary opacity-60 font-mono">{time}</span>
+              <span className="shrink-0 mt-0.5 text-[10px] text-text-tertiary opacity-60 font-mono">
+                {time}
+              </span>
               <span className="text-text-secondary leading-snug">{label}</span>
             </div>
             {result ? (
-              <div className={`ml-[4.5rem] mr-4 mb-1.5 px-2.5 py-1 rounded text-[11px] leading-snug ${
-                result.IsError
-                  ? 'bg-dismiss/5 text-dismiss'
-                  : 'bg-black/[0.02] text-text-tertiary'
-              }`}>
+              <div
+                className={`ml-[4.5rem] mr-4 mb-1.5 px-2.5 py-1 rounded text-[11px] leading-snug ${
+                  result.IsError
+                    ? 'bg-dismiss/5 text-dismiss'
+                    : 'bg-black/[0.02] text-text-tertiary'
+                }`}
+              >
                 {formatToolResult(tc, result)}
               </div>
             ) : isActive ? (
@@ -216,7 +238,7 @@ function renderActivityLog(messages: AgentMessage[], isActive: boolean, run: Age
                 Running...
               </div>
             ) : null}
-          </div>
+          </div>,
         )
       }
     }
@@ -226,9 +248,14 @@ function renderActivityLog(messages: AgentMessage[], isActive: boolean, run: Age
   if (run.ResultSummary && !isActive) {
     const isFailed = run.Status === 'failed' || run.Status === 'cancelled'
     elements.push(
-      <div key="result-summary" className="mx-2 my-2 rounded-xl backdrop-blur-sm bg-white/50 border border-border-glass p-3.5">
+      <div
+        key="result-summary"
+        className="mx-2 my-2 rounded-xl backdrop-blur-sm bg-white/50 border border-border-glass p-3.5"
+      >
         <div className="flex items-center justify-between mb-2">
-          <span className={`text-[11px] font-semibold tracking-wide ${isFailed ? 'text-dismiss' : 'text-text-primary'}`}>
+          <span
+            className={`text-[11px] font-semibold tracking-wide ${isFailed ? 'text-dismiss' : 'text-text-primary'}`}
+          >
             {run.Status === 'cancelled' ? '◼ Cancelled' : isFailed ? '✗ Failed' : '✓ Done'}
           </span>
           {run.ResultLink && (
@@ -242,21 +269,19 @@ function renderActivityLog(messages: AgentMessage[], isActive: boolean, run: Age
             </a>
           )}
         </div>
-        <p className="text-[12px] leading-relaxed text-text-secondary">
-          {run.ResultSummary}
-        </p>
-      </div>
+        <p className="text-[12px] leading-relaxed text-text-secondary">{run.ResultSummary}</p>
+      </div>,
     )
   }
 
   return elements
 }
 
-function formatToolCall(name: string, input: Record<string, any>): string {
+function formatToolCall(name: string, input: Record<string, unknown>): string {
   if (name === 'Bash') {
     const cmd = String(input.command || '')
     if (cmd.includes('todotriage exec gh pr view')) return 'Fetching PR details'
-    if (cmd.includes('todotriage exec gh pr diff') && input.command?.includes('--file'))
+    if (cmd.includes('todotriage exec gh pr diff') && cmd.includes('--file'))
       return `Reading diff: ${extractFlag(cmd, '--file')}`
     if (cmd.includes('todotriage exec gh pr diff')) return 'Reading full diff'
     if (cmd.includes('todotriage exec gh pr files')) return 'Listing changed files'
@@ -270,13 +295,15 @@ function formatToolCall(name: string, input: Record<string, any>): string {
       const event = extractFlag(cmd, '--event')
       return `Submitting review (${event || 'comment'})`
     }
-    if (cmd.includes('todotriage exec gh pr comment-list-pending')) return 'Reviewing pending comments'
+    if (cmd.includes('todotriage exec gh pr comment-list-pending'))
+      return 'Reviewing pending comments'
     if (cmd.includes('todotriage exec gh pr add-comment')) return 'Adding comment'
-    if (cmd.includes('todotriage exec')) return `Running: ${cmd.split('todotriage exec ')[1]?.slice(0, 60)}`
+    if (cmd.includes('todotriage exec'))
+      return `Running: ${cmd.split('todotriage exec ')[1]?.slice(0, 60)}`
     return `Running command`
   }
   if (name === 'Read') return `Reading ${basename(String(input.file_path || ''))}`
-  if (name === 'Glob') return `Searching for ${input.pattern || 'files'}`
+  if (name === 'Glob') return `Searching for ${String(input.pattern || 'files')}`
   if (name === 'Grep') return `Searching for "${String(input.pattern || '').slice(0, 40)}"`
   return `${name}`
 }
@@ -374,7 +401,6 @@ function formatToolResult(tc: ToolCall, result: AgentMessage): string {
 
     // comment-update / comment-delete
     if (data.scope) return `✓ (${data.scope})`
-
   } catch {
     // Not JSON
   }
@@ -397,8 +423,8 @@ function formatToolResult(tc: ToolCall, result: AgentMessage): string {
   return text.length > 80 ? text.slice(0, 77) + '...' : text
 }
 
-function formatElapsed(dateStr: string): string {
-  const diff = Date.now() - new Date(dateStr).getTime()
+function formatElapsed(dateStr: string, now: number = Date.now()): string {
+  const diff = now - new Date(dateStr).getTime()
   const seconds = Math.floor(diff / 1000)
   if (seconds < 60) return `${seconds}s`
   const minutes = Math.floor(seconds / 60)
@@ -407,7 +433,6 @@ function formatElapsed(dateStr: string): string {
   const hours = Math.floor(minutes / 60)
   return `${hours}h ${minutes % 60}m`
 }
-
 
 function compactNum(n: number): string {
   if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k'

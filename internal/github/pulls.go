@@ -9,23 +9,23 @@ import (
 
 // PRView is the compact PR details returned by `gh pr view`.
 type PRView struct {
-	Number       int        `json:"number"`
-	Title        string     `json:"title"`
-	Body         string     `json:"body"`
-	State        string     `json:"state"`
-	Merged       bool       `json:"merged"`
-	AutoMerge    bool       `json:"auto_merge"`
-	Author       string     `json:"author"`
-	Additions    int        `json:"additions"`
-	Deletions    int        `json:"deletions"`
-	ChangedFiles int        `json:"changed_files"`
-	HeadRef      string     `json:"head_ref"`
-	BaseRef      string     `json:"base_ref"`
-	HeadSHA      string     `json:"head_sha"`
-	HTMLURL      string     `json:"html_url"`
-	CloneURL     string     `json:"clone_url"`
-	CreatedAt    string     `json:"created_at"`
-	UpdatedAt    string     `json:"updated_at"`
+	Number       int               `json:"number"`
+	Title        string            `json:"title"`
+	Body         string            `json:"body"`
+	State        string            `json:"state"`
+	Merged       bool              `json:"merged"`
+	AutoMerge    bool              `json:"auto_merge"`
+	Author       string            `json:"author"`
+	Additions    int               `json:"additions"`
+	Deletions    int               `json:"deletions"`
+	ChangedFiles int               `json:"changed_files"`
+	HeadRef      string            `json:"head_ref"`
+	BaseRef      string            `json:"base_ref"`
+	HeadSHA      string            `json:"head_sha"`
+	HTMLURL      string            `json:"html_url"`
+	CloneURL     string            `json:"clone_url"`
+	CreatedAt    string            `json:"created_at"`
+	UpdatedAt    string            `json:"updated_at"`
 	Reviews      []PRReviewSummary `json:"reviews"`
 	Comments     []PRTopComment    `json:"comments"`
 }
@@ -209,13 +209,13 @@ func (c *Client) GetPRDiff(owner, repo string, number int, file string) (string,
 
 // CommentThread is a top-level comment with its replies.
 type CommentThread struct {
-	ID        int             `json:"id"`
-	Author    string          `json:"author"`
-	Body      string          `json:"body"`
-	CreatedAt string          `json:"created_at"`
-	Replies   []ThreadReply   `json:"replies"`
-	Page      int             `json:"page"`
-	HasMore   bool            `json:"has_more"`
+	ID        int           `json:"id"`
+	Author    string        `json:"author"`
+	Body      string        `json:"body"`
+	CreatedAt string        `json:"created_at"`
+	Replies   []ThreadReply `json:"replies"`
+	Page      int           `json:"page"`
+	HasMore   bool          `json:"has_more"`
 }
 
 type ThreadReply struct {

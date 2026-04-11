@@ -9,7 +9,7 @@ require (
 
 require github.com/google/uuid v1.6.0
 
-require nhooyr.io/websocket v1.8.17
+require github.com/coder/websocket v1.8.14
 
 require (
 	github.com/danieljoos/wincred v1.2.3 // indirect

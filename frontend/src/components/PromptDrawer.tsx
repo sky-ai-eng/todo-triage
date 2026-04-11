@@ -38,7 +38,9 @@ function loadWidth(): number {
       const w = parseInt(stored, 10)
       if (w >= MIN_WIDTH && w <= MAX_WIDTH) return w
     }
-  } catch {}
+  } catch {
+    // best effort — localStorage may be disabled
+  }
   return 520
 }
 
@@ -67,31 +69,52 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
       return
     }
     if (!promptId) return
+    let cancelled = false
     fetch(`/api/prompts/${promptId}`)
-      .then(res => res.json())
-      .then(data => {
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        return res.json()
+      })
+      .then((data) => {
+        if (cancelled) return
         setName(data.prompt.name)
         setBody(data.prompt.body)
         setSource(data.prompt.source)
         setError('')
       })
-      .catch(() => setError('Failed to load prompt'))
+      .catch(() => {
+        if (!cancelled) setError('Failed to load prompt')
+      })
 
     fetch(`/api/prompts/${promptId}/stats`)
-      .then(res => res.json())
-      .then(setStats)
-      .catch(() => setStats(null))
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        return res.json()
+      })
+      .then((data) => {
+        if (!cancelled) setStats(data)
+      })
+      .catch(() => {
+        if (!cancelled) setStats(null)
+      })
+
+    return () => {
+      cancelled = true
+    }
   }, [promptId, isNew])
 
   // Resize drag handlers
-  const onMouseDown = useCallback((e: React.MouseEvent) => {
-    e.preventDefault()
-    dragging.current = true
-    startX.current = e.clientX
-    startWidth.current = width
-    document.body.style.cursor = 'col-resize'
-    document.body.style.userSelect = 'none'
-  }, [width])
+  const onMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault()
+      dragging.current = true
+      startX.current = e.clientX
+      startWidth.current = width
+      document.body.style.cursor = 'col-resize'
+      document.body.style.userSelect = 'none'
+    },
+    [width],
+  )
 
   useEffect(() => {
     const onMouseMove = (e: MouseEvent) => {
@@ -207,11 +230,13 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
             <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
               {/* Name */}
               <div>
-                <label className="block text-[12px] font-medium text-text-secondary mb-1.5">Name</label>
+                <label className="block text-[12px] font-medium text-text-secondary mb-1.5">
+                  Name
+                </label>
                 <input
                   type="text"
                   value={name}
-                  onChange={e => setName(e.target.value)}
+                  onChange={(e) => setName(e.target.value)}
                   placeholder="e.g. Thorough Code Review"
                   className="w-full px-3 py-2 rounded-lg border border-border-subtle bg-white/50 text-[13px] text-text-primary placeholder:text-text-tertiary focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 transition-colors"
                 />
@@ -219,10 +244,12 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
 
               {/* Body */}
               <div>
-                <label className="block text-[12px] font-medium text-text-secondary mb-1.5">Prompt Body</label>
+                <label className="block text-[12px] font-medium text-text-secondary mb-1.5">
+                  Prompt Body
+                </label>
                 <textarea
                   value={body}
-                  onChange={e => setBody(e.target.value)}
+                  onChange={(e) => setBody(e.target.value)}
                   placeholder="Describe what the agent should do..."
                   rows={16}
                   className="w-full px-3 py-2.5 rounded-lg border border-border-subtle bg-white/50 text-[13px] text-text-primary font-mono leading-relaxed placeholder:text-text-tertiary focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 transition-colors resize-y"
@@ -231,16 +258,21 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
 
               {/* Template variables reference */}
               <div>
-                <label className="block text-[12px] font-medium text-text-secondary mb-1.5">Template Variables</label>
+                <label className="block text-[12px] font-medium text-text-secondary mb-1.5">
+                  Template Variables
+                </label>
                 <div className="bg-black/[0.02] rounded-lg border border-border-subtle p-3 space-y-1.5">
-                  {TEMPLATE_VARS.map(v => (
+                  {TEMPLATE_VARS.map((v) => (
                     <div key={v.name} className="flex items-center gap-3">
-                      <code className="text-[11px] font-mono text-accent bg-accent/[0.06] px-1.5 py-0.5 rounded">{v.name}</code>
+                      <code className="text-[11px] font-mono text-accent bg-accent/[0.06] px-1.5 py-0.5 rounded">
+                        {v.name}
+                      </code>
                       <span className="text-[11px] text-text-tertiary">{v.desc}</span>
                     </div>
                   ))}
                   <p className="text-[10px] text-text-tertiary mt-2 pt-2 border-t border-border-subtle">
-                    Tool guidance and completion format are injected automatically. You only need to write the mission.
+                    Tool guidance and completion format are injected automatically. You only need to
+                    write the mission.
                   </p>
                 </div>
               </div>
@@ -248,13 +280,25 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
               {/* Stats */}
               {!isNew && stats && stats.total_runs > 0 && (
                 <div>
-                  <label className="block text-[12px] font-medium text-text-secondary mb-2">Performance</label>
+                  <label className="block text-[12px] font-medium text-text-secondary mb-2">
+                    Performance
+                  </label>
                   <div className="bg-black/[0.02] rounded-lg border border-border-subtle p-3 space-y-3">
                     {/* Stat pills */}
                     <div className="flex gap-2 flex-wrap">
                       <StatPill label="Runs" value={String(stats.total_runs)} />
                       <StatPill label="Avg cost" value={`$${stats.avg_cost_usd.toFixed(3)}`} />
-                      <StatPill label="Success" value={`${Math.round(stats.success_rate * 100)}%`} color={stats.success_rate >= 0.8 ? 'text-claim' : stats.success_rate >= 0.5 ? 'text-amber-600' : 'text-dismiss'} />
+                      <StatPill
+                        label="Success"
+                        value={`${Math.round(stats.success_rate * 100)}%`}
+                        color={
+                          stats.success_rate >= 0.8
+                            ? 'text-claim'
+                            : stats.success_rate >= 0.5
+                              ? 'text-amber-600'
+                              : 'text-dismiss'
+                        }
+                      />
                       <StatPill label="Avg time" value={formatDuration(stats.avg_duration_ms)} />
                     </div>
 
@@ -263,7 +307,7 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
                       <div>
                         <div className="flex items-end gap-[2px] h-8">
                           {stats.runs_per_day.map((d, i) => {
-                            const max = Math.max(...stats.runs_per_day.map(r => r.count), 1)
+                            const max = Math.max(...stats.runs_per_day.map((r) => r.count), 1)
                             const pct = d.count / max
                             return (
                               <div
@@ -271,7 +315,10 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
                                 className="flex-1 rounded-sm transition-all"
                                 style={{
                                   height: `${Math.max(pct * 100, 4)}%`,
-                                  background: d.count > 0 ? 'var(--color-accent)' : 'var(--color-border-subtle)',
+                                  background:
+                                    d.count > 0
+                                      ? 'var(--color-accent)'
+                                      : 'var(--color-border-subtle)',
                                   opacity: d.count > 0 ? 0.7 : 0.3,
                                 }}
                                 title={`${d.date}: ${d.count} run${d.count !== 1 ? 's' : ''}`}
@@ -298,7 +345,9 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
               {/* Source badge */}
               {!isNew && source && (
                 <div className="flex items-center gap-2">
-                  <span className={`text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded ${source === 'system' ? 'bg-black/[0.04] text-text-tertiary' : 'bg-accent/10 text-accent'}`}>
+                  <span
+                    className={`text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded ${source === 'system' ? 'bg-black/[0.04] text-text-tertiary' : 'bg-accent/10 text-accent'}`}
+                  >
                     {source}
                   </span>
                 </div>
@@ -312,10 +361,20 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
                   <button
                     onClick={handleDelete}
                     disabled={deleting}
-                    title={source === 'user' ? 'Permanently delete this prompt' : 'Hide this prompt — it will not reappear on import'}
+                    title={
+                      source === 'user'
+                        ? 'Permanently delete this prompt'
+                        : 'Hide this prompt — it will not reappear on import'
+                    }
                     className="text-[12px] text-text-tertiary hover:text-red-500 font-medium transition-colors disabled:opacity-50"
                   >
-                    {deleting ? (source === 'user' ? 'Deleting...' : 'Hiding...') : (source === 'user' ? 'Delete' : 'Hide')}
+                    {deleting
+                      ? source === 'user'
+                        ? 'Deleting...'
+                        : 'Hiding...'
+                      : source === 'user'
+                        ? 'Delete'
+                        : 'Hide'}
                   </button>
                 )}
               </div>

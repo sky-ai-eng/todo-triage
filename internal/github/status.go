@@ -7,26 +7,26 @@ import (
 
 // PRStatus is the live status for a single PR, fetched on demand.
 type PRStatus struct {
-	Mergeable    *bool          `json:"mergeable"`    // null = unknown/calculating
-	AutoMerge    bool           `json:"auto_merge"`
-	MergeableState string       `json:"mergeable_state"` // "clean", "dirty", "blocked", "behind", "unknown"
-	Reviews      []ReviewState  `json:"reviews"`
-	ChecksStatus ChecksStatus   `json:"checks_status"`
-	Conflicts    bool           `json:"conflicts"`
-	ReviewDecision string       `json:"review_decision"` // "approved", "changes_requested", "review_required", ""
+	Mergeable      *bool         `json:"mergeable"` // null = unknown/calculating
+	AutoMerge      bool          `json:"auto_merge"`
+	MergeableState string        `json:"mergeable_state"` // "clean", "dirty", "blocked", "behind", "unknown"
+	Reviews        []ReviewState `json:"reviews"`
+	ChecksStatus   ChecksStatus  `json:"checks_status"`
+	Conflicts      bool          `json:"conflicts"`
+	ReviewDecision string        `json:"review_decision"` // "approved", "changes_requested", "review_required", ""
 }
 
 type ReviewState struct {
-	Author    string `json:"author"`
-	State     string `json:"state"` // APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED, PENDING
+	Author      string `json:"author"`
+	State       string `json:"state"` // APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED, PENDING
 	SubmittedAt string `json:"submitted_at"`
 }
 
 type ChecksStatus struct {
-	Total    int `json:"total"`
-	Passing  int `json:"passing"`
-	Failing  int `json:"failing"`
-	Pending  int `json:"pending"`
+	Total   int `json:"total"`
+	Passing int `json:"passing"`
+	Failing int `json:"failing"`
+	Pending int `json:"pending"`
 }
 
 // GetPRStatus fetches the live status for a PR: mergeability, reviews, checks.
@@ -39,7 +39,9 @@ func (c *Client) GetPRStatus(owner, repo string, number int) (*PRStatus, error) 
 		return nil, err
 	}
 	var pr map[string]any
-	json.Unmarshal(prData, &pr)
+	if err := json.Unmarshal(prData, &pr); err != nil {
+		return nil, fmt.Errorf("parse PR response: %w", err)
+	}
 
 	if m, ok := pr["mergeable"].(bool); ok {
 		status.Mergeable = &m
@@ -127,7 +129,9 @@ func (c *Client) MarkPRReady(owner, repo string, number int) error {
 		return err
 	}
 	var pr map[string]any
-	json.Unmarshal(data, &pr)
+	if err := json.Unmarshal(data, &pr); err != nil {
+		return fmt.Errorf("parse PR response: %w", err)
+	}
 	nodeID := strVal(pr, "node_id")
 	if nodeID == "" {
 		return fmt.Errorf("could not get node_id for PR %d", number)
@@ -151,7 +155,9 @@ func (c *Client) ConvertPRToDraft(owner, repo string, number int) error {
 		return err
 	}
 	var pr map[string]any
-	json.Unmarshal(data, &pr)
+	if err := json.Unmarshal(data, &pr); err != nil {
+		return fmt.Errorf("parse PR response: %w", err)
+	}
 	nodeID := strVal(pr, "node_id")
 	if nodeID == "" {
 		return fmt.Errorf("could not get node_id for PR %d", number)

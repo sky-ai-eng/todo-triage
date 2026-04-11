@@ -18,8 +18,8 @@ import (
 	"github.com/sky-ai-eng/todo-triage/internal/jira"
 	"github.com/sky-ai-eng/todo-triage/internal/poller"
 	"github.com/sky-ai-eng/todo-triage/internal/repoprofile"
-	"github.com/sky-ai-eng/todo-triage/internal/skills"
 	"github.com/sky-ai-eng/todo-triage/internal/server"
+	"github.com/sky-ai-eng/todo-triage/internal/skills"
 	"github.com/sky-ai-eng/todo-triage/internal/worktree"
 	"github.com/sky-ai-eng/todo-triage/pkg/websocket"
 
@@ -108,8 +108,8 @@ func main() {
 		Name: "ws-broadcast",
 		Handle: func(evt domain.Event) {
 			wsHub.Broadcast(websocket.Event{
-				Type:  "event",
-				Data:  evt,
+				Type: "event",
+				Data: evt,
 			})
 			// Also send the legacy "tasks_updated" for backward compat
 			if evt.EventType == domain.EventSystemPollCompleted {

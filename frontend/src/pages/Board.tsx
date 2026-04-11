@@ -59,10 +59,10 @@ export default function Board() {
   const fetchTasks = useCallback(async () => {
     try {
       const [queuedRes, claimedRes, delegatedRes, doneRes] = await Promise.all([
-        fetch('/api/queue').then((r) => r.ok ? r.json() : []),
-        fetch('/api/tasks?status=claimed').then((r) => r.ok ? r.json() : []),
-        fetch('/api/tasks?status=delegated').then((r) => r.ok ? r.json() : []),
-        fetch('/api/tasks?status=done').then((r) => r.ok ? r.json() : []),
+        fetch('/api/queue').then((r) => (r.ok ? r.json() : [])),
+        fetch('/api/tasks?status=claimed').then((r) => (r.ok ? r.json() : [])),
+        fetch('/api/tasks?status=delegated').then((r) => (r.ok ? r.json() : [])),
+        fetch('/api/tasks?status=done').then((r) => (r.ok ? r.json() : [])),
       ])
       setQueued(queuedRes)
       setClaimed(claimedRes)
@@ -94,45 +94,52 @@ export default function Board() {
     }
   }, [])
 
-  useEffect(() => { fetchTasks() }, [fetchTasks])
+  useEffect(() => {
+    fetchTasks()
+  }, [fetchTasks])
 
-  useWebSocket(useCallback((event: WSEvent) => {
-    if (event.type === 'agent_run_update') {
-      setAgentRuns((prev) => {
-        const updated = { ...prev }
-        for (const [taskId, run] of Object.entries(updated)) {
-          if (run.ID === event.run_id) {
-            updated[taskId] = { ...run, Status: event.data.status }
-            fetch(`/api/agent/runs/${event.run_id}`)
-              .then((r) => r.json())
-              .then((fullRun: AgentRun) => {
-                setAgentRuns((p) => {
-                  const u = { ...p }
-                  for (const [tid, r] of Object.entries(u)) {
-                    if (r.ID === event.run_id) u[tid] = fullRun
-                  }
-                  return u
-                })
-              })
-            break
+  useWebSocket(
+    useCallback(
+      (event: WSEvent) => {
+        if (event.type === 'agent_run_update') {
+          setAgentRuns((prev) => {
+            const updated = { ...prev }
+            for (const [taskId, run] of Object.entries(updated)) {
+              if (run.ID === event.run_id) {
+                updated[taskId] = { ...run, Status: event.data.status }
+                fetch(`/api/agent/runs/${event.run_id}`)
+                  .then((r) => r.json())
+                  .then((fullRun: AgentRun) => {
+                    setAgentRuns((p) => {
+                      const u = { ...p }
+                      for (const [tid, r] of Object.entries(u)) {
+                        if (r.ID === event.run_id) u[tid] = fullRun
+                      }
+                      return u
+                    })
+                  })
+                break
+              }
+            }
+            return updated
+          })
+          if (['completed', 'failed', 'pending_approval'].includes(event.data.status)) {
+            fetchTasks()
           }
         }
-        return updated
-      })
-      if (['completed', 'failed', 'pending_approval'].includes(event.data.status)) {
-        fetchTasks()
-      }
-    }
-    if (event.type === 'agent_message') {
-      setAgentMessages((prev) => ({
-        ...prev,
-        [event.run_id]: [...(prev[event.run_id] || []), event.data as AgentMessage],
-      }))
-    }
-    if (event.type === 'tasks_updated' || event.type === 'scoring_completed') {
-      fetchTasks()
-    }
-  }, [fetchTasks]))
+        if (event.type === 'agent_message') {
+          setAgentMessages((prev) => ({
+            ...prev,
+            [event.run_id]: [...(prev[event.run_id] || []), event.data as AgentMessage],
+          }))
+        }
+        if (event.type === 'tasks_updated' || event.type === 'scoring_completed') {
+          fetchTasks()
+        }
+      },
+      [fetchTasks],
+    ),
+  )
 
   // Agent column: attention-weighted ordering
   // Top: needs review (pending_approval), then failed/cancelled, then running at bottom
@@ -156,12 +163,13 @@ export default function Board() {
     }
     if (search.trim()) {
       const q = search.toLowerCase()
-      items = items.filter((t) =>
-        t.title.toLowerCase().includes(q) ||
-        t.repo?.toLowerCase().includes(q) ||
-        t.author?.toLowerCase().includes(q) ||
-        t.ai_summary?.toLowerCase().includes(q) ||
-        t.event_type?.toLowerCase().includes(q)
+      items = items.filter(
+        (t) =>
+          t.title.toLowerCase().includes(q) ||
+          t.repo?.toLowerCase().includes(q) ||
+          t.author?.toLowerCase().includes(q) ||
+          t.ai_summary?.toLowerCase().includes(q) ||
+          t.event_type?.toLowerCase().includes(q),
       )
     }
     return items
@@ -186,17 +194,18 @@ export default function Board() {
   }, [queued, claimed, delegated, done])
 
   // Column membership for dragging
-  const getColumn = useCallback((taskId: string): ColumnId | null => {
-    if (queued.some((t) => t.id === taskId)) return 'queue'
-    if (claimed.some((t) => t.id === taskId)) return 'you'
-    if (delegated.some((t) => t.id === taskId)) return 'agent'
-    if (done.some((t) => t.id === taskId)) return 'done'
-    return null
-  }, [queued, claimed, delegated, done])
-
-  const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 5 } })
+  const getColumn = useCallback(
+    (taskId: string): ColumnId | null => {
+      if (queued.some((t) => t.id === taskId)) return 'queue'
+      if (claimed.some((t) => t.id === taskId)) return 'you'
+      if (delegated.some((t) => t.id === taskId)) return 'agent'
+      if (done.some((t) => t.id === taskId)) return 'done'
+      return null
+    },
+    [queued, claimed, delegated, done],
   )
+
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
 
   const handleDragStart = (event: DragStartEvent) => {
     const id = String(event.active.id)
@@ -210,7 +219,10 @@ export default function Board() {
 
   const handleDragOver = (event: DragOverEvent) => {
     const { over } = event
-    if (!over) { setOverColumn(null); return }
+    if (!over) {
+      setOverColumn(null)
+      return
+    }
 
     const overId = String(over.id)
     if (['you', 'agent', 'done'].includes(overId)) {
@@ -309,7 +321,10 @@ export default function Board() {
     }
 
     // Any → Queue: undo/requeue
-    if (targetCol === 'queue' || (wasDraggingFromSidebar && !['you', 'agent', 'done'].includes(overId))) {
+    if (
+      targetCol === 'queue' ||
+      (wasDraggingFromSidebar && !['you', 'agent', 'done'].includes(overId))
+    ) {
       // Don't requeue if source is already queue
       if (sourceCol !== 'queue') {
         await fetch(`/api/tasks/${taskId}/undo`, { method: 'POST' })
@@ -319,23 +334,29 @@ export default function Board() {
     }
   }
 
-  const handleRequeue = useCallback(async (taskId: string) => {
-    await fetch(`/api/tasks/${taskId}/undo`, { method: 'POST' })
-    fetchTasks()
-  }, [fetchTasks])
+  const handleRequeue = useCallback(
+    async (taskId: string) => {
+      await fetch(`/api/tasks/${taskId}/undo`, { method: 'POST' })
+      fetchTasks()
+    },
+    [fetchTasks],
+  )
 
-  const handlePromptSelected = useCallback(async (promptId: string) => {
-    setShowPromptPicker(false)
-    const task = pendingDelegateTask.current
-    if (!task) return
-    pendingDelegateTask.current = null
-    await fetch(`/api/tasks/${task.id}/swipe`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'delegate', hesitation_ms: 0, prompt_id: promptId }),
-    })
-    fetchTasks()
-  }, [fetchTasks])
+  const handlePromptSelected = useCallback(
+    async (promptId: string) => {
+      setShowPromptPicker(false)
+      const task = pendingDelegateTask.current
+      if (!task) return
+      pendingDelegateTask.current = null
+      await fetch(`/api/tasks/${task.id}/swipe`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'delegate', hesitation_ms: 0, prompt_id: promptId }),
+      })
+      fetchTasks()
+    },
+    [fetchTasks],
+  )
 
   const activeTask = activeId ? allTasks.get(activeId) : null
 
@@ -369,8 +390,20 @@ export default function Board() {
               onClick={() => setSidebarOpen(true)}
               className="fixed left-4 top-20 bottom-4 w-10 z-30 bg-surface-raised/80 backdrop-blur-xl border border-border-glass rounded-2xl shadow-sm shadow-black/[0.03] flex flex-col items-center pt-4 gap-3 hover:border-accent/20 transition-colors group"
             >
-              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" className="text-text-tertiary group-hover:text-accent transition-colors shrink-0">
-                <path d="M6 3l5 5-5 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+              <svg
+                width="16"
+                height="16"
+                viewBox="0 0 16 16"
+                fill="none"
+                className="text-text-tertiary group-hover:text-accent transition-colors shrink-0"
+              >
+                <path
+                  d="M6 3l5 5-5 5"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
               </svg>
               <span className="text-[11px] font-medium text-text-tertiary bg-black/[0.04] rounded-full px-2 py-0.5 shrink-0">
                 {queued.length}
@@ -402,94 +435,93 @@ export default function Board() {
                 transition={{ type: 'spring', damping: 28, stiffness: 300 }}
                 className="fixed left-4 top-20 bottom-4 w-[280px] z-40 bg-surface-raised/95 backdrop-blur-xl border border-border-glass rounded-2xl shadow-xl shadow-black/[0.08] flex flex-col overflow-hidden"
               >
-              {/* Header */}
-              <div className="px-4 pt-4 pb-3 border-b border-border-subtle shrink-0">
-                <div className="flex items-center justify-between mb-3">
-                  <div className="flex items-center gap-2">
-                    <h2 className="text-[13px] font-semibold text-text-primary">Queue</h2>
-                    <span className="text-[11px] text-text-tertiary bg-black/[0.04] rounded-full px-2 py-0.5">
-                      {filteredQueue.length}{filteredQueue.length !== queued.length ? `/${queued.length}` : ''}
-                    </span>
-                  </div>
-                  <button
-                    onClick={() => setSidebarOpen(false)}
-                    aria-label="Close queue sidebar"
-                    className="text-text-tertiary hover:text-text-secondary transition-colors text-lg leading-none px-1"
-                  >
-                    &times;
-                  </button>
-                </div>
-
-                {/* Search */}
-                <input
-                  type="text"
-                  placeholder="Search tasks..."
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  className="w-full bg-white/50 border border-border-subtle rounded-xl px-3 py-2 text-[12px] text-text-primary placeholder-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent/40 transition-colors mb-2"
-                  autoFocus
-                />
-
-                {/* Source filter */}
-                <div className="flex gap-1 mb-1">
-                  {(['all', 'github', 'jira'] as const).map((f) => (
+                {/* Header */}
+                <div className="px-4 pt-4 pb-3 border-b border-border-subtle shrink-0">
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-2">
+                      <h2 className="text-[13px] font-semibold text-text-primary">Queue</h2>
+                      <span className="text-[11px] text-text-tertiary bg-black/[0.04] rounded-full px-2 py-0.5">
+                        {filteredQueue.length}
+                        {filteredQueue.length !== queued.length ? `/${queued.length}` : ''}
+                      </span>
+                    </div>
                     <button
-                      key={f}
-                      onClick={() => setSourceFilter(f)}
-                      className={`text-[10px] px-2 py-0.5 rounded-full transition-colors ${
-                        sourceFilter === f
-                          ? 'bg-accent/10 text-accent font-medium'
-                          : 'text-text-tertiary hover:text-text-secondary'
-                      }`}
+                      onClick={() => setSidebarOpen(false)}
+                      aria-label="Close queue sidebar"
+                      className="text-text-tertiary hover:text-text-secondary transition-colors text-lg leading-none px-1"
                     >
-                      {f === 'all' ? 'All' : f === 'github' ? 'GitHub' : 'Jira'}
+                      &times;
                     </button>
-                  ))}
-                </div>
+                  </div>
 
-                {/* Event type quick-filter chips */}
-                {queueEventTypes.length > 0 && (
-                  <div className="flex flex-wrap gap-1 mt-1">
-                    {queueEventTypes.map((et) => (
+                  {/* Search */}
+                  <input
+                    type="text"
+                    placeholder="Search tasks..."
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                    className="w-full bg-white/50 border border-border-subtle rounded-xl px-3 py-2 text-[12px] text-text-primary placeholder-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent/40 transition-colors mb-2"
+                    autoFocus
+                  />
+
+                  {/* Source filter */}
+                  <div className="flex gap-1 mb-1">
+                    {(['all', 'github', 'jira'] as const).map((f) => (
                       <button
-                        key={et}
-                        onClick={() => setSearch(et)}
-                        className="opacity-70 hover:opacity-100 transition-opacity"
+                        key={f}
+                        onClick={() => setSourceFilter(f)}
+                        className={`text-[10px] px-2 py-0.5 rounded-full transition-colors ${
+                          sourceFilter === f
+                            ? 'bg-accent/10 text-accent font-medium'
+                            : 'text-text-tertiary hover:text-text-secondary'
+                        }`}
                       >
-                        <EventBadge eventType={et} compact />
+                        {f === 'all' ? 'All' : f === 'github' ? 'GitHub' : 'Jira'}
                       </button>
                     ))}
                   </div>
-                )}
-              </div>
 
-              {/* Scrollable task list */}
-              <div className="flex-1 overflow-y-auto p-2 space-y-2">
-                <p className="text-[10px] text-text-tertiary px-2 py-1">
-                  Drag tasks to a column
-                </p>
-                {filteredQueue.length === 0 ? (
-                  <p className="text-[12px] text-text-tertiary text-center py-8">
-                    {queued.length === 0 ? 'Queue is empty' : 'No matching tasks'}
-                  </p>
-                ) : (
-                  <SortableContext items={filteredQueue.map((t) => t.id)} strategy={verticalListSortingStrategy}>
-                    {filteredQueue.map((task) => (
-                      <SidebarTaskCard key={task.id} task={task} />
-                    ))}
-                  </SortableContext>
-                )}
-              </div>
+                  {/* Event type quick-filter chips */}
+                  {queueEventTypes.length > 0 && (
+                    <div className="flex flex-wrap gap-1 mt-1">
+                      {queueEventTypes.map((et) => (
+                        <button
+                          key={et}
+                          onClick={() => setSearch(et)}
+                          className="opacity-70 hover:opacity-100 transition-opacity"
+                        >
+                          <EventBadge eventType={et} compact />
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Scrollable task list */}
+                <div className="flex-1 overflow-y-auto p-2 space-y-2">
+                  <p className="text-[10px] text-text-tertiary px-2 py-1">Drag tasks to a column</p>
+                  {filteredQueue.length === 0 ? (
+                    <p className="text-[12px] text-text-tertiary text-center py-8">
+                      {queued.length === 0 ? 'Queue is empty' : 'No matching tasks'}
+                    </p>
+                  ) : (
+                    <SortableContext
+                      items={filteredQueue.map((t) => t.id)}
+                      strategy={verticalListSortingStrategy}
+                    >
+                      {filteredQueue.map((task) => (
+                        <SidebarTaskCard key={task.id} task={task} />
+                      ))}
+                    </SortableContext>
+                  )}
+                </div>
               </motion.div>
             </>
           )}
         </AnimatePresence>
 
         {/* Main board — 3 columns */}
-        <div
-          className="grid grid-cols-3 gap-6 min-h-[70vh]"
-          style={{ marginLeft: '3rem' }}
-        >
+        <div className="grid grid-cols-3 gap-6 min-h-[70vh]" style={{ marginLeft: '3rem' }}>
           {/* You column */}
           <DroppableColumn
             id="you"
@@ -497,12 +529,19 @@ export default function Board() {
             count={claimed.length}
             isOver={overColumn === 'you'}
           >
-            <SortableContext items={claimed.map((t) => t.id)} strategy={verticalListSortingStrategy}>
+            <SortableContext
+              items={claimed.map((t) => t.id)}
+              strategy={verticalListSortingStrategy}
+            >
               {claimed.length === 0 ? (
                 <EmptyColumn>Nothing claimed</EmptyColumn>
               ) : (
                 claimed.map((task) => (
-                  <SortableTaskCard key={task.id} task={task} onRequeue={() => handleRequeue(task.id)} />
+                  <SortableTaskCard
+                    key={task.id}
+                    task={task}
+                    onRequeue={() => handleRequeue(task.id)}
+                  />
                 ))
               )}
             </SortableContext>
@@ -515,7 +554,10 @@ export default function Board() {
             count={agentItems.length}
             isOver={overColumn === 'agent'}
           >
-            <SortableContext items={agentItems.filter((t) => !agentRuns[t.id]).map((t) => t.id)} strategy={verticalListSortingStrategy}>
+            <SortableContext
+              items={agentItems.filter((t) => !agentRuns[t.id]).map((t) => t.id)}
+              strategy={verticalListSortingStrategy}
+            >
               {agentItems.length === 0 ? (
                 <EmptyColumn>No delegated tasks</EmptyColumn>
               ) : (
@@ -530,8 +572,12 @@ export default function Board() {
                       onReview={() => setReviewRunID(agentRuns[task.id].ID)}
                     />
                   ) : (
-                    <SortableTaskCard key={task.id} task={task} onRequeue={() => handleRequeue(task.id)} />
-                  )
+                    <SortableTaskCard
+                      key={task.id}
+                      task={task}
+                      onRequeue={() => handleRequeue(task.id)}
+                    />
+                  ),
                 )
               )}
             </SortableContext>
@@ -544,7 +590,10 @@ export default function Board() {
             count={done.length}
             isOver={overColumn === 'done'}
           >
-            <SortableContext items={done.filter((t) => !agentRuns[t.id]).map((t) => t.id)} strategy={verticalListSortingStrategy}>
+            <SortableContext
+              items={done.filter((t) => !agentRuns[t.id]).map((t) => t.id)}
+              strategy={verticalListSortingStrategy}
+            >
               {done.length === 0 ? (
                 <EmptyColumn>No completed items</EmptyColumn>
               ) : (
@@ -560,7 +609,7 @@ export default function Board() {
                     />
                   ) : (
                     <SortableTaskCard key={task.id} task={task} />
-                  )
+                  ),
                 )
               )}
             </SortableContext>
@@ -581,15 +630,25 @@ export default function Board() {
       <PromptPicker
         open={showPromptPicker}
         onSelect={handlePromptSelected}
-        onClose={() => { setShowPromptPicker(false); pendingDelegateTask.current = null }}
-        onEditPrompts={() => { setShowPromptPicker(false); pendingDelegateTask.current = null; window.location.href = '/prompts' }}
+        onClose={() => {
+          setShowPromptPicker(false)
+          pendingDelegateTask.current = null
+        }}
+        onEditPrompts={() => {
+          setShowPromptPicker(false)
+          pendingDelegateTask.current = null
+          window.location.href = '/prompts'
+        }}
       />
 
       {/* Review overlay for pending_approval runs */}
       <ReviewOverlay
         runID={reviewRunID ?? ''}
         open={reviewRunID !== null}
-        onClose={() => { setReviewRunID(null); fetchTasks() }}
+        onClose={() => {
+          setReviewRunID(null)
+          fetchTasks()
+        }}
       />
     </DndContext>
   )
@@ -597,14 +656,9 @@ export default function Board() {
 
 /** Compact card for the sidebar queue — smaller than a full TaskCard */
 function SidebarTaskCard({ task }: { task: Task }) {
-  const {
-    attributes,
-    listeners,
-    setNodeRef,
-    transform,
-    transition,
-    isDragging,
-  } = useSortable({ id: task.id })
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: task.id,
+  })
 
   const style: React.CSSProperties = {
     transform: CSS.Transform.toString(transform),
@@ -621,9 +675,13 @@ function SidebarTaskCard({ task }: { task: Task }) {
       {...listeners}
     >
       <div className="flex items-center gap-1.5 mb-1">
-        <span className={`text-[9px] font-semibold uppercase tracking-wider px-1 py-0.5 rounded ${
-          task.source === 'github' ? 'bg-black/[0.04] text-text-secondary' : 'bg-blue-500/10 text-blue-600'
-        }`}>
+        <span
+          className={`text-[9px] font-semibold uppercase tracking-wider px-1 py-0.5 rounded ${
+            task.source === 'github'
+              ? 'bg-black/[0.04] text-text-secondary'
+              : 'bg-blue-500/10 text-blue-600'
+          }`}
+        >
           {task.source === 'github' ? 'GH' : 'Jira'}
         </span>
         <EventBadge eventType={task.event_type} compact />
@@ -640,14 +698,9 @@ function SidebarTaskCard({ task }: { task: Task }) {
 }
 
 function SortableTaskCard({ task, onRequeue }: { task: Task; onRequeue?: () => void }) {
-  const {
-    attributes,
-    listeners,
-    setNodeRef,
-    transform,
-    transition,
-    isDragging,
-  } = useSortable({ id: task.id })
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: task.id,
+  })
 
   const style: React.CSSProperties = {
     transform: CSS.Transform.toString(transform),
@@ -696,9 +749,7 @@ function DroppableColumn({
       <div
         ref={setNodeRef}
         className={`flex-1 rounded-2xl border bg-black/[0.01] p-3 space-y-3 overflow-y-auto max-h-[calc(100vh-180px)] transition-colors ${
-          isOver
-            ? 'border-accent/30 bg-accent/[0.03]'
-            : 'border-border-subtle'
+          isOver ? 'border-accent/30 bg-accent/[0.03]' : 'border-border-subtle'
         }`}
       >
         {children}
@@ -708,7 +759,5 @@ function DroppableColumn({
 }
 
 function EmptyColumn({ children }: { children: React.ReactNode }) {
-  return (
-    <p className="text-[12px] text-text-tertiary text-center py-12">{children}</p>
-  )
+  return <p className="text-[12px] text-text-tertiary text-center py-12">{children}</p>
 }

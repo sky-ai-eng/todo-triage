@@ -44,7 +44,7 @@ const SWIPE_VELOCITY = 300
 export default function Cards() {
   const [tasks, setTasks] = useState<Task[]>([])
   const [loadState, setLoadState] = useState<LoadState>('loading')
-  const [cardStart, setCardStart] = useState(Date.now())
+  const [cardStart, setCardStart] = useState(() => Date.now())
   const [undoTask, setUndoTask] = useState<{ id: string; action: string } | null>(null)
   const [showPromptPicker, setShowPromptPicker] = useState(false)
   const [filterOpen, setFilterOpen] = useState(false)
@@ -54,11 +54,18 @@ export default function Cards() {
 
   // Track shift key for prompt picker override
   useEffect(() => {
-    const down = (e: KeyboardEvent) => { if (e.key === 'Shift') shiftHeld.current = true }
-    const up = (e: KeyboardEvent) => { if (e.key === 'Shift') shiftHeld.current = false }
+    const down = (e: KeyboardEvent) => {
+      if (e.key === 'Shift') shiftHeld.current = true
+    }
+    const up = (e: KeyboardEvent) => {
+      if (e.key === 'Shift') shiftHeld.current = false
+    }
     window.addEventListener('keydown', down)
     window.addEventListener('keyup', up)
-    return () => { window.removeEventListener('keydown', down); window.removeEventListener('keyup', up) }
+    return () => {
+      window.removeEventListener('keydown', down)
+      window.removeEventListener('keyup', up)
+    }
   }, [])
 
   const fetchQueue = useCallback(async (preserveCurrent = false) => {
@@ -81,22 +88,31 @@ export default function Cards() {
     }
   }, [])
 
+  // Initial queue load on mount. fetchQueue calls setState internally, which
+  // the lint rule flags transitively — but fetching data on mount is the
+  // canonical use of an effect and the safe pattern here.
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchQueue()
   }, [fetchQueue])
 
   // Handle WS events for live triage pipeline updates
-  useWebSocket(useCallback((event: WSEvent) => {
-    if (event.type === 'tasks_updated') {
-      // New tasks arrived from poller — refetch but keep current card stable
-      fetchQueue(true)
-    }
+  useWebSocket(
+    useCallback(
+      (event: WSEvent) => {
+        if (event.type === 'tasks_updated') {
+          // New tasks arrived from poller — refetch but keep current card stable
+          fetchQueue(true)
+        }
 
-    if (event.type === 'scoring_started' || event.type === 'scoring_completed') {
-      // Refetch to pick up scoring_status changes
-      fetchQueue(true)
-    }
-  }, [fetchQueue]))
+        if (event.type === 'scoring_started' || event.type === 'scoring_completed') {
+          // Refetch to pick up scoring_status changes
+          fetchQueue(true)
+        }
+      },
+      [fetchQueue],
+    ),
+  )
 
   const swipe = async (action: SwipeAction, promptId?: string) => {
     const task = tasks[0]
@@ -115,17 +131,22 @@ export default function Cards() {
     const hesitationMs = Date.now() - cardStart
 
     try {
-      const res = action === 'snooze'
-        ? await fetch(`/api/tasks/${task.id}/snooze`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ until: '2h', hesitation_ms: hesitationMs }),
-          })
-        : await fetch(`/api/tasks/${task.id}/swipe`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action, hesitation_ms: hesitationMs, ...(promptId && { prompt_id: promptId }) }),
-          })
+      const res =
+        action === 'snooze'
+          ? await fetch(`/api/tasks/${task.id}/snooze`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ until: '2h', hesitation_ms: hesitationMs }),
+            })
+          : await fetch(`/api/tasks/${task.id}/swipe`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                action,
+                hesitation_ms: hesitationMs,
+                ...(promptId && { prompt_id: promptId }),
+              }),
+            })
 
       if (!res.ok) return
 
@@ -168,8 +189,10 @@ export default function Cards() {
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'ArrowLeft') swipe('dismiss')
       else if (e.key === 'ArrowRight') swipe('claim')
-      else if (e.key === 'ArrowUp') { shiftHeld.current = e.shiftKey; swipe('delegate') }
-      else if (e.key === 'ArrowDown') swipe('snooze')
+      else if (e.key === 'ArrowUp') {
+        shiftHeld.current = e.shiftKey
+        swipe('delegate')
+      } else if (e.key === 'ArrowDown') swipe('snooze')
       else if ((e.ctrlKey || e.metaKey) && e.key === 'z') undo()
     }
     window.addEventListener('keydown', handler)
@@ -205,7 +228,7 @@ export default function Cards() {
         <div className="relative">
           <EventFilterPanel
             open={filterOpen}
-            onToggle={() => setFilterOpen(o => !o)}
+            onToggle={() => setFilterOpen((o) => !o)}
             onChange={() => fetchQueue()}
           />
         </div>
@@ -223,7 +246,7 @@ export default function Cards() {
           </p>
           <EventFilterPanel
             open={filterOpen}
-            onToggle={() => setFilterOpen(o => !o)}
+            onToggle={() => setFilterOpen((o) => !o)}
             onChange={() => fetchQueue()}
           />
         </div>
@@ -259,9 +282,24 @@ export default function Cards() {
 
         {/* Action buttons */}
         <div className="flex gap-3">
-          <ActionButton onClick={() => swipe('dismiss')} color="dismiss" label="Dismiss" shortcut="←" />
-          <ActionButton onClick={() => swipe('snooze')} color="snooze" label="Snooze" shortcut="↓" />
-          <ActionButton onClick={() => swipe('delegate')} color="delegate" label="Delegate" shortcut="↑" />
+          <ActionButton
+            onClick={() => swipe('dismiss')}
+            color="dismiss"
+            label="Dismiss"
+            shortcut="←"
+          />
+          <ActionButton
+            onClick={() => swipe('snooze')}
+            color="snooze"
+            label="Snooze"
+            shortcut="↓"
+          />
+          <ActionButton
+            onClick={() => swipe('delegate')}
+            color="delegate"
+            label="Delegate"
+            shortcut="↑"
+          />
           <ActionButton onClick={() => swipe('claim')} color="claim" label="Claim" shortcut="→" />
         </div>
 
@@ -275,7 +313,13 @@ export default function Cards() {
               className="fixed bottom-8 left-1/2 -translate-x-1/2 backdrop-blur-xl bg-white/70 border border-border-glass rounded-full px-5 py-2.5 flex items-center gap-3 shadow-lg shadow-black/5"
             >
               <span className="text-sm text-text-secondary">
-                {undoTask.action === 'dismiss' ? 'Dismissed' : undoTask.action === 'claim' ? 'Claimed' : undoTask.action === 'delegate' ? 'Delegated' : 'Snoozed'}
+                {undoTask.action === 'dismiss'
+                  ? 'Dismissed'
+                  : undoTask.action === 'claim'
+                    ? 'Claimed'
+                    : undoTask.action === 'delegate'
+                      ? 'Delegated'
+                      : 'Snoozed'}
               </span>
               <button
                 onClick={undo}
@@ -301,7 +345,12 @@ export default function Cards() {
   )
 }
 
-function ActionButton({ onClick, color, label, shortcut }: {
+function ActionButton({
+  onClick,
+  color,
+  label,
+  shortcut,
+}: {
   onClick: () => void
   color: 'dismiss' | 'claim' | 'delegate' | 'snooze'
   label: string
@@ -324,7 +373,13 @@ function ActionButton({ onClick, color, label, shortcut }: {
   )
 }
 
-function SwipeCard({ task, onSwipe, style, interactive = true, isScoring = false }: {
+function SwipeCard({
+  task,
+  onSwipe,
+  style,
+  interactive = true,
+  isScoring = false,
+}: {
   task: Task
   onSwipe?: (action: SwipeAction) => void
   style?: React.CSSProperties
@@ -378,7 +433,7 @@ function SwipeCard({ task, onSwipe, style, interactive = true, isScoring = false
           background: useTransform(
             x,
             [-150, 0, 150],
-            ['rgba(255,255,255,0.55)', 'rgba(255,255,255,0.6)', 'rgba(255,255,255,0.55)']
+            ['rgba(255,255,255,0.55)', 'rgba(255,255,255,0.6)', 'rgba(255,255,255,0.55)'],
           ),
         }}
       />
@@ -391,13 +446,22 @@ function SwipeCard({ task, onSwipe, style, interactive = true, isScoring = false
       {/* Direction labels — only on the interactive top card */}
       {interactive && (
         <>
-          <motion.div style={{ opacity: leftOpacity }} className="absolute top-6 right-6 text-dismiss font-semibold text-xs tracking-wide uppercase border border-dismiss/30 rounded-full px-3 py-1">
+          <motion.div
+            style={{ opacity: leftOpacity }}
+            className="absolute top-6 right-6 text-dismiss font-semibold text-xs tracking-wide uppercase border border-dismiss/30 rounded-full px-3 py-1"
+          >
             Dismiss
           </motion.div>
-          <motion.div style={{ opacity: rightOpacity }} className="absolute top-6 right-6 text-claim font-semibold text-xs tracking-wide uppercase border border-claim/30 rounded-full px-3 py-1">
+          <motion.div
+            style={{ opacity: rightOpacity }}
+            className="absolute top-6 right-6 text-claim font-semibold text-xs tracking-wide uppercase border border-claim/30 rounded-full px-3 py-1"
+          >
             Claim
           </motion.div>
-          <motion.div style={{ opacity: upOpacity }} className="absolute top-6 right-6 text-delegate font-semibold text-xs tracking-wide uppercase border border-delegate/30 rounded-full px-3 py-1">
+          <motion.div
+            style={{ opacity: upOpacity }}
+            className="absolute top-6 right-6 text-delegate font-semibold text-xs tracking-wide uppercase border border-delegate/30 rounded-full px-3 py-1"
+          >
             Delegate
           </motion.div>
         </>
@@ -407,19 +471,21 @@ function SwipeCard({ task, onSwipe, style, interactive = true, isScoring = false
       <div className="relative h-full p-7 flex flex-col overflow-hidden">
         {/* Source badge row */}
         <div className="flex items-center gap-2.5 mb-4 shrink-0">
-          <span className={`text-[11px] font-semibold uppercase tracking-wider px-2.5 py-1 rounded-full ${
-            task.source === 'github'
-              ? 'bg-black/[0.05] text-text-secondary'
-              : 'bg-blue-500/10 text-blue-600'
-          }`}>
+          <span
+            className={`text-[11px] font-semibold uppercase tracking-wider px-2.5 py-1 rounded-full ${
+              task.source === 'github'
+                ? 'bg-black/[0.05] text-text-secondary'
+                : 'bg-blue-500/10 text-blue-600'
+            }`}
+          >
             {task.source === 'github' ? 'GitHub' : 'Jira'}
           </span>
           <EventBadge eventType={task.event_type} />
-          {task.repo && (
-            <span className="text-[12px] text-text-tertiary">{task.repo}</span>
-          )}
+          {task.repo && <span className="text-[12px] text-text-tertiary">{task.repo}</span>}
           {task.severity && (
-            <span className="text-[11px] font-medium text-accent bg-accent-soft px-2 py-0.5 rounded-full">{task.severity}</span>
+            <span className="text-[11px] font-medium text-accent bg-accent-soft px-2 py-0.5 rounded-full">
+              {task.severity}
+            </span>
           )}
         </div>
 
@@ -431,12 +497,18 @@ function SwipeCard({ task, onSwipe, style, interactive = true, isScoring = false
         {/* AI Summary — shimmer when scoring, content when scored */}
         {task.ai_summary ? (
           <div className="flex items-start gap-2 mb-3 shrink-0">
-            <svg className="w-3.5 h-3.5 mt-0.5 shrink-0 text-text-tertiary opacity-50" viewBox="0 0 16 16" fill="none">
-              <path d="M8 1.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13zM7 5h2v5H7V5zm0 6h2v2H7v-2z" fill="currentColor" fillRule="evenodd" />
+            <svg
+              className="w-3.5 h-3.5 mt-0.5 shrink-0 text-text-tertiary opacity-50"
+              viewBox="0 0 16 16"
+              fill="none"
+            >
+              <path
+                d="M8 1.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13zM7 5h2v5H7V5zm0 6h2v2H7v-2z"
+                fill="currentColor"
+                fillRule="evenodd"
+              />
             </svg>
-            <p className="text-[13px] text-text-secondary leading-relaxed">
-              {task.ai_summary}
-            </p>
+            <p className="text-[13px] text-text-secondary leading-relaxed">{task.ai_summary}</p>
           </div>
         ) : isScoring ? (
           <div className="mb-3 shrink-0 space-y-2">
@@ -463,7 +535,10 @@ function SwipeCard({ task, onSwipe, style, interactive = true, isScoring = false
         {task.labels.length > 0 && (
           <div className="flex flex-wrap gap-1.5 mb-3 shrink-0">
             {task.labels.slice(0, 4).map((label) => (
-              <span key={label} className="text-[11px] text-text-tertiary bg-black/[0.04] px-2.5 py-0.5 rounded-full">
+              <span
+                key={label}
+                className="text-[11px] text-text-tertiary bg-black/[0.04] px-2.5 py-0.5 rounded-full"
+              >
                 {label}
               </span>
             ))}
@@ -482,11 +557,19 @@ function SwipeCard({ task, onSwipe, style, interactive = true, isScoring = false
               <span>{age}</span>
             </div>
             <div className="flex items-center gap-1.5">
-              {(task.diff_additions || task.diff_deletions) ? (
+              {task.diff_additions || task.diff_deletions ? (
                 <>
                   <span className="inline-flex gap-1">
-                    {task.diff_additions ? <span className="text-claim font-medium">+{compactNum(task.diff_additions)}</span> : null}
-                    {task.diff_deletions ? <span className="text-dismiss font-medium">-{compactNum(task.diff_deletions)}</span> : null}
+                    {task.diff_additions ? (
+                      <span className="text-claim font-medium">
+                        +{compactNum(task.diff_additions)}
+                      </span>
+                    ) : null}
+                    {task.diff_deletions ? (
+                      <span className="text-dismiss font-medium">
+                        -{compactNum(task.diff_deletions)}
+                      </span>
+                    ) : null}
                   </span>
                   {task.files_changed != null && task.files_changed > 0 && (
                     <>
@@ -526,7 +609,12 @@ function SwipeCard({ task, onSwipe, style, interactive = true, isScoring = false
 function PriorityGauge({ value }: { value: number }) {
   // 0.0 = low priority (cool), 1.0 = urgent (hot)
   const angle = -90 + value * 180
-  const needleColor = value >= 0.7 ? 'var(--color-dismiss)' : value >= 0.4 ? 'var(--color-snooze)' : 'var(--color-claim)'
+  const needleColor =
+    value >= 0.7
+      ? 'var(--color-dismiss)'
+      : value >= 0.4
+        ? 'var(--color-snooze)'
+        : 'var(--color-claim)'
 
   return (
     <svg width="18" height="12" viewBox="0 0 28 18" fill="none" className="shrink-0 mt-0.5">
@@ -548,8 +636,8 @@ function PriorityGauge({ value }: { value: number }) {
       <line
         x1="14"
         y1="16"
-        x2={14 + 8 * Math.cos((angle - 90) * Math.PI / 180)}
-        y2={16 + 8 * Math.sin((angle - 90) * Math.PI / 180)}
+        x2={14 + 8 * Math.cos(((angle - 90) * Math.PI) / 180)}
+        y2={16 + 8 * Math.sin(((angle - 90) * Math.PI) / 180)}
         stroke={needleColor}
         strokeWidth="1.5"
         strokeLinecap="round"
@@ -563,8 +651,18 @@ function ConfidenceGauge({ value }: { value: number }) {
   // Needle angle: 0.0 (human, left) to 1.0 (AI, right) maps to -90deg to +90deg
   const angle = -90 + value * 180
   const pct = Math.round(value * 100)
-  const label = value >= 0.7 ? 'Highly automatable' : value >= 0.4 ? 'Partially automatable' : 'Needs human attention'
-  const needleColor = value >= 0.7 ? 'var(--color-delegate)' : value >= 0.4 ? 'var(--color-snooze)' : 'var(--color-dismiss)'
+  const label =
+    value >= 0.7
+      ? 'Highly automatable'
+      : value >= 0.4
+        ? 'Partially automatable'
+        : 'Needs human attention'
+  const needleColor =
+    value >= 0.7
+      ? 'var(--color-delegate)'
+      : value >= 0.4
+        ? 'var(--color-snooze)'
+        : 'var(--color-dismiss)'
 
   return (
     <Tooltip.Root>
@@ -595,8 +693,8 @@ function ConfidenceGauge({ value }: { value: number }) {
             <line
               x1="14"
               y1="16"
-              x2={14 + 8 * Math.cos((angle - 90) * Math.PI / 180)}
-              y2={16 + 8 * Math.sin((angle - 90) * Math.PI / 180)}
+              x2={14 + 8 * Math.cos(((angle - 90) * Math.PI) / 180)}
+              y2={16 + 8 * Math.sin(((angle - 90) * Math.PI) / 180)}
               stroke={needleColor}
               strokeWidth="1.5"
               strokeLinecap="round"
@@ -614,7 +712,12 @@ function ConfidenceGauge({ value }: { value: number }) {
         >
           <div className="font-medium text-text-primary mb-0.5">{label}</div>
           <div className="text-text-tertiary">
-            {pct}% AI confidence — {value >= 0.7 ? 'good candidate for delegation' : value >= 0.4 ? 'may need some human guidance' : 'best handled by a human'}
+            {pct}% AI confidence —{' '}
+            {value >= 0.7
+              ? 'good candidate for delegation'
+              : value >= 0.4
+                ? 'may need some human guidance'
+                : 'best handled by a human'}
           </div>
           <Tooltip.Arrow className="fill-white/80" />
         </Tooltip.Content>

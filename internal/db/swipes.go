@@ -5,7 +5,6 @@ import (
 	"time"
 )
 
-
 // RecordSwipe inserts a swipe event and updates the task status accordingly.
 // Returns the new task status.
 func RecordSwipe(database *sql.DB, taskID, action string, hesitationMs int) (string, error) {

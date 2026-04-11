@@ -57,7 +57,7 @@ export default function RepoPickerModal({ selected, onSave, onClose, inline }: P
       (r) =>
         r.full_name.toLowerCase().includes(q) ||
         (r.description || '').toLowerCase().includes(q) ||
-        (r.language || '').toLowerCase().includes(q)
+        (r.language || '').toLowerCase().includes(q),
     )
   }, [repos, search])
 
@@ -78,8 +78,8 @@ export default function RepoPickerModal({ selected, onSave, onClose, inline }: P
           Select Repositories
         </h2>
         <p className="text-[13px] text-text-tertiary mt-1 leading-relaxed">
-          Choose which repos to watch. PRs from these repos appear in your triage queue,
-          and Jira tickets are matched to these repos for delegation.
+          Choose which repos to watch. PRs from these repos appear in your triage queue, and Jira
+          tickets are matched to these repos for delegation.
         </p>
       </div>
 
@@ -114,51 +114,62 @@ export default function RepoPickerModal({ selected, onSave, onClose, inline }: P
           </p>
         )}
 
-        {!loading && !error && filtered.map((repo) => {
-          const isChecked = checked.has(repo.full_name)
-          return (
-            <button
-              key={repo.full_name}
-              type="button"
-              onClick={() => toggle(repo.full_name)}
-              className={`w-full flex items-start gap-3 px-3 py-2.5 text-left rounded-xl transition-colors hover:bg-black/[0.02] ${
-                isChecked ? 'bg-accent/[0.04]' : ''
-              }`}
-            >
-              <span className={`mt-0.5 shrink-0 w-4 h-4 rounded border flex items-center justify-center transition-colors ${
-                isChecked
-                  ? 'bg-accent border-accent text-white'
-                  : 'border-border-subtle'
-              }`}>
-                {isChecked && (
-                  <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                    <polyline points="2 5 4 7 8 3" />
-                  </svg>
-                )}
-              </span>
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2">
-                  <span className="text-[12.5px] font-medium text-text-primary truncate">
-                    {repo.full_name}
-                  </span>
-                  {repo.private && (
-                    <span className="text-[9px] text-text-tertiary border border-border-subtle rounded px-1 py-0.5">
-                      private
-                    </span>
+        {!loading &&
+          !error &&
+          filtered.map((repo) => {
+            const isChecked = checked.has(repo.full_name)
+            return (
+              <button
+                key={repo.full_name}
+                type="button"
+                onClick={() => toggle(repo.full_name)}
+                className={`w-full flex items-start gap-3 px-3 py-2.5 text-left rounded-xl transition-colors hover:bg-black/[0.02] ${
+                  isChecked ? 'bg-accent/[0.04]' : ''
+                }`}
+              >
+                <span
+                  className={`mt-0.5 shrink-0 w-4 h-4 rounded border flex items-center justify-center transition-colors ${
+                    isChecked ? 'bg-accent border-accent text-white' : 'border-border-subtle'
+                  }`}
+                >
+                  {isChecked && (
+                    <svg
+                      width="10"
+                      height="10"
+                      viewBox="0 0 10 10"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <polyline points="2 5 4 7 8 3" />
+                    </svg>
                   )}
-                  {repo.language && (
-                    <span className="text-[10px] text-text-tertiary">{repo.language}</span>
+                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[12.5px] font-medium text-text-primary truncate">
+                      {repo.full_name}
+                    </span>
+                    {repo.private && (
+                      <span className="text-[9px] text-text-tertiary border border-border-subtle rounded px-1 py-0.5">
+                        private
+                      </span>
+                    )}
+                    {repo.language && (
+                      <span className="text-[10px] text-text-tertiary">{repo.language}</span>
+                    )}
+                  </div>
+                  {repo.description && (
+                    <p className="text-[11px] text-text-tertiary truncate mt-0.5">
+                      {repo.description}
+                    </p>
                   )}
                 </div>
-                {repo.description && (
-                  <p className="text-[11px] text-text-tertiary truncate mt-0.5">
-                    {repo.description}
-                  </p>
-                )}
-              </div>
-            </button>
-          )
-        })}
+              </button>
+            )
+          })}
       </div>
 
       {/* Footer */}
@@ -198,10 +209,14 @@ export default function RepoPickerModal({ selected, onSave, onClose, inline }: P
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 backdrop-blur-sm" onClick={onClose}>
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 backdrop-blur-sm"
+      onClick={onClose}
+    >
       <div
         className="w-full max-w-xl backdrop-blur-xl bg-surface-raised border border-border-glass rounded-2xl shadow-lg shadow-black/[0.06] overflow-hidden"
-        onClick={(e) => e.stopPropagation()}>
+        onClick={(e) => e.stopPropagation()}
+      >
         {content}
       </div>
     </div>

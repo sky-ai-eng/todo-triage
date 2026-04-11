@@ -202,7 +202,7 @@ func formatRepoProfiles(profiles []domain.RepoProfile) string {
 	}
 	var sb strings.Builder
 	for _, p := range profiles {
-		sb.WriteString(fmt.Sprintf("repo: %s\n%s\n\n", p.ID, p.ProfileText))
+		fmt.Fprintf(&sb, "repo: %s\n%s\n\n", p.ID, p.ProfileText)
 	}
 	return strings.TrimSpace(sb.String())
 }

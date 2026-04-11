@@ -15,16 +15,16 @@ import (
 
 // Server is the main HTTP server for Todo Triage.
 type Server struct {
-	db                    *sql.DB
-	mux                   *http.ServeMux
-	static                fs.FS
-	ws                    *websocket.Hub
-	spawner               *delegate.Spawner
-	ghClient              *ghclient.Client
-	jiraClient            *jira.Client
-	jiraInProgressStatus  string
-	onGitHubChanged       func() // GitHub creds/repos changed — full restart + re-profile
-	onJiraChanged         func() // Jira config changed — restart Jira poller only
+	db                   *sql.DB
+	mux                  *http.ServeMux
+	static               fs.FS
+	ws                   *websocket.Hub
+	spawner              *delegate.Spawner
+	ghClient             *ghclient.Client
+	jiraClient           *jira.Client
+	jiraInProgressStatus string
+	onGitHubChanged      func() // GitHub creds/repos changed — full restart + re-profile
+	onJiraChanged        func() // Jira config changed — restart Jira poller only
 }
 
 // New creates a new server with the given database and registers all routes.
