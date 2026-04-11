@@ -70,7 +70,7 @@ func (s *Server) handleAuthSetup(w http.ResponseWriter, r *http.Request) {
 	if err := auth.Store(auth.Credentials{
 		GitHubURL:      req.GitHubURL,
 		GitHubPAT:      req.GitHubPAT,
-		GitHubUsername:  ghUsername,
+		GitHubUsername: ghUsername,
 		JiraURL:        req.JiraURL,
 		JiraPAT:        req.JiraPAT,
 	}); err != nil {

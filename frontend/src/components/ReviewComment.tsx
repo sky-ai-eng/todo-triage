@@ -1,43 +1,36 @@
-import { useState } from "react";
+import { useState } from 'react'
 
 interface Props {
-  id: string;
-  path: string;
-  line: number;
-  body: string;
-  onUpdate: (id: string, body: string) => void;
-  onDelete: (id: string) => void;
+  id: string
+  path: string
+  line: number
+  body: string
+  onUpdate: (id: string, body: string) => void
+  onDelete: (id: string) => void
 }
 
-export default function ReviewComment({
-  id,
-  path,
-  line,
-  body,
-  onUpdate,
-  onDelete,
-}: Props) {
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(body);
+export default function ReviewComment({ id, path, line, body, onUpdate, onDelete }: Props) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(body)
 
   const save = () => {
     if (draft.trim() && draft !== body) {
-      onUpdate(id, draft);
+      onUpdate(id, draft)
     }
-    setEditing(false);
-  };
+    setEditing(false)
+  }
 
   const cancel = () => {
-    setDraft(body);
-    setEditing(false);
-  };
+    setDraft(body)
+    setEditing(false)
+  }
 
   // Parse suggestion blocks for display
   const renderBody = (text: string) => {
-    const parts: React.ReactNode[] = [];
-    const regex = /```suggestion\n([\s\S]*?)```/g;
-    let last = 0;
-    let match: RegExpExecArray | null;
+    const parts: React.ReactNode[] = []
+    const regex = /```suggestion\n([\s\S]*?)```/g
+    let last = 0
+    let match: RegExpExecArray | null
 
     while ((match = regex.exec(text)) !== null) {
       if (match.index > last) {
@@ -45,7 +38,7 @@ export default function ReviewComment({
           <span key={last} className="whitespace-pre-wrap">
             {text.slice(last, match.index)}
           </span>,
-        );
+        )
       }
       parts.push(
         <div
@@ -59,8 +52,8 @@ export default function ReviewComment({
             {match[1]}
           </pre>
         </div>,
-      );
-      last = match.index + match[0].length;
+      )
+      last = match.index + match[0].length
     }
 
     if (last < text.length) {
@@ -68,11 +61,11 @@ export default function ReviewComment({
         <span key={last} className="whitespace-pre-wrap">
           {text.slice(last)}
         </span>,
-      );
+      )
     }
 
-    return parts.length > 0 ? parts : <span className="whitespace-pre-wrap">{text}</span>;
-  };
+    return parts.length > 0 ? parts : <span className="whitespace-pre-wrap">{text}</span>
+  }
 
   return (
     <div className="mx-3 my-2 group">
@@ -135,5 +128,5 @@ export default function ReviewComment({
         </div>
       </div>
     </div>
-  );
+  )
 }

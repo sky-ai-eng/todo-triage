@@ -7,7 +7,6 @@ import (
 	"github.com/sky-ai-eng/todo-triage/internal/domain"
 )
 
-
 func CreatePendingReview(database *sql.DB, r domain.PendingReview) error {
 	_, err := database.Exec(
 		`INSERT INTO pending_reviews (id, pr_number, owner, repo, commit_sha, diff_lines, run_id) VALUES (?, ?, ?, ?, ?, ?, ?)`,

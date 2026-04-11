@@ -9,7 +9,6 @@ import (
 	"github.com/sky-ai-eng/todo-triage/internal/domain"
 )
 
-
 // CreateAgentRun inserts a new agent run.
 func CreateAgentRun(database *sql.DB, run domain.AgentRun) error {
 	_, err := database.Exec(`

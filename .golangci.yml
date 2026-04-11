@@ -16,11 +16,23 @@ linters:
 
   settings:
     errcheck:
+      # These all represent cleanup / best-effort operations where the
+      # returned error is either unrecoverable or intentionally ignored.
+      # The list is explicit because errcheck's (io.Closer).Close pattern
+      # doesn't always match concrete types like *sql.Rows.
       exclude-functions:
         - (io.Closer).Close
+        - (*database/sql.Rows).Close
+        - (*database/sql.Stmt).Close
+        - (*database/sql.DB).Close
+        - (*database/sql.Tx).Rollback
+        - os.RemoveAll
+        - (net/http.ResponseWriter).Write
+        - (*encoding/json.Encoder).Encode
         - fmt.Fprintf
         - fmt.Fprintln
         - fmt.Fprint
+        - fmt.Sscanf
 
   exclusions:
     rules:

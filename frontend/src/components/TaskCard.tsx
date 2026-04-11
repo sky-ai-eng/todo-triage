@@ -23,13 +23,19 @@ const TaskCard = forwardRef<HTMLDivElement, Props & React.HTMLAttributes<HTMLDiv
         {...props}
       >
         <div className="flex items-center gap-2 mb-2">
-          <span className={`text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded ${
-            task.source === 'github' ? 'bg-black/[0.04] text-text-secondary' : 'bg-blue-500/10 text-blue-600'
-          }`}>
+          <span
+            className={`text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded ${
+              task.source === 'github'
+                ? 'bg-black/[0.04] text-text-secondary'
+                : 'bg-blue-500/10 text-blue-600'
+            }`}
+          >
             {task.source === 'github' ? 'GH' : 'Jira'}
           </span>
           <EventBadge eventType={task.event_type} compact />
-          {task.repo && <span className="text-[11px] text-text-tertiary truncate">{task.repo}</span>}
+          {task.repo && (
+            <span className="text-[11px] text-text-tertiary truncate">{task.repo}</span>
+          )}
         </div>
 
         <h3 className="text-[13px] font-semibold text-text-primary leading-snug line-clamp-2 mb-1">
@@ -45,8 +51,12 @@ const TaskCard = forwardRef<HTMLDivElement, Props & React.HTMLAttributes<HTMLDiv
             {task.author && <span>{task.author}</span>}
             {(task.diff_additions || task.diff_deletions) && (
               <span>
-                {task.diff_additions ? <span className="text-claim">+{task.diff_additions}</span> : null}
-                {task.diff_deletions ? <span className="text-dismiss ml-1">-{task.diff_deletions}</span> : null}
+                {task.diff_additions ? (
+                  <span className="text-claim">+{task.diff_additions}</span>
+                ) : null}
+                {task.diff_deletions ? (
+                  <span className="text-dismiss ml-1">-{task.diff_deletions}</span>
+                ) : null}
               </span>
             )}
             <span>{age}</span>
@@ -55,7 +65,10 @@ const TaskCard = forwardRef<HTMLDivElement, Props & React.HTMLAttributes<HTMLDiv
           <div className="flex items-center gap-3">
             {onRequeue && (
               <button
-                onClick={(e) => { e.stopPropagation(); onRequeue() }}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onRequeue()
+                }}
                 onPointerDown={(e) => e.stopPropagation()}
                 className="text-[12px] text-text-tertiary hover:text-text-primary font-medium transition-colors"
                 title="Return to queue"
@@ -77,7 +90,7 @@ const TaskCard = forwardRef<HTMLDivElement, Props & React.HTMLAttributes<HTMLDiv
         </div>
       </div>
     )
-  }
+  },
 )
 
 TaskCard.displayName = 'TaskCard'

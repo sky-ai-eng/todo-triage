@@ -10,10 +10,10 @@ import (
 // DashboardStats holds aggregated PR statistics.
 type DashboardStats struct {
 	// Counts
-	Merged    int `json:"merged"`
-	Closed    int `json:"closed"`
-	Awaiting  int `json:"awaiting"` // open, not draft
-	Draft     int `json:"draft"`
+	Merged   int `json:"merged"`
+	Closed   int `json:"closed"`
+	Awaiting int `json:"awaiting"` // open, not draft
+	Draft    int `json:"draft"`
 
 	// Reviews
 	ReviewsGiven    int `json:"reviews_given"`

@@ -128,7 +128,7 @@ type Issue struct {
 	Fields struct {
 		Summary     string          `json:"summary"`
 		Description json.RawMessage `json:"description"`
-		Status      *Status `json:"status,omitempty"`
+		Status      *Status         `json:"status,omitempty"`
 		IssueType   *struct {
 			Name string `json:"name"`
 		} `json:"issuetype,omitempty"`
@@ -143,7 +143,7 @@ type Issue struct {
 		Parent *struct {
 			Key string `json:"key"`
 		} `json:"parent,omitempty"`
-		Labels []string `json:"labels,omitempty"`
+		Labels  []string `json:"labels,omitempty"`
 		Comment *struct {
 			Total int `json:"total"`
 		} `json:"comment,omitempty"`
@@ -152,10 +152,10 @@ type Issue struct {
 
 // IssueType represents a Jira issue type for a project.
 type IssueType struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Subtask  bool   `json:"subtask"`
-	IconURL  string `json:"iconUrl,omitempty"`
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Subtask bool   `json:"subtask"`
+	IconURL string `json:"iconUrl,omitempty"`
 }
 
 // Transition represents an available workflow transition.

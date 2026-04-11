@@ -24,12 +24,12 @@ export default function Prompts() {
 
   const handleSaved = () => {
     closeDrawer()
-    setGraphKey(k => k + 1) // force graph refetch
+    setGraphKey((k) => k + 1) // force graph refetch
   }
 
   const handleDeleted = () => {
     closeDrawer()
-    setGraphKey(k => k + 1)
+    setGraphKey((k) => k + 1)
   }
 
   return (

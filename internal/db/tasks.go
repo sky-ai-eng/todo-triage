@@ -8,7 +8,6 @@ import (
 	"github.com/sky-ai-eng/todo-triage/internal/domain"
 )
 
-
 // taskColumns is the canonical SELECT column list for queryTasks. Every query that
 // feeds into queryTasks must use this exact list so the Scan stays in sync.
 const taskColumns = `id, source, source_id, source_url, title, description, repo, author, labels, severity,

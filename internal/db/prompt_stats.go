@@ -7,20 +7,20 @@ import (
 
 // PromptStats holds aggregated performance data for a single prompt.
 type PromptStats struct {
-	TotalRuns      int       `json:"total_runs"`
-	CompletedRuns  int       `json:"completed_runs"`
-	FailedRuns     int       `json:"failed_runs"`
-	SuccessRate    float64   `json:"success_rate"`     // 0-1
-	AvgCostUSD     float64   `json:"avg_cost_usd"`
-	AvgDurationMs  int       `json:"avg_duration_ms"`
-	TotalCostUSD   float64   `json:"total_cost_usd"`
-	LastUsedAt     *string   `json:"last_used_at"`     // RFC3339 or null
-	RunsPerDay     []DayCount `json:"runs_per_day"`    // last 30 days
+	TotalRuns     int        `json:"total_runs"`
+	CompletedRuns int        `json:"completed_runs"`
+	FailedRuns    int        `json:"failed_runs"`
+	SuccessRate   float64    `json:"success_rate"` // 0-1
+	AvgCostUSD    float64    `json:"avg_cost_usd"`
+	AvgDurationMs int        `json:"avg_duration_ms"`
+	TotalCostUSD  float64    `json:"total_cost_usd"`
+	LastUsedAt    *string    `json:"last_used_at"` // RFC3339 or null
+	RunsPerDay    []DayCount `json:"runs_per_day"` // last 30 days
 }
 
 // DayCount is a single day's run count for the sparkline.
 type DayCount struct {
-	Date  string `json:"date"`  // "2026-04-01"
+	Date  string `json:"date"` // "2026-04-01"
 	Count int    `json:"count"`
 }
 
@@ -54,9 +54,10 @@ func GetPromptStats(db *sql.DB, promptID string) (*PromptStats, error) {
 		stats.SuccessRate = float64(stats.CompletedRuns) / float64(stats.TotalRuns)
 	}
 
-	// Last used
+	// Last used — sql.ErrNoRows is expected for prompts that have never run.
+	// Any other error leaves lastUsed invalid, which we handle identically.
 	var lastUsed sql.NullTime
-	db.QueryRow(`SELECT MAX(started_at) FROM agent_runs WHERE prompt_id = ?`, promptID).Scan(&lastUsed)
+	_ = db.QueryRow(`SELECT MAX(started_at) FROM agent_runs WHERE prompt_id = ?`, promptID).Scan(&lastUsed)
 	if lastUsed.Valid {
 		s := lastUsed.Time.Format(time.RFC3339)
 		stats.LastUsedAt = &s
@@ -79,7 +80,9 @@ func GetPromptStats(db *sql.DB, promptID string) (*PromptStats, error) {
 	for rows.Next() {
 		var day string
 		var cnt int
-		rows.Scan(&day, &cnt)
+		if err := rows.Scan(&day, &cnt); err != nil {
+			continue
+		}
 		dayMap[day] = cnt
 	}
 

@@ -1,57 +1,84 @@
-import { useState } from "react";
-import Markdown from "react-markdown";
+import { useState } from 'react'
+import Markdown from 'react-markdown'
 
 interface Props {
-  owner: string;
-  repo: string;
-  prNumber: number;
-  reviewEvent: string;
-  reviewBody: string;
-  commentCount: number;
-  onUpdateBody: (body: string) => void;
-  onUpdateEvent: (event: string) => void;
-  onSubmit: () => void;
-  onDiscard: () => void;
-  submitting: boolean;
+  owner: string
+  repo: string
+  prNumber: number
+  reviewEvent: string
+  reviewBody: string
+  commentCount: number
+  onUpdateBody: (body: string) => void
+  onUpdateEvent: (event: string) => void
+  onSubmit: () => void
+  onDiscard: () => void
+  submitting: boolean
 }
 
 const EVENT_OPTIONS = [
   {
-    value: "APPROVE",
-    label: "Approve",
-    color: "text-claim",
-    bg: "bg-claim/10",
+    value: 'APPROVE',
+    label: 'Approve',
+    color: 'text-claim',
+    bg: 'bg-claim/10',
     icon: (
-      <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 14 14"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
         <polyline points="3 7.5 5.5 10 11 4" />
       </svg>
     ),
   },
   {
-    value: "COMMENT",
-    label: "Comment",
-    color: "text-text-secondary",
-    bg: "bg-black/[0.04]",
+    value: 'COMMENT',
+    label: 'Comment',
+    color: 'text-text-secondary',
+    bg: 'bg-black/[0.04]',
     icon: (
-      <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 14 14"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
         <path d="M2 2.5h10a1 1 0 011 1v6a1 1 0 01-1 1H4l-2.5 2V3.5a1 1 0 011-1z" />
       </svg>
     ),
   },
   {
-    value: "REQUEST_CHANGES",
-    label: "Request Changes",
-    color: "text-dismiss",
-    bg: "bg-dismiss/10",
+    value: 'REQUEST_CHANGES',
+    label: 'Request Changes',
+    color: 'text-dismiss',
+    bg: 'bg-dismiss/10',
     icon: (
-      <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 14 14"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
         <circle cx="7" cy="7" r="5.5" />
         <line x1="5" y1="5" x2="9" y2="9" />
         <line x1="9" y1="5" x2="5" y2="9" />
       </svg>
     ),
   },
-];
+]
 
 export default function ReviewSummary({
   owner,
@@ -66,21 +93,21 @@ export default function ReviewSummary({
   onDiscard,
   submitting,
 }: Props) {
-  const [editingBody, setEditingBody] = useState(false);
-  const [rawView, setRawView] = useState(false);
-  const [draft, setDraft] = useState(reviewBody);
+  const [editingBody, setEditingBody] = useState(false)
+  const [rawView, setRawView] = useState(false)
+  const [draft, setDraft] = useState(reviewBody)
 
   const saveBody = () => {
-    onUpdateBody(draft);
-    setEditingBody(false);
-  };
+    onUpdateBody(draft)
+    setEditingBody(false)
+  }
 
   const cancelEdit = () => {
-    setDraft(reviewBody);
-    setEditingBody(false);
-  };
+    setDraft(reviewBody)
+    setEditingBody(false)
+  }
 
-  const currentEvent = EVENT_OPTIONS.find((e) => e.value === reviewEvent) ?? EVENT_OPTIONS[1];
+  const currentEvent = EVENT_OPTIONS.find((e) => e.value === reviewEvent) ?? EVENT_OPTIONS[1]
 
   return (
     <div className="backdrop-blur-xl bg-surface-raised/70 border border-border-glass rounded-2xl shadow-sm shadow-black/[0.02] overflow-hidden">
@@ -105,7 +132,7 @@ export default function ReviewSummary({
                 className={`flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1.5 rounded-lg border transition-all duration-150 ${
                   reviewEvent === opt.value
                     ? `${opt.color} ${opt.bg} border-current/20`
-                    : "text-text-tertiary border-transparent hover:bg-black/[0.03]"
+                    : 'text-text-tertiary border-transparent hover:bg-black/[0.03]'
                 }`}
               >
                 {opt.icon}
@@ -150,10 +177,13 @@ export default function ReviewSummary({
                 onClick={() => setRawView(!rawView)}
                 className="text-[10px] text-text-tertiary hover:text-text-secondary px-1.5 py-0.5 rounded bg-white/60 border border-border-subtle transition-colors"
               >
-                {rawView ? "Preview" : "Raw"}
+                {rawView ? 'Preview' : 'Raw'}
               </button>
               <button
-                onClick={() => { setDraft(reviewBody); setEditingBody(true); }}
+                onClick={() => {
+                  setDraft(reviewBody)
+                  setEditingBody(true)
+                }}
                 className="text-[10px] text-text-tertiary hover:text-accent px-1.5 py-0.5 rounded bg-white/60 border border-border-subtle transition-colors"
               >
                 Edit
@@ -163,7 +193,10 @@ export default function ReviewSummary({
             <div className="bg-white/30 rounded-xl px-4 py-3 border border-transparent hover:border-border-subtle transition-colors min-h-[48px]">
               {!reviewBody ? (
                 <span
-                  onClick={() => { setDraft(reviewBody); setEditingBody(true); }}
+                  onClick={() => {
+                    setDraft(reviewBody)
+                    setEditingBody(true)
+                  }}
                   className="text-[13px] text-text-tertiary italic cursor-text"
                 >
                   No summary provided
@@ -185,7 +218,7 @@ export default function ReviewSummary({
       {/* Footer actions */}
       <div className="px-5 py-3 border-t border-border-subtle flex items-center justify-between">
         <span className="text-[11px] text-text-tertiary">
-          {commentCount} inline comment{commentCount !== 1 ? "s" : ""}
+          {commentCount} inline comment{commentCount !== 1 ? 's' : ''}
         </span>
 
         <div className="flex items-center gap-2">
@@ -200,13 +233,13 @@ export default function ReviewSummary({
             disabled={submitting}
             className={`flex items-center gap-1.5 text-[12px] font-semibold px-4 py-2 rounded-xl transition-all duration-150 ${
               submitting
-                ? "bg-accent/50 text-white/70 cursor-not-allowed"
+                ? 'bg-accent/50 text-white/70 cursor-not-allowed'
                 : `text-white ${
-                    reviewEvent === "APPROVE"
-                      ? "bg-claim hover:bg-claim/90"
-                      : reviewEvent === "REQUEST_CHANGES"
-                        ? "bg-dismiss hover:bg-dismiss/90"
-                        : "bg-accent hover:bg-accent/90"
+                    reviewEvent === 'APPROVE'
+                      ? 'bg-claim hover:bg-claim/90'
+                      : reviewEvent === 'REQUEST_CHANGES'
+                        ? 'bg-dismiss hover:bg-dismiss/90'
+                        : 'bg-accent hover:bg-accent/90'
                   }`
             }`}
           >
@@ -225,5 +258,5 @@ export default function ReviewSummary({
         </div>
       </div>
     </div>
-  );
+  )
 }

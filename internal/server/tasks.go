@@ -12,26 +12,26 @@ import (
 
 // taskJSON is the API representation of a task.
 type taskJSON struct {
-	ID              string   `json:"id"`
-	Source          string   `json:"source"`
-	SourceID        string   `json:"source_id"`
-	SourceURL       string   `json:"source_url"`
-	Title           string   `json:"title"`
-	Description     string   `json:"description,omitempty"`
-	Repo            string   `json:"repo,omitempty"`
-	Author          string   `json:"author,omitempty"`
-	Labels          []string `json:"labels"`
-	Severity        string   `json:"severity,omitempty"`
-	DiffAdditions   int      `json:"diff_additions,omitempty"`
-	DiffDeletions   int      `json:"diff_deletions,omitempty"`
-	FilesChanged    int      `json:"files_changed,omitempty"`
-	CIStatus        string   `json:"ci_status,omitempty"`
-	RelevanceReason string   `json:"relevance_reason,omitempty"`
-	EventType       string   `json:"event_type,omitempty"`
-	ScoringStatus   string   `json:"scoring_status"`
-	CreatedAt       string   `json:"created_at"`
-	Status          string   `json:"status"`
-	PriorityScore   *float64 `json:"priority_score"`
+	ID                string   `json:"id"`
+	Source            string   `json:"source"`
+	SourceID          string   `json:"source_id"`
+	SourceURL         string   `json:"source_url"`
+	Title             string   `json:"title"`
+	Description       string   `json:"description,omitempty"`
+	Repo              string   `json:"repo,omitempty"`
+	Author            string   `json:"author,omitempty"`
+	Labels            []string `json:"labels"`
+	Severity          string   `json:"severity,omitempty"`
+	DiffAdditions     int      `json:"diff_additions,omitempty"`
+	DiffDeletions     int      `json:"diff_deletions,omitempty"`
+	FilesChanged      int      `json:"files_changed,omitempty"`
+	CIStatus          string   `json:"ci_status,omitempty"`
+	RelevanceReason   string   `json:"relevance_reason,omitempty"`
+	EventType         string   `json:"event_type,omitempty"`
+	ScoringStatus     string   `json:"scoring_status"`
+	CreatedAt         string   `json:"created_at"`
+	Status            string   `json:"status"`
+	PriorityScore     *float64 `json:"priority_score"`
 	AISummary         string   `json:"ai_summary,omitempty"`
 	PriorityReasoning string   `json:"priority_reasoning,omitempty"`
 	AgentConfidence   *float64 `json:"agent_confidence"`
@@ -43,26 +43,26 @@ func taskToJSON(t domain.Task) taskJSON {
 		labels = []string{}
 	}
 	return taskJSON{
-		ID:              t.ID,
-		Source:          t.Source,
-		SourceID:        t.SourceID,
-		SourceURL:       t.SourceURL,
-		Title:           t.Title,
-		Description:     t.Description,
-		Repo:            t.Repo,
-		Author:          t.Author,
-		Labels:          labels,
-		Severity:        t.Severity,
-		DiffAdditions:   t.DiffAdditions,
-		DiffDeletions:   t.DiffDeletions,
-		FilesChanged:    t.FilesChanged,
-		CIStatus:        t.CIStatus,
-		RelevanceReason: t.RelevanceReason,
-		EventType:       t.EventType,
-		ScoringStatus:   t.ScoringStatus,
-		CreatedAt:       t.CreatedAt.Format(time.RFC3339),
-		Status:          t.Status,
-		PriorityScore:   t.PriorityScore,
+		ID:                t.ID,
+		Source:            t.Source,
+		SourceID:          t.SourceID,
+		SourceURL:         t.SourceURL,
+		Title:             t.Title,
+		Description:       t.Description,
+		Repo:              t.Repo,
+		Author:            t.Author,
+		Labels:            labels,
+		Severity:          t.Severity,
+		DiffAdditions:     t.DiffAdditions,
+		DiffDeletions:     t.DiffDeletions,
+		FilesChanged:      t.FilesChanged,
+		CIStatus:          t.CIStatus,
+		RelevanceReason:   t.RelevanceReason,
+		EventType:         t.EventType,
+		ScoringStatus:     t.ScoringStatus,
+		CreatedAt:         t.CreatedAt.Format(time.RFC3339),
+		Status:            t.Status,
+		PriorityScore:     t.PriorityScore,
 		AISummary:         t.AISummary,
 		PriorityReasoning: t.PriorityReasoning,
 		AgentConfidence:   t.AgentConfidence,

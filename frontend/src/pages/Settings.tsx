@@ -81,12 +81,21 @@ export default function Settings() {
           }
         }
       })
+    // fetchJiraStatuses intentionally omitted — this effect is a one-shot
+    // mount loader, and the call always passes projects explicitly so no
+    // closure staleness is possible.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const fetchJiraStatuses = async (projects?: string[]) => {
     setStatusesLoading(true)
     try {
-      const projectList = projects || form.jira_projects.split(',').map((s) => s.trim()).filter(Boolean)
+      const projectList =
+        projects ||
+        form.jira_projects
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean)
       if (projectList.length === 0) return
       const params = projectList.map((p) => `project=${encodeURIComponent(p)}`).join('&')
       const res = await fetch(`/api/jira/statuses?${params}`)
@@ -226,54 +235,54 @@ export default function Settings() {
     <div className="max-w-2xl mx-auto">
       <h1 className="text-[22px] font-semibold text-text-primary tracking-tight mb-6">Settings</h1>
       <form onSubmit={save} className="space-y-5">
-
         {/* GitHub (always on) */}
         <Section>
           <h2 className="text-[13px] font-medium text-text-secondary mb-4">GitHub</h2>
           <div className="space-y-3">
-              <Field label="Base URL">
-                <input
-                  type="url"
-                  placeholder="https://github.com"
-                  value={form.github_url}
-                  onChange={update('github_url')}
-                  className={inputClass}
-                />
-              </Field>
-              <Field label={`Token${data.github.has_token ? ' (leave blank to keep current)' : ''}`}>
-                <input
-                  type="password"
-                  placeholder={data.github.has_token ? '••••••••' : 'GitHub Personal Access Token'}
-                  value={form.github_pat}
-                  onChange={update('github_pat')}
-                  className={inputClass}
-                />
-                <p className="text-[11px] text-text-tertiary mt-1">
-                  Requires a{' '}
-                  <a
-                    href="https://github.com/settings/tokens/new?scopes=repo,read:org&description=Todo+Triage"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-accent hover:underline"
-                  >classic PAT</a>
-                  {' '}with <code className="text-text-secondary">repo</code> and{' '}
-                  <code className="text-text-secondary">read:org</code> scopes.
-                </p>
-              </Field>
-              <Field label="Poll interval">
-                <select
-                  value={form.github_poll_interval}
-                  onChange={update('github_poll_interval')}
-                  className={inputClass}
+            <Field label="Base URL">
+              <input
+                type="url"
+                placeholder="https://github.com"
+                value={form.github_url}
+                onChange={update('github_url')}
+                className={inputClass}
+              />
+            </Field>
+            <Field label={`Token${data.github.has_token ? ' (leave blank to keep current)' : ''}`}>
+              <input
+                type="password"
+                placeholder={data.github.has_token ? '••••••••' : 'GitHub Personal Access Token'}
+                value={form.github_pat}
+                onChange={update('github_pat')}
+                className={inputClass}
+              />
+              <p className="text-[11px] text-text-tertiary mt-1">
+                Requires a{' '}
+                <a
+                  href="https://github.com/settings/tokens/new?scopes=repo,read:org&description=Todo+Triage"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-accent hover:underline"
                 >
-                  <option value="30s">30 seconds</option>
-                  <option value="1m0s">1 minute</option>
-                  <option value="2m0s">2 minutes</option>
-                  <option value="5m0s">5 minutes</option>
-                </select>
-              </Field>
-
-            </div>
+                  classic PAT
+                </a>{' '}
+                with <code className="text-text-secondary">repo</code> and{' '}
+                <code className="text-text-secondary">read:org</code> scopes.
+              </p>
+            </Field>
+            <Field label="Poll interval">
+              <select
+                value={form.github_poll_interval}
+                onChange={update('github_poll_interval')}
+                className={inputClass}
+              >
+                <option value="30s">30 seconds</option>
+                <option value="1m0s">1 minute</option>
+                <option value="2m0s">2 minutes</option>
+                <option value="5m0s">5 minutes</option>
+              </select>
+            </Field>
+          </div>
         </Section>
 
         {/* Jira */}
@@ -331,7 +340,9 @@ export default function Settings() {
             <div className="space-y-3">
               <div className="flex items-center gap-2 rounded-xl bg-claim/[0.06] border border-claim/15 px-4 py-2.5">
                 <div className="w-1.5 h-1.5 rounded-full bg-claim shrink-0" />
-                <span className="text-[12px] text-claim">Connected to {form.jira_url.replace(/^https?:\/\//, '')}</span>
+                <span className="text-[12px] text-claim">
+                  Connected to {form.jira_url.replace(/^https?:\/\//, '')}
+                </span>
               </div>
               <Field label="Poll interval">
                 <select
@@ -395,7 +406,8 @@ export default function Settings() {
                           onClick={() =>
                             setForm((f) => ({
                               ...f,
-                              jira_in_progress_status: f.jira_in_progress_status === s.name ? '' : s.name,
+                              jira_in_progress_status:
+                                f.jira_in_progress_status === s.name ? '' : s.name,
                             }))
                           }
                         />
@@ -413,11 +425,7 @@ export default function Settings() {
           <h2 className="text-[13px] font-medium text-text-secondary mb-4">AI</h2>
           <div className="space-y-3">
             <Field label="Delegation model">
-              <select
-                value={form.ai_model}
-                onChange={update('ai_model')}
-                className={inputClass}
-              >
+              <select value={form.ai_model} onChange={update('ai_model')} className={inputClass}>
                 <option value="haiku">Haiku (fast, cheap)</option>
                 <option value="sonnet">Sonnet (balanced)</option>
                 <option value="opus">Opus (most capable)</option>
@@ -428,22 +436,26 @@ export default function Settings() {
 
         {/* Message */}
         {message && (
-          <div className={`rounded-xl px-4 py-2.5 text-[13px] ${
-            message.type === 'success'
-              ? 'bg-claim/[0.08] border border-claim/20 text-claim'
-              : 'bg-dismiss/[0.08] border border-dismiss/20 text-dismiss'
-          }`}>
+          <div
+            className={`rounded-xl px-4 py-2.5 text-[13px] ${
+              message.type === 'success'
+                ? 'bg-claim/[0.08] border border-claim/20 text-claim'
+                : 'bg-dismiss/[0.08] border border-dismiss/20 text-dismiss'
+            }`}
+          >
             {message.text}
           </div>
         )}
 
         <button
           type="submit"
-          disabled={saving || (jiraConnected && (
-            !form.jira_projects.trim() ||
-            form.jira_pickup_statuses.length === 0 ||
-            !form.jira_in_progress_status
-          ))}
+          disabled={
+            saving ||
+            (jiraConnected &&
+              (!form.jira_projects.trim() ||
+                form.jira_pickup_statuses.length === 0 ||
+                !form.jira_in_progress_status))
+          }
           className="w-full bg-accent hover:bg-accent/90 disabled:opacity-40 text-white font-medium rounded-xl px-4 py-2.5 text-[13px] transition-colors"
         >
           {saving ? 'Saving...' : 'Save Settings'}
@@ -455,7 +467,9 @@ export default function Settings() {
           <div className="flex items-center justify-between">
             <div>
               <p className="text-[13px] text-text-primary">Import Claude Code Skills</p>
-              <p className="text-[11px] text-text-tertiary mt-0.5">Import SKILL.md files from ~/.claude/skills/ as delegation prompts</p>
+              <p className="text-[11px] text-text-tertiary mt-0.5">
+                Import SKILL.md files from ~/.claude/skills/ as delegation prompts
+              </p>
             </div>
             <button
               type="button"
@@ -464,9 +478,10 @@ export default function Settings() {
                 const data = await res.json()
                 setMessage({
                   type: data.imported > 0 ? 'success' : 'error',
-                  text: data.imported > 0
-                    ? `Imported ${data.imported} skill${data.imported !== 1 ? 's' : ''} (${data.skipped} already imported)`
-                    : `No new skills found (${data.scanned} scanned, ${data.skipped} already imported)`
+                  text:
+                    data.imported > 0
+                      ? `Imported ${data.imported} skill${data.imported !== 1 ? 's' : ''} (${data.skipped} already imported)`
+                      : `No new skills found (${data.scanned} scanned, ${data.skipped} already imported)`,
                 })
               }}
               className="text-[13px] text-accent hover:text-accent/80 border border-accent/20 hover:border-accent/30 rounded-xl px-4 py-2 transition-colors shrink-0"
@@ -492,7 +507,6 @@ export default function Settings() {
           </button>
         </Section>
       </form>
-
     </div>
   )
 }
@@ -502,9 +516,11 @@ const inputClass =
 
 function Section({ children, danger }: { children: React.ReactNode; danger?: boolean }) {
   return (
-    <section className={`backdrop-blur-xl bg-surface-raised border rounded-2xl p-6 shadow-sm shadow-black/[0.03] ${
-      danger ? 'border-dismiss/15' : 'border-border-glass'
-    }`}>
+    <section
+      className={`backdrop-blur-xl bg-surface-raised border rounded-2xl p-6 shadow-sm shadow-black/[0.03] ${
+        danger ? 'border-dismiss/15' : 'border-border-glass'
+      }`}
+    >
       {children}
     </section>
   )
@@ -519,8 +535,15 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   )
 }
 
-
-function StatusChip({ label, selected, onClick }: { label: string; selected: boolean; onClick: () => void }) {
+function StatusChip({
+  label,
+  selected,
+  onClick,
+}: {
+  label: string
+  selected: boolean
+  onClick: () => void
+}) {
   return (
     <button
       type="button"

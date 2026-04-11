@@ -13,25 +13,37 @@ interface PRStatusData {
 
 export default function PRCard({ pr }: { pr: PRSummary }) {
   const [status, setStatus] = useState<PRStatusData | null>(null)
-  const [loading, setLoading] = useState(false)
+  const [fetchFailed, setFetchFailed] = useState(false)
   const [expanded, setExpanded] = useState(false)
+  // Derived: "loading" means expanded, no status received yet, AND the last
+  // fetch attempt hasn't failed. Without the fetchFailed flag, a failed
+  // fetch would leave `status` null forever and the "Failed to load status"
+  // branch below would be unreachable.
+  const loading = expanded && status === null && !fetchFailed
 
   useEffect(() => {
     if (!expanded) return
-    setLoading(true)
+    let cancelled = false
     fetch(`/api/dashboard/prs/${pr.number}/status?repo=${pr.repo}`)
       .then((r) => r.json())
-      .then((d) => setStatus(d))
-      .catch(() => {})
-      .finally(() => setLoading(false))
+      .then((d) => {
+        if (!cancelled) {
+          setStatus(d)
+          setFetchFailed(false)
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setFetchFailed(true)
+      })
+    return () => {
+      cancelled = true
+    }
   }, [expanded, pr.number, pr.repo])
 
   const age = formatAge(pr.updated_at)
   // mergeable_state "clean" means GitHub says it's good to merge
   // (accounts for branch protection, required reviews, CI, conflicts — everything)
-  const canMerge = status
-    ? status.mergeable_state === 'clean' && status.mergeable === true
-    : null
+  const canMerge = status ? status.mergeable_state === 'clean' && status.mergeable === true : null
 
   return (
     <div className="bg-surface-raised backdrop-blur-xl border border-border-glass rounded-2xl overflow-hidden shadow-sm shadow-black/[0.03]">
@@ -47,7 +59,9 @@ export default function PRCard({ pr }: { pr: PRSummary }) {
           ) : pr.state === 'closed' ? (
             <div className="w-2.5 h-2.5 rounded-full bg-dismiss" />
           ) : !expanded ? (
-            <div className={`w-2.5 h-2.5 rounded-full ${pr.draft ? 'bg-text-tertiary/30' : 'bg-accent/40'}`} />
+            <div
+              className={`w-2.5 h-2.5 rounded-full ${pr.draft ? 'bg-text-tertiary/30' : 'bg-accent/40'}`}
+            />
           ) : canMerge === true ? (
             <div className="w-2.5 h-2.5 rounded-full bg-claim" title="Ready to merge" />
           ) : canMerge === false ? (
@@ -78,15 +92,16 @@ export default function PRCard({ pr }: { pr: PRSummary }) {
               </span>
             )}
           </div>
-          <h3 className="text-[14px] font-medium text-text-primary truncate">
-            {pr.title}
-          </h3>
+          <h3 className="text-[14px] font-medium text-text-primary truncate">{pr.title}</h3>
         </div>
 
         {/* Labels */}
         <div className="hidden sm:flex gap-1.5 shrink-0">
           {(pr.labels || []).slice(0, 2).map((l) => (
-            <span key={l} className="text-[10px] text-text-tertiary bg-black/[0.04] rounded-full px-2 py-0.5">
+            <span
+              key={l}
+              className="text-[10px] text-text-tertiary bg-black/[0.04] rounded-full px-2 py-0.5"
+            >
               {l}
             </span>
           ))}
@@ -101,7 +116,13 @@ export default function PRCard({ pr }: { pr: PRSummary }) {
           viewBox="0 0 16 16"
           fill="none"
         >
-          <path d="M4 6l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+          <path
+            d="M4 6l4 4 4-4"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
         </svg>
       </button>
 
@@ -114,7 +135,11 @@ export default function PRCard({ pr }: { pr: PRSummary }) {
             <div className="pt-3 space-y-3">
               {/* Merge readiness */}
               <div className="flex items-center gap-3">
-                <MergeIndicator canMerge={canMerge} conflicts={status.conflicts} state={status.mergeable_state} />
+                <MergeIndicator
+                  canMerge={canMerge}
+                  conflicts={status.conflicts}
+                  state={status.mergeable_state}
+                />
                 {status.auto_merge && (
                   <span className="text-[11px] text-delegate font-medium bg-delegate/10 rounded-full px-2.5 py-0.5">
                     Auto-merge on
@@ -139,7 +164,9 @@ export default function PRCard({ pr }: { pr: PRSummary }) {
               {/* Checks */}
               <div>
                 <h4 className="text-[11px] font-medium text-text-tertiary mb-1.5">Checks</h4>
-                <ChecksBar checks={status.checks_status || { total: 0, passing: 0, failing: 0, pending: 0 }} />
+                <ChecksBar
+                  checks={status.checks_status || { total: 0, passing: 0, failing: 0, pending: 0 }}
+                />
               </div>
 
               {/* Actions */}
@@ -163,7 +190,15 @@ export default function PRCard({ pr }: { pr: PRSummary }) {
   )
 }
 
-function MergeIndicator({ canMerge, conflicts, state }: { canMerge: boolean | null; conflicts: boolean; state: string }) {
+function MergeIndicator({
+  canMerge,
+  conflicts,
+  state,
+}: {
+  canMerge: boolean | null
+  conflicts: boolean
+  state: string
+}) {
   if (canMerge) {
     return <span className="text-[12px] font-medium text-claim">Ready to merge</span>
   }
@@ -197,7 +232,11 @@ function ReviewBadge({ review }: { review: { author: string; state: string } }) 
   )
 }
 
-function ChecksBar({ checks }: { checks: { total: number; passing: number; failing: number; pending: number } }) {
+function ChecksBar({
+  checks,
+}: {
+  checks: { total: number; passing: number; failing: number; pending: number }
+}) {
   if (checks.total === 0) {
     return <p className="text-[12px] text-text-tertiary">No checks</p>
   }
@@ -206,13 +245,22 @@ function ChecksBar({ checks }: { checks: { total: number; passing: number; faili
     <div className="flex items-center gap-3">
       <div className="flex-1 h-1.5 rounded-full bg-black/[0.04] overflow-hidden flex">
         {checks.passing > 0 && (
-          <div className="h-full bg-claim" style={{ width: `${(checks.passing / checks.total) * 100}%` }} />
+          <div
+            className="h-full bg-claim"
+            style={{ width: `${(checks.passing / checks.total) * 100}%` }}
+          />
         )}
         {checks.pending > 0 && (
-          <div className="h-full bg-snooze" style={{ width: `${(checks.pending / checks.total) * 100}%` }} />
+          <div
+            className="h-full bg-snooze"
+            style={{ width: `${(checks.pending / checks.total) * 100}%` }}
+          />
         )}
         {checks.failing > 0 && (
-          <div className="h-full bg-dismiss" style={{ width: `${(checks.failing / checks.total) * 100}%` }} />
+          <div
+            className="h-full bg-dismiss"
+            style={{ width: `${(checks.failing / checks.total) * 100}%` }}
+          />
         )}
       </div>
       <span className="text-[11px] text-text-tertiary shrink-0">

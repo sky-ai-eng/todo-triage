@@ -1,23 +1,23 @@
-import { useState, useMemo } from "react";
-import { Diff, Hunk, markEdits, tokenize, getChangeKey } from "react-diff-view";
-import type { FileData, HunkData, ChangeData } from "react-diff-view";
-import ReviewComment from "./ReviewComment";
-import { diffViewRefractor, languageForPath } from "../lib/highlight";
+import { useState, useMemo } from 'react'
+import { Diff, Hunk, markEdits, tokenize, getChangeKey } from 'react-diff-view'
+import type { FileData, HunkData, ChangeData } from 'react-diff-view'
+import ReviewComment from './ReviewComment'
+import { diffViewRefractor, languageForPath } from '../lib/highlight'
 
 export interface FileComment {
-  id: string;
-  path: string;
-  line: number;
-  startLine?: number;
-  body: string;
+  id: string
+  path: string
+  line: number
+  startLine?: number
+  body: string
 }
 
 interface Props {
-  file: FileData;
-  comments: FileComment[];
-  defaultCollapsed?: boolean;
-  onUpdateComment: (id: string, body: string) => void;
-  onDeleteComment: (id: string) => void;
+  file: FileData
+  comments: FileComment[]
+  defaultCollapsed?: boolean
+  onUpdateComment: (id: string, body: string) => void
+  onDeleteComment: (id: string) => void
 }
 
 export default function DiffFile({
@@ -27,21 +27,21 @@ export default function DiffFile({
   onUpdateComment,
   onDeleteComment,
 }: Props) {
-  const [collapsed, setCollapsed] = useState(defaultCollapsed);
+  const [collapsed, setCollapsed] = useState(defaultCollapsed)
 
   // Build the widgets map: changeKey → ReactNode
   const widgets = useMemo(() => {
-    const map: Record<string, React.ReactNode> = {};
+    const map: Record<string, React.ReactNode> = {}
 
     for (const comment of comments) {
       // Find the change in any hunk that matches this comment's line number
       for (const hunk of file.hunks) {
         for (const change of hunk.changes) {
-          const lineNum = getLineNumber(change);
+          const lineNum = getLineNumber(change)
           if (lineNum === comment.line) {
-            const key = getChangeKey(change);
+            const key = getChangeKey(change)
             // Stack multiple comments on the same line
-            const existing = map[key];
+            const existing = map[key]
             map[key] = (
               <>
                 {existing}
@@ -55,48 +55,48 @@ export default function DiffFile({
                   onDelete={onDeleteComment}
                 />
               </>
-            );
-            break;
+            )
+            break
           }
         }
       }
     }
 
-    return map;
-  }, [comments, file.hunks, onUpdateComment, onDeleteComment]);
+    return map
+  }, [comments, file.hunks, onUpdateComment, onDeleteComment])
 
   // Tokenize with syntax highlighting + word-level edit marks
-  const displayPath = file.newPath === "/dev/null" ? file.oldPath : file.newPath;
+  const displayPath = file.newPath === '/dev/null' ? file.oldPath : file.newPath
   const tokens = useMemo(() => {
-    const lang = languageForPath(displayPath);
+    const lang = languageForPath(displayPath)
     try {
       const result = tokenize(file.hunks, {
         ...(lang
           ? { highlight: true, refractor: diffViewRefractor, language: lang }
           : { highlight: false }),
-        enhancers: [markEdits(file.hunks, { type: "block" })],
-      });
-      return result;
+        enhancers: [markEdits(file.hunks, { type: 'block' })],
+      })
+      return result
     } catch (err) {
-      console.warn("[DiffFile] tokenize failed for", displayPath, err);
-      return undefined;
+      console.warn('[DiffFile] tokenize failed for', displayPath, err)
+      return undefined
     }
-  }, [file.hunks, displayPath]);
+  }, [file.hunks, displayPath])
 
   // Count additions and deletions
   const stats = useMemo(() => {
-    let additions = 0;
-    let deletions = 0;
+    let additions = 0
+    let deletions = 0
     for (const hunk of file.hunks) {
       for (const change of hunk.changes) {
-        if (change.type === "insert") additions++;
-        if (change.type === "delete") deletions++;
+        if (change.type === 'insert') additions++
+        if (change.type === 'delete') deletions++
       }
     }
-    return { additions, deletions };
-  }, [file.hunks]);
+    return { additions, deletions }
+  }, [file.hunks])
 
-  const commentCount = comments.length;
+  const commentCount = comments.length
 
   return (
     <div className="backdrop-blur-xl bg-surface-raised/70 border border-border-glass rounded-2xl overflow-hidden shadow-sm shadow-black/[0.02]">
@@ -116,7 +116,7 @@ export default function DiffFile({
           strokeLinecap="round"
           strokeLinejoin="round"
           className={`text-text-tertiary shrink-0 transition-transform duration-200 ${
-            collapsed ? "" : "rotate-90"
+            collapsed ? '' : 'rotate-90'
           }`}
         >
           <polyline points="4 2 8 6 4 10" />
@@ -130,21 +130,17 @@ export default function DiffFile({
         {/* Comment count */}
         {commentCount > 0 && (
           <span className="text-[10px] font-medium text-delegate bg-delegate/10 px-2 py-0.5 rounded-full shrink-0">
-            {commentCount} comment{commentCount !== 1 ? "s" : ""}
+            {commentCount} comment{commentCount !== 1 ? 's' : ''}
           </span>
         )}
 
         {/* Stats */}
         <div className="flex items-center gap-2 shrink-0">
           {stats.additions > 0 && (
-            <span className="text-[11px] font-medium text-claim">
-              +{stats.additions}
-            </span>
+            <span className="text-[11px] font-medium text-claim">+{stats.additions}</span>
           )}
           {stats.deletions > 0 && (
-            <span className="text-[11px] font-medium text-dismiss">
-              -{stats.deletions}
-            </span>
+            <span className="text-[11px] font-medium text-dismiss">-{stats.deletions}</span>
           )}
         </div>
       </button>
@@ -159,21 +155,17 @@ export default function DiffFile({
             widgets={widgets}
             tokens={tokens}
           >
-            {(hunks: HunkData[]) =>
-              hunks.map((hunk) => (
-                <Hunk key={hunk.content} hunk={hunk} />
-              ))
-            }
+            {(hunks: HunkData[]) => hunks.map((hunk) => <Hunk key={hunk.content} hunk={hunk} />)}
           </Diff>
         </div>
       )}
     </div>
-  );
+  )
 }
 
 function getLineNumber(change: ChangeData): number {
-  if (change.type === "normal") return change.newLineNumber;
-  if (change.type === "insert") return change.lineNumber;
-  if (change.type === "delete") return change.lineNumber;
-  return 0;
+  if (change.type === 'normal') return change.newLineNumber
+  if (change.type === 'insert') return change.lineNumber
+  if (change.type === 'delete') return change.lineNumber
+  return 0
 }

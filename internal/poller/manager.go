@@ -22,9 +22,9 @@ type Manager struct {
 	bus      *eventbus.Bus
 	tracker  *tracker.Tracker
 
-	mu         sync.Mutex
-	ghStop     chan struct{}
-	jiraStop   chan struct{}
+	mu       sync.Mutex
+	ghStop   chan struct{}
+	jiraStop chan struct{}
 }
 
 func NewManager(database *sql.DB, bus *eventbus.Bus) *Manager {

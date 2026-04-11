@@ -19,7 +19,6 @@ type Config struct {
 type GitHubConfig struct {
 	BaseURL      string        `yaml:"base_url"`
 	PollInterval time.Duration `yaml:"poll_interval"`
-
 }
 
 type JiraConfig struct {
