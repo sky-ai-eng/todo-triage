@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path // empty' | { read -r f; [ -z \"$f\" ] && exit 0; case \"$f\" in *.go) \"$(go env GOPATH)/bin/goimports\" -w \"$f\" ;; /Users/aidan/TT/todo-triage/frontend/*) case \"$f\" in *.ts|*.tsx|*.css|*.json) (cd /Users/aidan/TT/todo-triage/frontend && npx --no-install prettier --write \"$f\") ;; esac ;; esac; } 2>/dev/null || true",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -15,5 +15,6 @@ frontend/dist/
 
 # Custom
 _scratch/
-.claude/
+.claude/*
+!.claude/settings.json
 docs/todotriage-spec.md
