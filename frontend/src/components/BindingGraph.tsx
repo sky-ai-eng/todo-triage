@@ -189,7 +189,9 @@ function loadLayout(): SavedLayout {
 function saveLayout(layout: SavedLayout) {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(layout))
-  } catch {}
+  } catch {
+    // best effort — localStorage may be full or disabled
+  }
 }
 
 // --- Inner Graph ---
@@ -384,7 +386,9 @@ function BindingGraphInner({ onPromptClick }: GraphProps) {
           }),
         })
         fetchAll()
-      } catch {}
+      } catch {
+        // ignore — caller will retry on next interval
+      }
     },
     [fetchAll],
   )
@@ -397,7 +401,9 @@ function BindingGraphInner({ onPromptClick }: GraphProps) {
           { method: 'DELETE' },
         )
         fetchAll()
-      } catch {}
+      } catch {
+        // ignore — caller will retry on next interval
+      }
     },
     [fetchAll],
   )
@@ -423,7 +429,9 @@ function BindingGraphInner({ onPromptClick }: GraphProps) {
             body: JSON.stringify({ prompt_id: promptId, event_type: eventType, is_default: true }),
           })
           fetchAll()
-        } catch {}
+        } catch {
+          // ignore — caller will retry on next interval
+        }
       }
     },
     [fetchAll],

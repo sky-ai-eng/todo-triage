@@ -38,7 +38,9 @@ function loadWidth(): number {
       const w = parseInt(stored, 10)
       if (w >= MIN_WIDTH && w <= MAX_WIDTH) return w
     }
-  } catch {}
+  } catch {
+    // best effort — localStorage may be disabled
+  }
   return 520
 }
 

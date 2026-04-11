@@ -287,11 +287,11 @@ function renderActivityLog(messages: AgentMessage[], isActive: boolean, run: Age
   return elements
 }
 
-function formatToolCall(name: string, input: Record<string, any>): string {
+function formatToolCall(name: string, input: Record<string, unknown>): string {
   if (name === 'Bash') {
     const cmd = String(input.command || '')
     if (cmd.includes('todotriage exec gh pr view')) return 'Fetching PR details'
-    if (cmd.includes('todotriage exec gh pr diff') && input.command?.includes('--file'))
+    if (cmd.includes('todotriage exec gh pr diff') && cmd.includes('--file'))
       return `Reading diff: ${extractFlag(cmd, '--file')}`
     if (cmd.includes('todotriage exec gh pr diff')) return 'Reading full diff'
     if (cmd.includes('todotriage exec gh pr files')) return 'Listing changed files'
@@ -313,7 +313,7 @@ function formatToolCall(name: string, input: Record<string, any>): string {
     return `Running command`
   }
   if (name === 'Read') return `Reading ${basename(String(input.file_path || ''))}`
-  if (name === 'Glob') return `Searching for ${input.pattern || 'files'}`
+  if (name === 'Glob') return `Searching for ${String(input.pattern || 'files')}`
   if (name === 'Grep') return `Searching for "${String(input.pattern || '').slice(0, 40)}"`
   return `${name}`
 }

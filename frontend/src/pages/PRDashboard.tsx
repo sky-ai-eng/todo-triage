@@ -62,7 +62,9 @@ function loadCached<T>(key: string): T | null {
 function saveCache(key: string, data: unknown) {
   try {
     sessionStorage.setItem(key, JSON.stringify(data))
-  } catch {}
+  } catch {
+    // best effort — sessionStorage may be full or disabled
+  }
 }
 
 export default function PRDashboard() {
@@ -462,8 +464,11 @@ function MergedTimeline({ data }: { data: { week: string; count: number }[] }) {
               fontSize: '11px',
               boxShadow: '0 4px 12px rgba(0,0,0,0.05)',
             }}
-            formatter={(value: any) => [`${value} PR${value !== 1 ? 's' : ''}`, 'Merged']}
-            labelFormatter={(label: any) => `Week of ${label}`}
+            formatter={(value) => {
+              const n = typeof value === 'number' ? value : Number(value)
+              return [`${n} PR${n !== 1 ? 's' : ''}`, 'Merged']
+            }}
+            labelFormatter={(label) => `Week of ${String(label)}`}
           />
           <Area
             type="monotone"

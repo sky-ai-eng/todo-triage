@@ -44,7 +44,7 @@ const SWIPE_VELOCITY = 300
 export default function Cards() {
   const [tasks, setTasks] = useState<Task[]>([])
   const [loadState, setLoadState] = useState<LoadState>('loading')
-  const [cardStart, setCardStart] = useState(Date.now())
+  const [cardStart, setCardStart] = useState(() => Date.now())
   const [undoTask, setUndoTask] = useState<{ id: string; action: string } | null>(null)
   const [showPromptPicker, setShowPromptPicker] = useState(false)
   const [filterOpen, setFilterOpen] = useState(false)

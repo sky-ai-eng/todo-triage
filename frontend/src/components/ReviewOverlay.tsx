@@ -44,7 +44,6 @@ export default function ReviewOverlay({ runID, open, onClose }: Props) {
     let cancelled = false
     setLoading(true)
     setError(null)
-
     ;(async () => {
       try {
         // Fetch review metadata + comments
@@ -61,8 +60,8 @@ export default function ReviewOverlay({ runID, open, onClose }: Props) {
         if (cancelled) return
         const parsed = parseDiff(diffText)
         setFiles(parsed)
-      } catch (err: any) {
-        if (!cancelled) setError(err.message)
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : String(err))
       } finally {
         if (!cancelled) setLoading(false)
       }
@@ -148,8 +147,8 @@ export default function ReviewOverlay({ runID, open, onClose }: Props) {
         throw new Error(data.error || 'Submit failed')
       }
       onClose()
-    } catch (err: any) {
-      setError(err.message)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
     } finally {
       setSubmitting(false)
     }
