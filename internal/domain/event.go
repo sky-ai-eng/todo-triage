@@ -49,6 +49,7 @@ const (
 	EventGitHubPROpened          = "github:pr:opened"
 	EventGitHubPRClosed          = "github:pr:closed"
 	EventGitHubPRReadyForReview  = "github:pr:ready_for_review"
+	EventGitHubPRNewCommits      = "github:pr:new_commits"
 )
 
 // Jira events
@@ -84,7 +85,8 @@ func AllEventTypes() []EventType {
 		{ID: EventJiraIssueAssigned, Source: "jira", Category: "issue", Label: "Issue Assigned", Description: "Issue was assigned to you", DefaultPriority: 0.6, Enabled: true, SortOrder: 5},
 		{ID: EventGitHubPRApproved, Source: "github", Category: "pr", Label: "PR Approved", Description: "Your PR was approved — ready to merge", DefaultPriority: 0.9, Enabled: true, SortOrder: 6},
 		{ID: EventGitHubPRReviewReceived, Source: "github", Category: "pr", Label: "Review Received", Description: "Your PR received a review", DefaultPriority: 0.7, Enabled: true, SortOrder: 7},
-		{ID: EventGitHubPRMentioned, Source: "github", Category: "pr", Label: "Mentioned", Description: "You were @mentioned in a PR", DefaultPriority: 0.5, Enabled: true, SortOrder: 8},
+		{ID: EventGitHubPRNewCommits, Source: "github", Category: "pr", Label: "New Commits", Description: "A tracked PR has new commits since the last poll", DefaultPriority: 0.6, Enabled: true, SortOrder: 8},
+		{ID: EventGitHubPRMentioned, Source: "github", Category: "pr", Label: "Mentioned", Description: "You were @mentioned in a PR", DefaultPriority: 0.5, Enabled: true, SortOrder: 9},
 		{ID: EventJiraIssueAvailable, Source: "jira", Category: "issue", Label: "Issue Available", Description: "New unassigned issue in pickup queue", DefaultPriority: 0.5, Enabled: true, SortOrder: 9},
 		{ID: EventJiraIssuePriorityChanged, Source: "jira", Category: "issue", Label: "Priority Changed", Description: "Issue priority was changed", DefaultPriority: 0.5, Enabled: true, SortOrder: 10},
 		{ID: EventJiraIssueCommented, Source: "jira", Category: "issue", Label: "New Comment", Description: "A new comment was added to an issue", DefaultPriority: 0.5, Enabled: true, SortOrder: 11},

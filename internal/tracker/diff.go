@@ -59,6 +59,17 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, sourceID, username string) []
 		}
 	}
 
+	// --- New commits (head SHA changed) ---
+	// An empty prev.HeadSHA means "unknown prior state" (first poll after the
+	// field was added, or a refresh that failed to surface it). Don't fire a
+	// spurious event in either case — only emit when both sides are known and
+	// genuinely differ.
+	if prev.HeadSHA != "" && curr.HeadSHA != "" && prev.HeadSHA != curr.HeadSHA {
+		emit(domain.EventGitHubPRNewCommits, map[string]string{
+			"prev": prev.HeadSHA, "new": curr.HeadSHA,
+		})
+	}
+
 	// --- Mergeable state (conflicts) ---
 	if prev.Mergeable != "CONFLICTING" && curr.Mergeable == "CONFLICTING" {
 		emit(domain.EventGitHubPRConflicts, map[string]string{

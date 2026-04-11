@@ -90,6 +90,37 @@ func TestDiffPR_CITransition(t *testing.T) {
 	assertEventTypes(t, events, nil)
 }
 
+func TestDiffPR_NewCommits(t *testing.T) {
+	// head_sha changed → fires with before/after metadata
+	prev := domain.PRSnapshot{Number: 42, HeadSHA: "abc123"}
+	curr := domain.PRSnapshot{Number: 42, HeadSHA: "def456"}
+
+	events := DiffPRSnapshots(prev, curr, "42", "")
+	assertEventTypes(t, events, []string{domain.EventGitHubPRNewCommits})
+	assertMetaContains(t, events[0], "new", "def456")
+	assertMetaContains(t, events[0], "prev", "abc123")
+
+	// head_sha unchanged → no event
+	events = DiffPRSnapshots(prev, prev, "42", "")
+	assertEventTypes(t, events, nil)
+
+	// prev empty (first poll populating the field) → no spurious event
+	events = DiffPRSnapshots(
+		domain.PRSnapshot{Number: 42, HeadSHA: ""},
+		domain.PRSnapshot{Number: 42, HeadSHA: "abc123"},
+		"42", "",
+	)
+	assertEventTypes(t, events, nil)
+
+	// curr empty (refresh lost the field) → no spurious event
+	events = DiffPRSnapshots(
+		domain.PRSnapshot{Number: 42, HeadSHA: "abc123"},
+		domain.PRSnapshot{Number: 42, HeadSHA: ""},
+		"42", "",
+	)
+	assertEventTypes(t, events, nil)
+}
+
 func TestDiffPR_Merged(t *testing.T) {
 	prev := domain.PRSnapshot{Number: 42, State: "OPEN", Merged: false}
 	curr := domain.PRSnapshot{Number: 42, State: "MERGED", Merged: true}
