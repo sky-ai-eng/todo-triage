@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	ws "nhooyr.io/websocket"
+	ws "github.com/coder/websocket"
 )
 
 // Event is a message sent to connected clients over the websocket.
