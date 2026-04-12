@@ -407,7 +407,7 @@ function BindingGraphInner({ onPromptClick }: GraphProps) {
     [fetchAll],
   )
 
-  // Click edge to toggle enabled/disabled; long-press or confirm to delete
+  // Click edge to toggle enabled/disabled; shift-click to open delete confirmation
   const onEdgeClick: EdgeMouseHandler = useCallback(
     async (event, edge) => {
       const trigger = triggersRef.current.find((t) => t.id === edge.id)
