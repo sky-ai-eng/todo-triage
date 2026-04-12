@@ -61,6 +61,20 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, repos 
 			log.Printf("[tracker] error registering tracked item %s: %v", sid, err)
 		}
 
+		// Store the discovery snapshot so Phase 2 classification can see
+		// whether this PR is terminal (merged/closed) without waiting for
+		// a refresh cycle. Without this, UpsertTrackedItem stores '{}' as
+		// the default, Phase 2 parses that as a zero-value PRSnapshot, and
+		// every newly-discovered PR — including merged backfill results —
+		// gets classified as "open" and refreshed with the expensive full
+		// fragment, undermining the whole cost savings from the fragment
+		// split. The refresh in the same poll cycle overwrites this with
+		// the real data, so the brief overwrite is harmless.
+		snapJSON, _ := json.Marshal(d.Snapshot)
+		if err := db.UpdateTrackedSnapshot(t.database, "github", sid, string(snapJSON)); err != nil {
+			log.Printf("[tracker] warning: failed to store discovery snapshot for %s: %v", sid, err)
+		}
+
 		// Reactivate if a previously-terminal item is now open (e.g., reopened PR)
 		if !d.Snapshot.Merged && d.Snapshot.State != "CLOSED" {
 			if reactivated, err := db.ReactivateTrackedItem(t.database, "github", sid); err != nil {
@@ -129,10 +143,6 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, repos 
 
 	// Phase 3: Diff, upsert tasks, and emit events
 	// (reuses `tracked` from Phase 2 — same active set, no extra query)
-	if err != nil {
-		return 0, fmt.Errorf("list tracked items: %w", err)
-	}
-
 	eventsEmitted := 0
 	for _, item := range tracked {
 		if item.NodeID == "" {
