@@ -256,9 +256,9 @@ CREATE TABLE IF NOT EXISTS task_memory (
     run_id TEXT NOT NULL REFERENCES agent_runs(id),
     content TEXT NOT NULL,
     source TEXT NOT NULL DEFAULT 'agent',
-    created_at DATETIME NOT NULL
+    created_at DATETIME NOT NULL,
+    UNIQUE(run_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_task_memory_task_id ON task_memory(task_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_task_memory_run_id ON task_memory(run_id);
 `

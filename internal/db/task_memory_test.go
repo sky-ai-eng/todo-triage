@@ -135,6 +135,50 @@ func TestGetTaskMemoryByRun_NotFound(t *testing.T) {
 	}
 }
 
+func TestSaveTaskMemory_RejectsDuplicateRunID(t *testing.T) {
+	database := newTestDB(t)
+	taskID, runID := seedTaskAndRun(t, database)
+
+	// First insert succeeds.
+	first := domain.TaskMemory{
+		ID:        "mem-first",
+		TaskID:    taskID,
+		RunID:     runID,
+		Content:   "first",
+		Source:    "agent",
+		CreatedAt: time.Now(),
+	}
+	if err := SaveTaskMemory(database, first); err != nil {
+		t.Fatalf("first SaveTaskMemory: %v", err)
+	}
+
+	// Second insert for the same run_id must be rejected by the UNIQUE
+	// constraint. Without this guarantee, races or double-calls would
+	// leave GetTaskMemoryByRun returning an arbitrary row — and
+	// downstream joins (SKY-148 circuit-breaker UI) would show
+	// duplicated "prior attempt" entries for a single run.
+	second := domain.TaskMemory{
+		ID:        "mem-second",
+		TaskID:    taskID,
+		RunID:     runID, // same as first
+		Content:   "second",
+		Source:    "system",
+		CreatedAt: time.Now(),
+	}
+	if err := SaveTaskMemory(database, second); err == nil {
+		t.Fatal("expected duplicate run_id insert to be rejected, but it succeeded")
+	}
+
+	// And the first row is still the single source of truth.
+	got, err := GetTaskMemoryByRun(database, runID)
+	if err != nil {
+		t.Fatalf("GetTaskMemoryByRun: %v", err)
+	}
+	if got == nil || got.ID != "mem-first" || got.Content != "first" {
+		t.Errorf("expected first row preserved, got %+v", got)
+	}
+}
+
 func TestSetAgentRunSessionAndMarkMemoryMissing(t *testing.T) {
 	database := newTestDB(t)
 	_, runID := seedTaskAndRun(t, database)
