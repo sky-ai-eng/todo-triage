@@ -338,30 +338,40 @@ func writeLocalExcludes(wtDir string) error {
 // (used for idempotency — we skip the rewrite if the file is already
 // what we want).
 //
-// If existing content contains both begin and end markers (with begin
-// appearing first), the bytes between them plus the end-marker line are
-// replaced with managedBlock. Everything outside the markers is preserved
-// byte-for-byte. If the markers are missing or malformed (end before
-// begin, one without the other), managedBlock is appended at EOF with a
-// blank-line separator.
+// Marker search is direction-aware: we find the begin marker first, then
+// search for the end marker *after* the begin position. Searching the
+// whole file for end with strings.Index would pick up the first
+// occurrence, which could sit before the begin marker in unrelated
+// content (a user comment that happens to paste our end string, a
+// previously-rewritten file with stray fragments, etc.). That earlier-
+// end + later-begin pair would look malformed, causing us to append a
+// duplicate managed block every run. Constraining the end search to
+// positions after begin makes the scan robust against stray mentions.
+//
+// If a valid begin...end pair is found, the bytes between them (plus the
+// trailing newline after end) are replaced with managedBlock. Everything
+// outside the markers is preserved byte-for-byte. If no valid pair
+// exists, managedBlock is appended at EOF with a blank-line separator.
 func mergeManagedBlock(existing, managedBlock string) (string, bool) {
 	beginIdx := strings.Index(existing, managedExcludeBegin)
-	endIdx := strings.Index(existing, managedExcludeEnd)
-
-	if beginIdx >= 0 && endIdx > beginIdx {
-		// Replace in place. endIdx points at the start of the end marker;
-		// we want to consume up to and including the newline that follows
-		// it, so the final structure is [before][managedBlock][after]
-		// without introducing or losing any blank lines at the seams.
-		afterStart := endIdx + len(managedExcludeEnd)
-		if afterStart < len(existing) && existing[afterStart] == '\n' {
-			afterStart++
+	if beginIdx >= 0 {
+		searchFrom := beginIdx + len(managedExcludeBegin)
+		if relEnd := strings.Index(existing[searchFrom:], managedExcludeEnd); relEnd >= 0 {
+			endIdx := searchFrom + relEnd
+			// Consume up to and including the newline that follows the
+			// end marker so the final structure is
+			// [before][managedBlock][after] without introducing or losing
+			// blank lines at the seams.
+			afterEnd := endIdx + len(managedExcludeEnd)
+			if afterEnd < len(existing) && existing[afterEnd] == '\n' {
+				afterEnd++
+			}
+			candidate := existing[:beginIdx] + managedBlock + existing[afterEnd:]
+			if candidate == existing {
+				return existing, false
+			}
+			return candidate, true
 		}
-		candidate := existing[:beginIdx] + managedBlock + existing[afterStart:]
-		if candidate == existing {
-			return existing, false
-		}
-		return candidate, true
 	}
 
 	// No valid marker pair found. Append the managed block at EOF,

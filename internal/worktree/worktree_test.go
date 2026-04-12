@@ -343,6 +343,95 @@ func TestWriteLocalExcludes_RejectsMalformedGitPointer(t *testing.T) {
 	}
 }
 
+// TestWriteLocalExcludes_StrayEndMarkerBeforeBlock is the regression
+// guard for a subtle mergeManagedBlock bug: strings.Index finds the
+// *first* occurrence, so if the end marker string appeared anywhere in
+// the file before the actual begin marker (e.g., inside a user comment
+// that pastes the marker verbatim, or stale content from a broken
+// previous run), the pair check `endIdx > beginIdx` would fail and we'd
+// fall to the append path, duplicating the managed block every run.
+//
+// The fix searches for the end marker only after the begin marker's
+// position, so stray earlier occurrences are ignored. This test
+// pre-populates a file with a stray end marker before a valid managed
+// block, runs writeLocalExcludes twice, and verifies:
+//   - The managed block is rewritten in place (not duplicated)
+//   - The stray end marker text is preserved (it's user content, not ours)
+//   - Idempotent: second run produces the same file
+func TestWriteLocalExcludes_StrayEndMarkerBeforeBlock(t *testing.T) {
+	wtDir, excludePath := setupPlainCheckout(t)
+
+	// User content that happens to include our end marker string —
+	// maybe as a quoted example in a comment, maybe as leftover from a
+	// truncated previous managed block that someone hand-edited. The
+	// real managed block sits *after* this stray mention.
+	stray := "# example of a todotriage block looks like:\n" +
+		"# " + managedExcludeEnd + "\n" +
+		"node_modules/\n\n" +
+		managedExcludeBegin + "\n" +
+		"_scratch/\n" +
+		managedExcludeEnd + "\n"
+	if err := os.WriteFile(excludePath, []byte(stray), 0644); err != nil {
+		t.Fatalf("pre-populate: %v", err)
+	}
+
+	if err := writeLocalExcludes(wtDir); err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	firstContent, err := os.ReadFile(excludePath)
+	if err != nil {
+		t.Fatalf("read after first: %v", err)
+	}
+	firstStr := string(firstContent)
+
+	// The begin marker should appear exactly once (ours, rewritten in
+	// place). The end marker appears twice: once in the stray comment
+	// line (preserved user content) and once as the actual block
+	// terminator. Any more than that means we appended a duplicate.
+	if n := strings.Count(firstStr, managedExcludeBegin); n != 1 {
+		t.Errorf("begin marker count = %d, want 1 (stray end mention caused duplicate append?)\nfile:\n%s", n, firstStr)
+	}
+	if n := strings.Count(firstStr, managedExcludeEnd); n != 2 {
+		t.Errorf("end marker count = %d, want 2 (one stray comment line + one real block)\nfile:\n%s", n, firstStr)
+	}
+
+	// User content preserved
+	if !strings.Contains(firstStr, "node_modules/") {
+		t.Errorf("user line 'node_modules/' lost; file:\n%s", firstStr)
+	}
+	if !strings.Contains(firstStr, "# example of a todotriage block looks like:") {
+		t.Errorf("stray user comment lost; file:\n%s", firstStr)
+	}
+
+	// Managed block now contains both patterns (growth in place)
+	beginIdx := strings.Index(firstStr, managedExcludeBegin)
+	searchFrom := beginIdx + len(managedExcludeBegin)
+	relEnd := strings.Index(firstStr[searchFrom:], managedExcludeEnd)
+	if relEnd < 0 {
+		t.Fatalf("end marker not found after begin; file:\n%s", firstStr)
+	}
+	managedSection := firstStr[beginIdx : searchFrom+relEnd]
+	for _, p := range managedExcludePatterns {
+		if !strings.Contains(managedSection, p) {
+			t.Errorf("managed block missing pattern %q; section:\n%s", p, managedSection)
+		}
+	}
+
+	// Idempotent: second run produces identical content. If the stray
+	// end marker still confused us, we'd append on every run and the
+	// files would differ.
+	if err := writeLocalExcludes(wtDir); err != nil {
+		t.Fatalf("second call: %v", err)
+	}
+	secondContent, err := os.ReadFile(excludePath)
+	if err != nil {
+		t.Fatalf("read after second: %v", err)
+	}
+	if string(secondContent) != firstStr {
+		t.Errorf("file diverged between calls:\nfirst:\n%s\n\nsecond:\n%s", firstStr, string(secondContent))
+	}
+}
+
 func TestWriteLocalExcludes_AppendsTrailingNewlineWhenMissing(t *testing.T) {
 	wtDir, excludePath := setupPlainCheckout(t)
 

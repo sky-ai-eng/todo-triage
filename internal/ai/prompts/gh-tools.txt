@@ -3,7 +3,7 @@ GitHub interactions use `{{BINARY_PATH}} exec gh`. Run `{{BINARY_PATH}} exec gh 
 Workflows:
 - Inspect a PR: `exec gh pr view`, `exec gh pr diff`, `exec gh pr files`. Use `-v` for full review/comment bodies.
 - Review a PR: `exec gh pr start-review` → `exec gh pr add-review-comment` (repeat) → `exec gh pr submit-review`.
-- Investigate a failing CI run: `exec gh actions download-logs <workflow_run_id>` downloads and extracts the full log archive to `./_scratch/ci-logs/<run_id>/`. Use your standard Read/Grep/Glob tools on the extracted files — each top-level directory under the destination is a single job.
+- Investigate a failing CI run: `exec gh actions download-logs <workflow_run_id>` downloads and extracts the full log archive to `./_scratch/ci-logs/<run_id>/`. Returns JSON with `dest_dir`, `bytes_downloaded`, and an `entries` array listing the top-level contents. Use your standard Read/Grep/Glob tools on the extracted files — each top-level directory under the destination is a single job.
 - Read files in the working directory for context beyond the diff.
 
 Repo target resolution:

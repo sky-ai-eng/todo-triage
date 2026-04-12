@@ -10,7 +10,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/sky-ai-eng/todo-triage/internal/github"
 )
@@ -49,12 +48,26 @@ func handleActions(client *github.Client, args []string) {
 	}
 }
 
+// downloadLogsResult is the JSON envelope emitted on success by
+// `gh actions download-logs`. Structured output matches the `exec gh`
+// contract that every command produces JSON on stdout, so downstream
+// tooling (agents, jq, shell pipelines) can parse without scraping
+// human-readable text.
+type downloadLogsResult struct {
+	RunID           int64    `json:"run_id"`
+	Owner           string   `json:"owner"`
+	Repo            string   `json:"repo"`
+	DestDir         string   `json:"dest_dir"`
+	BytesDownloaded int64    `json:"bytes_downloaded"`
+	Entries         []string `json:"entries"`
+}
+
 // actionsDownloadLogs implements `gh actions download-logs <run_id>`.
 //
 // Fetches the full log archive for a workflow run, extracts it into
-// <cwd>/_scratch/ci-logs/<run_id>/, and prints the destination path plus a
-// top-level directory listing on stdout so agents can orient immediately.
-// Everything goes to stderr on failure with a non-zero exit.
+// <cwd>/_scratch/ci-logs/<run_id>/, and prints a structured JSON result
+// on stdout so agents can parse it the same way they parse every other
+// exec gh command. Errors go to stderr with a non-zero exit.
 //
 // The resource-owning work (temp file + destination directory) lives in
 // downloadAndExtractLogs so defers actually fire on error — exitErr calls
@@ -104,16 +117,18 @@ func actionsDownloadLogs(client *github.Client, args []string) {
 	if err != nil {
 		exitErr(fmt.Sprintf("list extracted entries: %v", err))
 	}
+	if entries == nil {
+		entries = []string{} // JSON null would be misleading; empty archive is an empty list
+	}
 
-	fmt.Printf("extracted %d bytes to: %s\n", bytesDownloaded, destDir)
-	fmt.Println("top-level entries:")
-	if len(entries) == 0 {
-		fmt.Println("  (archive was empty)")
-		return
-	}
-	for _, e := range entries {
-		fmt.Printf("  %s\n", e)
-	}
+	printJSON(downloadLogsResult{
+		RunID:           runID,
+		Owner:           owner,
+		Repo:            repo,
+		DestDir:         destDir,
+		BytesDownloaded: bytesDownloaded,
+		Entries:         entries,
+	})
 }
 
 // downloadAndExtractLogs owns every on-disk resource the command needs: the
@@ -165,8 +180,13 @@ func downloadAndExtractLogs(client *github.Client, owner, repo string, runID int
 		_ = os.Remove(tmpPath)
 	}()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
-	defer cancel()
+	// No explicit ctx deadline: DownloadArtifact enforces its own
+	// per-request timeout via the shallow-copied http.Client it runs
+	// against. Setting another WithTimeout here would just duplicate
+	// the same magic number (and let the two drift in a future edit).
+	// Using context.Background keeps the door open for signal-driven
+	// cancellation without committing to a specific wall-clock ceiling.
+	ctx := context.Background()
 
 	apiPath := fmt.Sprintf("/repos/%s/%s/actions/runs/%d/logs", owner, repo, runID)
 	bytesDownloaded, err := client.DownloadArtifact(ctx, apiPath, tmpFile, maxArchiveBytes)
