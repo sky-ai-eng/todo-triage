@@ -708,47 +708,7 @@ func ingestAgentMemory(database *sql.DB, cwd, runID, taskID string) error {
 	return nil
 }
 
-// writeSystemStubMemory writes a placeholder task_memory row for runs
-// that ended involuntarily before the agent could produce its own
-// memory file. Maintains the SKY-141 invariant that every involuntarily-
-// failed run produces exactly one task_memory row, so downstream
-// consumers (circuit-breaker UI, materialize-at-startup) never see
-// an orphaned run record.
-//
-// No-op if a row already exists for the run — defensive against the
-// order-of-operations case where the agent wrote a real memory file
-// that got ingested, then a post-ingestion step crashed and fell into
-// the failure path. Duplicate stubs would pollute the history; a
-// single genuine entry wins.
-//
-// Cancellation is not a failure: handleCancelled does NOT call this,
-// so cancelled runs legitimately have no task_memory row. Downstream
-// code is responsible for handling that cleanly.
-func writeSystemStubMemory(database *sql.DB, runID, taskID, reason string) {
-	existing, err := db.GetTaskMemoryByRun(database, runID)
-	if err != nil {
-		log.Printf("[delegate] warning: failed to check existing memory for run %s: %v", runID, err)
-		// Fall through and try the insert anyway — better a duplicate
-		// than a lost stub.
-	}
-	if existing != nil {
-		return
-	}
-	content := fmt.Sprintf("# Run %s\n\nRun failed involuntarily: %s\n\nNo agent reasoning available.\n", runID, reason)
-	stub := domain.TaskMemory{
-		ID:        uuid.New().String(),
-		TaskID:    taskID,
-		RunID:     runID,
-		Content:   content,
-		Source:    "system",
-		CreatedAt: time.Now(),
-	}
-	if err := db.SaveTaskMemory(database, stub); err != nil {
-		log.Printf("[delegate] warning: failed to write system stub memory for run %s: %v", runID, err)
-	}
-}
-
-// runMemoryGate enforces the pre-complete task_memory file invariant.
+// runMemoryGate enforces the pre-complete task_memory file requirement.
 //
 // If the agent wrote ./task_memory/<runID>.md during its initial
 // invocation, returns the original completion unchanged. Otherwise
@@ -937,19 +897,6 @@ func (s *Spawner) updateStatus(runID, status string) {
 
 func (s *Spawner) failRun(runID, errMsg string) {
 	log.Printf("[delegate] run %s failed: %s", runID, errMsg)
-
-	// Look up task_id so we can write a system stub task_memory row,
-	// maintaining the SKY-141 invariant that every involuntarily-failed
-	// run produces exactly one task_memory row. Cancellation is handled
-	// separately via handleCancelled and intentionally does not write a
-	// stub — the circuit breaker UI treats cancellation as a non-failure
-	// terminal state.
-	var taskID sql.NullString
-	if err := s.database.QueryRow(`SELECT task_id FROM agent_runs WHERE id = ?`, runID).Scan(&taskID); err != nil {
-		log.Printf("[delegate] warning: failed to look up task_id for failed run %s: %v", runID, err)
-	} else if taskID.Valid && taskID.String != "" {
-		writeSystemStubMemory(s.database, runID, taskID.String, errMsg)
-	}
 
 	if _, err := s.database.Exec(`UPDATE agent_runs SET status = 'failed' WHERE id = ?`, runID); err != nil {
 		log.Printf("[delegate] warning: failed to mark run %s as failed: %v", runID, err)
