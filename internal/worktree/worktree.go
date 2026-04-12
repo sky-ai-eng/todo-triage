@@ -175,6 +175,14 @@ func CreateForPR(ctx context.Context, owner, repo, cloneURL, headBranch string, 
 	}
 
 	if err := writeLocalExcludes(wtDir); err != nil {
+		// The worktree has already been registered with the bare repo at
+		// this point, so we must roll it back before returning — otherwise
+		// the caller sees an error AND has no handle to clean up with,
+		// leaking a half-configured worktree directory. Remove handles
+		// both the directory removal and the bare-repo worktree prune.
+		if rmErr := Remove(runID); rmErr != nil {
+			log.Printf("[worktree] rollback after exclude-write failure: %v", rmErr)
+		}
 		return "", fmt.Errorf("write local git excludes: %w", err)
 	}
 
@@ -224,6 +232,13 @@ func CreateForBranch(ctx context.Context, owner, repo, cloneURL, baseBranch, fea
 	}
 
 	if err := writeLocalExcludes(wtDir); err != nil {
+		// Same rollback rationale as in CreateForPR: the worktree is
+		// already registered and on disk, so we own the cleanup if any
+		// post-add step fails. Remove handles both the directory and the
+		// bare-repo prune.
+		if rmErr := Remove(runID); rmErr != nil {
+			log.Printf("[worktree] rollback after exclude-write failure: %v", rmErr)
+		}
 		return "", fmt.Errorf("write local git excludes: %w", err)
 	}
 
@@ -231,62 +246,132 @@ func CreateForBranch(ctx context.Context, owner, repo, cloneURL, baseBranch, fea
 	return wtDir, nil
 }
 
-// writeLocalExcludes installs local (non-committed) gitignore patterns into
-// the worktree's .git/info/exclude so agents can't accidentally commit the
-// scratch and memory directories the delegation system uses.
+// managedExcludePatterns are the gitignore patterns writeLocalExcludes
+// ensures are present in .git/info/exclude for every delegated worktree.
 //
 // - _scratch/    — CI log archives, other ephemeral download targets (SKY-146)
 // - task_memory/ — cross-run structured audit entries (SKY-141)
+var managedExcludePatterns = []string{"_scratch/", "task_memory/"}
+
+// managedExcludeHeader marks the block we append so it's obvious where the
+// patterns came from when someone reads the file by hand. Not used for
+// parsing — idempotency is detected via line-level pattern presence.
+const managedExcludeHeader = "# Managed by todotriage — local scratch/memory state (do not commit)"
+
+// writeLocalExcludes ensures the worktree's .git/info/exclude file contains
+// every pattern in managedExcludePatterns so agents can't accidentally
+// commit our infrastructure directories.
+//
+// Append-only by design: any existing content in the file (user patterns,
+// tool-managed patterns, anything) is preserved. Only the patterns we
+// manage that aren't already present as whole lines get appended, under a
+// labelled header section. Running this twice is a no-op on the second
+// call — idempotent.
 //
 // Uses .git/info/exclude rather than a committed .gitignore because these
 // paths are infrastructure concerns, not something the tracked repo should
 // know or care about.
 //
-// Fails closed: if the write fails we return the error and let worktree
-// creation fail. A worktree without the excludes is a footgun (agents could
-// commit hundreds of log files), so rolling back the worktree on error is
-// the safer behavior than silently proceeding.
+// Fails closed: if any step fails we return the error and the caller is
+// responsible for rolling back the partially-created worktree. A worktree
+// without the excludes is a footgun (agents could commit hundreds of log
+// files), so rolling back the worktree on error is the safer behavior
+// than silently proceeding.
 //
-// Worktrees in git use a per-worktree info directory — for a linked worktree,
-// `.git` is a file containing `gitdir: <path>`, and `info/exclude` lives
-// under that gitdir. We resolve it by reading `.git` and appending
-// `info/exclude`.
+// Worktrees in git use a per-worktree info directory — for a linked
+// worktree, `.git` is a file containing `gitdir: <path>`, and
+// `info/exclude` lives under that gitdir. For a plain checkout `.git` is
+// a directory. Both layouts are handled.
 func writeLocalExcludes(wtDir string) error {
-	const excludeContents = "# Managed by todotriage — do not commit local scratch/memory state\n_scratch/\ntask_memory/\n"
-
-	gitFile := filepath.Join(wtDir, ".git")
-	info, err := os.Stat(gitFile)
+	excludePath, err := resolveExcludePath(wtDir)
 	if err != nil {
-		return fmt.Errorf("stat .git: %w", err)
+		return err
 	}
 
-	var excludePath string
-	if info.IsDir() {
-		// Non-worktree checkout (shouldn't happen in our flow, but handle it)
-		excludePath = filepath.Join(gitFile, "info", "exclude")
-	} else {
-		// Linked worktree: .git is a pointer file like "gitdir: /path/to/worktrees/<name>"
-		data, err := os.ReadFile(gitFile)
-		if err != nil {
-			return fmt.Errorf("read .git pointer: %w", err)
+	// Read whatever's already there. A non-existent file is fine — we'll
+	// create it below. Any other read error is fatal.
+	existing, err := os.ReadFile(excludePath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read exclude file: %w", err)
+	}
+	existingStr := string(existing)
+
+	// Figure out which of our patterns are missing. Line-level match rather
+	// than substring match so a comment like "# see _scratch/" doesn't
+	// accidentally count as the pattern being present.
+	have := make(map[string]bool)
+	for _, line := range strings.Split(existingStr, "\n") {
+		have[strings.TrimSpace(line)] = true
+	}
+	var toAdd []string
+	for _, p := range managedExcludePatterns {
+		if !have[p] {
+			toAdd = append(toAdd, p)
 		}
-		gitdir := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(data)), "gitdir:"))
-		if gitdir == "" {
-			return fmt.Errorf(".git pointer missing gitdir: %q", string(data))
+	}
+	if len(toAdd) == 0 {
+		return nil // idempotent no-op — everything we manage is already present
+	}
+
+	// Build the block to append. Never modifies existing content — we only
+	// add our managed patterns at the end, preceded by a blank-line
+	// separator and the header so it's visually distinct from whatever
+	// else is already in the file.
+	var block strings.Builder
+	if existingStr != "" {
+		if !strings.HasSuffix(existingStr, "\n") {
+			block.WriteString("\n") // ensure existing content is newline-terminated before we append
 		}
-		if !filepath.IsAbs(gitdir) {
-			gitdir = filepath.Join(wtDir, gitdir)
-		}
-		excludePath = filepath.Join(gitdir, "info", "exclude")
+		block.WriteString("\n") // blank separator between existing content and our block
+	}
+	block.WriteString(managedExcludeHeader)
+	block.WriteString("\n")
+	for _, p := range toAdd {
+		block.WriteString(p)
+		block.WriteString("\n")
 	}
 
 	if err := os.MkdirAll(filepath.Dir(excludePath), 0755); err != nil {
 		return fmt.Errorf("mkdir info dir: %w", err)
 	}
-	if err := os.WriteFile(excludePath, []byte(excludeContents), 0644); err != nil {
-		return fmt.Errorf("write exclude file: %w", err)
+
+	f, err := os.OpenFile(excludePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("open exclude file: %w", err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(block.String()); err != nil {
+		return fmt.Errorf("append exclude entries: %w", err)
 	}
 	return nil
+}
+
+// resolveExcludePath returns the filesystem path of .git/info/exclude for
+// a worktree, handling both the linked-worktree case (where .git is a
+// pointer file) and the plain-checkout case (where .git is a directory).
+func resolveExcludePath(wtDir string) (string, error) {
+	gitFile := filepath.Join(wtDir, ".git")
+	info, err := os.Stat(gitFile)
+	if err != nil {
+		return "", fmt.Errorf("stat .git: %w", err)
+	}
+	if info.IsDir() {
+		// Plain checkout
+		return filepath.Join(gitFile, "info", "exclude"), nil
+	}
+	// Linked worktree: .git is a pointer file like "gitdir: /path/to/worktrees/<name>"
+	data, err := os.ReadFile(gitFile)
+	if err != nil {
+		return "", fmt.Errorf("read .git pointer: %w", err)
+	}
+	gitdir := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(data)), "gitdir:"))
+	if gitdir == "" {
+		return "", fmt.Errorf(".git pointer missing gitdir: %q", string(data))
+	}
+	if !filepath.IsAbs(gitdir) {
+		gitdir = filepath.Join(wtDir, gitdir)
+	}
+	return filepath.Join(gitdir, "info", "exclude"), nil
 }
 
 // branchExists checks whether a branch ref exists in the bare repo.
