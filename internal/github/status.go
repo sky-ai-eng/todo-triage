@@ -32,6 +32,7 @@ type ChecksStatus struct {
 	Passing int `json:"passing"`
 	Failing int `json:"failing"`
 	Pending int `json:"pending"`
+	Skipped int `json:"skipped"`
 }
 
 // GetPRStatus fetches the live status for a PR: mergeability, reviews, checks.
@@ -137,6 +138,8 @@ func (c *Client) GetPRStatus(owner, repo string, number int) (*PRStatus, error) 
 			status.ChecksStatus.Pending++
 		case domain.IsFailingConclusion(cr.Conclusion):
 			status.ChecksStatus.Failing++
+		case cr.Conclusion == "skipped":
+			status.ChecksStatus.Skipped++
 		default:
 			status.ChecksStatus.Passing++
 		}

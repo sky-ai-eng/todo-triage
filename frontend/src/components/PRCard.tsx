@@ -6,7 +6,13 @@ interface PRStatusData {
   auto_merge: boolean
   mergeable_state: string
   reviews: { author: string; state: string; submitted_at: string }[]
-  checks_status: { total: number; passing: number; failing: number; pending: number }
+  checks_status: {
+    total: number
+    passing: number
+    failing: number
+    pending: number
+    skipped: number
+  }
   conflicts: boolean
   review_decision: string
 }
@@ -165,7 +171,15 @@ export default function PRCard({ pr }: { pr: PRSummary }) {
               <div>
                 <h4 className="text-[11px] font-medium text-text-tertiary mb-1.5">Checks</h4>
                 <ChecksBar
-                  checks={status.checks_status || { total: 0, passing: 0, failing: 0, pending: 0 }}
+                  checks={
+                    status.checks_status || {
+                      total: 0,
+                      passing: 0,
+                      failing: 0,
+                      pending: 0,
+                      skipped: 0,
+                    }
+                  }
                 />
               </div>
 
@@ -235,7 +249,7 @@ function ReviewBadge({ review }: { review: { author: string; state: string } }) 
 function ChecksBar({
   checks,
 }: {
-  checks: { total: number; passing: number; failing: number; pending: number }
+  checks: { total: number; passing: number; failing: number; pending: number; skipped: number }
 }) {
   if (checks.total === 0) {
     return <p className="text-[12px] text-text-tertiary">No checks</p>
@@ -248,6 +262,12 @@ function ChecksBar({
           <div
             className="h-full bg-claim"
             style={{ width: `${(checks.passing / checks.total) * 100}%` }}
+          />
+        )}
+        {checks.skipped > 0 && (
+          <div
+            className="h-full bg-text-tertiary/20"
+            style={{ width: `${(checks.skipped / checks.total) * 100}%` }}
           />
         )}
         {checks.pending > 0 && (
@@ -265,6 +285,7 @@ function ChecksBar({
       </div>
       <span className="text-[11px] text-text-tertiary shrink-0">
         {checks.passing}/{checks.total} passing
+        {checks.skipped > 0 && ` · ${checks.skipped} skipped`}
       </span>
     </div>
   )

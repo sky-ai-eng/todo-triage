@@ -61,6 +61,27 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, repos 
 			log.Printf("[tracker] error registering tracked item %s: %v", sid, err)
 		}
 
+		// Seed the discovery snapshot for newly-inserted items so Phase 2
+		// classification can see whether this PR is terminal (merged/closed).
+		// Without this, new items have '{}' as their snapshot default,
+		// Phase 2 parses that as zero-value (Merged=false, State=""), and
+		// every newly-discovered PR gets classified as "open" and refreshed
+		// with the expensive full fragment.
+		//
+		// The WHERE snapshot='{}' guard is critical: for already-tracked
+		// items, the stored snapshot is the previous cycle's full-refresh
+		// data (with real CheckRuns). Overwriting it with the lightweight
+		// discovery snapshot (nil CheckRuns) would cause Phase 3 to diff
+		// against nil instead of last-cycle state, silently skipping CI
+		// event detection.
+		snapJSON, _ := json.Marshal(d.Snapshot)
+		if _, err := t.database.Exec(
+			`UPDATE tracked_items SET snapshot = ? WHERE source = ? AND source_id = ? AND snapshot = '{}'`,
+			string(snapJSON), "github", sid,
+		); err != nil {
+			log.Printf("[tracker] warning: failed to seed discovery snapshot for %s: %v", sid, err)
+		}
+
 		// Reactivate if a previously-terminal item is now open (e.g., reopened PR)
 		if !d.Snapshot.Merged && d.Snapshot.State != "CLOSED" {
 			if reactivated, err := db.ReactivateTrackedItem(t.database, "github", sid); err != nil {
@@ -71,26 +92,64 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, repos 
 		}
 	}
 
-	// Phase 2: Refresh all tracked items via GraphQL batch
-	nodeIDs, err := db.ListNodeIDs(t.database, "github")
-	if err != nil {
-		return 0, fmt.Errorf("list node IDs: %w", err)
-	}
-	if len(nodeIDs) == 0 {
-		return 0, nil
-	}
-
-	refreshed, err := client.RefreshPRs(nodeIDs)
-	if err != nil {
-		return 0, fmt.Errorf("refresh PRs: %w", err)
-	}
-
-	// Phase 3: Diff, upsert tasks, and emit events
+	// Phase 2: Refresh tracked items.
+	//
+	// Load tracked items first (we also need them for Phase 3 diffing)
+	// and classify by stored-snapshot state so we can use the right
+	// GraphQL fragment for each tier:
+	//
+	//   Open PRs     → full fragment (includes check runs for CI diffing)
+	//   Terminal PRs → lightweight fragment (CI is irrelevant; much cheaper)
+	//
+	// Terminal PRs go through exactly one refresh after discovery (to get
+	// final state), then MarkTerminal excludes them from future polls.
 	tracked, err := db.ListActiveTrackedItems(t.database, "github")
 	if err != nil {
 		return 0, fmt.Errorf("list tracked items: %w", err)
 	}
 
+	var openIDs, terminalIDs []string
+	for _, item := range tracked {
+		if item.NodeID == "" {
+			continue
+		}
+		var snap domain.PRSnapshot
+		if item.Snapshot != "" && item.Snapshot != "{}" {
+			_ = json.Unmarshal([]byte(item.Snapshot), &snap)
+		}
+		if snap.Merged || snap.State == "CLOSED" || snap.State == "MERGED" {
+			terminalIDs = append(terminalIDs, item.NodeID)
+		} else {
+			openIDs = append(openIDs, item.NodeID)
+		}
+	}
+
+	if len(openIDs) == 0 && len(terminalIDs) == 0 {
+		return 0, nil
+	}
+
+	refreshed := make(map[string]domain.PRSnapshot)
+	if len(openIDs) > 0 {
+		open, err := client.RefreshPRs(openIDs, true)
+		if err != nil {
+			return 0, fmt.Errorf("refresh open PRs: %w", err)
+		}
+		for k, v := range open {
+			refreshed[k] = v
+		}
+	}
+	if len(terminalIDs) > 0 {
+		terminal, err := client.RefreshPRs(terminalIDs, false)
+		if err != nil {
+			return 0, fmt.Errorf("refresh terminal PRs: %w", err)
+		}
+		for k, v := range terminal {
+			refreshed[k] = v
+		}
+	}
+
+	// Phase 3: Diff, upsert tasks, and emit events
+	// (reuses `tracked` from Phase 2 — same active set, no extra query)
 	eventsEmitted := 0
 	for _, item := range tracked {
 		if item.NodeID == "" {
