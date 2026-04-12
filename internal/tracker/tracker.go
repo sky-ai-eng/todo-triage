@@ -61,18 +61,25 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, repos 
 			log.Printf("[tracker] error registering tracked item %s: %v", sid, err)
 		}
 
-		// Store the discovery snapshot so Phase 2 classification can see
-		// whether this PR is terminal (merged/closed) without waiting for
-		// a refresh cycle. Without this, UpsertTrackedItem stores '{}' as
-		// the default, Phase 2 parses that as a zero-value PRSnapshot, and
-		// every newly-discovered PR — including merged backfill results —
-		// gets classified as "open" and refreshed with the expensive full
-		// fragment, undermining the whole cost savings from the fragment
-		// split. The refresh in the same poll cycle overwrites this with
-		// the real data, so the brief overwrite is harmless.
+		// Seed the discovery snapshot for newly-inserted items so Phase 2
+		// classification can see whether this PR is terminal (merged/closed).
+		// Without this, new items have '{}' as their snapshot default,
+		// Phase 2 parses that as zero-value (Merged=false, State=""), and
+		// every newly-discovered PR gets classified as "open" and refreshed
+		// with the expensive full fragment.
+		//
+		// The WHERE snapshot='{}' guard is critical: for already-tracked
+		// items, the stored snapshot is the previous cycle's full-refresh
+		// data (with real CheckRuns). Overwriting it with the lightweight
+		// discovery snapshot (nil CheckRuns) would cause Phase 3 to diff
+		// against nil instead of last-cycle state, silently skipping CI
+		// event detection.
 		snapJSON, _ := json.Marshal(d.Snapshot)
-		if err := db.UpdateTrackedSnapshot(t.database, "github", sid, string(snapJSON)); err != nil {
-			log.Printf("[tracker] warning: failed to store discovery snapshot for %s: %v", sid, err)
+		if _, err := t.database.Exec(
+			`UPDATE tracked_items SET snapshot = ? WHERE source = ? AND source_id = ? AND snapshot = '{}'`,
+			string(snapJSON), "github", sid,
+		); err != nil {
+			log.Printf("[tracker] warning: failed to seed discovery snapshot for %s: %v", sid, err)
 		}
 
 		// Reactivate if a previously-terminal item is now open (e.g., reopened PR)
