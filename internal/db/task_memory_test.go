@@ -10,14 +10,30 @@ import (
 )
 
 // newTestDB opens an in-memory SQLite database with foreign keys enabled
-// and runs the schema migration. Returned DB is ready for use; caller is
-// responsible for Close.
+// and runs the schema migration. Returned DB is ready for use; test
+// cleanup closes it.
+//
+// Connection pool is pinned to a single connection via SetMaxOpenConns(1).
+// This is not about performance — it's correctness. SQLite's `:memory:`
+// URI creates a fresh in-memory database per connection, so if Go's
+// default sql pool opens a second connection (during parallel execution,
+// after an idle close, or during connection recycling), queries on the
+// new connection hit a completely empty database. A write on connection
+// A followed by a read on connection B would intermittently return "no
+// rows found" for a row we just inserted.
+//
+// Pinning to one connection forces every operation in the test to share
+// the same in-memory db. The alternative — `file:<name>?mode=memory&cache=shared`
+// — works too but needs a unique db name per test to avoid cross-test
+// pollution, which is more machinery for the same guarantee.
 func newTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 	database, err := sql.Open("sqlite3", ":memory:?_foreign_keys=on")
 	if err != nil {
 		t.Fatalf("open in-memory db: %v", err)
 	}
+	database.SetMaxOpenConns(1)
+	database.SetMaxIdleConns(1)
 	if err := Migrate(database); err != nil {
 		database.Close()
 		t.Fatalf("migrate: %v", err)
