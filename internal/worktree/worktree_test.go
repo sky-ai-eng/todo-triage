@@ -60,8 +60,8 @@ func TestWriteLocalExcludes_CreatesFileWhenMissing(t *testing.T) {
 	if !strings.Contains(s, "task_memory/") {
 		t.Errorf("missing task_memory/ pattern: %q", s)
 	}
-	if !strings.Contains(s, managedExcludeHeader) {
-		t.Errorf("missing managed header: %q", s)
+	if !strings.Contains(s, managedExcludeBegin) || !strings.Contains(s, managedExcludeEnd) {
+		t.Errorf("missing marker pair: %q", s)
 	}
 }
 
@@ -151,13 +151,17 @@ func TestWriteLocalExcludes_Idempotent(t *testing.T) {
 }
 
 // TestWriteLocalExcludes_PartialExisting covers the case where one of our
-// managed patterns is already present (maybe from a previous partial
-// setup, or an unrelated tool) but the other isn't. We should add only
-// the missing pattern, not duplicate the existing one.
+// managed patterns is present in unrelated user content (e.g. the user
+// added _scratch/ manually before we ran) and the other isn't. The
+// managed block is always written as a complete manifest, so the user's
+// line stays untouched AND our block appears with both patterns. Git
+// dedupes duplicate lines internally, so two occurrences of _scratch/
+// are functionally equivalent to one — the important invariant is
+// "user content preserved, managed block complete."
 func TestWriteLocalExcludes_PartialExisting(t *testing.T) {
 	wtDir, excludePath := setupPlainCheckout(t)
 
-	// _scratch/ already there; task_memory/ missing.
+	// _scratch/ lives in user content; task_memory/ is not yet in the file.
 	if err := os.WriteFile(excludePath, []byte("other-tool-pattern/\n_scratch/\n"), 0644); err != nil {
 		t.Fatalf("pre-populate: %v", err)
 	}
@@ -172,17 +176,89 @@ func TestWriteLocalExcludes_PartialExisting(t *testing.T) {
 	}
 	s := string(content)
 
-	// _scratch/ should appear exactly once — not duplicated by the append.
-	if count := strings.Count(s, "_scratch/"); count != 1 {
-		t.Errorf("_scratch/ appears %d times, want 1; file:\n%s", count, s)
+	// User content preserved (both lines still present as whole lines)
+	gotLines := strings.Split(s, "\n")
+	wantUserLines := []string{"other-tool-pattern/", "_scratch/"}
+	for _, want := range wantUserLines {
+		found := false
+		for _, line := range gotLines {
+			if line == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("user line %q lost; file:\n%s", want, s)
+		}
 	}
-	// task_memory/ must have been added.
-	if !strings.Contains(s, "task_memory/") {
-		t.Errorf("task_memory/ missing; file:\n%s", s)
+
+	// Managed block is present and complete — both patterns inside it.
+	beginIdx := strings.Index(s, managedExcludeBegin)
+	endIdx := strings.Index(s, managedExcludeEnd)
+	if beginIdx < 0 || endIdx <= beginIdx {
+		t.Fatalf("managed block markers missing or inverted; file:\n%s", s)
 	}
-	// The unrelated user pattern must survive.
-	if !strings.Contains(s, "other-tool-pattern/") {
-		t.Errorf("user pattern lost; file:\n%s", s)
+	managedSection := s[beginIdx:endIdx]
+	for _, p := range managedExcludePatterns {
+		if !strings.Contains(managedSection, p) {
+			t.Errorf("managed block missing pattern %q; section:\n%s", p, managedSection)
+		}
+	}
+}
+
+// TestWriteLocalExcludes_GrowthReusesBlock is the regression guard for the
+// "header duplication on pattern set growth" issue: if managedExcludePatterns
+// grows from {A} to {A, B}, a later run should expand the existing managed
+// block in place rather than appending a second block with its own header.
+// Simulated here by writing a complete managed block containing a subset of
+// the current managedExcludePatterns, then running writeLocalExcludes and
+// verifying the block now contains the full set and the begin/end markers
+// each appear exactly once.
+func TestWriteLocalExcludes_GrowthReusesBlock(t *testing.T) {
+	wtDir, excludePath := setupPlainCheckout(t)
+
+	// Simulate a previous run that only knew about _scratch/. Format matches
+	// what writeLocalExcludes would produce — begin marker, patterns, end
+	// marker — but with a subset of the current managedExcludePatterns.
+	stale := "user-pattern/\n\n" +
+		managedExcludeBegin + "\n" +
+		"_scratch/\n" +
+		managedExcludeEnd + "\n"
+	if err := os.WriteFile(excludePath, []byte(stale), 0644); err != nil {
+		t.Fatalf("pre-populate: %v", err)
+	}
+
+	if err := writeLocalExcludes(wtDir); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	content, err := os.ReadFile(excludePath)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	s := string(content)
+
+	// Markers must appear exactly once — not duplicated by a new block.
+	if n := strings.Count(s, managedExcludeBegin); n != 1 {
+		t.Errorf("begin marker appears %d times, want 1; file:\n%s", n, s)
+	}
+	if n := strings.Count(s, managedExcludeEnd); n != 1 {
+		t.Errorf("end marker appears %d times, want 1; file:\n%s", n, s)
+	}
+
+	// Managed block should now contain the full set (expanded in place).
+	beginIdx := strings.Index(s, managedExcludeBegin)
+	endIdx := strings.Index(s, managedExcludeEnd)
+	managedSection := s[beginIdx:endIdx]
+	for _, p := range managedExcludePatterns {
+		if !strings.Contains(managedSection, p) {
+			t.Errorf("managed block missing %q after growth; section:\n%s", p, managedSection)
+		}
+	}
+
+	// User content outside the block must survive.
+	if !strings.Contains(s, "user-pattern/") {
+		t.Errorf("user line lost after growth rewrite; file:\n%s", s)
 	}
 }
 
@@ -200,6 +276,70 @@ func TestWriteLocalExcludes_LinkedWorktreePointer(t *testing.T) {
 	s := string(content)
 	if !strings.Contains(s, "_scratch/") || !strings.Contains(s, "task_memory/") {
 		t.Errorf("managed patterns not written through pointer file; got:\n%s", s)
+	}
+}
+
+// TestWriteLocalExcludes_RejectsMalformedGitPointer is the regression guard
+// for a real bug: strings.TrimPrefix is a silent no-op when the prefix
+// isn't present, so a corrupted or non-pointer .git file like
+// "malicious-path/" would have been interpreted as the literal gitdir
+// path, causing us to write info/exclude to an arbitrary location
+// relative to the worktree. The fix explicitly requires the trimmed
+// content to start with "gitdir:".
+func TestWriteLocalExcludes_RejectsMalformedGitPointer(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+	}{
+		{"no gitdir prefix", "some-other-path/"},
+		{"plain path that looks like a relative dir", "../../etc"},
+		{"random garbage", "kjsdfhkjshdf"},
+		{"partial prefix", "gitdi: /some/path"},
+		{"case-wrong prefix", "GITDIR: /some/path"},
+		{"empty file", ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			wtDir := t.TempDir()
+			// Write the malformed pointer file
+			if err := os.WriteFile(filepath.Join(wtDir, ".git"), []byte(tc.content), 0644); err != nil {
+				t.Fatalf("write .git: %v", err)
+			}
+
+			err := writeLocalExcludes(wtDir)
+			if err == nil {
+				t.Fatalf("expected error on malformed pointer %q, got nil", tc.content)
+			}
+			// Error message should be diagnostic — mention it's not a
+			// valid pointer rather than some downstream "no such file".
+			if !strings.Contains(err.Error(), "not a valid worktree pointer") &&
+				!strings.Contains(err.Error(), "empty gitdir") {
+				t.Errorf("error should mention invalid pointer, got: %v", err)
+			}
+
+			// Crucially: no file should have been created anywhere based
+			// on the corrupted content. Check that nothing matching
+			// "info/exclude" exists under the tempdir beyond the .git
+			// file we wrote ourselves.
+			var unexpected []string
+			_ = filepath.Walk(wtDir, func(path string, info os.FileInfo, walkErr error) error {
+				if walkErr != nil {
+					return nil
+				}
+				if info.IsDir() {
+					return nil
+				}
+				if path == filepath.Join(wtDir, ".git") {
+					return nil
+				}
+				unexpected = append(unexpected, path)
+				return nil
+			})
+			if len(unexpected) > 0 {
+				t.Errorf("malformed pointer caused unexpected writes: %v", unexpected)
+			}
+		})
 	}
 }
 
@@ -221,10 +361,10 @@ func TestWriteLocalExcludes_AppendsTrailingNewlineWhenMissing(t *testing.T) {
 	}
 	s := string(content)
 
-	// Original line must still be a recognizable whole line, not mashed
-	// into the managed header. Verify the header appears on its own line.
-	if !strings.Contains(s, "\n"+managedExcludeHeader) && !strings.HasPrefix(s, managedExcludeHeader) {
-		t.Errorf("managed header not on its own line; file:\n%s", s)
+	// The begin marker must appear on its own line, not mashed onto the
+	// end of the unterminated user line.
+	if !strings.Contains(s, "\n"+managedExcludeBegin) {
+		t.Errorf("begin marker not on its own line; file:\n%s", s)
 	}
 	// The original pattern must still be findable as a whole line.
 	foundLine := false

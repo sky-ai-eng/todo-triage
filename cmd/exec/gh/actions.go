@@ -77,12 +77,18 @@ func actionsDownloadLogs(client *github.Client, args []string) {
 
 	// Destination: <cwd>/_scratch/ci-logs/<run_id>/. Resolving to absolute
 	// so the success output gives the agent a path it can use directly
-	// without needing to reason about cwd.
+	// without needing to reason about cwd. safeDestDirForRun also walks
+	// each path component to reject pre-existing symlinks — otherwise a
+	// symlinked `_scratch` (accidental or malicious) would let our
+	// RemoveAll / MkdirAll / zip extraction escape the working directory.
 	cwd, err := os.Getwd()
 	if err != nil {
 		exitErr(fmt.Sprintf("resolve cwd: %v", err))
 	}
-	destDir := filepath.Join(cwd, "_scratch", "ci-logs", strconv.FormatInt(runID, 10))
+	destDir, err := safeDestDirForRun(cwd, runID)
+	if err != nil {
+		exitErr(err.Error())
+	}
 
 	bytesDownloaded, err := downloadAndExtractLogs(client, owner, repo, runID, destDir)
 	if err != nil {
@@ -180,6 +186,47 @@ func downloadAndExtractLogs(client *github.Client, owner, repo string, runID int
 
 	success = true
 	return bytesDownloaded, nil
+}
+
+// safeDestDirForRun resolves the <cwd>/_scratch/ci-logs/<run_id> destination
+// path for a given workflow run, with a symlink safety check at every
+// component we walk through. If any component under cwd exists as a
+// symlink, the function refuses — otherwise our RemoveAll, MkdirAll, and
+// zip extraction would all follow the link and could touch paths outside
+// the working directory.
+//
+// Components that don't exist yet are fine (we'll create them ourselves).
+// Components that exist as regular directories are also fine. Only
+// pre-existing symlinks are rejected.
+//
+// There's an inherent TOCTOU race between this check and the subsequent
+// filesystem operations, but for our threat model (accidental pre-existing
+// symlinks in a worktree, not a live attacker with filesystem primitives)
+// this is sufficient. Defending against a live race would require *at
+// syscalls with O_NOFOLLOW on every path component, which is overkill.
+func safeDestDirForRun(cwd string, runID int64) (string, error) {
+	components := []string{"_scratch", "ci-logs", strconv.FormatInt(runID, 10)}
+	current := cwd
+	for _, c := range components {
+		current = filepath.Join(current, c)
+		info, err := os.Lstat(current)
+		if err != nil {
+			if os.IsNotExist(err) {
+				// Nothing past this point exists yet — the rest of the
+				// path will be created by MkdirAll, so there's nothing
+				// to symlink-check.
+				break
+			}
+			return "", fmt.Errorf("stat path component %s: %w", current, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("refusing to use symlinked path component %s (resolves outside the worktree)", current)
+		}
+		if !info.IsDir() {
+			return "", fmt.Errorf("path component %s exists but is not a directory", current)
+		}
+	}
+	return filepath.Join(cwd, "_scratch", "ci-logs", strconv.FormatInt(runID, 10)), nil
 }
 
 // extractZip safely extracts zipPath into destDir. Rejects any entry whose

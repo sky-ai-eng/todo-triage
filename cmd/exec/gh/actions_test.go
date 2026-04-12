@@ -242,6 +242,116 @@ func TestTopLevelEntries_EmptyDir(t *testing.T) {
 	}
 }
 
+// TestSafeDestDirForRun_HappyPath verifies the common case where none of
+// the path components exist yet — we just construct the path, no safety
+// rejections needed.
+func TestSafeDestDirForRun_HappyPath(t *testing.T) {
+	cwd := t.TempDir()
+	dest, err := safeDestDirForRun(cwd, 123)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := filepath.Join(cwd, "_scratch", "ci-logs", "123")
+	if dest != want {
+		t.Errorf("dest = %q, want %q", dest, want)
+	}
+}
+
+// TestSafeDestDirForRun_AllowsRealDirectories confirms that pre-existing
+// real directories on the path are fine — only symlinks are rejected.
+// This covers the "run #2 on the same cwd" case where _scratch and
+// _scratch/ci-logs already exist from a previous run.
+func TestSafeDestDirForRun_AllowsRealDirectories(t *testing.T) {
+	cwd := t.TempDir()
+	mustMkdir(t, filepath.Join(cwd, "_scratch", "ci-logs"))
+
+	dest, err := safeDestDirForRun(cwd, 456)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := filepath.Join(cwd, "_scratch", "ci-logs", "456")
+	if dest != want {
+		t.Errorf("dest = %q, want %q", dest, want)
+	}
+}
+
+// TestSafeDestDirForRun_RejectsSymlinkedComponent is the regression guard
+// for the symlink-escape bug: if any component under cwd (including the
+// run_id leaf itself) exists as a symlink, we must refuse to proceed.
+// Otherwise downloadAndExtractLogs would RemoveAll / MkdirAll / extract
+// through the symlink and touch paths outside the working directory.
+func TestSafeDestDirForRun_RejectsSymlinkedComponent(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, cwd string)
+	}{
+		{
+			"_scratch is a symlink to somewhere outside",
+			func(t *testing.T, cwd string) {
+				outside := t.TempDir()
+				if err := os.Symlink(outside, filepath.Join(cwd, "_scratch")); err != nil {
+					t.Fatalf("symlink: %v", err)
+				}
+			},
+		},
+		{
+			"_scratch/ci-logs is a symlink",
+			func(t *testing.T, cwd string) {
+				outside := t.TempDir()
+				mustMkdir(t, filepath.Join(cwd, "_scratch"))
+				if err := os.Symlink(outside, filepath.Join(cwd, "_scratch", "ci-logs")); err != nil {
+					t.Fatalf("symlink: %v", err)
+				}
+			},
+		},
+		{
+			"run_id leaf is a symlink",
+			func(t *testing.T, cwd string) {
+				outside := t.TempDir()
+				mustMkdir(t, filepath.Join(cwd, "_scratch", "ci-logs"))
+				if err := os.Symlink(outside, filepath.Join(cwd, "_scratch", "ci-logs", "789")); err != nil {
+					t.Fatalf("symlink: %v", err)
+				}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cwd := t.TempDir()
+			tc.setup(t, cwd)
+
+			_, err := safeDestDirForRun(cwd, 789)
+			if err == nil {
+				t.Fatal("expected symlink rejection, got nil error")
+			}
+			if !strings.Contains(err.Error(), "symlinked path component") {
+				t.Errorf("error should mention symlink, got: %v", err)
+			}
+		})
+	}
+}
+
+// TestSafeDestDirForRun_RejectsNonDirectoryComponent catches the case
+// where a path component exists but as a regular file (not a symlink,
+// not a directory). MkdirAll would fail on the real operation; we fail
+// earlier with a clearer message.
+func TestSafeDestDirForRun_RejectsNonDirectoryComponent(t *testing.T) {
+	cwd := t.TempDir()
+	// Create _scratch as a file instead of a directory
+	if err := os.WriteFile(filepath.Join(cwd, "_scratch"), []byte("nope"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	_, err := safeDestDirForRun(cwd, 123)
+	if err == nil {
+		t.Fatal("expected error on non-directory component, got nil")
+	}
+	if !strings.Contains(err.Error(), "not a directory") {
+		t.Errorf("error should mention non-directory, got: %v", err)
+	}
+}
+
 func mustMkdir(t *testing.T, path string) {
 	t.Helper()
 	if err := os.MkdirAll(path, 0755); err != nil {
