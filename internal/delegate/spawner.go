@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -352,68 +353,47 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	s.updateStatus(runID, "running")
 
 	stream := newStreamState()
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-
-		messages, completion := stream.parseLine(line, runID)
-
-		for _, msg := range messages {
-			id, err := db.InsertAgentMessage(s.database, *msg)
-			if err != nil {
-				log.Printf("[delegate] error storing message: %v", err)
-				continue
-			}
-			msg.ID = int(id)
-			s.broadcastMessage(runID, msg)
-		}
-
-		if completion != nil {
-			resultLink, resultSummary := "", ""
-			status := "completed"
-			if completion.IsError {
-				status = "failed"
-			}
-			if parsed := parseAgentResult(completion.Result); parsed != nil {
-				resultLink = parsed.PrimaryLink()
-				resultSummary = parsed.Summary
-				if parsed.Status == "failed" {
-					status = "failed"
-				}
-			}
-			if err := db.CompleteAgentRun(s.database, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultLink, resultSummary); err != nil {
-				log.Printf("[delegate] warning: failed to record completion for run %s: %v", runID, err)
-			}
-
-			if status == "completed" {
-				if pendingReview, _ := db.PendingReviewByRunID(s.database, runID); pendingReview != nil {
-					status = "pending_approval"
-					if _, err := s.database.Exec(`UPDATE agent_runs SET status = ? WHERE id = ?`, status, runID); err != nil {
-						log.Printf("[delegate] warning: failed to set pending_approval for run %s: %v", runID, err)
-					}
-				}
-			}
-
-			if status == "completed" {
-				if _, err := s.database.Exec(`UPDATE tasks SET status = 'done' WHERE id = ?`, task.ID); err != nil {
-					log.Printf("[delegate] warning: failed to update task %s to done: %v", task.ID, err)
-				}
-			}
-			s.broadcastRunUpdate(runID, status)
-			// We've already captured the result from stdout; just drain any
-			// remaining subprocess state. Exit code is not load-bearing here.
-			_ = cmd.Wait()
-			return
-		}
+	completion, streamErr := s.consumeClaudeStream(stdout, runID, stream)
+	if streamErr != nil {
+		log.Printf("[delegate] scanner error for run %s: %v", runID, streamErr)
 	}
 
-	if err := scanner.Err(); err != nil {
-		log.Printf("[delegate] scanner error for run %s: %v", runID, err)
+	if completion != nil {
+		resultLink, resultSummary := "", ""
+		status := "completed"
+		if completion.IsError {
+			status = "failed"
+		}
+		if parsed := parseAgentResult(completion.Result); parsed != nil {
+			resultLink = parsed.PrimaryLink()
+			resultSummary = parsed.Summary
+			if parsed.Status == "failed" {
+				status = "failed"
+			}
+		}
+		if err := db.CompleteAgentRun(s.database, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultLink, resultSummary); err != nil {
+			log.Printf("[delegate] warning: failed to record completion for run %s: %v", runID, err)
+		}
+
+		if status == "completed" {
+			if pendingReview, _ := db.PendingReviewByRunID(s.database, runID); pendingReview != nil {
+				status = "pending_approval"
+				if _, err := s.database.Exec(`UPDATE agent_runs SET status = ? WHERE id = ?`, status, runID); err != nil {
+					log.Printf("[delegate] warning: failed to set pending_approval for run %s: %v", runID, err)
+				}
+			}
+		}
+
+		if status == "completed" {
+			if _, err := s.database.Exec(`UPDATE tasks SET status = 'done' WHERE id = ?`, task.ID); err != nil {
+				log.Printf("[delegate] warning: failed to update task %s to done: %v", task.ID, err)
+			}
+		}
+		s.broadcastRunUpdate(runID, status)
+		// We've already captured the result from stdout; just drain any
+		// remaining subprocess state. Exit code is not load-bearing here.
+		_ = cmd.Wait()
+		return
 	}
 
 	if err := cmd.Wait(); err != nil {
@@ -430,6 +410,202 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		log.Printf("[delegate] warning: failed to record fallback completion for run %s: %v", runID, err)
 	}
 	s.broadcastRunUpdate(runID, "completed")
+}
+
+// consumeClaudeStream scans NDJSON output from claude -p, persists each
+// accumulated message via InsertAgentMessage, broadcasts them to UI
+// subscribers, and returns the first `result` event seen as a
+// *runCompletion. Shared between the initial agent invocation and the
+// ResumeWithMessage helper so stream handling stays consistent across
+// both entry points.
+//
+// Session id is persisted on agent_runs as soon as the `system/init`
+// event surfaces it, not at stream close. Inline persistence means any
+// mid-run consumer (a future concurrent gate, or a panic handler
+// recovering from a crash) can read it from the database without
+// waiting for the stream to complete. On resume the same stream still
+// carries a fresh init event with the same session id, so writing it
+// again is idempotent.
+//
+// Returns nil *runCompletion if the stream ended without a result event
+// — the caller treats that as an involuntary failure and decides via
+// cmd.Wait() whether to attribute the failure to cancellation or a
+// real crash.
+func (s *Spawner) consumeClaudeStream(stdout io.Reader, runID string, stream *streamState) (*runCompletion, error) {
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
+
+	sessionPersisted := false
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+
+		messages, completion := stream.parseLine(line, runID)
+
+		// Persist session id the first time it appears. Done inline so
+		// mid-run consumers can read it from agent_runs without needing
+		// the stream to have closed first.
+		if !sessionPersisted {
+			if sid := stream.SessionID(); sid != "" {
+				if err := db.SetAgentRunSession(s.database, runID, sid); err != nil {
+					log.Printf("[delegate] warning: failed to persist session_id for run %s: %v", runID, err)
+				}
+				sessionPersisted = true
+			}
+		}
+
+		for _, msg := range messages {
+			id, err := db.InsertAgentMessage(s.database, *msg)
+			if err != nil {
+				log.Printf("[delegate] error storing message: %v", err)
+				continue
+			}
+			msg.ID = int(id)
+			s.broadcastMessage(runID, msg)
+		}
+
+		if completion != nil {
+			return completion, nil
+		}
+	}
+	return nil, scanner.Err()
+}
+
+// ResumeOptions configures a ResumeWithMessage invocation. The struct
+// is empty today but exists so callers can add fields later without a
+// signature change rippling through SKY-141 and SKY-139.
+type ResumeOptions struct {
+	// Model overrides the spawner's current model. Empty = use the
+	// spawner default, which is the right choice for the memory-gate
+	// retry loop in SKY-141 (we want the continuation to use the same
+	// model the initial invocation ran under).
+	Model string
+}
+
+// ResumeOutcome bundles what ResumeWithMessage returns: the raw
+// completion event from the resumed stream (nil if none was observed),
+// the parsed agent result JSON (nil if the completion text didn't
+// contain a parseable envelope), and captured stderr for diagnostics.
+//
+// Callers decide how to interpret a nil Completion — the memory-gate
+// retry loop treats it as "retry again if attempts remain, else flag
+// memory_missing," while a yield-resume flow might treat it as a
+// session-level failure and surface an error.
+type ResumeOutcome struct {
+	Completion *runCompletion
+	Result     *agentResult
+	StderrText string
+}
+
+// ResumeWithMessage resumes a prior headless claude session with a new
+// user message and streams the result through the same message-
+// persistence path as the initial invocation. Used by the SKY-141
+// task-memory write-gate retry loop, and designed to be reusable by
+// SKY-139's yield-to-user flow once that ticket lands.
+//
+// Callers pass the sessionID captured during the initial run (read
+// from agent_runs.session_id, populated by consumeClaudeStream), the
+// cwd the original run used so the resumed subprocess sees the same
+// worktree, and the user message to append to the conversation. The
+// runID is reused so resumed messages append to the existing
+// agent_messages stream — the UI sees one coherent conversation.
+//
+// This helper does NOT update agent_runs status. The caller manages
+// lifecycle: the memory-gate retry loop keeps the run in its current
+// state during retries and only finalizes once the gate passes or
+// gives up. Mirroring the initial invocation's status updates here
+// would produce double CompleteAgentRun writes with stale
+// cost/duration fields overwriting the real totals.
+func (s *Spawner) ResumeWithMessage(ctx context.Context, runID, sessionID, cwd, message string, opts ResumeOptions) (*ResumeOutcome, error) {
+	if sessionID == "" {
+		return nil, fmt.Errorf("resume: missing session id")
+	}
+	if cwd == "" {
+		return nil, fmt.Errorf("resume: missing cwd")
+	}
+
+	s.mu.Lock()
+	model := s.model
+	s.mu.Unlock()
+	if opts.Model != "" {
+		model = opts.Model
+	}
+
+	selfBin, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("resolve own binary path: %w", err)
+	}
+
+	args := []string{
+		"-p", message,
+		"--resume", sessionID,
+		"--model", model,
+		"--output-format", "stream-json",
+		"--verbose",
+		"--allowedTools", fmt.Sprintf("Bash(%s exec *),Bash(git commit *),Bash(git add *),Bash(git push *),Bash(git merge *),Bash(git rebase *),Bash(git fetch *),Bash(git checkout *),Read,Write,Edit,Glob,Grep,WebSearch,WebFetch", selfBin),
+		"--max-turns", "100",
+	}
+
+	cmd := exec.Command("claude", args...)
+	cmd.Dir = cwd
+	cmd.Env = append(os.Environ(), "TODOTRIAGE_RUN_ID="+runID, "TODOTRIAGE_REVIEW_PREVIEW=1")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("stdout pipe: %w", err)
+	}
+
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start claude resume: %w", err)
+	}
+
+	pgid := cmd.Process.Pid
+	go func() {
+		<-ctx.Done()
+		if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
+			// Best-effort; subprocess may have already exited
+			_ = err
+		}
+	}()
+
+	stream := newStreamState()
+	completion, streamErr := s.consumeClaudeStream(stdout, runID, stream)
+
+	waitErr := cmd.Wait()
+
+	outcome := &ResumeOutcome{
+		Completion: completion,
+		StderrText: stderrBuf.String(),
+	}
+	if completion != nil {
+		outcome.Result = parseAgentResult(completion.Result)
+	}
+
+	// A stream error with no completion means the subprocess produced
+	// malformed output or died mid-stream. Surface it to the caller so
+	// the gate can decide whether to retry or give up.
+	if streamErr != nil && completion == nil {
+		return outcome, fmt.Errorf("resume stream: %w", streamErr)
+	}
+
+	// A wait error without a captured completion is an involuntary
+	// failure — the subprocess exited without sending a result event.
+	// Either cancellation (via ctx) or a genuine crash.
+	if waitErr != nil && completion == nil {
+		if ctx.Err() != nil {
+			return outcome, ctx.Err()
+		}
+		return outcome, fmt.Errorf("claude resume failed: %w (stderr: %s)", waitErr, stderrBuf.String())
+	}
+
+	return outcome, nil
 }
 
 // resolvePrompt finds the mission text for a task, either from an explicit ID or the default binding.
