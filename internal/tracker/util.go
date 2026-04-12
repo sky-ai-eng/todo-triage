@@ -50,7 +50,9 @@ func scopedQueries(base string, repos []string) []string {
 	for _, repo := range repos {
 		term := " repo:" + repo
 		if len(current)+len(term) > maxSearchQueryLen || reposInCurrent >= maxReposPerQuery {
-			queries = append(queries, current)
+			if reposInCurrent > 0 {
+				queries = append(queries, current)
+			}
 			current = base + term
 			reposInCurrent = 1
 		} else {
