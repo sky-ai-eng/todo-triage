@@ -928,10 +928,11 @@ func (s *Spawner) updateBreakerCounter(taskID, triggerType, status string) {
 		}
 		log.Printf("[delegate] task %s: consecutive unsuccessful auto-runs = %d", taskID, newCount)
 
-		// Emit a suspension event so the UI can surface the breaker trip.
-		// The actual gating (skip auto-fires when counter >= max_iterations)
-		// is enforced by the auto-delegation hook in SKY-147.
-		if newCount >= 2 {
+		// Emit a suspension event exactly once — on the transition, not on
+		// every subsequent failure. The actual gating (skip auto-fires when
+		// counter >= max_iterations) is enforced by the auto-delegation hook
+		// in SKY-147.
+		if newCount == 2 {
 			if _, err := db.RecordEvent(s.database, domain.Event{
 				EventType: domain.EventSystemTaskAutoSuspended,
 				TaskID:    taskID,
