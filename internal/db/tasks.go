@@ -19,7 +19,7 @@ const taskColumns = `id, source, source_id, source_url, title, description, repo
 const qualifiedTaskColumns = `tasks.id, tasks.source, tasks.source_id, tasks.source_url, tasks.title, tasks.description, tasks.repo, tasks.author, tasks.labels, tasks.severity,
        tasks.diff_additions, tasks.diff_deletions, tasks.files_changed, tasks.ci_status, tasks.relevance_reason, tasks.source_status, tasks.scoring_status,
        tasks.event_type, tasks.created_at, tasks.fetched_at, tasks.status, tasks.priority_score, tasks.ai_summary,
-       tasks.priority_reasoning, tasks.agent_confidence, tasks.snooze_until`
+       tasks.priority_reasoning, tasks.agent_confidence, tasks.snooze_until, tasks.consecutive_unsuccessful_runs`
 
 // UpsertTask inserts a new task or updates an existing one matched by (source, source_id).
 // Only updates metadata fields — does not overwrite status, priority_score, ai_summary,

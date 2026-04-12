@@ -134,9 +134,6 @@ export default function PromptPicker({ open, onSelect, onClose, onEditPrompts }:
                 >
                   Edit Prompts
                 </button>
-                <span className="text-[11px] text-text-tertiary">
-                  Hold Shift + swipe up to always see this
-                </span>
               </div>
             </div>
           </motion.div>

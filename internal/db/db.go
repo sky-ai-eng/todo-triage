@@ -203,14 +203,6 @@ CREATE TABLE IF NOT EXISTS prompts (
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS prompt_bindings (
-    prompt_id TEXT NOT NULL REFERENCES prompts(id) ON DELETE CASCADE,
-    event_type TEXT NOT NULL,
-    is_default BOOLEAN DEFAULT 0,
-    PRIMARY KEY (prompt_id, event_type)
-);
-
-CREATE INDEX IF NOT EXISTS idx_prompt_bindings_event_type ON prompt_bindings(event_type);
 CREATE INDEX IF NOT EXISTS idx_agent_runs_prompt_id ON agent_runs(prompt_id);
 
 CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
@@ -275,10 +267,11 @@ CREATE TABLE IF NOT EXISTS prompt_triggers (
     cooldown_seconds INTEGER NOT NULL DEFAULT 60,
     enabled BOOLEAN NOT NULL DEFAULT 1,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(event_type, trigger_type)
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_prompt_triggers_prompt_event_trigger_unique
+    ON prompt_triggers(prompt_id, event_type, trigger_type);
 CREATE INDEX IF NOT EXISTS idx_prompt_triggers_event_type ON prompt_triggers(event_type) WHERE enabled = 1;
 CREATE INDEX IF NOT EXISTS idx_prompt_triggers_prompt_id_created_at ON prompt_triggers(prompt_id, created_at);
 `

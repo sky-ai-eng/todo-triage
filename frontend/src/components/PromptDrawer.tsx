@@ -77,9 +77,9 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
       })
       .then((data) => {
         if (cancelled) return
-        setName(data.prompt.name)
-        setBody(data.prompt.body)
-        setSource(data.prompt.source)
+        setName(data.name)
+        setBody(data.body)
+        setSource(data.source)
         setError('')
       })
       .catch(() => {
@@ -176,10 +176,13 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
     setDeleting(true)
     try {
       const res = await fetch(`/api/prompts/${promptId}`, { method: 'DELETE' })
-      if (!res.ok) throw new Error('Failed to delete')
+      if (!res.ok) {
+        const body = await res.json().catch(() => null)
+        throw new Error(body?.error || 'Failed to delete')
+      }
       onDeleted?.()
-    } catch {
-      setError('Failed to delete prompt')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete prompt')
     } finally {
       setDeleting(false)
     }
