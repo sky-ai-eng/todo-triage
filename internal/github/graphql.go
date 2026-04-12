@@ -185,22 +185,49 @@ func (c *Client) DiscoverPRs(searchQuery string, limit int) ([]DiscoveredPR, err
 	return results, nil
 }
 
+// refreshBatchSize caps how many node IDs go into a single GraphQL
+// nodes(ids: [...]) call. GitHub's per-query runtime-cost limit can
+// reject large batches even when the static 500k-node budget is fine.
+// 20 IDs with the full fragment (~1,060 nodes each = ~21k nodes) is
+// well within both limits while keeping the round-trip count reasonable.
+const refreshBatchSize = 20
+
 // RefreshPRs batch-fetches current state for tracked PRs using their GraphQL node IDs.
 // Returns a map of node ID → snapshot. Missing/deleted PRs are silently omitted.
+//
+// Internally batches into chunks of refreshBatchSize to stay under
+// GitHub's per-query runtime-cost ceiling. Transparent to callers.
 //
 // includeCheckRuns controls which fragment is used and whether the resulting
 // snapshots carry CI data:
 //   - true  → prFullFragment, CheckRuns populated. Use for OPEN PRs where
 //     CI state changes drive events.
 //   - false → prDiscoveryFragment, CheckRuns == nil. Use for terminal
-//     (merged/closed) PRs where CI status is irrelevant. Also dramatically
-//     cheaper per-node (~50 vs ~1,060) so the 500k-node budget stretches
-//     further on large tracked sets.
+//     (merged/closed) PRs where CI status is irrelevant.
 func (c *Client) RefreshPRs(nodeIDs []string, includeCheckRuns bool) (map[string]domain.PRSnapshot, error) {
 	if len(nodeIDs) == 0 {
 		return nil, nil
 	}
 
+	results := make(map[string]domain.PRSnapshot, len(nodeIDs))
+	for i := 0; i < len(nodeIDs); i += refreshBatchSize {
+		end := i + refreshBatchSize
+		if end > len(nodeIDs) {
+			end = len(nodeIDs)
+		}
+		batch, err := c.refreshPRsBatch(nodeIDs[i:end], includeCheckRuns)
+		if err != nil {
+			return nil, err
+		}
+		for k, v := range batch {
+			results[k] = v
+		}
+	}
+	return results, nil
+}
+
+// refreshPRsBatch is the single-call implementation for one batch of IDs.
+func (c *Client) refreshPRsBatch(nodeIDs []string, includeCheckRuns bool) (map[string]domain.PRSnapshot, error) {
 	fragment := prDiscoveryFragment
 	fragmentSpread := "PRDiscoveryFields"
 	if includeCheckRuns {
