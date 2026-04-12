@@ -13,7 +13,7 @@ import (
 const taskColumns = `id, source, source_id, source_url, title, description, repo, author, labels, severity,
        diff_additions, diff_deletions, files_changed, ci_status, relevance_reason, source_status, scoring_status,
        event_type, created_at, fetched_at, status, priority_score, ai_summary,
-       priority_reasoning, agent_confidence, snooze_until`
+       priority_reasoning, agent_confidence, snooze_until, consecutive_unsuccessful_runs`
 
 // qualifiedTaskColumns is taskColumns with tasks. prefix, for use in JOINs where column names are ambiguous.
 const qualifiedTaskColumns = `tasks.id, tasks.source, tasks.source_id, tasks.source_url, tasks.title, tasks.description, tasks.repo, tasks.author, tasks.labels, tasks.severity,
@@ -114,6 +114,7 @@ func queryTasks(database *sql.DB, query string, args ...any) ([]domain.Task, err
 			&eventType, &t.CreatedAt, &t.FetchedAt,
 			&t.Status, &priorityScore, &aiSummary,
 			&priorityReasoning, &agentConfidence, &snoozeUntil,
+			&t.ConsecutiveUnsuccessfulRuns,
 		)
 		if err != nil {
 			return nil, err
@@ -150,4 +151,22 @@ func queryTasks(database *sql.DB, query string, args ...any) ([]domain.Task, err
 		tasks = append(tasks, t)
 	}
 	return tasks, rows.Err()
+}
+
+// IncrementTaskUnsuccessfulRuns atomically increments the consecutive failure
+// counter and returns the new value so the caller can check the threshold.
+func IncrementTaskUnsuccessfulRuns(database *sql.DB, taskID string) (int, error) {
+	var newVal int
+	err := database.QueryRow(`
+		UPDATE tasks SET consecutive_unsuccessful_runs = consecutive_unsuccessful_runs + 1
+		WHERE id = ?
+		RETURNING consecutive_unsuccessful_runs
+	`, taskID).Scan(&newVal)
+	return newVal, err
+}
+
+// ResetTaskUnsuccessfulRuns sets the consecutive failure counter back to zero.
+func ResetTaskUnsuccessfulRuns(database *sql.DB, taskID string) error {
+	_, err := database.Exec(`UPDATE tasks SET consecutive_unsuccessful_runs = 0 WHERE id = ?`, taskID)
+	return err
 }

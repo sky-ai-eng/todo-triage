@@ -37,6 +37,7 @@ type AIConfig struct {
 	Model                    string `yaml:"model"`
 	ReprioritizeThreshold    int    `yaml:"reprioritize_threshold"`
 	PreferenceUpdateInterval int    `yaml:"preference_update_interval"`
+	AutoDelegateEnabled      bool   `yaml:"auto_delegate_enabled"`
 }
 
 // Ready returns true if GitHub credentials are configured.
@@ -66,6 +67,7 @@ func Default() Config {
 			Model:                    "sonnet",
 			ReprioritizeThreshold:    5,
 			PreferenceUpdateInterval: 20,
+			AutoDelegateEnabled:      true,
 		},
 	}
 }

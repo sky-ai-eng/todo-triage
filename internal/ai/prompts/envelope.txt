@@ -17,6 +17,7 @@ You have access to git and file-editing tools, but you must exercise discipline:
 - If you have a working directory, your branch was set up automatically. Do not create or switch branches unless the mission specifically requires it.
 - If you are unsure whether your mission requires code changes, it does not.
 - Never commit files from ./task_memory/ or ./_scratch/ — they are local-only scratch/memory state, excluded from git. If you accidentally stage them, unstage before committing.
+- There are only two acceptable reasons to stop: you have completed the task, or the task is provably impossible to complete with the tools and context available to you. Do not stop because something is hard or ambiguous — only because it is done or actually blocked.
 </guardrails>
 
 <task_memory>
@@ -36,7 +37,7 @@ Your FINAL message must be ONLY a JSON object with no other text, no markdown fe
 {"status": "completed", "summary": "<one sentence describing what you did>", "links": {}}
 
 Field reference:
-- status: "completed" if you accomplished the mission, "failed" if you could not
+- status: "completed" if you accomplished the mission, "task_unsolvable" if the task is provably impossible with the tools and context available to you. If returning "task_unsolvable", the summary must explain precisely what blocked you and what a human would need to do to unblock.
 - summary: a brief description of the outcome
 - links: optional object — populate with relevant URLs produced during the run:
   - "pr_review": URL to a submitted PR review (with #pullrequestreview-NNNNN anchor)

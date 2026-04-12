@@ -83,7 +83,7 @@ type runConfig struct {
 
 // Delegate kicks off an async agent run for any task type.
 // Routes to the appropriate worktree setup based on task source.
-func (s *Spawner) Delegate(task domain.Task, explicitPromptID string) (string, error) {
+func (s *Spawner) Delegate(task domain.Task, explicitPromptID string, triggerType string) (string, error) {
 	s.mu.Lock()
 	ghClient := s.ghClient
 	model := s.model
@@ -98,13 +98,17 @@ func (s *Spawner) Delegate(task domain.Task, explicitPromptID string) (string, e
 		log.Printf("[delegate] warning: failed to increment usage for prompt %s: %v", promptID, err)
 	}
 
+	if triggerType == "" {
+		triggerType = "manual"
+	}
 	runID := uuid.New().String()
 	if err := db.CreateAgentRun(s.database, domain.AgentRun{
-		ID:       runID,
-		TaskID:   task.ID,
-		PromptID: promptID,
-		Status:   "initializing",
-		Model:    model,
+		ID:          runID,
+		TaskID:      task.ID,
+		PromptID:    promptID,
+		Status:      "initializing",
+		Model:       model,
+		TriggerType: triggerType,
 	}); err != nil {
 		return "", fmt.Errorf("create agent run: %w", err)
 	}
@@ -142,12 +146,12 @@ func (s *Spawner) Delegate(task domain.Task, explicitPromptID string) (string, e
 				s.handleCancelled(runID, startTime, cfg.hasWT)
 				return
 			}
-			s.failRun(runID, setupErr.Error())
+			s.failRun(runID, task.ID, triggerType, setupErr.Error())
 			return
 		}
 
 		// Phase 2: run the agent
-		s.runAgent(ctx, runID, task, mission, cfg, startTime, model)
+		s.runAgent(ctx, runID, task, mission, cfg, startTime, model, triggerType)
 	}()
 
 	return runID, nil
@@ -155,7 +159,7 @@ func (s *Spawner) Delegate(task domain.Task, explicitPromptID string) (string, e
 
 // DelegatePR is a convenience wrapper that calls Delegate for backward compatibility.
 func (s *Spawner) DelegatePR(task domain.Task, explicitPromptID string) (string, error) {
-	return s.Delegate(task, explicitPromptID)
+	return s.Delegate(task, explicitPromptID, "manual")
 }
 
 // setupGitHub prepares a worktree for a GitHub PR task.
@@ -265,7 +269,7 @@ func (s *Spawner) setupJira(ctx context.Context, runID string, task domain.Task,
 }
 
 // runAgent is the generic agent execution loop. Works for any task type.
-func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, mission string, cfg runConfig, startTime time.Time, model string) {
+func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, mission string, cfg runConfig, startTime time.Time, model string, triggerType string) {
 	if cfg.hasWT {
 		// Best-effort cleanup on return; the worktree ID is unique per run
 		// so a failed remove just leaves a dangling directory under _worktrees.
@@ -281,7 +285,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		var err error
 		claudeCwd, err = worktree.MakeRunCwd(runID)
 		if err != nil {
-			s.failRun(runID, "failed to create run cwd: "+err.Error())
+			s.failRun(runID, task.ID, triggerType, "failed to create run cwd: "+err.Error())
 			return
 		}
 		defer worktree.RemoveRunCwd(runID)
@@ -298,7 +302,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 
 	selfBin, err := os.Executable()
 	if err != nil {
-		s.failRun(runID, "failed to resolve own binary path: "+err.Error())
+		s.failRun(runID, task.ID, triggerType, "failed to resolve own binary path: "+err.Error())
 		return
 	}
 
@@ -335,7 +339,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		s.failRun(runID, "failed to create stdout pipe: "+err.Error())
+		s.failRun(runID, task.ID, triggerType, "failed to create stdout pipe: "+err.Error())
 		return
 	}
 
@@ -343,7 +347,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	cmd.Stderr = &stderrBuf
 
 	if err := cmd.Start(); err != nil {
-		s.failRun(runID, "failed to start claude: "+err.Error())
+		s.failRun(runID, task.ID, triggerType, "failed to start claude: "+err.Error())
 		return
 	}
 
@@ -405,13 +409,18 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		if parsed := parseAgentResult(completion.Result); parsed != nil {
 			resultLink = parsed.PrimaryLink()
 			resultSummary = parsed.Summary
-			if parsed.Status == "failed" {
+			switch parsed.Status {
+			case "failed":
 				status = "failed"
+			case "task_unsolvable":
+				status = "task_unsolvable"
 			}
 		}
 		if err := db.CompleteAgentRun(s.database, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultLink, resultSummary); err != nil {
 			log.Printf("[delegate] warning: failed to record completion for run %s: %v", runID, err)
 		}
+
+		s.updateBreakerCounter(task.ID, triggerType, status)
 
 		if status == "completed" {
 			if pendingReview, _ := db.PendingReviewByRunID(s.database, runID); pendingReview != nil {
@@ -440,11 +449,11 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 			return
 		}
 		stderr := stderrBuf.String()
-		s.failRun(runID, fmt.Sprintf("claude exited with error: %v\nstderr: %s", err, stderr))
+		s.failRun(runID, task.ID, triggerType, fmt.Sprintf("claude exited with error: %v\nstderr: %s", err, stderr))
 		return
 	}
 
-	s.failRun(runID, "claude exited cleanly without producing a result event")
+	s.failRun(runID, task.ID, triggerType, "claude exited cleanly without producing a result event")
 }
 
 // consumeClaudeStream scans NDJSON output from claude -p, persists each
@@ -895,7 +904,47 @@ func (s *Spawner) updateStatus(runID, status string) {
 	s.broadcastRunUpdate(runID, status)
 }
 
-func (s *Spawner) failRun(runID, errMsg string) {
+// updateBreakerCounter adjusts the per-task consecutive failure counter
+// based on the run's trigger type and terminal status.
+//
+// Rules:
+//   - Auto runs (trigger_type != "manual") that fail or are unsolvable increment the counter.
+//     When the counter reaches the trigger's max_iterations threshold, a system event is emitted.
+//   - Any successful run (manual or auto) resets the counter to zero.
+//   - Manual runs that fail or are unsolvable do not touch the counter.
+func (s *Spawner) updateBreakerCounter(taskID, triggerType, status string) {
+	switch {
+	case status == "completed":
+		// Success resets the counter regardless of trigger type.
+		if err := db.ResetTaskUnsuccessfulRuns(s.database, taskID); err != nil {
+			log.Printf("[delegate] warning: failed to reset unsuccessful runs for task %s: %v", taskID, err)
+		}
+
+	case triggerType != "manual" && (status == "failed" || status == "task_unsolvable"):
+		newCount, err := db.IncrementTaskUnsuccessfulRuns(s.database, taskID)
+		if err != nil {
+			log.Printf("[delegate] warning: failed to increment unsuccessful runs for task %s: %v", taskID, err)
+			return
+		}
+		log.Printf("[delegate] task %s: consecutive unsuccessful auto-runs = %d", taskID, newCount)
+
+		// Emit a suspension event exactly once — on the transition, not on
+		// every subsequent failure. The actual gating (skip auto-fires when
+		// counter >= max_iterations) is enforced by the auto-delegation hook
+		// in SKY-147.
+		if newCount == 2 {
+			if _, err := db.RecordEvent(s.database, domain.Event{
+				EventType: domain.EventSystemTaskAutoSuspended,
+				TaskID:    taskID,
+				Metadata:  fmt.Sprintf(`{"consecutive_failures": %d}`, newCount),
+			}); err != nil {
+				log.Printf("[delegate] warning: failed to record auto-suspension event for task %s: %v", taskID, err)
+			}
+		}
+	}
+}
+
+func (s *Spawner) failRun(runID, taskID, triggerType, errMsg string) {
 	log.Printf("[delegate] run %s failed: %s", runID, errMsg)
 
 	if _, err := s.database.Exec(`UPDATE agent_runs SET status = 'failed' WHERE id = ?`, runID); err != nil {
@@ -912,6 +961,7 @@ func (s *Spawner) failRun(runID, errMsg string) {
 		log.Printf("[delegate] warning: failed to record failure message for run %s: %v", runID, err)
 	}
 
+	s.updateBreakerCounter(taskID, triggerType, "failed")
 	s.broadcastRunUpdate(runID, "failed")
 }
 

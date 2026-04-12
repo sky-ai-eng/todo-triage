@@ -68,6 +68,7 @@ const (
 	EventSystemScoringCompleted    = "system:scoring:completed"
 	EventSystemDelegationCompleted = "system:delegation:completed"
 	EventSystemDelegationFailed    = "system:delegation:failed"
+	EventSystemTaskAutoSuspended   = "system:task:auto_suspended"
 )
 
 // AllEventTypes returns the full seed catalog.
@@ -104,5 +105,6 @@ func AllEventTypes() []EventType {
 		{ID: EventSystemScoringCompleted, Source: "system", Category: "scoring", Label: "Scoring Complete", Description: "AI scoring finished for tasks", DefaultPriority: 0.0, Enabled: false, SortOrder: 101},
 		{ID: EventSystemDelegationCompleted, Source: "system", Category: "delegation", Label: "Delegation Complete", Description: "Agent delegation run completed", DefaultPriority: 0.0, Enabled: false, SortOrder: 102},
 		{ID: EventSystemDelegationFailed, Source: "system", Category: "delegation", Label: "Delegation Failed", Description: "Agent delegation run failed", DefaultPriority: 0.0, Enabled: false, SortOrder: 103},
+		{ID: EventSystemTaskAutoSuspended, Source: "system", Category: "delegation", Label: "Auto-delegation Suspended", Description: "Auto-delegation suspended for a task after repeated failures", DefaultPriority: 0.0, Enabled: false, SortOrder: 104},
 	}
 }

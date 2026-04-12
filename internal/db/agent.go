@@ -11,10 +11,14 @@ import (
 
 // CreateAgentRun inserts a new agent run.
 func CreateAgentRun(database *sql.DB, run domain.AgentRun) error {
+	triggerType := run.TriggerType
+	if triggerType == "" {
+		triggerType = "manual"
+	}
 	_, err := database.Exec(`
-		INSERT INTO agent_runs (id, task_id, prompt_id, status, model, worktree_path)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, run.ID, run.TaskID, nullIfEmpty(run.PromptID), run.Status, run.Model, run.WorktreePath)
+		INSERT INTO agent_runs (id, task_id, prompt_id, status, model, worktree_path, trigger_type)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, run.ID, run.TaskID, nullIfEmpty(run.PromptID), run.Status, run.Model, run.WorktreePath, triggerType)
 	return err
 }
 

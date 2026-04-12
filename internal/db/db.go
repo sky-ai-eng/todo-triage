@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     matched_repos TEXT,
     blocked_reason TEXT,
     snooze_until DATETIME,
+    consecutive_unsuccessful_runs INTEGER NOT NULL DEFAULT 0,
     UNIQUE(source, source_id)
 );
 
@@ -103,7 +104,8 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     result_link TEXT,
     result_summary TEXT,
     session_id TEXT,
-    memory_missing BOOLEAN DEFAULT 0
+    memory_missing BOOLEAN DEFAULT 0,
+    trigger_type TEXT NOT NULL DEFAULT 'manual'
 );
 
 CREATE TABLE IF NOT EXISTS agent_messages (
