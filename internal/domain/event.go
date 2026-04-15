@@ -125,9 +125,9 @@ const (
 // events_catalog so any runtime emission FK-fails until rewritten.
 //
 // DefaultPriority/Enabled/SortOrder fields on the struct are stale (the
-// events_catalog table no longer has those columns); kept populated for
-// downstream UI code that hasn't been rewritten. SeedEventTypes only persists
-// id/source/category/label/description.
+// events_catalog table no longer has those columns). AllEventTypes does not
+// populate them, so they remain zero-valued here; SeedEventTypes only
+// persists id/source/category/label/description.
 func AllEventTypes() []EventType {
 	return []EventType{
 		// --- GitHub PR — per-action review events (split on review type) ---
