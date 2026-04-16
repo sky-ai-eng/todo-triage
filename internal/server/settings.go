@@ -189,9 +189,9 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 		if err := auth.ClearGitHub(); err != nil {
 			log.Printf("[settings] failed to clear GitHub keychain entry: %v", err)
 		}
-		if err := db.ClearTrackedItems(s.db, "github"); err != nil {
+		if err := db.ClearEntityItems(s.db, "github"); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{
-				"error": "failed to clear GitHub tracked items: " + err.Error(),
+				"error": "failed to clear GitHub entities: " + err.Error(),
 				"field": "github",
 			})
 			return
@@ -213,7 +213,7 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Jira URL is required"})
 				return
 			}
-			_, err := auth.ValidateJira(url, req.JiraPAT)
+			jiraUser, err := auth.ValidateJira(url, req.JiraPAT)
 			if err != nil {
 				writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
 					"error": "Jira: " + err.Error(),
@@ -222,17 +222,19 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			creds.JiraPAT = req.JiraPAT
+			creds.JiraDisplayName = jiraUser.DisplayName
 		}
 	} else {
 		creds.JiraURL = ""
 		creds.JiraPAT = ""
+		creds.JiraDisplayName = ""
 		cfg.Jira.BaseURL = ""
 		if err := auth.ClearJira(); err != nil {
 			log.Printf("[settings] failed to clear Jira keychain entry: %v", err)
 		}
-		if err := db.ClearTrackedItems(s.db, "jira"); err != nil {
+		if err := db.ClearEntityItems(s.db, "jira"); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{
-				"error": "failed to clear Jira tracked items: " + err.Error(),
+				"error": "failed to clear Jira entities: " + err.Error(),
 				"field": "jira",
 			})
 			return
@@ -340,6 +342,7 @@ func (s *Server) handleJiraConnect(w http.ResponseWriter, r *http.Request) {
 	// Persist credentials and config
 	creds.JiraURL = req.URL
 	creds.JiraPAT = req.PAT
+	creds.JiraDisplayName = jiraUser.DisplayName
 	cfg.Jira.BaseURL = req.URL
 
 	if err := auth.Store(creds); err != nil {

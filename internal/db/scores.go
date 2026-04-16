@@ -6,10 +6,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// MarkScoring sets scoring_status = 'scoring' for the given task IDs.
+// MarkScoring sets scoring_status = 'in_progress' for the given task IDs.
 func MarkScoring(database *sql.DB, taskIDs []string) error {
 	for _, id := range taskIDs {
-		if _, err := database.Exec(`UPDATE tasks SET scoring_status = 'scoring' WHERE id = ?`, id); err != nil {
+		if _, err := database.Exec(`UPDATE tasks SET scoring_status = 'in_progress' WHERE id = ?`, id); err != nil {
 			return err
 		}
 	}
@@ -27,7 +27,8 @@ func UpdateTaskScores(database *sql.DB, updates []domain.TaskScoreUpdate) error 
 
 	stmt, err := tx.Prepare(`
 		UPDATE tasks
-		SET priority_score = ?, agent_confidence = ?, ai_summary = ?, priority_reasoning = ?, scoring_status = 'scored'
+		SET priority_score = ?, autonomy_suitability = ?, ai_summary = ?,
+		    priority_reasoning = ?, scoring_status = 'scored'
 		WHERE id = ?
 	`)
 	if err != nil {
@@ -36,7 +37,7 @@ func UpdateTaskScores(database *sql.DB, updates []domain.TaskScoreUpdate) error 
 	defer stmt.Close()
 
 	for _, u := range updates {
-		_, err := stmt.Exec(u.PriorityScore, u.AgentConfidence, u.Summary, u.PriorityReasoning, u.ID)
+		_, err := stmt.Exec(u.PriorityScore, u.AutonomySuitability, u.Summary, u.PriorityReasoning, u.ID)
 		if err != nil {
 			return err
 		}
@@ -47,7 +48,11 @@ func UpdateTaskScores(database *sql.DB, updates []domain.TaskScoreUpdate) error 
 
 // UnscoredTasks returns queued tasks that haven't been scored yet.
 func UnscoredTasks(database *sql.DB) ([]domain.Task, error) {
-	return queryTasks(database, `SELECT `+taskColumns+` FROM tasks
-		WHERE status = 'queued' AND scoring_status = 'unscored'
-		ORDER BY created_at DESC`)
+	return queryTasks(database, `
+		SELECT `+taskColumnsWithEntity+`
+		FROM tasks t
+		JOIN entities e ON t.entity_id = e.id
+		WHERE t.status = 'queued' AND t.scoring_status = 'pending'
+		ORDER BY t.created_at DESC
+	`)
 }

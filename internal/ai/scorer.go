@@ -46,28 +46,23 @@ const batchSize = 10
 
 // TaskInput is the minimal info we send to the LLM for scoring.
 type TaskInput struct {
-	ID              string   `json:"id"`
-	Source          string   `json:"source"`
-	Title           string   `json:"title"`
-	Description     string   `json:"description,omitempty"`
-	Repo            string   `json:"repo,omitempty"`
-	Author          string   `json:"author,omitempty"`
-	Labels          []string `json:"labels,omitempty"`
-	Severity        string   `json:"severity,omitempty"`
-	DiffSize        int      `json:"diff_size,omitempty"`
-	FilesChanged    int      `json:"files_changed,omitempty"`
-	CIStatus        string   `json:"ci_status,omitempty"`
-	RelevanceReason string   `json:"relevance_reason,omitempty"`
+	ID              string `json:"id"`
+	Source          string `json:"source"`
+	Title           string `json:"title"`
+	EventType       string `json:"event_type,omitempty"`
+	EntitySourceID  string `json:"entity_source_id,omitempty"` // e.g. "owner/repo#42"
+	Severity        string `json:"severity,omitempty"`
+	RelevanceReason string `json:"relevance_reason,omitempty"`
 }
 
 // TaskScore is what we get back from the LLM per task.
 type TaskScore struct {
-	ID                string   `json:"id"`
-	PriorityScore     float64  `json:"priority_score"`
-	AgentConfidence   float64  `json:"agent_confidence"`
-	PriorityReasoning string   `json:"priority_reasoning"`
-	Summary           string   `json:"summary"`
-	Repos             []string `json:"repos"`
+	ID                  string   `json:"id"`
+	PriorityScore       float64  `json:"priority_score"`
+	AutonomySuitability float64  `json:"autonomy_suitability"`
+	PriorityReasoning   string   `json:"priority_reasoning"`
+	Summary             string   `json:"summary"`
+	Repos               []string `json:"repos"`
 }
 
 // scoringModel is always haiku — fast and cheap, plenty capable for
@@ -98,16 +93,11 @@ func ScoreTasks(database *sql.DB, tasks []domain.Task) ([]TaskScore, error) {
 	for i, t := range tasks {
 		inputs[i] = TaskInput{
 			ID:              t.ID,
-			Source:          t.Source,
+			Source:          t.EntitySource,
 			Title:           t.Title,
-			Description:     truncate(t.Description, 500),
-			Repo:            t.Repo,
-			Author:          t.Author,
-			Labels:          t.Labels,
+			EventType:       t.EventType,
+			EntitySourceID:  t.EntitySourceID,
 			Severity:        t.Severity,
-			DiffSize:        t.DiffAdditions + t.DiffDeletions,
-			FilesChanged:    t.FilesChanged,
-			CIStatus:        t.CIStatus,
 			RelevanceReason: t.RelevanceReason,
 		}
 	}

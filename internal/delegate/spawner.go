@@ -133,13 +133,13 @@ func (s *Spawner) Delegate(task domain.Task, explicitPromptID string, triggerTyp
 		var cfg runConfig
 		var setupErr error
 
-		switch task.Source {
+		switch task.EntitySource {
 		case "github":
 			cfg, setupErr = s.setupGitHub(ctx, runID, task, ghClient)
 		case "jira":
 			cfg, setupErr = s.setupJira(ctx, runID, task, ghClient)
 		default:
-			setupErr = fmt.Errorf("unsupported task source: %s", task.Source)
+			setupErr = fmt.Errorf("unsupported task source: %s", task.EntitySource)
 		}
 
 		if setupErr != nil {
@@ -169,17 +169,22 @@ func (s *Spawner) setupGitHub(ctx context.Context, runID string, task domain.Tas
 		return runConfig{}, fmt.Errorf("GitHub credentials not configured")
 	}
 
-	owner, repo := parseOwnerRepo(task.Repo)
+	// EntitySourceID for GitHub PRs is "owner/repo#42" — extract the repo part.
+	repoStr := task.EntitySourceID
+	if idx := strings.LastIndex(repoStr, "#"); idx >= 0 {
+		repoStr = repoStr[:idx]
+	}
+	owner, repo := parseOwnerRepo(repoStr)
 	if owner == "" || repo == "" {
-		return runConfig{}, fmt.Errorf("cannot parse owner/repo from task.Repo: %q", task.Repo)
+		return runConfig{}, fmt.Errorf("cannot parse owner/repo from entity source ID: %q", task.EntitySourceID)
 	}
 
 	prNumber := 0
-	if idx := strings.LastIndex(task.SourceID, "#"); idx >= 0 {
-		fmt.Sscanf(task.SourceID[idx+1:], "%d", &prNumber)
+	if idx := strings.LastIndex(task.EntitySourceID, "#"); idx >= 0 {
+		fmt.Sscanf(task.EntitySourceID[idx+1:], "%d", &prNumber)
 	}
 	if prNumber == 0 {
-		return runConfig{}, fmt.Errorf("invalid PR number from task.SourceID: %q", task.SourceID)
+		return runConfig{}, fmt.Errorf("invalid PR number from task.EntitySourceID: %q", task.EntitySourceID)
 	}
 
 	s.updateStatus(runID, "fetching")
@@ -194,7 +199,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, runID string, task domain.Tas
 		return runConfig{}, fmt.Errorf("failed to create worktree: %w", err)
 	}
 
-	if _, err := s.database.Exec(`UPDATE agent_runs SET worktree_path = ? WHERE id = ?`, wtPath, runID); err != nil {
+	if _, err := s.database.Exec(`UPDATE runs SET worktree_path = ? WHERE id = ?`, wtPath, runID); err != nil {
 		log.Printf("[delegate] warning: failed to update worktree path for run %s: %v", runID, err)
 	}
 
@@ -219,9 +224,9 @@ func (s *Spawner) setupJira(ctx context.Context, runID string, task domain.Task,
 	switch len(matchedRepos) {
 	case 0:
 		// No repo match — pure Jira task, no worktree
-		log.Printf("[delegate] Jira task %s: no matched repo, running without worktree", task.SourceID)
+		log.Printf("[delegate] Jira task %s: no matched repo, running without worktree", task.EntitySourceID)
 		return runConfig{
-			scope:    fmt.Sprintf("Jira issue: %s", task.SourceID),
+			scope:    fmt.Sprintf("Jira issue: %s", task.EntitySourceID),
 			toolsRef: ai.JiraToolsTemplate,
 		}, nil
 
@@ -241,20 +246,20 @@ func (s *Spawner) setupJira(ctx context.Context, runID string, task domain.Task,
 		if baseBranch == "" {
 			baseBranch = profile.DefaultBranch
 		}
-		featureBranch := "feature/" + task.SourceID
+		featureBranch := "feature/" + task.EntitySourceID
 
 		wtPath, err := worktree.CreateForBranch(ctx, profile.Owner, profile.Repo, profile.CloneURL, baseBranch, featureBranch, runID)
 		if err != nil {
 			return runConfig{}, fmt.Errorf("failed to create worktree: %w", err)
 		}
 
-		if _, err := s.database.Exec(`UPDATE agent_runs SET worktree_path = ? WHERE id = ?`, wtPath, runID); err != nil {
+		if _, err := s.database.Exec(`UPDATE runs SET worktree_path = ? WHERE id = ?`, wtPath, runID); err != nil {
 			log.Printf("[delegate] warning: failed to update worktree path for run %s: %v", runID, err)
 		}
 
 		// Agent gets both GH and Jira tools when it has a repo (may need to create PRs)
 		return runConfig{
-			scope:    fmt.Sprintf("Repository: %s\nJira issue: %s\nBranch: %s", repoID, task.SourceID, featureBranch),
+			scope:    fmt.Sprintf("Repository: %s\nJira issue: %s\nBranch: %s", repoID, task.EntitySourceID, featureBranch),
 			toolsRef: ai.GHToolsTemplate + "\n\n" + ai.JiraToolsTemplate,
 			wtPath:   wtPath,
 			hasWT:    true,
@@ -265,7 +270,7 @@ func (s *Spawner) setupJira(ctx context.Context, runID string, task domain.Task,
 	default:
 		// Multiple matches — ambiguous, block for now
 		return runConfig{}, fmt.Errorf("jira task %s matched %d repos (%s) — cannot determine which to clone",
-			task.SourceID, len(matchedRepos), strings.Join(matchedRepos, ", "))
+			task.EntitySourceID, len(matchedRepos), strings.Join(matchedRepos, ", "))
 	}
 }
 
@@ -299,7 +304,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	// sees what previous iterations on this task have already tried. The
 	// directory is git-excluded by writeLocalExcludes (managedExcludePatterns
 	// in internal/worktree/worktree.go) so nothing leaks into the PR.
-	materializePriorMemories(s.database, claudeCwd, task.ID)
+	materializePriorMemories(s.database, claudeCwd, task.EntityID)
 
 	selfBin, err := os.Executable()
 	if err != nil {
@@ -392,7 +397,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		// completed — we don't fail a run just because the agent skipped
 		// the memory write, but we DO surface the gap.
 		if memoryFileExists(claudeCwd, runID) {
-			if err := ingestAgentMemory(s.database, claudeCwd, runID, task.ID); err != nil {
+			if err := ingestAgentMemory(s.database, claudeCwd, runID, task.EntityID); err != nil {
 				log.Printf("[delegate] warning: failed to ingest memory file for run %s: %v", runID, err)
 			}
 		} else {
@@ -402,13 +407,12 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 			}
 		}
 
-		resultLink, resultSummary := "", ""
+		resultSummary := ""
 		status := "completed"
 		if completion.IsError {
 			status = "failed"
 		}
 		if parsed := parseAgentResult(completion.Result); parsed != nil {
-			resultLink = parsed.PrimaryLink()
 			resultSummary = parsed.Summary
 			switch parsed.Status {
 			case "failed":
@@ -417,7 +421,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 				status = "task_unsolvable"
 			}
 		}
-		if err := db.CompleteAgentRun(s.database, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultLink, resultSummary); err != nil {
+		if err := db.CompleteAgentRun(s.database, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultSummary); err != nil {
 			log.Printf("[delegate] warning: failed to record completion for run %s: %v", runID, err)
 		}
 
@@ -426,7 +430,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		if status == "completed" {
 			if pendingReview, _ := db.PendingReviewByRunID(s.database, runID); pendingReview != nil {
 				status = "pending_approval"
-				if _, err := s.database.Exec(`UPDATE agent_runs SET status = ? WHERE id = ?`, status, runID); err != nil {
+				if _, err := s.database.Exec(`UPDATE runs SET status = ? WHERE id = ?`, status, runID); err != nil {
 					log.Printf("[delegate] warning: failed to set pending_approval for run %s: %v", runID, err)
 				}
 			}
@@ -464,7 +468,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 // ResumeWithMessage helper so stream handling stays consistent across
 // both entry points.
 //
-// Session id is persisted on agent_runs as soon as the `system/init`
+// Session id is persisted on runs as soon as the `system/init`
 // event surfaces it, not at stream close. Inline persistence means any
 // mid-run consumer (a future concurrent gate, or a panic handler
 // recovering from a crash) can read it from the database without
@@ -491,7 +495,7 @@ func (s *Spawner) consumeClaudeStream(stdout io.Reader, runID string, stream *st
 		messages, completion := stream.parseLine(line, runID)
 
 		// Persist session id the first time it appears. Done inline so
-		// mid-run consumers can read it from agent_runs without needing
+		// mid-run consumers can read it from runs without needing
 		// the stream to have closed first.
 		if !sessionPersisted {
 			if sid := stream.SessionID(); sid != "" {
@@ -570,13 +574,13 @@ type ResumeOutcome struct {
 // SKY-139's yield-to-user flow once that ticket lands.
 //
 // Callers pass the sessionID captured during the initial run (read
-// from agent_runs.session_id, populated by consumeClaudeStream), the
+// from runs.session_id, populated by consumeClaudeStream), the
 // cwd the original run used so the resumed subprocess sees the same
 // worktree, and the user message to append to the conversation. The
 // runID is reused so resumed messages append to the existing
-// agent_messages stream — the UI sees one coherent conversation.
+// run_messages stream — the UI sees one coherent conversation.
 //
-// This helper does NOT update agent_runs status. The caller manages
+// This helper does NOT update runs status. The caller manages
 // lifecycle: the memory-gate retry loop keeps the run in its current
 // state during retries and only finalizes once the gate passes or
 // gives up. Mirroring the initial invocation's status updates here
@@ -698,7 +702,7 @@ func memoryFileExists(cwd, runID string) bool {
 // and saves it as a task_memory row. Called after the write-gate has
 // verified the file is present. Returns an error only on read/DB failure —
 // "file missing" is not an error here because the caller already checked.
-func ingestAgentMemory(database *sql.DB, cwd, runID, taskID string) error {
+func ingestAgentMemory(database *sql.DB, cwd, runID, entityID string) error {
 	path := filepath.Join(cwd, "task_memory", runID+".md")
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -706,13 +710,12 @@ func ingestAgentMemory(database *sql.DB, cwd, runID, taskID string) error {
 	}
 	mem := domain.TaskMemory{
 		ID:        uuid.New().String(),
-		TaskID:    taskID,
 		RunID:     runID,
+		EntityID:  entityID,
 		Content:   string(data),
-		Source:    "agent",
 		CreatedAt: time.Now().UTC(),
 	}
-	if err := db.SaveTaskMemory(database, mem); err != nil {
+	if err := db.SaveRunMemory(database, mem); err != nil {
 		return fmt.Errorf("save memory row: %w", err)
 	}
 	return nil
@@ -727,9 +730,9 @@ func ingestAgentMemory(database *sql.DB, cwd, runID, taskID string) error {
 // sessions are merged into the returned completion so cost/duration/
 // num_turns accounting reflects the full span of the run.
 //
-// The gate does not touch agent_runs status — that remains the caller's
+// The gate does not touch runs status — that remains the caller's
 // responsibility. Side effects: (a) spawns resume subprocesses via
-// ResumeWithMessage, whose messages land in agent_messages via
+// ResumeWithMessage, whose messages land in run_messages via
 // consumeClaudeStream's persistence, (b) logs progress for operator
 // diagnosis.
 //
@@ -830,10 +833,10 @@ func mergeCompletion(base, resume *runCompletion) *runCompletion {
 // cross-run memory benefit. This "advisory" posture only holds for
 // the read side — the write-before-finish gate is enforced separately
 // for NEW memories produced during the run.
-func materializePriorMemories(database *sql.DB, cwd, taskID string) {
-	memories, err := db.GetTaskMemoriesForTask(database, taskID)
+func materializePriorMemories(database *sql.DB, cwd, entityID string) {
+	memories, err := db.GetMemoriesForEntity(database, entityID)
 	if err != nil {
-		log.Printf("[delegate] warning: failed to load prior task memories for task %s: %v", taskID, err)
+		log.Printf("[delegate] warning: failed to load prior memories for entity %s: %v", entityID, err)
 		return
 	}
 	if len(memories) == 0 {
@@ -856,7 +859,7 @@ func materializePriorMemories(database *sql.DB, cwd, taskID string) {
 		written++
 	}
 	if written > 0 {
-		log.Printf("[delegate] materialized %d prior task memories for task %s", written, taskID)
+		log.Printf("[delegate] materialized %d prior memories for entity %s", written, entityID)
 	}
 }
 
@@ -880,7 +883,7 @@ func (s *Spawner) resolvePrompt(task domain.Task, explicitPromptID string) (stri
 
 func (s *Spawner) handleCancelled(runID string, startTime time.Time, hasWT bool) {
 	elapsed := int(time.Since(startTime).Milliseconds())
-	if err := db.CompleteAgentRun(s.database, runID, "cancelled", 0, elapsed, 0, "cancelled", "", "Cancelled by user"); err != nil {
+	if err := db.CompleteAgentRun(s.database, runID, "cancelled", 0, elapsed, 0, "cancelled", "Cancelled by user"); err != nil {
 		log.Printf("[delegate] warning: failed to record cancellation for run %s: %v", runID, err)
 	}
 	s.broadcastRunUpdate(runID, "cancelled")
@@ -891,56 +894,24 @@ func (s *Spawner) handleCancelled(runID string, startTime time.Time, hasWT bool)
 }
 
 func (s *Spawner) updateStatus(runID, status string) {
-	if _, err := s.database.Exec(`UPDATE agent_runs SET status = ? WHERE id = ?`, status, runID); err != nil {
+	if _, err := s.database.Exec(`UPDATE runs SET status = ? WHERE id = ?`, status, runID); err != nil {
 		log.Printf("[delegate] warning: failed to update status for run %s: %v", runID, err)
 	}
 	s.broadcastRunUpdate(runID, status)
 }
 
-// updateBreakerCounter adjusts the per-task consecutive failure counter
-// based on the run's trigger type and terminal status.
-//
-// Rules:
-//   - Auto runs (trigger_type != "manual") that fail or are unsolvable increment the counter.
-//     When the counter reaches the trigger's breaker_threshold, a system event is emitted.
-//   - Any successful run (manual or auto) resets the counter to zero.
-//   - Manual runs that fail or are unsolvable do not touch the counter.
+// updateBreakerCounter is a no-op stub. The breaker is now query-based
+// (see routing.Router + db.CountConsecutiveFailedRuns). Kept as a call site
+// placeholder until all callers are cleaned up.
 func (s *Spawner) updateBreakerCounter(taskID, triggerType, status string) {
-	switch {
-	case status == "completed":
-		// Success resets the counter regardless of trigger type.
-		if err := db.ResetTaskUnsuccessfulRuns(s.database, taskID); err != nil {
-			log.Printf("[delegate] warning: failed to reset unsuccessful runs for task %s: %v", taskID, err)
-		}
-
-	case triggerType != "manual" && (status == "failed" || status == "task_unsolvable"):
-		newCount, err := db.IncrementTaskUnsuccessfulRuns(s.database, taskID)
-		if err != nil {
-			log.Printf("[delegate] warning: failed to increment unsuccessful runs for task %s: %v", taskID, err)
-			return
-		}
-		log.Printf("[delegate] task %s: consecutive unsuccessful auto-runs = %d", taskID, newCount)
-
-		// Emit a suspension event exactly once — on the transition, not on
-		// every subsequent failure. The actual gating (skip auto-fires when
-		// counter >= breaker_threshold) is enforced by the auto-delegation hook
-		// in SKY-147.
-		if newCount == 2 {
-			if _, err := db.RecordEvent(s.database, domain.Event{
-				EventType:    domain.EventSystemTaskAutoSuspended,
-				TaskID:       taskID,
-				MetadataJSON: fmt.Sprintf(`{"consecutive_failures": %d}`, newCount),
-			}); err != nil {
-				log.Printf("[delegate] warning: failed to record auto-suspension event for task %s: %v", taskID, err)
-			}
-		}
-	}
+	// Breaker is query-based now — no per-task counter to update.
+	// See internal/routing/router.go and internal/db/tasks.go.
 }
 
 func (s *Spawner) failRun(runID, taskID, triggerType, errMsg string) {
 	log.Printf("[delegate] run %s failed: %s", runID, errMsg)
 
-	if _, err := s.database.Exec(`UPDATE agent_runs SET status = 'failed' WHERE id = ?`, runID); err != nil {
+	if _, err := s.database.Exec(`UPDATE runs SET status = 'failed' WHERE id = ?`, runID); err != nil {
 		log.Printf("[delegate] warning: failed to mark run %s as failed: %v", runID, err)
 	}
 
