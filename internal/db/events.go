@@ -43,7 +43,16 @@ func SeedEventTypes(db *sql.DB) error {
 
 // RecordEvent inserts an event into the audit log and returns its UUID.
 // If evt.ID is empty, a v4 UUID is generated; otherwise the caller's ID is
-// used (handy for tests and idempotent retries).
+// used (useful for pinning IDs in tests). The INSERT has no ON CONFLICT
+// handling — reusing an existing ID surfaces the PK violation to the caller.
+//
+// Idempotency is *not* a responsibility of this layer. The events table is
+// an append-only audit log (see db.go: "No idempotency — dedup happens
+// downstream"). The poller's restart-safe story is snapshot-driven: if a
+// crash happens between the emit and the snapshot_json commit, the next
+// poll's diff finds the same delta and re-emits cleanly. The atomicity
+// needed to make that "exactly-once" is SKY-178's job (emit + snapshot
+// commit wrapped in a single transaction).
 func RecordEvent(db *sql.DB, evt domain.Event) (string, error) {
 	id := evt.ID
 	if id == "" {
