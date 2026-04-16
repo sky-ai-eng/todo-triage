@@ -88,7 +88,12 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string) []
 	// --- Per-check CI events -----------------------------------------------
 	// Emit one event per check-run that transitions to a new conclusion.
 	// Identity: check-run ID. Same ID seen again → no event.
-	if prev.CheckRuns != nil {
+	//
+	// nil prev.CheckRuns (discovery snapshot, lightweight fragment) is treated
+	// as empty — every check in curr is "new." This ensures failing CI on a
+	// newly-tracked entity is surfaced on the first full refresh, not deferred
+	// to the second poll.
+	if curr.CheckRuns != nil {
 		prevByID := make(map[int64]domain.CheckRun, len(prev.CheckRuns))
 		for _, cr := range prev.CheckRuns {
 			prevByID[cr.ID] = cr

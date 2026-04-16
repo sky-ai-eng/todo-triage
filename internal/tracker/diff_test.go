@@ -190,20 +190,45 @@ func TestDiff_CI_PendingToFailure_EmitsEvent(t *testing.T) {
 	}
 }
 
-func TestDiff_CI_NilPrevCheckRuns_SkipsCISection(t *testing.T) {
-	// nil prev.CheckRuns = "unknown prior state" — skip CI entirely to
-	// avoid spurious events on first poll after the field was added.
+func TestDiff_CI_NilPrevCheckRuns_TreatedAsEmpty(t *testing.T) {
+	// nil prev.CheckRuns (discovery snapshot) is treated as empty — every
+	// check in curr is new. This ensures failing CI on a newly-tracked
+	// entity fires on the first full refresh.
 	prev := basePRSnapshot()
-	prev.CheckRuns = nil // unknown
+	prev.CheckRuns = nil // discovery snapshot
 	curr := basePRSnapshot()
 	curr.CheckRuns = []domain.CheckRun{
 		{ID: 1, Name: "build", Conclusion: "failure"},
+		{ID: 2, Name: "lint", Conclusion: "success"},
 	}
 
 	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
 	failed := findEvents(evts, domain.EventGitHubPRCICheckFailed)
-	if len(failed) != 0 {
-		t.Errorf("expected 0 ci events (nil prev = unknown), got %d", len(failed))
+	passed := findEvents(evts, domain.EventGitHubPRCICheckPassed)
+	if len(failed) != 1 {
+		t.Errorf("expected 1 ci_check_failed (nil prev = empty), got %d", len(failed))
+	}
+	if len(passed) != 1 {
+		t.Errorf("expected 1 ci_check_passed (nil prev = empty), got %d", len(passed))
+	}
+}
+
+func TestDiff_CI_NilCurrCheckRuns_SkipsCISection(t *testing.T) {
+	// nil curr.CheckRuns means the refresh didn't return CI data (e.g.,
+	// lightweight terminal fragment). Skip the CI section entirely.
+	prev := basePRSnapshot()
+	prev.CheckRuns = []domain.CheckRun{
+		{ID: 1, Name: "build", Conclusion: "failure"},
+	}
+	curr := basePRSnapshot()
+	curr.CheckRuns = nil
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	if len(findEvents(evts, domain.EventGitHubPRCICheckPassed)) != 0 {
+		t.Error("should not emit ci events when curr.CheckRuns is nil")
+	}
+	if len(findEvents(evts, domain.EventGitHubPRCICheckFailed)) != 0 {
+		t.Error("should not emit ci events when curr.CheckRuns is nil")
 	}
 }
 
