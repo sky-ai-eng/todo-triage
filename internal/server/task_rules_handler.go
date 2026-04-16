@@ -113,11 +113,17 @@ func (s *Server) handleTaskRuleCreate(w http.ResponseWriter, r *http.Request) {
 // immutable (changing it would invalidate the predicate schema); users who
 // want to "change" the event type should delete + recreate.
 type patchTaskRuleRequest struct {
-	ScopePredicateJSON *string  `json:"scope_predicate_json"` // pointer: absent = leave, present + "" = clear
-	Enabled            *bool    `json:"enabled"`
-	Name               *string  `json:"name"`
-	DefaultPriority    *float64 `json:"default_priority"`
-	SortOrder          *int     `json:"sort_order"`
+	// ScopePredicateJSON uses json.RawMessage to distinguish three cases
+	// that a *string can't: absent (len==0 → leave unchanged), explicit
+	// JSON null (bytes "null" → clear to match-all), and any other value.
+	// A plain *string would collapse absent and null to the same nil,
+	// silently no-op'ing clients who send `{"scope_predicate_json": null}`
+	// to clear the predicate.
+	ScopePredicateJSON json.RawMessage `json:"scope_predicate_json"`
+	Enabled            *bool           `json:"enabled"`
+	Name               *string         `json:"name"`
+	DefaultPriority    *float64        `json:"default_priority"`
+	SortOrder          *int            `json:"sort_order"`
 }
 
 func (s *Server) handleTaskRuleUpdate(w http.ResponseWriter, r *http.Request) {
@@ -161,17 +167,34 @@ func (s *Server) handleTaskRuleUpdate(w http.ResponseWriter, r *http.Request) {
 	if req.SortOrder != nil {
 		updated.SortOrder = *req.SortOrder
 	}
-	if req.ScopePredicateJSON != nil {
-		// Validate + canonicalise against the rule's existing event_type.
-		canonical, err := events.ValidatePredicateJSON(existing.EventType, *req.ScopePredicateJSON)
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		if canonical == "" {
+	// Predicate update — three distinguishable cases:
+	//   - absent (len==0):            leave unchanged
+	//   - explicit null ("null"):     clear to match-all
+	//   - any JSON string (quoted):   unquote, then validate + canonicalise
+	//   - bare JSON object / other:   treat as predicate body directly
+	if len(req.ScopePredicateJSON) > 0 {
+		raw := string(req.ScopePredicateJSON)
+		if raw == "null" {
 			updated.ScopePredicateJSON = nil
 		} else {
-			updated.ScopePredicateJSON = &canonical
+			// The body may be either a JSON string wrapping the predicate
+			// (e.g. `"{\"author_is_self\":true}"`) — which is how responses
+			// round-trip back in — or a bare JSON object. Handle both by
+			// unquoting strings, otherwise passing through.
+			var asString string
+			if err := json.Unmarshal(req.ScopePredicateJSON, &asString); err == nil {
+				raw = asString
+			}
+			canonical, err := events.ValidatePredicateJSON(existing.EventType, raw)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				return
+			}
+			if canonical == "" {
+				updated.ScopePredicateJSON = nil
+			} else {
+				updated.ScopePredicateJSON = &canonical
+			}
 		}
 	}
 
