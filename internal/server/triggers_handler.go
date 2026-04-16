@@ -105,6 +105,84 @@ func (s *Server) handleTriggerCreate(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// PUT /api/triggers/{id}
+//
+// Updates the mutable-config subset of an existing trigger: scope predicate,
+// breaker threshold, cooldown. Deliberately does NOT accept prompt_id or
+// event_type — changing those means the trigger is semantically a different
+// thing (predicate schema is keyed on event_type, and the DB has a unique
+// constraint on (prompt_id, event_type)), so delete+recreate is the right
+// shape. `enabled` is owned by POST /api/triggers/{id}/toggle and is not
+// accepted here either.
+//
+// All three body fields are required (PUT replace semantics): clients must
+// send the current values for fields they don't intend to change. Use a PATCH
+// variant later if that becomes annoying.
+func (s *Server) handleTriggerUpdate(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	var req struct {
+		ScopePredicateJSON string `json:"scope_predicate_json"`
+		BreakerThreshold   int    `json:"breaker_threshold"`
+		CooldownSeconds    int    `json:"cooldown_seconds"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+
+	existing, err := db.GetPromptTrigger(s.db, id)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if existing == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "trigger not found"})
+		return
+	}
+
+	if req.BreakerThreshold <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "breaker_threshold must be positive"})
+		return
+	}
+	if req.CooldownSeconds < 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "cooldown_seconds must be >= 0"})
+		return
+	}
+
+	// Canonicalise the predicate against the existing event_type — the client
+	// can't change event_type on an update, so we use the trigger's current
+	// value (not anything from the request).
+	canonicalPredicate, err := events.ValidatePredicateJSON(existing.EventType, req.ScopePredicateJSON)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+
+	// Mutate only the config-subset fields; keep identity + toggle state.
+	updated := *existing
+	updated.BreakerThreshold = req.BreakerThreshold
+	updated.CooldownSeconds = req.CooldownSeconds
+	if canonicalPredicate == "" {
+		updated.ScopePredicateJSON = nil
+	} else {
+		updated.ScopePredicateJSON = &canonicalPredicate
+	}
+
+	if err := db.SavePromptTrigger(s.db, updated); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	// Re-read so the response reflects the updated_at timestamp the DB set.
+	fresh, _ := db.GetPromptTrigger(s.db, id)
+	if fresh != nil {
+		writeJSON(w, http.StatusOK, fresh)
+	} else {
+		writeJSON(w, http.StatusOK, updated)
+	}
+}
+
 func (s *Server) handleTriggerDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if err := db.DeletePromptTrigger(s.db, id); err != nil {

@@ -98,6 +98,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/event-schemas/{event_type}", s.handleEventSchemaGet)
 	s.mux.HandleFunc("GET /api/triggers", s.handleTriggersList)
 	s.mux.HandleFunc("POST /api/triggers", s.handleTriggerCreate)
+	s.mux.HandleFunc("PUT /api/triggers/{id}", s.handleTriggerUpdate)
 	s.mux.HandleFunc("DELETE /api/triggers/{id}", s.handleTriggerDelete)
 	s.mux.HandleFunc("POST /api/triggers/{id}/toggle", s.handleTriggerToggle)
 	s.mux.HandleFunc("GET /api/prompts", s.handlePromptsList)
