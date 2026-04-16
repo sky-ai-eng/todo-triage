@@ -8,7 +8,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// DashboardStats holds aggregated PR statistics derived from tracked items.
+// DashboardStats holds aggregated PR statistics derived from entity snapshots.
 type DashboardStats struct {
 	Merged          int              `json:"merged"`
 	Closed          int              `json:"closed"`
@@ -38,14 +38,14 @@ type PRSummaryRow struct {
 	HTMLURL   string   `json:"html_url"`
 }
 
-// GetDashboardStats computes dashboard statistics from tracked_items snapshots.
+// GetDashboardStats computes dashboard statistics from entity snapshots.
 // username is the authenticated user's GitHub login, used to attribute reviews.
 func GetDashboardStats(database *sql.DB, username string, sinceDays int) (*DashboardStats, error) {
 	since := time.Now().AddDate(0, 0, -sinceDays)
 
 	rows, err := database.Query(`
-		SELECT snapshot FROM tracked_items
-		WHERE source = 'github'
+		SELECT snapshot_json FROM entities
+		WHERE source = 'github' AND snapshot_json IS NOT NULL AND snapshot_json != ''
 	`)
 	if err != nil {
 		return nil, err
@@ -122,13 +122,13 @@ func GetDashboardStats(database *sql.DB, username string, sinceDays int) (*Dashb
 	return stats, nil
 }
 
-// GetDashboardPRs returns PR summaries from tracked items for the dashboard list.
+// GetDashboardPRs returns PR summaries from entities for the dashboard list.
 // Includes open, merged, and closed PRs.
 func GetDashboardPRs(database *sql.DB) ([]PRSummaryRow, error) {
 	rows, err := database.Query(`
-		SELECT snapshot FROM tracked_items
-		WHERE source = 'github'
-		ORDER BY last_polled DESC
+		SELECT snapshot_json FROM entities
+		WHERE source = 'github' AND snapshot_json IS NOT NULL AND snapshot_json != ''
+		ORDER BY last_polled_at DESC
 	`)
 	if err != nil {
 		return nil, err

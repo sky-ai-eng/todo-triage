@@ -25,7 +25,7 @@ type DayCount struct {
 	Count int    `json:"count"`
 }
 
-// GetPromptStats returns aggregated stats for a prompt from agent_runs.
+// GetPromptStats returns aggregated stats for a prompt from runs.
 func GetPromptStats(db *sql.DB, promptID string) (*PromptStats, error) {
 	stats := &PromptStats{}
 
@@ -38,7 +38,7 @@ func GetPromptStats(db *sql.DB, promptID string) (*PromptStats, error) {
 			COALESCE(AVG(total_cost_usd), 0),
 			COALESCE(AVG(duration_ms), 0),
 			COALESCE(SUM(total_cost_usd), 0)
-		FROM agent_runs WHERE prompt_id = ?
+		FROM runs WHERE prompt_id = ?
 	`, promptID).Scan(
 		&stats.TotalRuns,
 		&stats.CompletedRuns,
@@ -61,7 +61,7 @@ func GetPromptStats(db *sql.DB, promptID string) (*PromptStats, error) {
 	// through with lastUsed.Valid=false so the page renders "never used"
 	// rather than breaking the whole stats response.
 	var lastUsed sql.NullTime
-	if err := db.QueryRow(`SELECT MAX(started_at) FROM agent_runs WHERE prompt_id = ?`, promptID).Scan(&lastUsed); err != nil {
+	if err := db.QueryRow(`SELECT MAX(started_at) FROM runs WHERE prompt_id = ?`, promptID).Scan(&lastUsed); err != nil {
 		log.Printf("[prompt_stats] failed to scan MAX(started_at) for %s: %v", promptID, err)
 	}
 	if lastUsed.Valid {
@@ -73,7 +73,7 @@ func GetPromptStats(db *sql.DB, promptID string) (*PromptStats, error) {
 	cutoff := time.Now().AddDate(0, 0, -30).Format("2006-01-02")
 	rows, err := db.Query(`
 		SELECT DATE(started_at) as day, COUNT(*) as cnt
-		FROM agent_runs
+		FROM runs
 		WHERE prompt_id = ? AND DATE(started_at) >= ?
 		GROUP BY day ORDER BY day
 	`, promptID, cutoff)

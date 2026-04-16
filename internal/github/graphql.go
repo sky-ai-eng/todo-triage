@@ -52,7 +52,7 @@ const prBaseFields = `
 // identity, metadata, reviews, and head SHA — but NOT check runs.
 //
 // Check runs are omitted because:
-//   - Discovery only needs to find PRs and seed tracked_items; the
+//   - Discovery only needs to find PRs and seed entities; the
 //     next refresh cycle fills in CI detail for any PRs that need it.
 //   - Merged/closed PRs are terminal — CI status is historical noise.
 //

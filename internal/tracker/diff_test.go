@@ -1,565 +1,854 @@
 package tracker
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 )
 
-func TestDiffPR_FirstSeen_ReviewRequested(t *testing.T) {
-	events := DiffPRSnapshots(domain.PRSnapshot{}, domain.PRSnapshot{
-		Number:         42,
-		State:          "OPEN",
-		Author:         "bob",
-		ReviewRequests: []string{"alice"},
-	}, "42", "alice")
+const testEntityID = "entity-123"
+const testUser = "aidan"
 
-	assertEventTypes(t, events, []string{domain.EventGitHubPRReviewRequested})
-}
+// --- Helpers ----------------------------------------------------------------
 
-func TestDiffPR_FirstSeen_Authored(t *testing.T) {
-	events := DiffPRSnapshots(domain.PRSnapshot{}, domain.PRSnapshot{
-		Number: 42,
-		State:  "OPEN",
-		Author: "alice",
-	}, "42", "alice")
-
-	assertEventTypes(t, events, []string{domain.EventGitHubPROpened})
-}
-
-func TestDiffPR_FirstSeen_Mentioned(t *testing.T) {
-	events := DiffPRSnapshots(domain.PRSnapshot{}, domain.PRSnapshot{
-		Number: 42,
-		State:  "OPEN",
-		Author: "bob",
-	}, "42", "alice")
-
-	assertEventTypes(t, events, []string{domain.EventGitHubPRMentioned})
-}
-
-func TestDiffPR_FirstSeen_Merged(t *testing.T) {
-	events := DiffPRSnapshots(domain.PRSnapshot{}, domain.PRSnapshot{
-		Number: 42,
-		State:  "MERGED",
-		Merged: true,
-	}, "42", "alice")
-
-	assertEventTypes(t, events, []string{domain.EventGitHubPRMerged})
-}
-
-func TestDiffPR_FirstSeen_Closed(t *testing.T) {
-	events := DiffPRSnapshots(domain.PRSnapshot{}, domain.PRSnapshot{
-		Number: 42,
-		State:  "CLOSED",
-		Merged: false,
-	}, "42", "alice")
-
-	assertEventTypes(t, events, []string{domain.EventGitHubPRClosed})
-}
-
-func TestDiffPR_OpenToClosed(t *testing.T) {
-	prev := domain.PRSnapshot{Number: 42, State: "OPEN", Merged: false}
-	curr := domain.PRSnapshot{Number: 42, State: "CLOSED", Merged: false}
-
-	events := DiffPRSnapshots(prev, curr, "42", "")
-	assertEventTypes(t, events, []string{domain.EventGitHubPRClosed})
-}
-
-func TestDiffPR_OpenToMerged_EmitsMergedNotClosed(t *testing.T) {
-	// Merged PRs (Merged=true) should emit github:pr:merged, not github:pr:closed
-	prev := domain.PRSnapshot{Number: 42, State: "OPEN", Merged: false}
-	curr := domain.PRSnapshot{Number: 42, State: "MERGED", Merged: true}
-
-	events := DiffPRSnapshots(prev, curr, "42", "")
-	assertEventTypes(t, events, []string{domain.EventGitHubPRMerged})
-}
-
-func TestDiffPR_CITransition(t *testing.T) {
-	// Baseline: one check, still running.
-	pending := domain.PRSnapshot{
-		Number: 42,
-		CheckRuns: []domain.CheckRun{
-			{ID: 1, Name: "test", Status: "in_progress"},
-		},
+func eventTypes(evts []domain.Event) []string {
+	var out []string
+	for _, e := range evts {
+		out = append(out, e.EventType)
 	}
-
-	// pending → same id completing as success: fires CIPassed
-	events := DiffPRSnapshots(pending, domain.PRSnapshot{
-		Number: 42,
-		CheckRuns: []domain.CheckRun{
-			{ID: 1, Name: "test", Status: "completed", Conclusion: "success"},
-		},
-	}, "42", "")
-	assertEventTypes(t, events, []string{domain.EventGitHubPRCIPassed})
-
-	// pending → same id completing as failure: fires CIFailed
-	// (case 2 in the diff logic: existing ID, prior conclusion wasn't failing)
-	events = DiffPRSnapshots(pending, domain.PRSnapshot{
-		Number: 42,
-		CheckRuns: []domain.CheckRun{
-			{ID: 1, Name: "test", Status: "completed", Conclusion: "failure"},
-		},
-	}, "42", "")
-	assertEventTypes(t, events, []string{domain.EventGitHubPRCIFailed})
-	assertMetaContains(t, events[0], "primary_check_name", "test")
-	assertMetaContains(t, events[0], "primary_conclusion", "failure")
-
-	// no change → no events
-	events = DiffPRSnapshots(pending, pending, "42", "")
-	assertEventTypes(t, events, nil)
-
-	// nil prev.CheckRuns (unknown prior state, e.g. old snapshot) → no fire
-	// even if curr has a failing check. Guards against spurious events on
-	// the first poll after this field landed.
-	events = DiffPRSnapshots(
-		domain.PRSnapshot{Number: 42, CheckRuns: nil},
-		domain.PRSnapshot{
-			Number: 42,
-			CheckRuns: []domain.CheckRun{
-				{ID: 99, Name: "test", Status: "completed", Conclusion: "failure"},
-			},
-		},
-		"42", "",
-	)
-	assertEventTypes(t, events, nil)
+	return out
 }
 
-// TestDiffPR_CIFailure_Scenario_B reproduces the "missed PENDING" bug that
-// the old scalar-CIState logic could not detect:
-//
-//	FAILURE → fix pushed → poller sees FAILURE again on the new SHA without
-//	having observed the intermediate PENDING → old aggregate stayed FAILURE
-//	→ no event fired → auto-delegation stuck.
-//
-// With per-check-run identity, the retry produces a new check_run_id at the
-// new SHA, and the diff logic fires on the new ID.
-func TestDiffPR_CIFailure_Scenario_B_RetryAtNewSHA(t *testing.T) {
-	prev := domain.PRSnapshot{
-		Number:  42,
-		HeadSHA: "abc123",
-		CheckRuns: []domain.CheckRun{
-			{ID: 100, Name: "test", Status: "completed", Conclusion: "failure"},
-		},
+func findEvent(evts []domain.Event, eventType string) *domain.Event {
+	for i := range evts {
+		if evts[i].EventType == eventType {
+			return &evts[i]
+		}
 	}
-	curr := domain.PRSnapshot{
-		Number:  42,
-		HeadSHA: "def456",
-		CheckRuns: []domain.CheckRun{
-			{ID: 200, Name: "test", Status: "completed", Conclusion: "failure"},
-		},
-	}
-
-	events := DiffPRSnapshots(prev, curr, "42", "")
-	types := eventTypes(events)
-	assertContains(t, types, domain.EventGitHubPRCIFailed)
-	assertContains(t, types, domain.EventGitHubPRNewCommits)
+	return nil
 }
 
-// TestDiffPR_CIFailure_Scenario_C reproduces the "different check fails"
-// bug that the old scalar-CIState logic could not detect:
-//
-//	Check A fails → agent fixes A → rerun → A passes, B newly fails →
-//	aggregate rollup stays FAILURE → no transition → no event fired →
-//	auto-delegation stuck.
-//
-// With per-check-run identity, B's new failing ID isn't in prev, so fires.
-func TestDiffPR_CIFailure_Scenario_C_DifferentCheckFails(t *testing.T) {
-	prev := domain.PRSnapshot{
-		Number: 42,
-		CheckRuns: []domain.CheckRun{
-			{ID: 100, Name: "unit", Status: "completed", Conclusion: "failure"},
-			{ID: 101, Name: "integration", Status: "completed", Conclusion: "success"},
-		},
+func findEvents(evts []domain.Event, eventType string) []domain.Event {
+	var out []domain.Event
+	for _, e := range evts {
+		if e.EventType == eventType {
+			out = append(out, e)
+		}
 	}
-	curr := domain.PRSnapshot{
-		Number: 42,
-		CheckRuns: []domain.CheckRun{
-			{ID: 200, Name: "unit", Status: "completed", Conclusion: "success"},
-			{ID: 201, Name: "integration", Status: "completed", Conclusion: "failure"},
-		},
-	}
-
-	events := DiffPRSnapshots(prev, curr, "42", "")
-	assertEventTypes(t, events, []string{domain.EventGitHubPRCIFailed})
-	assertMetaContains(t, events[0], "primary_check_name", "integration")
-	assertMetaContains(t, events[0], "count", "1")
+	return out
 }
 
-// TestDiffPR_CIPassed_PermissiveConclusions verifies that the aggregate
-// CIPassed transition fires for check-run conclusions outside the narrow
-// success/skipped/neutral set — specifically "stale" (which GitHub emits
-// after a rebase and treats as non-blocking), empty conclusion on a
-// completed run, and any future enum values. Regression guard for a real
-// bug where CIStatusFromCheckRuns only recognized three conclusions,
-// causing stable "stale" PRs to never report the aggregate success state.
-func TestDiffPR_CIPassed_PermissiveConclusions(t *testing.T) {
-	prev := domain.PRSnapshot{
-		Number: 42,
-		CheckRuns: []domain.CheckRun{
-			{ID: 1, Name: "test", Status: "in_progress"},
-		},
+func assertEntityID(t *testing.T, evt domain.Event) {
+	t.Helper()
+	if evt.EntityID == nil || *evt.EntityID != testEntityID {
+		t.Errorf("event %s: expected EntityID=%q, got %v", evt.EventType, testEntityID, evt.EntityID)
 	}
-
-	// stale → success-like, fires CIPassed
-	events := DiffPRSnapshots(prev, domain.PRSnapshot{
-		Number: 42,
-		CheckRuns: []domain.CheckRun{
-			{ID: 1, Name: "test", Status: "completed", Conclusion: "stale"},
-		},
-	}, "42", "")
-	assertEventTypes(t, events, []string{domain.EventGitHubPRCIPassed})
-
-	// empty conclusion on a completed run → also success-like
-	events = DiffPRSnapshots(prev, domain.PRSnapshot{
-		Number: 42,
-		CheckRuns: []domain.CheckRun{
-			{ID: 1, Name: "test", Status: "completed", Conclusion: ""},
-		},
-	}, "42", "")
-	assertEventTypes(t, events, []string{domain.EventGitHubPRCIPassed})
-
-	// Mixed: one stale + one success → still passes
-	events = DiffPRSnapshots(prev, domain.PRSnapshot{
-		Number: 42,
-		CheckRuns: []domain.CheckRun{
-			{ID: 1, Name: "test", Status: "completed", Conclusion: "success"},
-			{ID: 2, Name: "lint", Status: "completed", Conclusion: "stale"},
-		},
-	}, "42", "")
-	assertContains(t, eventTypes(events), domain.EventGitHubPRCIPassed)
 }
 
-// Stable CI — same IDs, same conclusions poll-to-poll — fires nothing.
-func TestDiffPR_CIFailure_StableCI_NoEvent(t *testing.T) {
-	snap := domain.PRSnapshot{
-		Number: 42,
-		CheckRuns: []domain.CheckRun{
-			{ID: 100, Name: "test", Status: "completed", Conclusion: "failure"},
-		},
+func decodeMetadata[T any](t *testing.T, evt domain.Event) T {
+	t.Helper()
+	var m T
+	if err := json.Unmarshal([]byte(evt.MetadataJSON), &m); err != nil {
+		t.Fatalf("failed to decode metadata for %s: %v", evt.EventType, err)
 	}
-	events := DiffPRSnapshots(snap, snap, "42", "")
-	assertEventTypes(t, events, nil)
+	return m
 }
 
-// Multiple checks newly fail in the same poll — fire once with a count and
-// the full list in metadata, not one event per failing check.
-func TestDiffPR_CIFailure_MultipleNewFailures_OneEvent(t *testing.T) {
-	prev := domain.PRSnapshot{
+// basePRSnapshot returns a minimal open PR snapshot for use as a "previous" state.
+func basePRSnapshot() domain.PRSnapshot {
+	return domain.PRSnapshot{
 		Number:    42,
-		CheckRuns: []domain.CheckRun{},
+		Title:     "Test PR",
+		Author:    testUser,
+		Repo:      "owner/repo",
+		URL:       "https://github.com/owner/repo/pull/42",
+		State:     "OPEN",
+		HeadSHA:   "abc123",
+		CheckRuns: []domain.CheckRun{}, // empty but non-nil = known prior state
+		Labels:    []string{},
 	}
-	curr := domain.PRSnapshot{
-		Number: 42,
-		CheckRuns: []domain.CheckRun{
-			{ID: 10, Name: "build", Status: "completed", Conclusion: "failure"},
-			{ID: 11, Name: "lint", Status: "completed", Conclusion: "failure"},
-			{ID: 12, Name: "test", Status: "completed", Conclusion: "failure"},
-		},
+}
+
+// --- First discovery --------------------------------------------------------
+
+func TestDiff_FirstDiscovery_OpenPR_NoEvents(t *testing.T) {
+	// First discovery of an open PR should emit no events — events fire
+	// on the NEXT poll when we can meaningfully diff.
+	curr := basePRSnapshot()
+	evts := DiffPRSnapshots(domain.PRSnapshot{}, curr, testEntityID, testUser)
+	if len(evts) != 0 {
+		t.Errorf("expected 0 events on first discovery of open PR, got %d: %v", len(evts), eventTypes(evts))
 	}
-
-	events := DiffPRSnapshots(prev, curr, "42", "")
-	assertEventTypes(t, events, []string{domain.EventGitHubPRCIFailed})
-	assertMetaContains(t, events[0], "count", "3")
-	assertMetaContains(t, events[0], "failing_checks", "build")
-	assertMetaContains(t, events[0], "failing_checks", "lint")
-	assertMetaContains(t, events[0], "failing_checks", "test")
 }
 
-func TestDiffPR_NewCommits(t *testing.T) {
-	// head_sha changed → fires with before/after metadata
-	prev := domain.PRSnapshot{Number: 42, HeadSHA: "abc123"}
-	curr := domain.PRSnapshot{Number: 42, HeadSHA: "def456"}
-
-	events := DiffPRSnapshots(prev, curr, "42", "")
-	assertEventTypes(t, events, []string{domain.EventGitHubPRNewCommits})
-	assertMetaContains(t, events[0], "new", "def456")
-	assertMetaContains(t, events[0], "prev", "abc123")
-
-	// head_sha unchanged → no event
-	events = DiffPRSnapshots(prev, prev, "42", "")
-	assertEventTypes(t, events, nil)
-
-	// prev empty (first poll populating the field) → no spurious event
-	events = DiffPRSnapshots(
-		domain.PRSnapshot{Number: 42, HeadSHA: ""},
-		domain.PRSnapshot{Number: 42, HeadSHA: "abc123"},
-		"42", "",
-	)
-	assertEventTypes(t, events, nil)
-
-	// curr empty (refresh lost the field) → no spurious event
-	events = DiffPRSnapshots(
-		domain.PRSnapshot{Number: 42, HeadSHA: "abc123"},
-		domain.PRSnapshot{Number: 42, HeadSHA: ""},
-		"42", "",
-	)
-	assertEventTypes(t, events, nil)
-}
-
-func TestDiffPR_Merged(t *testing.T) {
-	prev := domain.PRSnapshot{Number: 42, State: "OPEN", Merged: false}
-	curr := domain.PRSnapshot{Number: 42, State: "MERGED", Merged: true}
-
-	events := DiffPRSnapshots(prev, curr, "42", "")
-	assertEventTypes(t, events, []string{domain.EventGitHubPRMerged})
-}
-
-func TestDiffPR_DraftToReady(t *testing.T) {
-	prev := domain.PRSnapshot{Number: 42, IsDraft: true}
-	curr := domain.PRSnapshot{Number: 42, IsDraft: false}
-
-	events := DiffPRSnapshots(prev, curr, "42", "")
-	assertEventTypes(t, events, []string{domain.EventGitHubPRReadyForReview})
-}
-
-func TestDiffPR_Conflicts(t *testing.T) {
-	prev := domain.PRSnapshot{Number: 42, Mergeable: "MERGEABLE"}
-	curr := domain.PRSnapshot{Number: 42, Mergeable: "CONFLICTING"}
-
-	events := DiffPRSnapshots(prev, curr, "42", "")
-	assertEventTypes(t, events, []string{domain.EventGitHubPRConflicts})
-}
-
-func TestDiffPR_ReviewRequestAdded(t *testing.T) {
-	prev := domain.PRSnapshot{Number: 42, ReviewRequests: []string{"alice"}}
-	curr := domain.PRSnapshot{Number: 42, ReviewRequests: []string{"alice", "bob"}}
-
-	events := DiffPRSnapshots(prev, curr, "42", "bob")
-	assertEventTypes(t, events, []string{domain.EventGitHubPRReviewRequested})
-	assertMetaContains(t, events[0], "requested_reviewer", "bob")
-}
-
-func TestDiffPR_ReviewRequestAdded_OtherUser(t *testing.T) {
-	// Review requested for someone else — should NOT fire for us
-	prev := domain.PRSnapshot{Number: 42, ReviewRequests: []string{"alice"}}
-	curr := domain.PRSnapshot{Number: 42, ReviewRequests: []string{"alice", "bob"}}
-
-	events := DiffPRSnapshots(prev, curr, "42", "charlie")
-	assertEventTypes(t, events, nil)
-}
-
-func TestDiffPR_ReviewRequestReAdded(t *testing.T) {
-	// Simulates: alice reviewed, request removed, then re-requested
-	prev := domain.PRSnapshot{Number: 42, ReviewRequests: nil}
-	curr := domain.PRSnapshot{Number: 42, ReviewRequests: []string{"alice"}}
-
-	events := DiffPRSnapshots(prev, curr, "42", "alice")
-	assertEventTypes(t, events, []string{domain.EventGitHubPRReviewRequested})
-}
-
-func TestDiffPR_ReviewApproved(t *testing.T) {
-	prev := domain.PRSnapshot{
-		Number:  42,
-		Author:  "me",
-		Reviews: []domain.ReviewState{{Author: "alice", State: "COMMENTED"}},
+func TestDiff_FirstDiscovery_MergedPR_EmitsMerged(t *testing.T) {
+	curr := basePRSnapshot()
+	curr.Merged = true
+	evts := DiffPRSnapshots(domain.PRSnapshot{}, curr, testEntityID, testUser)
+	if len(evts) != 1 || evts[0].EventType != domain.EventGitHubPRMerged {
+		t.Errorf("expected [pr:merged], got %v", eventTypes(evts))
 	}
-	curr := domain.PRSnapshot{
-		Number:  42,
-		Author:  "me",
-		Reviews: []domain.ReviewState{{Author: "alice", State: "APPROVED"}},
+	assertEntityID(t, evts[0])
+}
+
+func TestDiff_FirstDiscovery_ClosedPR_EmitsClosed(t *testing.T) {
+	curr := basePRSnapshot()
+	curr.State = "CLOSED"
+	evts := DiffPRSnapshots(domain.PRSnapshot{}, curr, testEntityID, testUser)
+	if len(evts) != 1 || evts[0].EventType != domain.EventGitHubPRClosed {
+		t.Errorf("expected [pr:closed], got %v", eventTypes(evts))
+	}
+}
+
+// --- CI per-check events ----------------------------------------------------
+
+func TestDiff_CI_NewFailingCheck_EmitsPerCheck(t *testing.T) {
+	prev := basePRSnapshot()
+	curr := basePRSnapshot()
+	curr.CheckRuns = []domain.CheckRun{
+		{ID: 1, Name: "build", Conclusion: "failure"},
+		{ID: 2, Name: "test", Conclusion: "failure"},
+		{ID: 3, Name: "lint", Conclusion: "success"},
 	}
 
-	events := DiffPRSnapshots(prev, curr, "42", "me")
-	assertEventTypes(t, events, []string{domain.EventGitHubPRApproved})
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+
+	failed := findEvents(evts, domain.EventGitHubPRCICheckFailed)
+	passed := findEvents(evts, domain.EventGitHubPRCICheckPassed)
+
+	if len(failed) != 2 {
+		t.Errorf("expected 2 ci_check_failed events, got %d", len(failed))
+	}
+	if len(passed) != 1 {
+		t.Errorf("expected 1 ci_check_passed event, got %d", len(passed))
+	}
+
+	// Verify metadata on the first failed check.
+	meta := decodeMetadata[events.GitHubPRCICheckFailedMetadata](t, failed[0])
+	if !meta.AuthorIsSelf {
+		t.Error("expected AuthorIsSelf=true")
+	}
+	if meta.Repo != "owner/repo" {
+		t.Errorf("expected Repo=owner/repo, got %s", meta.Repo)
+	}
 }
 
-func TestDiffPR_ReviewApproved_NotAuthor(t *testing.T) {
-	// Review state changed on a PR we don't own — no event
-	prev := domain.PRSnapshot{
-		Number:  42,
-		Author:  "bob",
-		Reviews: []domain.ReviewState{{Author: "alice", State: "COMMENTED"}},
+func TestDiff_CI_SameFailingCheckID_NoEvent(t *testing.T) {
+	// If the same check-run ID was already failing, don't re-emit.
+	prev := basePRSnapshot()
+	prev.CheckRuns = []domain.CheckRun{
+		{ID: 1, Name: "build", Conclusion: "failure"},
 	}
-	curr := domain.PRSnapshot{
-		Number:  42,
-		Author:  "bob",
-		Reviews: []domain.ReviewState{{Author: "alice", State: "APPROVED"}},
+	curr := basePRSnapshot()
+	curr.CheckRuns = []domain.CheckRun{
+		{ID: 1, Name: "build", Conclusion: "failure"}, // same ID, still failing
 	}
 
-	events := DiffPRSnapshots(prev, curr, "42", "me")
-	assertEventTypes(t, events, nil)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	failed := findEvents(evts, domain.EventGitHubPRCICheckFailed)
+	if len(failed) != 0 {
+		t.Errorf("expected 0 ci_check_failed (same ID still failing), got %d", len(failed))
+	}
 }
 
-func TestDiffPR_ChangesRequested(t *testing.T) {
-	prev := domain.PRSnapshot{
-		Number:  42,
-		Author:  "me",
-		Reviews: []domain.ReviewState{{Author: "alice", State: "APPROVED"}},
+func TestDiff_CI_NewExecutionSameCheck_EmitsEvent(t *testing.T) {
+	// A new check-run ID for the same check name (retry/new commit) should fire.
+	prev := basePRSnapshot()
+	prev.CheckRuns = []domain.CheckRun{
+		{ID: 1, Name: "build", Conclusion: "failure"},
 	}
-	curr := domain.PRSnapshot{
-		Number:  42,
-		Author:  "me",
-		Reviews: []domain.ReviewState{{Author: "alice", State: "CHANGES_REQUESTED"}},
+	curr := basePRSnapshot()
+	curr.CheckRuns = []domain.CheckRun{
+		{ID: 1, Name: "build", Conclusion: "failure"}, // old, kept
+		{ID: 2, Name: "build", Conclusion: "failure"}, // new execution
 	}
 
-	events := DiffPRSnapshots(prev, curr, "42", "me")
-	assertEventTypes(t, events, []string{domain.EventGitHubPRChangesReq})
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	failed := findEvents(evts, domain.EventGitHubPRCICheckFailed)
+	if len(failed) != 1 {
+		t.Errorf("expected 1 ci_check_failed (new execution ID), got %d", len(failed))
+	}
 }
 
-func TestDiffPR_MultipleEvents(t *testing.T) {
-	prev := domain.PRSnapshot{
-		Number: 42,
-		CheckRuns: []domain.CheckRun{
-			{ID: 1, Name: "test", Status: "in_progress"},
-		},
-		Mergeable: "UNKNOWN",
-		IsDraft:   true,
+func TestDiff_CI_PendingToFailure_EmitsEvent(t *testing.T) {
+	// Check was pending (not failing) last poll, now failed = new signal.
+	prev := basePRSnapshot()
+	prev.CheckRuns = []domain.CheckRun{
+		{ID: 1, Name: "build", Conclusion: ""}, // pending
 	}
-	curr := domain.PRSnapshot{
-		Number: 42,
-		CheckRuns: []domain.CheckRun{
-			{ID: 1, Name: "test", Status: "completed", Conclusion: "success"},
-		},
-		Mergeable: "CONFLICTING",
-		IsDraft:   false,
+	curr := basePRSnapshot()
+	curr.CheckRuns = []domain.CheckRun{
+		{ID: 1, Name: "build", Conclusion: "failure"},
 	}
 
-	events := DiffPRSnapshots(prev, curr, "42", "")
-	types := eventTypes(events)
-
-	assertContains(t, types, domain.EventGitHubPRCIPassed)
-	assertContains(t, types, domain.EventGitHubPRConflicts)
-	assertContains(t, types, domain.EventGitHubPRReadyForReview)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	failed := findEvents(evts, domain.EventGitHubPRCICheckFailed)
+	if len(failed) != 1 {
+		t.Errorf("expected 1 ci_check_failed (pending→failure), got %d", len(failed))
+	}
 }
 
-func TestDiffPR_NoChange(t *testing.T) {
-	snap := domain.PRSnapshot{
-		Number: 42,
-		CheckRuns: []domain.CheckRun{
-			{ID: 1, Name: "test", Status: "completed", Conclusion: "success"},
-		},
-		Mergeable: "MERGEABLE",
-		Reviews:   []domain.ReviewState{{Author: "alice", State: "APPROVED"}},
+func TestDiff_CI_NilPrevCheckRuns_TreatedAsEmpty(t *testing.T) {
+	// nil prev.CheckRuns (discovery snapshot) is treated as empty — every
+	// check in curr is new. This ensures failing CI on a newly-tracked
+	// entity fires on the first full refresh.
+	prev := basePRSnapshot()
+	prev.CheckRuns = nil // discovery snapshot
+	curr := basePRSnapshot()
+	curr.CheckRuns = []domain.CheckRun{
+		{ID: 1, Name: "build", Conclusion: "failure"},
+		{ID: 2, Name: "lint", Conclusion: "success"},
 	}
 
-	events := DiffPRSnapshots(snap, snap, "42", "")
-	assertEventTypes(t, events, nil)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	failed := findEvents(evts, domain.EventGitHubPRCICheckFailed)
+	passed := findEvents(evts, domain.EventGitHubPRCICheckPassed)
+	if len(failed) != 1 {
+		t.Errorf("expected 1 ci_check_failed (nil prev = empty), got %d", len(failed))
+	}
+	if len(passed) != 1 {
+		t.Errorf("expected 1 ci_check_passed (nil prev = empty), got %d", len(passed))
+	}
 }
 
-func TestDiffJira_FirstSeen(t *testing.T) {
-	events := DiffJiraSnapshots(domain.JiraSnapshot{}, domain.JiraSnapshot{
-		Key: "SKY-1", Status: "To Do",
-	}, "SKY-1")
-	assertEventTypes(t, events, []string{domain.EventJiraIssueAvailable})
+func TestDiff_CI_NilCurrCheckRuns_SkipsCISection(t *testing.T) {
+	// nil curr.CheckRuns means the refresh didn't return CI data (e.g.,
+	// lightweight terminal fragment). Skip the CI section entirely.
+	prev := basePRSnapshot()
+	prev.CheckRuns = []domain.CheckRun{
+		{ID: 1, Name: "build", Conclusion: "failure"},
+	}
+	curr := basePRSnapshot()
+	curr.CheckRuns = nil
 
-	events = DiffJiraSnapshots(domain.JiraSnapshot{}, domain.JiraSnapshot{
-		Key: "SKY-2", Status: "In Progress", Assignee: "alice",
-	}, "SKY-2")
-	assertEventTypes(t, events, []string{domain.EventJiraIssueAssigned})
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	if len(findEvents(evts, domain.EventGitHubPRCICheckPassed)) != 0 {
+		t.Error("should not emit ci events when curr.CheckRuns is nil")
+	}
+	if len(findEvents(evts, domain.EventGitHubPRCICheckFailed)) != 0 {
+		t.Error("should not emit ci events when curr.CheckRuns is nil")
+	}
 }
 
-func TestDiffJira_StatusChange(t *testing.T) {
+func TestDiff_CI_FailureToSuccess_EmitsCheckPassed(t *testing.T) {
+	prev := basePRSnapshot()
+	prev.CheckRuns = []domain.CheckRun{
+		{ID: 1, Name: "build", Conclusion: "failure"},
+	}
+	curr := basePRSnapshot()
+	curr.CheckRuns = []domain.CheckRun{
+		{ID: 1, Name: "build", Conclusion: "success"},
+	}
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	passed := findEvents(evts, domain.EventGitHubPRCICheckPassed)
+	if len(passed) != 1 {
+		t.Errorf("expected 1 ci_check_passed, got %d", len(passed))
+	}
+	// Should NOT emit ci_check_failed.
+	if len(findEvents(evts, domain.EventGitHubPRCICheckFailed)) != 0 {
+		t.Error("should not emit ci_check_failed when check is now passing")
+	}
+}
+
+func TestDiff_CI_FailureToSkipped_EmitsCheckPassed(t *testing.T) {
+	// A check that was failing and transitions to skipped (e.g., path filter
+	// excludes the changed files on a new commit) should emit ci_check_passed
+	// so ci_check_failed tasks can close via inline check.
+	prev := basePRSnapshot()
+	prev.CheckRuns = []domain.CheckRun{
+		{ID: 1, Name: "integration", Conclusion: "failure"},
+	}
+	curr := basePRSnapshot()
+	curr.CheckRuns = []domain.CheckRun{
+		{ID: 1, Name: "integration", Conclusion: "skipped"},
+	}
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	passed := findEvents(evts, domain.EventGitHubPRCICheckPassed)
+	if len(passed) != 1 {
+		t.Errorf("expected 1 ci_check_passed (failure→skipped), got %d", len(passed))
+	}
+	meta := decodeMetadata[events.GitHubPRCICheckPassedMetadata](t, passed[0])
+	if meta.Conclusion != "skipped" {
+		t.Errorf("expected Conclusion=skipped, got %s", meta.Conclusion)
+	}
+}
+
+func TestDiff_CI_FailureToNeutral_EmitsCheckPassed(t *testing.T) {
+	prev := basePRSnapshot()
+	prev.CheckRuns = []domain.CheckRun{
+		{ID: 1, Name: "lint", Conclusion: "failure"},
+	}
+	curr := basePRSnapshot()
+	curr.CheckRuns = []domain.CheckRun{
+		{ID: 1, Name: "lint", Conclusion: "neutral"},
+	}
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	passed := findEvents(evts, domain.EventGitHubPRCICheckPassed)
+	if len(passed) != 1 {
+		t.Errorf("expected 1 ci_check_passed (failure→neutral), got %d", len(passed))
+	}
+}
+
+func TestDiff_CI_SkippedToSkipped_NoEvent(t *testing.T) {
+	// Already non-failing → still non-failing = no event.
+	prev := basePRSnapshot()
+	prev.CheckRuns = []domain.CheckRun{
+		{ID: 1, Name: "optional", Conclusion: "skipped"},
+	}
+	curr := basePRSnapshot()
+	curr.CheckRuns = []domain.CheckRun{
+		{ID: 1, Name: "optional", Conclusion: "skipped"},
+	}
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	if len(findEvents(evts, domain.EventGitHubPRCICheckPassed)) != 0 {
+		t.Error("should not emit ci_check_passed when already non-failing")
+	}
+}
+
+func TestDiff_CI_PendingToSkipped_EmitsCheckPassed(t *testing.T) {
+	// Pending (empty conclusion) → skipped = new non-failing conclusion.
+	prev := basePRSnapshot()
+	prev.CheckRuns = []domain.CheckRun{
+		{ID: 1, Name: "optional", Conclusion: ""}, // pending
+	}
+	curr := basePRSnapshot()
+	curr.CheckRuns = []domain.CheckRun{
+		{ID: 1, Name: "optional", Conclusion: "skipped"},
+	}
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	passed := findEvents(evts, domain.EventGitHubPRCICheckPassed)
+	if len(passed) != 1 {
+		t.Errorf("expected 1 ci_check_passed (pending→skipped), got %d", len(passed))
+	}
+}
+
+// --- Reviews ----------------------------------------------------------------
+
+func TestDiff_Review_NewChangesRequested(t *testing.T) {
+	prev := basePRSnapshot()
+	curr := basePRSnapshot()
+	curr.Reviews = []domain.ReviewState{
+		{Author: "alice", State: "CHANGES_REQUESTED"},
+	}
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	evt := findEvent(evts, domain.EventGitHubPRReviewChangesRequested)
+	if evt == nil {
+		t.Fatal("expected review_changes_requested event")
+	}
+	meta := decodeMetadata[events.GitHubPRReviewChangesRequestedMetadata](t, *evt)
+	if meta.Reviewer != "alice" {
+		t.Errorf("expected Reviewer=alice, got %s", meta.Reviewer)
+	}
+	if meta.ReviewerIsSelf {
+		t.Error("expected ReviewerIsSelf=false for alice")
+	}
+	if !meta.AuthorIsSelf {
+		t.Error("expected AuthorIsSelf=true (PR author is testUser)")
+	}
+}
+
+func TestDiff_Review_SameState_NoEvent(t *testing.T) {
+	prev := basePRSnapshot()
+	prev.Reviews = []domain.ReviewState{
+		{Author: "alice", State: "APPROVED"},
+	}
+	curr := basePRSnapshot()
+	curr.Reviews = []domain.ReviewState{
+		{Author: "alice", State: "APPROVED"}, // unchanged
+	}
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	reviewEvts := findEvents(evts, domain.EventGitHubPRReviewApproved)
+	if len(reviewEvts) != 0 {
+		t.Errorf("expected no review events (state unchanged), got %d", len(reviewEvts))
+	}
+}
+
+func TestDiff_Review_SelfReview_EmitsSubmitted(t *testing.T) {
+	prev := basePRSnapshot()
+	prev.Author = "bob" // not self — so this is someone else's PR
+	curr := basePRSnapshot()
+	curr.Author = "bob"
+	curr.Reviews = []domain.ReviewState{
+		{Author: testUser, State: "COMMENTED"},
+	}
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+
+	// Should emit review_commented (the specific type) AND review_submitted (I reviewed).
+	commented := findEvent(evts, domain.EventGitHubPRReviewCommented)
+	submitted := findEvent(evts, domain.EventGitHubPRReviewSubmitted)
+	if commented == nil {
+		t.Error("expected review_commented event")
+	}
+	if submitted == nil {
+		t.Fatal("expected review_submitted event for self-review")
+	}
+	meta := decodeMetadata[events.GitHubPRReviewSubmittedMetadata](t, *submitted)
+	if !meta.ReviewerIsSelf {
+		t.Error("expected ReviewerIsSelf=true on submitted event")
+	}
+	if meta.ReviewType != "commented" {
+		t.Errorf("expected ReviewType=commented, got %s", meta.ReviewType)
+	}
+}
+
+func TestDiff_Review_MultipleReviewers_IndependentEvents(t *testing.T) {
+	prev := basePRSnapshot()
+	prev.Reviews = []domain.ReviewState{
+		{Author: "alice", State: "COMMENTED"},
+	}
+	curr := basePRSnapshot()
+	curr.Reviews = []domain.ReviewState{
+		{Author: "alice", State: "APPROVED"},        // changed
+		{Author: "bob", State: "CHANGES_REQUESTED"}, // new
+	}
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	approved := findEvents(evts, domain.EventGitHubPRReviewApproved)
+	changes := findEvents(evts, domain.EventGitHubPRReviewChangesRequested)
+
+	if len(approved) != 1 {
+		t.Errorf("expected 1 approved event (alice), got %d", len(approved))
+	}
+	if len(changes) != 1 {
+		t.Errorf("expected 1 changes_requested event (bob), got %d", len(changes))
+	}
+}
+
+// --- Review requests --------------------------------------------------------
+
+func TestDiff_ReviewRequested_ForSelf(t *testing.T) {
+	prev := basePRSnapshot()
+	prev.Author = "bob"
+	curr := basePRSnapshot()
+	curr.Author = "bob"
+	curr.ReviewRequests = []string{testUser}
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	if findEvent(evts, domain.EventGitHubPRReviewRequested) == nil {
+		t.Error("expected review_requested event when self added to requests")
+	}
+}
+
+func TestDiff_ReviewRequested_ForOther_NoEvent(t *testing.T) {
+	prev := basePRSnapshot()
+	curr := basePRSnapshot()
+	curr.ReviewRequests = []string{"someone-else"}
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	if findEvent(evts, domain.EventGitHubPRReviewRequested) != nil {
+		t.Error("should not emit review_requested when the request is for someone else")
+	}
+}
+
+func TestDiff_ReviewRequested_AlreadyPresent_NoEvent(t *testing.T) {
+	prev := basePRSnapshot()
+	prev.Author = "bob"
+	prev.ReviewRequests = []string{testUser}
+	curr := basePRSnapshot()
+	curr.Author = "bob"
+	curr.ReviewRequests = []string{testUser}
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	if findEvent(evts, domain.EventGitHubPRReviewRequested) != nil {
+		t.Error("should not re-emit review_requested when already in list")
+	}
+}
+
+// --- Labels -----------------------------------------------------------------
+
+func TestDiff_Labels_AddAndRemove(t *testing.T) {
+	prev := basePRSnapshot()
+	prev.Labels = []string{"wip", "bug"}
+	curr := basePRSnapshot()
+	curr.Labels = []string{"bug", "urgent"} // wip removed, urgent added
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+
+	added := findEvents(evts, domain.EventGitHubPRLabelAdded)
+	removed := findEvents(evts, domain.EventGitHubPRLabelRemoved)
+
+	if len(added) != 1 {
+		t.Errorf("expected 1 label_added, got %d", len(added))
+	}
+	if len(removed) != 1 {
+		t.Errorf("expected 1 label_removed, got %d", len(removed))
+	}
+
+	// Check dedup_key is set to the label name.
+	if added[0].DedupKey != "urgent" {
+		t.Errorf("expected dedup_key=urgent, got %s", added[0].DedupKey)
+	}
+	if removed[0].DedupKey != "wip" {
+		t.Errorf("expected dedup_key=wip, got %s", removed[0].DedupKey)
+	}
+
+	// Verify metadata has the label snapshot AFTER the change.
+	meta := decodeMetadata[events.GitHubPRLabelAddedMetadata](t, added[0])
+	if meta.LabelName != "urgent" {
+		t.Errorf("expected LabelName=urgent, got %s", meta.LabelName)
+	}
+}
+
+func TestDiff_Labels_NoChange_NoEvents(t *testing.T) {
+	prev := basePRSnapshot()
+	prev.Labels = []string{"bug", "wip"}
+	curr := basePRSnapshot()
+	curr.Labels = []string{"wip", "bug"} // same set, different order
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	if len(findEvents(evts, domain.EventGitHubPRLabelAdded)) != 0 {
+		t.Error("should not emit label_added when labels are the same set")
+	}
+	if len(findEvents(evts, domain.EventGitHubPRLabelRemoved)) != 0 {
+		t.Error("should not emit label_removed when labels are the same set")
+	}
+}
+
+// --- State transitions ------------------------------------------------------
+
+func TestDiff_Merged(t *testing.T) {
+	prev := basePRSnapshot()
+	curr := basePRSnapshot()
+	curr.Merged = true
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	if findEvent(evts, domain.EventGitHubPRMerged) == nil {
+		t.Error("expected pr:merged event")
+	}
+}
+
+func TestDiff_Closed(t *testing.T) {
+	prev := basePRSnapshot()
+	curr := basePRSnapshot()
+	curr.State = "CLOSED"
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	if findEvent(evts, domain.EventGitHubPRClosed) == nil {
+		t.Error("expected pr:closed event")
+	}
+}
+
+func TestDiff_ReadyForReview(t *testing.T) {
+	prev := basePRSnapshot()
+	prev.IsDraft = true
+	curr := basePRSnapshot()
+	curr.IsDraft = false
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	if findEvent(evts, domain.EventGitHubPRReadyForReview) == nil {
+		t.Error("expected pr:ready_for_review event")
+	}
+}
+
+func TestDiff_NewCommits(t *testing.T) {
+	prev := basePRSnapshot()
+	prev.HeadSHA = "aaa"
+	curr := basePRSnapshot()
+	curr.HeadSHA = "bbb"
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	evt := findEvent(evts, domain.EventGitHubPRNewCommits)
+	if evt == nil {
+		t.Fatal("expected pr:new_commits event")
+	}
+	meta := decodeMetadata[events.GitHubPRNewCommitsMetadata](t, *evt)
+	if meta.PrevHeadSHA != "aaa" || meta.HeadSHA != "bbb" {
+		t.Errorf("wrong SHAs: prev=%s head=%s", meta.PrevHeadSHA, meta.HeadSHA)
+	}
+}
+
+func TestDiff_NewCommits_EmptyPrev_NoEvent(t *testing.T) {
+	prev := basePRSnapshot()
+	prev.HeadSHA = "" // unknown prior
+	curr := basePRSnapshot()
+	curr.HeadSHA = "bbb"
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	if findEvent(evts, domain.EventGitHubPRNewCommits) != nil {
+		t.Error("should not emit new_commits when prev SHA is empty")
+	}
+}
+
+func TestDiff_Conflicts(t *testing.T) {
+	prev := basePRSnapshot()
+	prev.Mergeable = "MERGEABLE"
+	curr := basePRSnapshot()
+	curr.Mergeable = "CONFLICTING"
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	if findEvent(evts, domain.EventGitHubPRConflicts) == nil {
+		t.Error("expected pr:conflicts event")
+	}
+}
+
+func TestDiff_Conflicts_AlreadyConflicting_NoEvent(t *testing.T) {
+	prev := basePRSnapshot()
+	prev.Mergeable = "CONFLICTING"
+	curr := basePRSnapshot()
+	curr.Mergeable = "CONFLICTING"
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	if findEvent(evts, domain.EventGitHubPRConflicts) != nil {
+		t.Error("should not re-emit conflicts when already conflicting")
+	}
+}
+
+// --- Metadata: Labels snapshot on every event -------------------------------
+
+func TestDiff_AllPREvents_CarryLabels(t *testing.T) {
+	prev := basePRSnapshot()
+	prev.HeadSHA = "aaa"
+	curr := basePRSnapshot()
+	curr.HeadSHA = "bbb"
+	curr.Labels = []string{"self-review", "wip"}
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	// new_commits should fire; check its metadata has Labels.
+	evt := findEvent(evts, domain.EventGitHubPRNewCommits)
+	if evt == nil {
+		t.Fatal("expected new_commits event")
+	}
+	meta := decodeMetadata[events.GitHubPRNewCommitsMetadata](t, *evt)
+	if len(meta.Labels) != 2 {
+		t.Errorf("expected 2 labels in metadata, got %d", len(meta.Labels))
+	}
+}
+
+// --- Metadata: AuthorIsSelf -------------------------------------------------
+
+func TestDiff_AuthorIsSelf_True(t *testing.T) {
+	prev := basePRSnapshot()
+	prev.HeadSHA = "aaa"
+	curr := basePRSnapshot()
+	curr.HeadSHA = "bbb"
+	curr.Author = testUser
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	evt := findEvent(evts, domain.EventGitHubPRNewCommits)
+	if evt == nil {
+		t.Fatal("expected event")
+	}
+	meta := decodeMetadata[events.GitHubPRNewCommitsMetadata](t, *evt)
+	if !meta.AuthorIsSelf {
+		t.Error("expected AuthorIsSelf=true when Author matches username")
+	}
+}
+
+func TestDiff_AuthorIsSelf_False(t *testing.T) {
+	prev := basePRSnapshot()
+	prev.HeadSHA = "aaa"
+	curr := basePRSnapshot()
+	curr.HeadSHA = "bbb"
+	curr.Author = "someone-else"
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	evt := findEvent(evts, domain.EventGitHubPRNewCommits)
+	if evt == nil {
+		t.Fatal("expected event")
+	}
+	meta := decodeMetadata[events.GitHubPRNewCommitsMetadata](t, *evt)
+	if meta.AuthorIsSelf {
+		t.Error("expected AuthorIsSelf=false when Author differs from username")
+	}
+}
+
+// --- Jira -------------------------------------------------------------------
+
+func TestDiffJira_FirstDiscovery_Assigned(t *testing.T) {
+	curr := domain.JiraSnapshot{
+		Key:      "SKY-123",
+		Summary:  "Fix the thing",
+		Status:   "In Progress",
+		Assignee: testUser,
+		Priority: "High",
+	}
+	evts := DiffJiraSnapshots(domain.JiraSnapshot{}, curr, testEntityID, testUser)
+	if len(evts) != 1 || evts[0].EventType != domain.EventJiraIssueAssigned {
+		t.Errorf("expected [jira:issue:assigned], got %v", eventTypes(evts))
+	}
+	meta := decodeMetadata[events.JiraIssueAssignedMetadata](t, evts[0])
+	if !meta.AssigneeIsSelf {
+		t.Error("expected AssigneeIsSelf=true")
+	}
+}
+
+func TestDiffJira_FirstDiscovery_Available(t *testing.T) {
+	curr := domain.JiraSnapshot{
+		Key:    "SKY-124",
+		Status: "To Do",
+		// no Assignee
+	}
+	evts := DiffJiraSnapshots(domain.JiraSnapshot{}, curr, testEntityID, testUser)
+	if len(evts) != 1 || evts[0].EventType != domain.EventJiraIssueAvailable {
+		t.Errorf("expected [jira:issue:available], got %v", eventTypes(evts))
+	}
+}
+
+func TestDiffJira_FirstDiscovery_Completed(t *testing.T) {
+	curr := domain.JiraSnapshot{Key: "SKY-125", Status: "Done"}
+	evts := DiffJiraSnapshots(domain.JiraSnapshot{}, curr, testEntityID, testUser)
+	if len(evts) != 1 || evts[0].EventType != domain.EventJiraIssueCompleted {
+		t.Errorf("expected [jira:issue:completed], got %v", eventTypes(evts))
+	}
+}
+
+func TestDiffJira_StatusChanged_DedupKey(t *testing.T) {
 	prev := domain.JiraSnapshot{Key: "SKY-1", Status: "To Do"}
-	curr := domain.JiraSnapshot{Key: "SKY-1", Status: "In Progress"}
+	curr := domain.JiraSnapshot{Key: "SKY-1", Status: "In Review"}
 
-	events := DiffJiraSnapshots(prev, curr, "SKY-1")
-	assertEventTypes(t, events, []string{domain.EventJiraIssueStatusChanged})
+	evts := DiffJiraSnapshots(prev, curr, testEntityID, testUser)
+	evt := findEvent(evts, domain.EventJiraIssueStatusChanged)
+	if evt == nil {
+		t.Fatal("expected status_changed event")
+	}
+	// dedup_key should be the NEW status name (open-set discriminator).
+	if evt.DedupKey != "In Review" {
+		t.Errorf("expected dedup_key='In Review', got %q", evt.DedupKey)
+	}
 }
 
-func TestDiffJira_Completed(t *testing.T) {
+func TestDiffJira_StatusChanged_Terminal_AlsoEmitsCompleted(t *testing.T) {
 	prev := domain.JiraSnapshot{Key: "SKY-1", Status: "In Progress"}
 	curr := domain.JiraSnapshot{Key: "SKY-1", Status: "Done"}
 
-	events := DiffJiraSnapshots(prev, curr, "SKY-1")
-	types := eventTypes(events)
-	assertContains(t, types, domain.EventJiraIssueStatusChanged)
-	assertContains(t, types, domain.EventJiraIssueCompleted)
+	evts := DiffJiraSnapshots(prev, curr, testEntityID, testUser)
+	types := eventTypes(evts)
+	hasStatusChanged := false
+	hasCompleted := false
+	for _, t := range types {
+		if t == domain.EventJiraIssueStatusChanged {
+			hasStatusChanged = true
+		}
+		if t == domain.EventJiraIssueCompleted {
+			hasCompleted = true
+		}
+	}
+	if !hasStatusChanged {
+		t.Error("expected status_changed event")
+	}
+	if !hasCompleted {
+		t.Error("expected completed event for terminal status")
+	}
+}
+
+func TestDiffJira_Reassigned(t *testing.T) {
+	prev := domain.JiraSnapshot{Key: "SKY-1", Assignee: testUser}
+	curr := domain.JiraSnapshot{Key: "SKY-1", Assignee: "bob"}
+
+	evts := DiffJiraSnapshots(prev, curr, testEntityID, testUser)
+	evt := findEvent(evts, domain.EventJiraIssueAssigned)
+	if evt == nil {
+		t.Fatal("expected assigned event on reassignment")
+	}
+	meta := decodeMetadata[events.JiraIssueAssignedMetadata](t, *evt)
+	if meta.AssigneeIsSelf {
+		t.Error("expected AssigneeIsSelf=false when reassigned to bob")
+	}
 }
 
 func TestDiffJira_Unassigned(t *testing.T) {
-	prev := domain.JiraSnapshot{Key: "SKY-1", Status: "To Do", Assignee: "alice"}
-	curr := domain.JiraSnapshot{Key: "SKY-1", Status: "To Do", Assignee: ""}
+	prev := domain.JiraSnapshot{Key: "SKY-1", Assignee: testUser}
+	curr := domain.JiraSnapshot{Key: "SKY-1", Assignee: ""}
 
-	events := DiffJiraSnapshots(prev, curr, "SKY-1")
-	assertEventTypes(t, events, []string{domain.EventJiraIssueAvailable})
+	evts := DiffJiraSnapshots(prev, curr, testEntityID, testUser)
+	if findEvent(evts, domain.EventJiraIssueAvailable) == nil {
+		t.Error("expected available event when assignee removed")
+	}
 }
 
-func TestDiffJira_PriorityChange(t *testing.T) {
-	prev := domain.JiraSnapshot{Key: "SKY-1", Priority: "Medium"}
+func TestDiffJira_PriorityChanged_DedupKey(t *testing.T) {
+	prev := domain.JiraSnapshot{Key: "SKY-1", Priority: "Low"}
 	curr := domain.JiraSnapshot{Key: "SKY-1", Priority: "High"}
 
-	events := DiffJiraSnapshots(prev, curr, "SKY-1")
-	assertEventTypes(t, events, []string{domain.EventJiraIssuePriorityChanged})
+	evts := DiffJiraSnapshots(prev, curr, testEntityID, testUser)
+	evt := findEvent(evts, domain.EventJiraIssuePriorityChanged)
+	if evt == nil {
+		t.Fatal("expected priority_changed event")
+	}
+	if evt.DedupKey != "High" {
+		t.Errorf("expected dedup_key='High', got %q", evt.DedupKey)
+	}
 }
 
 func TestDiffJira_NewComment(t *testing.T) {
-	prev := domain.JiraSnapshot{Key: "SKY-1", CommentCount: 2}
-	curr := domain.JiraSnapshot{Key: "SKY-1", CommentCount: 3}
-
-	events := DiffJiraSnapshots(prev, curr, "SKY-1")
-	assertEventTypes(t, events, []string{domain.EventJiraIssueCommented})
-}
-
-func TestDiffJira_MultipleNewComments(t *testing.T) {
-	prev := domain.JiraSnapshot{Key: "SKY-1", CommentCount: 1}
-	curr := domain.JiraSnapshot{Key: "SKY-1", CommentCount: 4}
-
-	// Should fire once, not three times — it's "new comments detected", not per-comment
-	events := DiffJiraSnapshots(prev, curr, "SKY-1")
-	assertEventTypes(t, events, []string{domain.EventJiraIssueCommented})
-}
-
-func TestDiffJira_NoNewComments(t *testing.T) {
 	prev := domain.JiraSnapshot{Key: "SKY-1", CommentCount: 3}
-	curr := domain.JiraSnapshot{Key: "SKY-1", CommentCount: 3}
+	curr := domain.JiraSnapshot{Key: "SKY-1", CommentCount: 5}
 
-	events := DiffJiraSnapshots(prev, curr, "SKY-1")
-	assertEventTypes(t, events, nil)
+	evts := DiffJiraSnapshots(prev, curr, testEntityID, testUser)
+	if findEvent(evts, domain.EventJiraIssueCommented) == nil {
+		t.Error("expected commented event when comment count increases")
+	}
 }
 
-// --- test helpers ---
+func TestDiffJira_CommentCountDecrease_NoEvent(t *testing.T) {
+	prev := domain.JiraSnapshot{Key: "SKY-1", CommentCount: 5}
+	curr := domain.JiraSnapshot{Key: "SKY-1", CommentCount: 3} // deleted comments
 
-func eventTypes(events []domain.Event) []string {
-	var types []string
-	for _, e := range events {
-		types = append(types, e.EventType)
+	evts := DiffJiraSnapshots(prev, curr, testEntityID, testUser)
+	if findEvent(evts, domain.EventJiraIssueCommented) != nil {
+		t.Error("should not emit commented when count decreases")
 	}
-	return types
 }
 
-func assertEventTypes(t *testing.T, events []domain.Event, expected []string) {
-	t.Helper()
-	got := eventTypes(events)
-	if len(got) != len(expected) {
-		t.Fatalf("expected %d events %v, got %d: %v", len(expected), expected, len(got), got)
+// --- Compound scenario: multiple changes in one poll ------------------------
+
+func TestDiff_CompoundPoll_CIAndNewCommitsAndLabels(t *testing.T) {
+	prev := basePRSnapshot()
+	prev.HeadSHA = "aaa"
+	prev.Labels = []string{"wip"}
+
+	curr := basePRSnapshot()
+	curr.HeadSHA = "bbb"
+	curr.Labels = []string{"wip", "ready"}
+	curr.CheckRuns = []domain.CheckRun{
+		{ID: 10, Name: "build", Conclusion: "failure"},
+		{ID: 11, Name: "test", Conclusion: "success"},
 	}
-	for i := range expected {
-		if got[i] != expected[i] {
-			t.Errorf("event[%d]: expected %s, got %s", i, expected[i], got[i])
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+
+	// Should see: new_commits + ci_check_failed + ci_check_passed + label_added
+	types := eventTypes(evts)
+	expected := map[string]bool{
+		domain.EventGitHubPRNewCommits:    false,
+		domain.EventGitHubPRCICheckFailed: false,
+		domain.EventGitHubPRCICheckPassed: false,
+		domain.EventGitHubPRLabelAdded:    false,
+	}
+	for _, et := range types {
+		if _, ok := expected[et]; ok {
+			expected[et] = true
+		}
+	}
+	for et, found := range expected {
+		if !found {
+			t.Errorf("missing expected event type: %s (got: %v)", et, types)
 		}
 	}
 }
 
-func assertContains(t *testing.T, types []string, expected string) {
-	t.Helper()
-	for _, typ := range types {
-		if typ == expected {
-			return
+// --- extractProject helper --------------------------------------------------
+
+func TestExtractProject(t *testing.T) {
+	cases := []struct{ key, want string }{
+		{"SKY-123", "SKY"},
+		{"PROJ-1", "PROJ"},
+		{"NOHYPHEN", "NOHYPHEN"},
+	}
+	for _, tc := range cases {
+		got := extractProject(tc.key)
+		if got != tc.want {
+			t.Errorf("extractProject(%q) = %q, want %q", tc.key, got, tc.want)
 		}
 	}
-	t.Errorf("expected events to contain %s, got %v", expected, types)
-}
-
-func assertMetaContains(t *testing.T, event domain.Event, key, value string) {
-	t.Helper()
-	if event.MetadataJSON == "" {
-		t.Fatalf("event metadata is empty")
-	}
-	// Simple substring check — metadata is JSON
-	if !contains(event.MetadataJSON, value) {
-		t.Errorf("expected metadata to contain %s=%s, got %s", key, value, event.MetadataJSON)
-	}
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && searchStr(s, substr)
-}
-
-func searchStr(s, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
 }

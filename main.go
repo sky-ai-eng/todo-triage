@@ -18,6 +18,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/repoprofile"
+	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/server"
 	"github.com/sky-ai-eng/triage-factory/internal/skills"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
@@ -164,13 +165,14 @@ func main() {
 	spawner := delegate.NewSpawner(database, nil, wsHub, "")
 	srv.SetSpawner(spawner)
 
-	// Subscriber: auto-delegation — fires matching prompt_triggers on non-system events
+	// Subscriber: event router — records events, creates/bumps tasks, auto-
+	// delegates on matching triggers, runs inline close checks. Replaces the
+	// old "auto-delegate" subscriber.
+	eventRouter := routing.NewRouter(database, spawner, scorer, wsHub)
 	bus.Subscribe(eventbus.Subscriber{
-		Name:   "auto-delegate",
+		Name:   "router",
 		Filter: []string{"github:", "jira:"},
-		Handle: func(evt domain.Event) {
-			delegate.MaybeAutoDelegate(database, spawner, evt)
-		},
+		Handle: eventRouter.HandleEvent,
 	})
 
 	// GitHub changed: invalidate profiles → stop all → re-profile → restart all

@@ -2,93 +2,244 @@ package db
 
 import (
 	"database/sql"
-	"encoding/json"
-	"fmt"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// taskColumns is the canonical SELECT column list for queryTasks. Every query that
-// feeds into queryTasks must use this exact list so the Scan stays in sync.
-const taskColumns = `id, source, source_id, source_url, title, description, repo, author, labels, severity,
-       diff_additions, diff_deletions, files_changed, ci_status, relevance_reason, source_status, scoring_status,
-       event_type, created_at, fetched_at, status, priority_score, ai_summary,
-       priority_reasoning, agent_confidence, snooze_until, consecutive_unsuccessful_runs`
+// --- Column lists for task queries ----------------------------------------
+//
+// Every query that feeds into scanTask must use these columns in this order.
+// The entity JOIN columns are appended for display.
 
-// qualifiedTaskColumns is taskColumns with tasks. prefix, for use in JOINs where column names are ambiguous.
-const qualifiedTaskColumns = `tasks.id, tasks.source, tasks.source_id, tasks.source_url, tasks.title, tasks.description, tasks.repo, tasks.author, tasks.labels, tasks.severity,
-       tasks.diff_additions, tasks.diff_deletions, tasks.files_changed, tasks.ci_status, tasks.relevance_reason, tasks.source_status, tasks.scoring_status,
-       tasks.event_type, tasks.created_at, tasks.fetched_at, tasks.status, tasks.priority_score, tasks.ai_summary,
-       tasks.priority_reasoning, tasks.agent_confidence, tasks.snooze_until, tasks.consecutive_unsuccessful_runs`
+const taskColumnsWithEntity = `
+	t.id, t.entity_id, t.event_type, t.dedup_key, t.primary_event_id,
+	t.status, t.priority_score, t.ai_summary, t.autonomy_suitability,
+	t.priority_reasoning, t.scoring_status, t.severity, t.relevance_reason,
+	t.source_status, t.snooze_until, t.close_reason, t.close_event_type,
+	t.closed_at, t.created_at,
+	COALESCE(e.title, ''), COALESCE(e.url, ''), e.source_id, e.source, e.kind`
 
-// UpsertTask inserts a new task or updates an existing one matched by (source, source_id).
-// Only updates metadata fields — does not overwrite status, priority_score, ai_summary,
-// or agent_confidence so that user/AI state is preserved across polls.
-func UpsertTask(db *sql.DB, t domain.Task) error {
-	labelsJSON, err := json.Marshal(t.Labels)
-	if err != nil {
-		return fmt.Errorf("marshal labels: %w", err)
+// FindOrCreateTask implements the dedup logic via the partial unique index
+// (entity_id, event_type, dedup_key) WHERE status NOT IN ('done','dismissed').
+// If an active task exists, returns it with created=false. Otherwise creates
+// one with created=true.
+func FindOrCreateTask(db *sql.DB, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64) (*domain.Task, bool, error) {
+	// Try to find an existing active task.
+	var existing domain.Task
+	err := scanTaskRow(db.QueryRow(`
+		SELECT `+taskColumnsWithEntity+`
+		FROM tasks t
+		JOIN entities e ON t.entity_id = e.id
+		WHERE t.entity_id = ? AND t.event_type = ? AND t.dedup_key = ?
+			AND t.status NOT IN ('done', 'dismissed')
+		LIMIT 1
+	`, entityID, eventType, dedupKey), &existing)
+
+	if err == nil {
+		return &existing, false, nil
+	}
+	if err != sql.ErrNoRows {
+		return nil, false, err
 	}
 
+	// Create new task. If a concurrent goroutine raced us past the SELECT
+	// above, the partial unique index (entity_id, event_type, dedup_key)
+	// WHERE status NOT IN ('done','dismissed') will reject the INSERT. In
+	// that case, re-read the winner's row.
+	id := uuid.New().String()
+	now := time.Now()
 	_, err = db.Exec(`
-		INSERT INTO tasks (id, source, source_id, source_url, title, description, repo, author, labels, severity, diff_additions, diff_deletions, files_changed, ci_status, relevance_reason, source_status, event_type, status, created_at, fetched_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(source, source_id) DO UPDATE SET
-			source_url = excluded.source_url,
-			title = excluded.title,
-			description = excluded.description,
-			repo = excluded.repo,
-			author = excluded.author,
-			labels = excluded.labels,
-			severity = excluded.severity,
-			diff_additions = excluded.diff_additions,
-			diff_deletions = excluded.diff_deletions,
-			files_changed = excluded.files_changed,
-			ci_status = excluded.ci_status,
-			relevance_reason = excluded.relevance_reason,
-			source_status = excluded.source_status,
-			event_type = COALESCE(NULLIF(excluded.event_type, ''), tasks.event_type),
-			fetched_at = excluded.fetched_at
-	`,
-		t.ID, t.Source, t.SourceID, t.SourceURL,
-		t.Title, t.Description, t.Repo, t.Author,
-		string(labelsJSON), t.Severity, t.DiffAdditions, t.DiffDeletions, t.FilesChanged,
-		t.CIStatus, t.RelevanceReason, t.SourceStatus, t.EventType, t.Status,
-		t.CreatedAt, t.FetchedAt,
-	)
+		INSERT INTO tasks (id, entity_id, event_type, dedup_key, primary_event_id,
+		                   status, priority_score, scoring_status, created_at)
+		VALUES (?, ?, ?, ?, ?, 'queued', ?, 'pending', ?)
+	`, id, entityID, eventType, dedupKey, primaryEventID, defaultPriority, now)
+	if err != nil {
+		// Race: another goroutine created the task between our SELECT and
+		// INSERT. Re-read to return the winner's row.
+		var raced domain.Task
+		err2 := scanTaskRow(db.QueryRow(`
+			SELECT `+taskColumnsWithEntity+`
+			FROM tasks t
+			JOIN entities e ON t.entity_id = e.id
+			WHERE t.entity_id = ? AND t.event_type = ? AND t.dedup_key = ?
+				AND t.status NOT IN ('done', 'dismissed')
+			LIMIT 1
+		`, entityID, eventType, dedupKey), &raced)
+		if err2 == nil {
+			return &raced, false, nil
+		}
+		// Genuine error (not a race).
+		return nil, false, err
+	}
+
+	task, err := GetTask(db, id)
+	if err != nil {
+		return nil, false, err
+	}
+	return task, true, nil
+}
+
+// BumpTask records a new matching event on an existing task. Does NOT update
+// primary_event_id — that stays as the original spawning event (the task_events
+// junction with kind=bumped tracks subsequent events). If the task is snoozed,
+// un-snoozes it (wake-on-bump: the snooze premise "nothing new" is invalidated).
+func BumpTask(db *sql.DB, taskID, eventID string) error {
+	_, err := db.Exec(`
+		UPDATE tasks
+		SET status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END,
+		    snooze_until = CASE WHEN status = 'snoozed' THEN NULL ELSE snooze_until END
+		WHERE id = ?
+	`, taskID)
 	return err
 }
 
-// QueuedTasks returns queued tasks, filtered to only enabled event types.
-// Orders by user-defined event type sort_order first, then AI priority_score within each tier.
-// Tasks with no event_type (or an unknown one) sort last.
-func QueuedTasks(db *sql.DB) ([]domain.Task, error) {
-	return queryTasks(db, `SELECT `+qualifiedTaskColumns+` FROM tasks
-		LEFT JOIN event_types et ON tasks.event_type = et.id
-		WHERE tasks.status = 'queued'
-			AND (tasks.snooze_until IS NULL OR tasks.snooze_until <= datetime('now'))
-			AND (tasks.event_type IS NULL OR et.enabled = 1 OR et.enabled IS NULL)
-		ORDER BY COALESCE(et.sort_order, 999) ASC, COALESCE(tasks.priority_score, 0.5) DESC`)
+// CloseTask sets a task to done with the given close reason. Used by run-
+// completion, inline close checks, and user actions (dismiss/claim-done).
+func CloseTask(db *sql.DB, taskID, closeReason, closeEventType string) error {
+	now := time.Now()
+	var cet *string
+	if closeEventType != "" {
+		cet = &closeEventType
+	}
+	_, err := db.Exec(`
+		UPDATE tasks SET status = 'done', close_reason = ?, close_event_type = ?,
+		                 closed_at = ?
+		WHERE id = ? AND status NOT IN ('done', 'dismissed')
+	`, closeReason, cet, now, taskID)
+	return err
 }
 
-// TasksByStatus returns tasks filtered by status.
-func TasksByStatus(db *sql.DB, status string) ([]domain.Task, error) {
-	return queryTasks(db, `SELECT `+taskColumns+` FROM tasks
-		WHERE status = ?
-		ORDER BY COALESCE(priority_score, 0.5) DESC`, status)
+// CloseAllEntityTasks closes every active task on an entity with the given
+// close reason. Returns the number of tasks closed. Used by entity lifecycle
+// (close_reason="entity_closed").
+func CloseAllEntityTasks(db *sql.DB, entityID, closeReason string) (int, error) {
+	now := time.Now()
+	result, err := db.Exec(`
+		UPDATE tasks SET status = 'done', close_reason = ?, closed_at = ?
+		WHERE entity_id = ? AND status NOT IN ('done', 'dismissed')
+	`, closeReason, now, entityID)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := result.RowsAffected()
+	return int(n), nil
 }
 
-// GetTask returns a single task by ID.
+// SetTaskStatus updates a task's status. Used by the router (queued→delegated)
+// and the swipe handler (queued→claimed, etc.).
+func SetTaskStatus(db *sql.DB, taskID, status string) error {
+	_, err := db.Exec(`UPDATE tasks SET status = ? WHERE id = ?`, status, taskID)
+	return err
+}
+
+// RecordTaskEvent inserts into the task_events junction table.
+func RecordTaskEvent(db *sql.DB, taskID, eventID, kind string) error {
+	_, err := db.Exec(`
+		INSERT OR IGNORE INTO task_events (task_id, event_id, kind, created_at)
+		VALUES (?, ?, ?, ?)
+	`, taskID, eventID, kind, time.Now())
+	return err
+}
+
+// FindActiveTasksByEntityAndType returns all non-terminal tasks for an entity
+// matching the given event type. Used by inline close checks to find sibling
+// tasks to close.
+func FindActiveTasksByEntityAndType(db *sql.DB, entityID, eventType string) ([]domain.Task, error) {
+	return queryTasks(db, `
+		SELECT `+taskColumnsWithEntity+`
+		FROM tasks t
+		JOIN entities e ON t.entity_id = e.id
+		WHERE t.entity_id = ? AND t.event_type = ? AND t.status NOT IN ('done', 'dismissed')
+	`, entityID, eventType)
+}
+
+// FindActiveTasksByEntity returns all non-terminal tasks for an entity,
+// regardless of event type. Used by entity lifecycle to close everything.
+func FindActiveTasksByEntity(db *sql.DB, entityID string) ([]domain.Task, error) {
+	return queryTasks(db, `
+		SELECT `+taskColumnsWithEntity+`
+		FROM tasks t
+		JOIN entities e ON t.entity_id = e.id
+		WHERE t.entity_id = ? AND t.status NOT IN ('done', 'dismissed')
+	`, entityID)
+}
+
+// GetTask returns a single task by ID, joined with its entity for display fields.
 func GetTask(db *sql.DB, id string) (*domain.Task, error) {
-	tasks, err := queryTasks(db, `SELECT `+taskColumns+` FROM tasks WHERE id = ?`, id)
+	var t domain.Task
+	err := scanTaskRow(db.QueryRow(`
+		SELECT `+taskColumnsWithEntity+`
+		FROM tasks t
+		JOIN entities e ON t.entity_id = e.id
+		WHERE t.id = ?
+	`, id), &t)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}
-	if len(tasks) == 0 {
-		return nil, nil
-	}
-	return &tasks[0], nil
+	return &t, nil
 }
+
+// QueuedTasks returns queued tasks ordered by task_rules.sort_order (category
+// ordering) then priority_score DESC within each tier. JOINs entities for
+// display and task_rules for ordering.
+func QueuedTasks(db *sql.DB) ([]domain.Task, error) {
+	return queryTasks(db, `
+		SELECT `+taskColumnsWithEntity+`
+		FROM tasks t
+		JOIN entities e ON t.entity_id = e.id
+		LEFT JOIN task_rules tr ON t.event_type = tr.event_type AND tr.enabled = 1
+		WHERE t.status = 'queued'
+			AND (t.snooze_until IS NULL OR t.snooze_until <= datetime('now'))
+		ORDER BY COALESCE(tr.sort_order, 999) ASC, COALESCE(t.priority_score, 0.5) DESC
+	`)
+}
+
+// TasksByStatus returns tasks with the given status, ordered by priority.
+func TasksByStatus(db *sql.DB, status string) ([]domain.Task, error) {
+	return queryTasks(db, `
+		SELECT `+taskColumnsWithEntity+`
+		FROM tasks t
+		JOIN entities e ON t.entity_id = e.id
+		WHERE t.status = ?
+		ORDER BY COALESCE(t.priority_score, 0.5) DESC
+	`, status)
+}
+
+// --- Breaker queries (query-based, no counter column) --------------------
+
+// CountConsecutiveFailedRuns counts consecutive non-success auto-runs at the
+// tail of runs for (entity_id, prompt_id), stopping at the first 'completed'
+// row. Used by the router to check the breaker threshold.
+func CountConsecutiveFailedRuns(db *sql.DB, entityID, promptID string) (int, error) {
+	var count int
+	err := db.QueryRow(`
+		WITH recent AS (
+			SELECT r.status, r.started_at
+			FROM runs r
+			JOIN tasks t ON r.task_id = t.id
+			WHERE t.entity_id = ?
+				AND r.prompt_id = ?
+				AND r.trigger_type = 'event'
+			ORDER BY r.started_at DESC
+			LIMIT 20
+		)
+		SELECT COUNT(*)
+		FROM recent
+		WHERE status IN ('failed', 'task_unsolvable')
+			AND started_at > (
+				SELECT COALESCE(MAX(started_at), '1970-01-01')
+				FROM recent WHERE status = 'completed'
+			)
+	`, entityID, promptID).Scan(&count)
+	return count, err
+}
+
+// --- Internal query helpers -----------------------------------------------
 
 func queryTasks(database *sql.DB, query string, args ...any) ([]domain.Task, error) {
 	rows, err := database.Query(query, args...)
@@ -100,73 +251,88 @@ func queryTasks(database *sql.DB, query string, args ...any) ([]domain.Task, err
 	var tasks []domain.Task
 	for rows.Next() {
 		var t domain.Task
-		var labelsStr sql.NullString
-		var desc, repo, author, severity, aiSummary, priorityReasoning sql.NullString
-		var ciStatus, relevanceReason, sourceStatus, scoringStatus, eventType sql.NullString
-		var priorityScore, agentConfidence sql.NullFloat64
-		var diffAdditions, diffDeletions, filesChanged sql.NullInt64
-		var snoozeUntil sql.NullTime
-
-		err := rows.Scan(
-			&t.ID, &t.Source, &t.SourceID, &t.SourceURL, &t.Title,
-			&desc, &repo, &author, &labelsStr, &severity,
-			&diffAdditions, &diffDeletions, &filesChanged, &ciStatus, &relevanceReason, &sourceStatus, &scoringStatus,
-			&eventType, &t.CreatedAt, &t.FetchedAt,
-			&t.Status, &priorityScore, &aiSummary,
-			&priorityReasoning, &agentConfidence, &snoozeUntil,
-			&t.ConsecutiveUnsuccessfulRuns,
-		)
-		if err != nil {
+		if err := scanTaskFields(rows, &t); err != nil {
 			return nil, err
 		}
-
-		t.Description = desc.String
-		t.Repo = repo.String
-		t.Author = author.String
-		t.Severity = severity.String
-		t.AISummary = aiSummary.String
-		t.PriorityReasoning = priorityReasoning.String
-		t.CIStatus = ciStatus.String
-		t.RelevanceReason = relevanceReason.String
-		t.SourceStatus = sourceStatus.String
-		t.ScoringStatus = scoringStatus.String
-		t.EventType = eventType.String
-		t.DiffAdditions = int(diffAdditions.Int64)
-		t.DiffDeletions = int(diffDeletions.Int64)
-		t.FilesChanged = int(filesChanged.Int64)
-
-		if priorityScore.Valid {
-			t.PriorityScore = &priorityScore.Float64
-		}
-		if agentConfidence.Valid {
-			t.AgentConfidence = &agentConfidence.Float64
-		}
-		if snoozeUntil.Valid {
-			t.SnoozeUntil = &snoozeUntil.Time
-		}
-		if labelsStr.Valid {
-			_ = json.Unmarshal([]byte(labelsStr.String), &t.Labels)
-		}
-
 		tasks = append(tasks, t)
 	}
 	return tasks, rows.Err()
 }
 
-// IncrementTaskUnsuccessfulRuns atomically increments the consecutive failure
-// counter and returns the new value so the caller can check the threshold.
-func IncrementTaskUnsuccessfulRuns(database *sql.DB, taskID string) (int, error) {
-	var newVal int
-	err := database.QueryRow(`
-		UPDATE tasks SET consecutive_unsuccessful_runs = consecutive_unsuccessful_runs + 1
-		WHERE id = ?
-		RETURNING consecutive_unsuccessful_runs
-	`, taskID).Scan(&newVal)
-	return newVal, err
+func scanTaskRow(row *sql.Row, t *domain.Task) error {
+	return scanFields(row, t)
 }
 
-// ResetTaskUnsuccessfulRuns sets the consecutive failure counter back to zero.
-func ResetTaskUnsuccessfulRuns(database *sql.DB, taskID string) error {
-	_, err := database.Exec(`UPDATE tasks SET consecutive_unsuccessful_runs = 0 WHERE id = ?`, taskID)
-	return err
+// scanFields works for both *sql.Row and *sql.Rows via the Scanner interface.
+func scanFields(scanner interface{ Scan(...any) error }, t *domain.Task) error {
+	var priorityScore, autonomySuitability sql.NullFloat64
+	var aiSummary, priorityReasoning, severity, relevanceReason, sourceStatus sql.NullString
+	var scoringStatus, closeReason, closeEventType sql.NullString
+	var snoozeUntil, closedAt sql.NullTime
+
+	err := scanner.Scan(
+		&t.ID, &t.EntityID, &t.EventType, &t.DedupKey, &t.PrimaryEventID,
+		&t.Status, &priorityScore, &aiSummary, &autonomySuitability,
+		&priorityReasoning, &scoringStatus, &severity, &relevanceReason,
+		&sourceStatus, &snoozeUntil, &closeReason, &closeEventType,
+		&closedAt, &t.CreatedAt,
+		// Entity JOIN columns:
+		&t.Title, &t.SourceURL, &t.EntitySourceID, &t.EntitySource, &t.EntityKind,
+	)
+	if err != nil {
+		return err
+	}
+
+	if priorityScore.Valid {
+		t.PriorityScore = &priorityScore.Float64
+	}
+	if autonomySuitability.Valid {
+		t.AutonomySuitability = &autonomySuitability.Float64
+	}
+	t.AISummary = aiSummary.String
+	t.PriorityReasoning = priorityReasoning.String
+	t.Severity = severity.String
+	t.RelevanceReason = relevanceReason.String
+	t.SourceStatus = sourceStatus.String
+	t.ScoringStatus = scoringStatus.String
+	t.CloseReason = closeReason.String
+	t.CloseEventType = closeEventType.String
+	if snoozeUntil.Valid {
+		t.SnoozeUntil = &snoozeUntil.Time
+	}
+	if closedAt.Valid {
+		t.ClosedAt = &closedAt.Time
+	}
+	return nil
+}
+
+func scanTaskFields(rows *sql.Rows, t *domain.Task) error {
+	return scanFields(rows, t)
+}
+
+// --- Enabled rules query (for routing) ------------------------------------
+
+// GetEnabledRulesForEvent returns all enabled task_rules for an event type.
+func GetEnabledRulesForEvent(db *sql.DB, eventType string) ([]domain.TaskRule, error) {
+	rows, err := db.Query(`
+		SELECT id, event_type, scope_predicate_json, enabled, name,
+		       default_priority, sort_order, source, created_at, updated_at
+		FROM task_rules
+		WHERE event_type = ? AND enabled = 1
+	`, eventType)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var rules []domain.TaskRule
+	for rows.Next() {
+		var r domain.TaskRule
+		if err := rows.Scan(&r.ID, &r.EventType, &r.ScopePredicateJSON, &r.Enabled, &r.Name,
+			&r.DefaultPriority, &r.SortOrder, &r.Source, &r.CreatedAt, &r.UpdatedAt); err != nil {
+			return nil, err
+		}
+		rules = append(rules, r)
+	}
+	return rules, rows.Err()
 }
