@@ -271,19 +271,31 @@ func (r *Router) fireDelegate(task *domain.Task, trigger domain.PromptTrigger) {
 	fresh, err := dbpkg.GetTask(r.db, task.ID)
 	if err != nil || fresh == nil {
 		log.Printf("[router] failed to re-read task %s for delegation: %v", task.ID, err)
-		// Revert status since we can't delegate.
-		_ = dbpkg.SetTaskStatus(r.db, task.ID, "queued")
+		r.revertTaskStatus(task.ID, "queued")
 		return
 	}
 
 	runID, err := r.spawner.Delegate(*fresh, trigger.PromptID, "event", trigger.ID)
 	if err != nil {
 		log.Printf("[router] delegation failed for task %s: %v", task.ID, err)
-		// Revert status on failure.
-		_ = dbpkg.SetTaskStatus(r.db, task.ID, "queued")
+		r.revertTaskStatus(task.ID, "queued")
 		return
 	}
 	log.Printf("[router] started run %s for task %s", runID, task.ID)
+}
+
+// revertTaskStatus sets a task back to the given status and broadcasts the
+// change so the frontend doesn't get stuck showing a stale state (e.g.,
+// "delegated" after a delegation failure).
+func (r *Router) revertTaskStatus(taskID, status string) {
+	if err := dbpkg.SetTaskStatus(r.db, taskID, status); err != nil {
+		log.Printf("[router] failed to revert task %s to %s: %v", taskID, status, err)
+		return
+	}
+	r.ws.Broadcast(websocket.Event{
+		Type: "task_updated",
+		Data: map[string]any{"task_id": taskID, "status": status},
+	})
 }
 
 // --- Inline close checks --------------------------------------------------
