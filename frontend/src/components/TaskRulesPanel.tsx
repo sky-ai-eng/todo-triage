@@ -79,7 +79,7 @@ export default function TaskRulesPanel({ open, onClose }: TaskRulesPanelProps) {
 
           {/* Drawer */}
           <motion.div
-            className="fixed top-0 right-0 bottom-0 z-40 w-[400px] bg-surface-raised/95 backdrop-blur-2xl border-l border-border-glass shadow-2xl shadow-black/10 flex flex-col"
+            className="fixed top-[60px] right-0 bottom-0 z-40 w-[400px] bg-surface-raised/95 backdrop-blur-2xl border-l border-border-glass shadow-2xl shadow-black/10 flex flex-col"
             initial={{ x: '100%' }}
             animate={{ x: 0 }}
             exit={{ x: '100%' }}
