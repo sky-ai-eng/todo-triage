@@ -1,27 +1,25 @@
+export type TaskSource = 'github' | 'jira'
+export type EntityKind = 'pr' | 'issue' | 'epic' | 'message'
+
 export interface Task {
   id: string
-  source: string
+  source: TaskSource
   source_id: string
   source_url: string
   title: string
-  description?: string
-  repo?: string
-  author?: string
-  labels: string[]
+  entity_kind: EntityKind
+  event_type: string
+  dedup_key?: string
   severity?: string
-  diff_additions?: number
-  diff_deletions?: number
-  files_changed?: number
-  ci_status?: string
   relevance_reason?: string
-  event_type?: string
   scoring_status: string
   created_at: string
   status: string
   priority_score: number | null
+  autonomy_suitability: number | null
   ai_summary?: string
   priority_reasoning?: string
-  agent_confidence: number | null
+  close_reason?: string
 }
 
 export interface AgentRun {
@@ -35,7 +33,6 @@ export interface AgentRun {
   DurationMs?: number
   NumTurns?: number
   StopReason?: string
-  ResultLink: string
   ResultSummary: string
 }
 
