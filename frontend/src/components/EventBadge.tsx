@@ -1,7 +1,8 @@
 import * as Tooltip from '@radix-ui/react-tooltip'
 
-// Maps canonical per-action event types from the events_catalog to display info.
-// Matches the AllEventTypes() seed in internal/domain/event.go.
+// Maps canonical per-action event types from the events_catalog to UI display info.
+// This is a user-facing subset/override of the AllEventTypes() seed in internal/domain/event.go,
+// so labels may differ and some backend-only event types may fall back to the default badge.
 const EVENT_DISPLAY: Record<string, { label: string; description: string; color: string }> = {
   // --- GitHub PR: per-action review events (split on review type) ---
   'github:pr:review_changes_requested': {
