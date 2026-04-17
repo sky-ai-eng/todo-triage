@@ -23,6 +23,8 @@ func newTestServer(t *testing.T) *Server {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
+	database.SetMaxOpenConns(1)
+	database.SetMaxIdleConns(1)
 	t.Cleanup(func() { database.Close() })
 
 	if err := db.Migrate(database); err != nil {

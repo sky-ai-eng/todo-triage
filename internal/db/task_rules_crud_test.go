@@ -18,6 +18,11 @@ func newTestDB(t *testing.T) *sql.DB {
 	if err != nil {
 		t.Fatalf("open sqlite memory: %v", err)
 	}
+	// Force single connection — SQLite :memory: is per-connection, so a
+	// pooled second connection would get a blank database without the
+	// schema from Migrate.
+	database.SetMaxOpenConns(1)
+	database.SetMaxIdleConns(1)
 	t.Cleanup(func() { database.Close() })
 
 	if err := Migrate(database); err != nil {

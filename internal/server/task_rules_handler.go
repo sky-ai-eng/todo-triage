@@ -153,11 +153,12 @@ func (s *Server) handleTaskRuleUpdate(w http.ResponseWriter, r *http.Request) {
 		updated.Enabled = *req.Enabled
 	}
 	if req.Name != nil {
-		if *req.Name == "" {
+		trimmed := strings.TrimSpace(*req.Name)
+		if trimmed == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name cannot be empty"})
 			return
 		}
-		updated.Name = *req.Name
+		updated.Name = trimmed
 	}
 	if req.DefaultPriority != nil {
 		if *req.DefaultPriority < 0 || *req.DefaultPriority > 1 {
