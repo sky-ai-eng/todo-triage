@@ -33,6 +33,10 @@ export default function TaskRulesPanel({ open, onClose }: TaskRulesPanelProps) {
   const [creating, setCreating] = useState(false)
   const [refreshKey, setRefreshKey] = useState(0)
 
+  // distance:5 activation constraint means a drag only starts after 5px of
+  // pointer movement. Normal toggle/button clicks are press-and-release with
+  // negligible movement, so nested interactive controls (the enabled switch)
+  // work fine without special handling despite listeners being on the whole row.
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
 
   // Fetch rules on open or after mutations.
