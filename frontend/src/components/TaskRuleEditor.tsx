@@ -359,14 +359,14 @@ export default function TaskRuleEditor({
 
                 {/* Footer */}
                 <div className="px-6 py-4 border-t border-border-subtle flex items-center shrink-0">
-                  {/* Left: delete */}
-                  {isEdit && (
+                  {/* Left: delete — only for user rules. System rules use the enabled toggle instead. */}
+                  {isEdit && rule?.source !== 'system' && (
                     <button
                       onClick={handleDelete}
                       disabled={deleting}
                       className="text-[13px] font-medium text-dismiss hover:text-dismiss/80 transition-colors disabled:opacity-50"
                     >
-                      {deleting ? 'Removing…' : rule?.source === 'system' ? 'Disable' : 'Delete'}
+                      {deleting ? 'Deleting…' : 'Delete'}
                     </button>
                   )}
 
