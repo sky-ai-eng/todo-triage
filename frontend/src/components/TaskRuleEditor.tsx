@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
 import * as Tooltip from '@radix-ui/react-tooltip'
-import * as Switch from '@radix-ui/react-switch'
 import { X } from 'lucide-react'
 import PredicateEditor from './PredicateEditor'
 import type { TaskRule, EventType } from '../types'
@@ -327,21 +326,7 @@ export default function TaskRuleEditor({
                     </div>
                   </div>
 
-                  {/* Enabled toggle — edit mode only */}
-                  {isEdit && (
-                    <div className="flex items-center gap-3">
-                      <Switch.Root
-                        checked={enabled}
-                        onCheckedChange={setEnabled}
-                        className="relative w-9 h-5 rounded-full transition-colors data-[state=checked]:bg-accent data-[state=unchecked]:bg-black/10 cursor-pointer"
-                      >
-                        <Switch.Thumb className="block w-4 h-4 rounded-full bg-white shadow transition-transform data-[state=checked]:translate-x-[18px] data-[state=unchecked]:translate-x-[2px]" />
-                      </Switch.Root>
-                      <span className="text-[13px] text-text-secondary">
-                        {enabled ? 'Enabled' : 'Disabled'}
-                      </span>
-                    </div>
-                  )}
+                  {/* Enabled toggle removed — use the inline toggle in the rules list instead */}
                 </div>
 
                 {/* Footer */}
