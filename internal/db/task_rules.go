@@ -189,6 +189,9 @@ func DeleteTaskRule(db *sql.DB, id string) error {
 
 // ReorderTaskRules updates sort_order for each rule based on its position in
 // the given ID list. IDs not in the list keep their current sort_order.
+// Non-existent IDs are silently skipped (UPDATE affects 0 rows) — the only
+// caller is the frontend which sends IDs it just read; a stale ID means a
+// concurrent delete, and the next re-fetch corrects the list.
 func ReorderTaskRules(db *sql.DB, ids []string) error {
 	tx, err := db.Begin()
 	if err != nil {

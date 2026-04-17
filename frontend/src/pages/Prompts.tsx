@@ -45,8 +45,14 @@ export default function Prompts() {
   const handleTriggerDeleted = useCallback(async (eventType: string) => {
     try {
       const [triggersRes, rulesRes] = await Promise.all([
-        fetch('/api/triggers').then((r) => r.json()),
-        fetch('/api/task-rules').then((r) => r.json()),
+        fetch('/api/triggers').then((r) => {
+          if (!r.ok) throw new Error()
+          return r.json()
+        }),
+        fetch('/api/task-rules').then((r) => {
+          if (!r.ok) throw new Error()
+          return r.json()
+        }),
       ])
       const hasTrigger = (triggersRes as PromptTrigger[]).some(
         (t) => t.event_type === eventType && t.enabled,
