@@ -4,12 +4,16 @@ import PromptDrawer from '../components/PromptDrawer'
 import BindingGraph from '../components/BindingGraph'
 import ForgivingBanner from '../components/ForgivingBanner'
 import TaskRuleEditor from '../components/TaskRuleEditor'
+import TriggerConfigPanel from '../components/TriggerConfigPanel'
 import type { PromptTrigger, TaskRule } from '../types'
 
 export default function Prompts() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [isNew, setIsNew] = useState(false)
   const [graphKey, setGraphKey] = useState(0)
+
+  // Trigger config panel state.
+  const [editingTrigger, setEditingTrigger] = useState<PromptTrigger | null>(null)
 
   // Forgiving banner state.
   const [bannerEventType, setBannerEventType] = useState<string | null>(null)
@@ -95,6 +99,7 @@ export default function Prompts() {
         <BindingGraph
           key={graphKey}
           onPromptClick={openEdit}
+          onTriggerClick={setEditingTrigger}
           onTriggerDeleted={handleTriggerDeleted}
         />
       </div>
@@ -116,6 +121,23 @@ export default function Prompts() {
         onSaved={() => {
           setRuleEditorOpen(false)
           setBannerEventType(null)
+        }}
+      />
+
+      {/* Trigger config panel — opened by clicking a trigger edge */}
+      <TriggerConfigPanel
+        open={editingTrigger !== null}
+        trigger={editingTrigger}
+        onClose={() => setEditingTrigger(null)}
+        onSaved={() => {
+          setEditingTrigger(null)
+          setGraphKey((k) => k + 1)
+        }}
+        onDeleted={() => {
+          const eventType = editingTrigger?.event_type
+          setEditingTrigger(null)
+          setGraphKey((k) => k + 1)
+          if (eventType) handleTriggerDeleted(eventType)
         }}
       />
     </div>
