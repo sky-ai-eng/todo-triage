@@ -34,20 +34,26 @@ export default function TriggerConfigPanel({
   // Initialize state when trigger changes
   useEffect(() => {
     if (!trigger) return
+    let cancelled = false
+
     setPredicate(parsePredicate(trigger.scope_predicate_json))
     setMinAutonomy(trigger.min_autonomy_suitability)
     setBreakerThreshold(trigger.breaker_threshold)
     setCooldownSeconds(trigger.cooldown_seconds)
     setEnabled(trigger.enabled)
     setConfirmDelete(false)
+    setPromptName('')
 
-    // Fetch prompt name for display
     fetch(`/api/prompts/${encodeURIComponent(trigger.prompt_id)}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((p) => {
-        if (p) setPromptName(p.name)
+        if (!cancelled && p) setPromptName(p.name)
       })
       .catch(() => {})
+
+    return () => {
+      cancelled = true
+    }
   }, [trigger])
 
   const handleToggle = async (checked: boolean) => {
