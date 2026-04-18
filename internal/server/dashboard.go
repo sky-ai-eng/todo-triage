@@ -12,7 +12,7 @@ import (
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 )
 
-// handleDashboardStats returns aggregated PR statistics from tracked items.
+// handleDashboardStats returns aggregated PR statistics from entity snapshots.
 func (s *Server) handleDashboardStats(w http.ResponseWriter, r *http.Request) {
 	creds, err := auth.Load()
 	if err != nil || creds.GitHubPAT == "" || creds.GitHubUsername == "" {
@@ -29,7 +29,7 @@ func (s *Server) handleDashboardStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, stats)
 }
 
-// handleDashboardPRs returns open PRs from tracked items.
+// handleDashboardPRs returns open PRs from entity snapshots.
 func (s *Server) handleDashboardPRs(w http.ResponseWriter, r *http.Request) {
 	creds, err := auth.Load()
 	if err != nil || creds.GitHubPAT == "" || creds.GitHubUsername == "" {

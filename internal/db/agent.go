@@ -16,7 +16,7 @@ func CreateAgentRun(database *sql.DB, run domain.AgentRun) error {
 		triggerType = "manual"
 	}
 	_, err := database.Exec(`
-		INSERT INTO agent_runs (id, task_id, prompt_id, status, model, worktree_path, trigger_type, trigger_id)
+		INSERT INTO runs (id, task_id, prompt_id, status, model, worktree_path, trigger_type, trigger_id)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	`, run.ID, run.TaskID, nullIfEmpty(run.PromptID), run.Status, run.Model, run.WorktreePath, triggerType, nullIfEmpty(run.TriggerID))
 	return err
@@ -30,13 +30,13 @@ func nullIfEmpty(s string) any {
 }
 
 // CompleteAgentRun updates a run with completion info.
-func CompleteAgentRun(database *sql.DB, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultLink, resultSummary string) error {
+func CompleteAgentRun(database *sql.DB, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary string) error {
 	now := time.Now()
 	_, err := database.Exec(`
-		UPDATE agent_runs
-		SET status = ?, completed_at = ?, total_cost_usd = ?, duration_ms = ?, num_turns = ?, stop_reason = ?, result_link = ?, result_summary = ?
+		UPDATE runs
+		SET status = ?, completed_at = ?, total_cost_usd = ?, duration_ms = ?, num_turns = ?, stop_reason = ?, result_summary = ?
 		WHERE id = ?
-	`, status, now, costUSD, durationMs, numTurns, stopReason, resultLink, resultSummary, runID)
+	`, status, now, costUSD, durationMs, numTurns, stopReason, resultSummary, runID)
 	return err
 }
 
@@ -45,19 +45,19 @@ func GetAgentRun(database *sql.DB, runID string) (*domain.AgentRun, error) {
 	row := database.QueryRow(`
 		SELECT id, task_id, status, model, started_at, completed_at,
 		       total_cost_usd, duration_ms, num_turns, stop_reason, worktree_path,
-		       result_link, result_summary, session_id, memory_missing
-		FROM agent_runs WHERE id = ?
+		       result_summary, session_id, memory_missing
+		FROM runs WHERE id = ?
 	`, runID)
 
 	var r domain.AgentRun
 	var completedAt sql.NullTime
 	var costUSD sql.NullFloat64
 	var durationMs, numTurns sql.NullInt64
-	var stopReason, worktreePath, model, resultLink, resultSummary, sessionID sql.NullString
+	var stopReason, worktreePath, model, resultSummary, sessionID sql.NullString
 
 	err := row.Scan(&r.ID, &r.TaskID, &r.Status, &model, &r.StartedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &stopReason, &worktreePath,
-		&resultLink, &resultSummary, &sessionID, &r.MemoryMissing)
+		&resultSummary, &sessionID, &r.MemoryMissing)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -68,7 +68,6 @@ func GetAgentRun(database *sql.DB, runID string) (*domain.AgentRun, error) {
 	r.Model = model.String
 	r.StopReason = stopReason.String
 	r.WorktreePath = worktreePath.String
-	r.ResultLink = resultLink.String
 	r.ResultSummary = resultSummary.String
 	r.SessionID = sessionID.String
 	if completedAt.Valid {
@@ -94,8 +93,8 @@ func AgentRunsForTask(database *sql.DB, taskID string) ([]domain.AgentRun, error
 	rows, err := database.Query(`
 		SELECT id, task_id, status, model, started_at, completed_at,
 		       total_cost_usd, duration_ms, num_turns, stop_reason, worktree_path,
-		       result_link, result_summary, session_id, memory_missing
-		FROM agent_runs WHERE task_id = ? ORDER BY started_at DESC
+		       result_summary, session_id, memory_missing
+		FROM runs WHERE task_id = ? ORDER BY started_at DESC
 	`, taskID)
 	if err != nil {
 		return nil, err
@@ -108,18 +107,17 @@ func AgentRunsForTask(database *sql.DB, taskID string) ([]domain.AgentRun, error
 		var completedAt sql.NullTime
 		var costUSD sql.NullFloat64
 		var durationMs, numTurns sql.NullInt64
-		var stopReason, worktreePath, model, resultLink, resultSummary, sessionID sql.NullString
+		var stopReason, worktreePath, model, resultSummary, sessionID sql.NullString
 
 		if err := rows.Scan(&r.ID, &r.TaskID, &r.Status, &model, &r.StartedAt, &completedAt,
 			&costUSD, &durationMs, &numTurns, &stopReason, &worktreePath,
-			&resultLink, &resultSummary, &sessionID, &r.MemoryMissing); err != nil {
+			&resultSummary, &sessionID, &r.MemoryMissing); err != nil {
 			return nil, err
 		}
 
 		r.Model = model.String
 		r.StopReason = stopReason.String
 		r.WorktreePath = worktreePath.String
-		r.ResultLink = resultLink.String
 		r.ResultSummary = resultSummary.String
 		r.SessionID = sessionID.String
 		if completedAt.Valid {
@@ -151,7 +149,7 @@ func AgentRunsForTask(database *sql.DB, taskID string) ([]domain.AgentRun, error
 // run whose initial invocation returned but failed the memory-file check.
 func SetAgentRunSession(database *sql.DB, runID, sessionID string) error {
 	_, err := database.Exec(`
-		UPDATE agent_runs SET session_id = ? WHERE id = ?
+		UPDATE runs SET session_id = ? WHERE id = ?
 	`, sessionID, runID)
 	return err
 }
@@ -163,7 +161,7 @@ func SetAgentRunSession(database *sql.DB, runID, sessionID string) error {
 // the gap is visible. Called from the write-gate retry loop in SKY-141.
 func MarkAgentRunMemoryMissing(database *sql.DB, runID string) error {
 	_, err := database.Exec(`
-		UPDATE agent_runs SET memory_missing = 1 WHERE id = ?
+		UPDATE runs SET memory_missing = 1 WHERE id = ?
 	`, runID)
 	return err
 }
@@ -173,7 +171,7 @@ func MarkAgentRunMemoryMissing(database *sql.DB, runID string) error {
 func HasActiveRunForTask(database *sql.DB, taskID string) (bool, error) {
 	var count int
 	err := database.QueryRow(`
-		SELECT COUNT(*) FROM agent_runs
+		SELECT COUNT(*) FROM runs
 		WHERE task_id = ? AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable', 'pending_approval')
 	`, taskID).Scan(&count)
 	return count > 0, err
@@ -185,7 +183,7 @@ func HasActiveRunForTask(database *sql.DB, taskID string) (bool, error) {
 func LastAutoRunStartedAt(database *sql.DB, taskID string) (*time.Time, error) {
 	var startedAt sql.NullTime
 	err := database.QueryRow(`
-		SELECT started_at FROM agent_runs
+		SELECT started_at FROM runs
 		WHERE task_id = ? AND trigger_type != 'manual'
 		ORDER BY started_at DESC LIMIT 1
 	`, taskID).Scan(&startedAt)
@@ -218,7 +216,7 @@ func InsertAgentMessage(database *sql.DB, msg domain.AgentMessage) (int64, error
 	}
 
 	result, err := database.Exec(`
-		INSERT INTO agent_messages (run_id, role, content, subtype, tool_calls, tool_call_id, is_error, metadata, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens)
+		INSERT INTO run_messages (run_id, role, content, subtype, tool_calls, tool_call_id, is_error, metadata, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		msg.RunID, msg.Role, msg.Content, msg.Subtype,
@@ -237,7 +235,7 @@ func MessagesForRun(database *sql.DB, runID string) ([]domain.AgentMessage, erro
 	rows, err := database.Query(`
 		SELECT id, run_id, role, content, subtype, tool_calls, tool_call_id, is_error, metadata,
 		       model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at
-		FROM agent_messages WHERE run_id = ? ORDER BY id ASC
+		FROM run_messages WHERE run_id = ? ORDER BY id ASC
 	`, runID)
 	if err != nil {
 		return nil, err
@@ -310,7 +308,7 @@ func RunTokenTotals(database *sql.DB, runID string) (*TokenTotals, error) {
 		       COALESCE(SUM(cache_read_tokens), 0),
 		       COALESCE(SUM(cache_creation_tokens), 0),
 		       COUNT(*)
-		FROM agent_messages
+		FROM run_messages
 		WHERE run_id = ? AND role = 'assistant'
 	`, runID)
 

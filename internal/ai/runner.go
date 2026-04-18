@@ -128,17 +128,17 @@ func (r *Runner) run() {
 	// Build a source map for repo-match blocked_reason logic.
 	sourceByID := make(map[string]string, len(tasks))
 	for _, t := range tasks {
-		sourceByID[t.ID] = t.Source
+		sourceByID[t.ID] = t.EntitySource
 	}
 
 	updates := make([]domain.TaskScoreUpdate, len(scores))
 	for i, s := range scores {
 		updates[i] = domain.TaskScoreUpdate{
-			ID:                s.ID,
-			PriorityScore:     s.PriorityScore,
-			AgentConfidence:   s.AgentConfidence,
-			PriorityReasoning: s.PriorityReasoning,
-			Summary:           s.Summary,
+			ID:                  s.ID,
+			PriorityScore:       s.PriorityScore,
+			AutonomySuitability: s.AutonomySuitability,
+			PriorityReasoning:   s.PriorityReasoning,
+			Summary:             s.Summary,
 		}
 
 		// Determine blocked reason for repo matching.

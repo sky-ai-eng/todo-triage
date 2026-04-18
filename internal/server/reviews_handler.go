@@ -140,11 +140,11 @@ func (s *Server) handleReviewSubmit(w http.ResponseWriter, r *http.Request) {
 
 	// If this review was associated with an agent run, update the run status
 	if review.RunID != "" {
-		if _, err := s.db.Exec(`UPDATE agent_runs SET status = 'completed' WHERE id = ? AND status = 'pending_approval'`, review.RunID); err != nil {
+		if _, err := s.db.Exec(`UPDATE runs SET status = 'completed' WHERE id = ? AND status = 'pending_approval'`, review.RunID); err != nil {
 			log.Printf("[reviews] warning: failed to update run %s status: %v", review.RunID, err)
 		}
 		// Also mark the task as done
-		if _, err := s.db.Exec(`UPDATE tasks SET status = 'done' WHERE id = (SELECT task_id FROM agent_runs WHERE id = ?)`, review.RunID); err != nil {
+		if _, err := s.db.Exec(`UPDATE tasks SET status = 'done' WHERE id = (SELECT task_id FROM runs WHERE id = ?)`, review.RunID); err != nil {
 			log.Printf("[reviews] warning: failed to update task status for run %s: %v", review.RunID, err)
 		}
 		s.ws.Broadcast(websocket.Event{

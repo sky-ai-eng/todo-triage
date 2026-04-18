@@ -6,6 +6,7 @@ import TaskCard from '../components/TaskCard'
 import PromptPicker from '../components/PromptPicker'
 import ReviewOverlay from '../components/ReviewOverlay'
 import EventBadge from '../components/EventBadge'
+import SourceBadge from '../components/SourceBadge'
 import { motion, AnimatePresence } from 'motion/react'
 import {
   DndContext,
@@ -166,10 +167,9 @@ export default function Board() {
       items = items.filter(
         (t) =>
           t.title.toLowerCase().includes(q) ||
-          t.repo?.toLowerCase().includes(q) ||
-          t.author?.toLowerCase().includes(q) ||
+          t.source_id.toLowerCase().includes(q) ||
           t.ai_summary?.toLowerCase().includes(q) ||
-          t.event_type?.toLowerCase().includes(q),
+          t.event_type.toLowerCase().includes(q),
       )
     }
     return items
@@ -282,7 +282,7 @@ export default function Board() {
 
     // Block cross-column moves for externally terminal tasks (merged/closed PRs)
     const terminalEvents = ['github:pr:merged', 'github:pr:closed']
-    if (terminalEvents.includes(task.event_type || '')) return
+    if (terminalEvents.includes(task.event_type)) return
 
     // Queue → You: claim
     if (sourceCol === 'queue' && targetCol === 'you') {
@@ -675,24 +675,12 @@ function SidebarTaskCard({ task }: { task: Task }) {
       {...listeners}
     >
       <div className="flex items-center gap-1.5 mb-1">
-        <span
-          className={`text-[9px] font-semibold uppercase tracking-wider px-1 py-0.5 rounded ${
-            task.source === 'github'
-              ? 'bg-black/[0.04] text-text-secondary'
-              : 'bg-blue-500/10 text-blue-600'
-          }`}
-        >
-          {task.source === 'github' ? 'GH' : 'Jira'}
-        </span>
+        <SourceBadge task={task} />
         <EventBadge eventType={task.event_type} compact />
       </div>
       <h4 className="text-[12px] font-medium text-text-primary leading-snug line-clamp-2">
         {task.title}
       </h4>
-      <div className="flex items-center gap-2 mt-1 text-[10px] text-text-tertiary">
-        {task.repo && <span className="truncate">{task.repo}</span>}
-        {task.author && <span>{task.author}</span>}
-      </div>
     </div>
   )
 }

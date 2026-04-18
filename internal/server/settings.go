@@ -9,7 +9,6 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/config"
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 )
 
@@ -182,19 +181,16 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		// Disabled — clear GitHub credentials, keychain entries, and tracked data
+		// Disconnect is a soft gesture — clear credentials and stop polling,
+		// but keep entities/tasks/runs/memory intact. Reconnecting the same
+		// account resumes where we left off. Full wipe is a separate
+		// destructive action (not implemented in v1).
 		creds.GitHubURL = ""
 		creds.GitHubPAT = ""
 		creds.GitHubUsername = ""
 		cfg.GitHub.BaseURL = ""
 		if err := auth.ClearGitHub(); err != nil {
 			log.Printf("[settings] failed to clear GitHub keychain entry: %v", err)
-		}
-		if err := db.ClearTrackedItems(s.db, "github"); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{
-				"error": "failed to clear GitHub tracked items: " + err.Error(),
-				"field": "github",
-			})
-			return
 		}
 	}
 
@@ -213,7 +209,7 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Jira URL is required"})
 				return
 			}
-			_, err := auth.ValidateJira(url, req.JiraPAT)
+			jiraUser, err := auth.ValidateJira(url, req.JiraPAT)
 			if err != nil {
 				writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
 					"error": "Jira: " + err.Error(),
@@ -222,20 +218,16 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			creds.JiraPAT = req.JiraPAT
+			creds.JiraDisplayName = jiraUser.DisplayName
 		}
 	} else {
+		// Soft disconnect — keep entities/tasks/runs/memory intact.
 		creds.JiraURL = ""
 		creds.JiraPAT = ""
+		creds.JiraDisplayName = ""
 		cfg.Jira.BaseURL = ""
 		if err := auth.ClearJira(); err != nil {
 			log.Printf("[settings] failed to clear Jira keychain entry: %v", err)
-		}
-		if err := db.ClearTrackedItems(s.db, "jira"); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{
-				"error": "failed to clear Jira tracked items: " + err.Error(),
-				"field": "jira",
-			})
-			return
 		}
 	}
 
@@ -340,6 +332,7 @@ func (s *Server) handleJiraConnect(w http.ResponseWriter, r *http.Request) {
 	// Persist credentials and config
 	creds.JiraURL = req.URL
 	creds.JiraPAT = req.PAT
+	creds.JiraDisplayName = jiraUser.DisplayName
 	cfg.Jira.BaseURL = req.URL
 
 	if err := auth.Store(creds); err != nil {

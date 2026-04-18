@@ -18,6 +18,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/repoprofile"
+	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/server"
 	"github.com/sky-ai-eng/triage-factory/internal/skills"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
@@ -89,9 +90,14 @@ func main() {
 	// Clean up any orphaned worktrees from crashed runs
 	worktree.Cleanup()
 
-	// Seed event type catalog and default prompts
+	// Seed event type catalog, task_rules defaults, and default prompts.
+	// Order matters: task_rules FK to events_catalog(id), so catalog must be
+	// seeded first.
 	if err := db.SeedEventTypes(database); err != nil {
 		log.Fatalf("failed to seed event types: %v", err)
+	}
+	if err := db.SeedTaskRules(database); err != nil {
+		log.Fatalf("failed to seed task rules: %v", err)
 	}
 	seedDefaultPrompts(database)
 
@@ -125,6 +131,10 @@ func main() {
 	// Profile gate — scorer waits for this before running
 	profileGate := repoprofile.NewProfileGate(database)
 
+	// Declare eventRouter early so the scorer callback can reference it.
+	// Actual initialization happens below after the spawner is created.
+	var eventRouter *routing.Router
+
 	scorer := ai.NewRunner(database, ai.RunnerCallbacks{
 		OnScoringStarted: func(taskIDs []string) {
 			wsHub.Broadcast(websocket.Event{
@@ -137,6 +147,13 @@ func main() {
 				Type: "scoring_completed",
 				Data: map[string]any{"task_ids": taskIDs},
 			})
+			// Post-scoring re-derive: check deferred triggers whose
+			// min_autonomy_suitability threshold the scored tasks now meet.
+			// Runs async so it doesn't block the scorer from clearing its
+			// running flag and handling subsequent Trigger() calls.
+			if eventRouter != nil {
+				go eventRouter.ReDeriveAfterScoring(taskIDs)
+			}
 		},
 	})
 	scorer.SetProfileGate(profileGate.Ready)
@@ -159,13 +176,14 @@ func main() {
 	spawner := delegate.NewSpawner(database, nil, wsHub, "")
 	srv.SetSpawner(spawner)
 
-	// Subscriber: auto-delegation — fires matching prompt_triggers on non-system events
+	// Event router — records events, creates/bumps tasks, auto-delegates on
+	// matching triggers, runs inline close checks. Also handles post-scoring
+	// re-derive via the scorer callback wired above.
+	eventRouter = routing.NewRouter(database, spawner, scorer, wsHub)
 	bus.Subscribe(eventbus.Subscriber{
-		Name:   "auto-delegate",
+		Name:   "router",
 		Filter: []string{"github:", "jira:"},
-		Handle: func(evt domain.Event) {
-			delegate.MaybeAutoDelegate(database, spawner, evt)
-		},
+		Handle: eventRouter.HandleEvent,
 	})
 
 	// GitHub changed: invalidate profiles → stop all → re-profile → restart all

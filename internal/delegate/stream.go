@@ -20,7 +20,7 @@ func newStreamState() *streamState {
 
 // SessionID returns the Claude Code session_id captured from the stream's
 // `system/init` event, or empty if that event hasn't been seen yet.
-// Used by the spawner to persist the id on agent_runs so later `--resume`
+// Used by the spawner to persist the id on the runs table so later `--resume`
 // invocations (write-gate retry, SKY-139 yield) can attach to the session.
 func (s *streamState) SessionID() string { return s.sessionID }
 

@@ -27,6 +27,8 @@ interface EventType {
 
 interface GraphProps {
   onPromptClick?: (promptId: string) => void
+  onTriggerClick?: (trigger: PromptTrigger) => void
+  onTriggerDeleted?: (eventType: string, predicate?: string | null) => void
 }
 
 // --- Custom Nodes ---
@@ -196,7 +198,7 @@ function saveLayout(layout: SavedLayout) {
 
 // --- Inner Graph ---
 
-function BindingGraphInner({ onPromptClick }: GraphProps) {
+function BindingGraphInner({ onPromptClick, onTriggerClick, onTriggerDeleted }: GraphProps) {
   const [eventTypes, setEventTypes] = useState<EventType[]>([])
   const [prompts, setPrompts] = useState<Prompt[]>([])
   const [triggers, setTriggers] = useState<PromptTrigger[]>([])
@@ -216,6 +218,10 @@ function BindingGraphInner({ onPromptClick }: GraphProps) {
   triggersRef.current = triggers
   const onPromptClickRef = useRef(onPromptClick)
   onPromptClickRef.current = onPromptClick
+  const onTriggerClickRef = useRef(onTriggerClick)
+  onTriggerClickRef.current = onTriggerClick
+  const onTriggerDeletedRef = useRef(onTriggerDeleted)
+  onTriggerDeletedRef.current = onTriggerDeleted
 
   const fetchAll = useCallback(async () => {
     const parseOrThrow = async (r: Response, label: string) => {
@@ -397,9 +403,15 @@ function BindingGraphInner({ onPromptClick }: GraphProps) {
 
   const doDeleteTrigger = useCallback(
     async (triggerId: string) => {
+      // Capture trigger info before deletion for the forgiving banner callback.
+      const deleted = triggersRef.current.find((t) => t.id === triggerId)
       try {
         await fetch(`/api/triggers/${encodeURIComponent(triggerId)}`, { method: 'DELETE' })
-        fetchAll()
+        await fetchAll()
+        // Notify parent so it can check coverage and show the forgiving banner.
+        if (deleted) {
+          onTriggerDeletedRef.current?.(deleted.event_type)
+        }
       } catch {
         // ignore
       }
@@ -407,32 +419,20 @@ function BindingGraphInner({ onPromptClick }: GraphProps) {
     [fetchAll],
   )
 
-  // Click edge to toggle enabled/disabled; shift-click to open delete confirmation
-  const onEdgeClick: EdgeMouseHandler = useCallback(
-    async (event, edge) => {
-      const trigger = triggersRef.current.find((t) => t.id === edge.id)
-      if (!trigger) return
+  // Click edge to open config panel; shift-click to open delete confirmation
+  const onEdgeClick: EdgeMouseHandler = useCallback((event, edge) => {
+    const trigger = triggersRef.current.find((t) => t.id === edge.id)
+    if (!trigger) return
 
-      if (event.shiftKey) {
-        // Shift-click: show delete confirm
-        const mouseEvent = event as unknown as MouseEvent
-        setConfirmPopup({ x: mouseEvent.clientX, y: mouseEvent.clientY, triggerId: trigger.id })
-      } else {
-        // Regular click: toggle enabled
-        try {
-          await fetch(`/api/triggers/${encodeURIComponent(trigger.id)}/toggle`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ enabled: !trigger.enabled }),
-          })
-          fetchAll()
-        } catch {
-          // ignore
-        }
-      }
-    },
-    [fetchAll],
-  )
+    if (event.shiftKey) {
+      // Shift-click: show delete confirm
+      const mouseEvent = event as unknown as MouseEvent
+      setConfirmPopup({ x: mouseEvent.clientX, y: mouseEvent.clientY, triggerId: trigger.id })
+    } else {
+      // Regular click: open trigger config panel
+      onTriggerClickRef.current?.(trigger)
+    }
+  }, [])
 
   // Handle drop from sidebar
   const onDragOver = useCallback((e: DragEvent) => {

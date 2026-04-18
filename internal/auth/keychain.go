@@ -10,20 +10,22 @@ const service = "triagefactory"
 
 // Keychain keys
 const (
-	keyGitHubURL      = "github_url"
-	keyGitHubPAT      = "github_pat"
-	keyGitHubUsername = "github_username"
-	keyJiraURL        = "jira_url"
-	keyJiraPAT        = "jira_pat"
+	keyGitHubURL       = "github_url"
+	keyGitHubPAT       = "github_pat"
+	keyGitHubUsername  = "github_username"
+	keyJiraURL         = "jira_url"
+	keyJiraPAT         = "jira_pat"
+	keyJiraDisplayName = "jira_display_name"
 )
 
 // Credentials holds the stored auth configuration.
 type Credentials struct {
-	GitHubURL      string
-	GitHubPAT      string
-	GitHubUsername string
-	JiraURL        string
-	JiraPAT        string
+	GitHubURL       string
+	GitHubPAT       string
+	GitHubUsername  string
+	JiraURL         string
+	JiraPAT         string
+	JiraDisplayName string
 }
 
 // Store saves all credentials to the OS keychain.
@@ -34,6 +36,7 @@ func Store(creds Credentials) error {
 		{keyGitHubUsername, creds.GitHubUsername},
 		{keyJiraURL, creds.JiraURL},
 		{keyJiraPAT, creds.JiraPAT},
+		{keyJiraDisplayName, creds.JiraDisplayName},
 	}
 	for _, p := range pairs {
 		if p.val == "" {
@@ -72,6 +75,10 @@ func Load() (Credentials, error) {
 	if err != nil {
 		return creds, err
 	}
+	creds.JiraDisplayName, err = get(keyJiraDisplayName)
+	if err != nil {
+		return creds, err
+	}
 
 	return creds, nil
 }
@@ -87,7 +94,7 @@ func deleteKeys(keys ...string) error {
 
 // Clear removes all credentials from the OS keychain.
 func Clear() error {
-	return deleteKeys(keyGitHubURL, keyGitHubPAT, keyGitHubUsername, keyJiraURL, keyJiraPAT)
+	return deleteKeys(keyGitHubURL, keyGitHubPAT, keyGitHubUsername, keyJiraURL, keyJiraPAT, keyJiraDisplayName)
 }
 
 // ClearGitHub removes GitHub credentials from the OS keychain.
@@ -97,7 +104,7 @@ func ClearGitHub() error {
 
 // ClearJira removes Jira credentials from the OS keychain.
 func ClearJira() error {
-	return deleteKeys(keyJiraURL, keyJiraPAT)
+	return deleteKeys(keyJiraURL, keyJiraPAT, keyJiraDisplayName)
 }
 
 // IsConfigured returns true if at least one PAT is stored.

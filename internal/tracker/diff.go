@@ -2,322 +2,363 @@ package tracker
 
 import (
 	"encoding/json"
-	"fmt"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 )
 
-// DiffPRSnapshots compares two PR snapshots and returns events for every detected transition.
-// A zero-value prev (Number == 0) indicates first-seen and emits initial events.
-// username is the authenticated user, used to classify first-seen events. Pure function — no IO.
-func DiffPRSnapshots(prev, curr domain.PRSnapshot, sourceID, username string) []domain.Event {
+// DiffPRSnapshots compares two PR snapshots and returns per-action events for
+// every detected change. Each event carries typed metadata from the events
+// package, EntityID pointing to the PR entity, and DedupKey for open-set
+// discriminators (labels). A zero-value prev (Number == 0) indicates first
+// discovery — emits initial events from the current state.
+//
+// Pure function — no IO.
+func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string) []domain.Event {
 	now := time.Now()
-	var events []domain.Event
+	eid := &entityID
+	authorIsSelf := curr.Author == username
+	var evts []domain.Event
 
-	emit := func(eventType string, meta map[string]string) {
-		events = append(events, domain.Event{
-			EventType: eventType,
-			SourceID:  sourceID,
-			Metadata:  mustJSON(meta),
-			CreatedAt: now,
+	emit := func(eventType, dedupKey string, metadata any) {
+		metaJSON, _ := json.Marshal(metadata)
+		evts = append(evts, domain.Event{
+			EventType:    eventType,
+			EntityID:     eid,
+			DedupKey:     dedupKey,
+			MetadataJSON: string(metaJSON),
+			CreatedAt:    now,
 		})
 	}
 
+	// --- First discovery: no previous state to diff against ----------------
+	// On first discovery we DON'T emit events — the entity just gets created
+	// and the snapshot seeds. Events fire on the NEXT poll when we can
+	// meaningfully diff. Exception: terminal states (merged/closed) emit
+	// immediately since there won't be another diff.
 	if prev.Number == 0 {
-		// First snapshot — emit the initial event based on current state
-		return initialPREvents(curr, sourceID, username, now)
+		if curr.Merged {
+			emit(domain.EventGitHubPRMerged, "", events.GitHubPRMergedMetadata{
+				Author: curr.Author, AuthorIsSelf: authorIsSelf,
+				Repo: curr.Repo, PRNumber: curr.Number,
+				MergedBy: "", HeadSHA: curr.HeadSHA, Labels: curr.Labels,
+			})
+		} else if curr.State == "CLOSED" {
+			emit(domain.EventGitHubPRClosed, "", events.GitHubPRClosedMetadata{
+				Author: curr.Author, AuthorIsSelf: authorIsSelf,
+				Repo: curr.Repo, PRNumber: curr.Number,
+				ClosedBy: "", Labels: curr.Labels,
+			})
+		}
+		// For open PRs: no initial event. The next poll will diff against
+		// this snapshot and emit real per-action events (CI checks, reviews,
+		// review requests, etc.) when first observed.
+		return evts
 	}
 
-	// --- State transitions ---
+	// --- Entity-terminating transitions ------------------------------------
 
-	// Merged
 	if !prev.Merged && curr.Merged {
-		emit(domain.EventGitHubPRMerged, map[string]string{})
+		emit(domain.EventGitHubPRMerged, "", events.GitHubPRMergedMetadata{
+			Author: curr.Author, AuthorIsSelf: authorIsSelf,
+			Repo: curr.Repo, PRNumber: curr.Number,
+			MergedBy: "", HeadSHA: curr.HeadSHA, Labels: curr.Labels,
+		})
 	}
 
-	// Closed without merging
 	if prev.State != "CLOSED" && curr.State == "CLOSED" && !curr.Merged {
-		emit(domain.EventGitHubPRClosed, map[string]string{})
+		emit(domain.EventGitHubPRClosed, "", events.GitHubPRClosedMetadata{
+			Author: curr.Author, AuthorIsSelf: authorIsSelf,
+			Repo: curr.Repo, PRNumber: curr.Number,
+			ClosedBy: "", Labels: curr.Labels,
+		})
 	}
 
-	// Draft → Ready for review
+	// --- Draft → Ready for review ------------------------------------------
+
 	if prev.IsDraft && !curr.IsDraft {
-		emit(domain.EventGitHubPRReadyForReview, map[string]string{})
+		emit(domain.EventGitHubPRReadyForReview, "", events.GitHubPRReadyForReviewMetadata{
+			Author: curr.Author, AuthorIsSelf: authorIsSelf,
+			Repo: curr.Repo, PRNumber: curr.Number,
+			HeadSHA: curr.HeadSHA, Labels: curr.Labels,
+		})
 	}
 
-	// --- CI transitions ---
+	// --- Per-check CI events -----------------------------------------------
+	// Emit one event per check-run that transitions to a new conclusion.
+	// Identity: check-run ID. Same ID seen again → no event.
 	//
-	// Identity for CI failures is the check-run ID (monotonic per execution),
-	// not the aggregate rollup. This fixes two scenarios the old scalar
-	// transition check missed:
-	//
-	//   B: FAILURE → fix pushed → poller sees FAILURE again before seeing
-	//      PENDING. Old code: prev == curr == FAILURE, no fire. New code:
-	//      the new execution has a new ID not in prev, fires.
-	//
-	//   C: check A fails → event fires → fix → A passes, B newly fails.
-	//      Old code: aggregate stays FAILURE, no fire. New code: B's new
-	//      failing ID isn't in prev, fires.
-	//
-	// Guard: nil prev.CheckRuns means "unknown prior state" (an old snapshot
-	// from before this field existed). Skip the whole CI section in that case
-	// to avoid spurious events on the first poll after this field lands. An
-	// empty-but-non-nil slice is distinguishable and still gets evaluated
-	// (prevByID is empty, any curr failure fires as a new execution — which
-	// is correct).
-	if prev.CheckRuns != nil {
+	// nil prev.CheckRuns (discovery snapshot, lightweight fragment) is treated
+	// as empty — every check in curr is "new." This ensures failing CI on a
+	// newly-tracked entity is surfaced on the first full refresh, not deferred
+	// to the second poll.
+	if curr.CheckRuns != nil {
 		prevByID := make(map[int64]domain.CheckRun, len(prev.CheckRuns))
 		for _, cr := range prev.CheckRuns {
 			prevByID[cr.ID] = cr
 		}
 
-		// New or newly-failing check runs. Two cases fire here:
-		//   1. A failing CheckRun with an ID we haven't seen before (new
-		//      execution — retry or new commit).
-		//   2. A failing CheckRun with an ID we *have* seen but whose prior
-		//      conclusion wasn't failing (same execution completing as
-		//      failed — pending → failure on the same run).
-		var newFailing []domain.CheckRun
 		for _, cr := range curr.CheckRuns {
-			if !domain.IsFailingConclusion(cr.Conclusion) {
-				continue
-			}
 			prevCR, existed := prevByID[cr.ID]
-			if existed && domain.IsFailingConclusion(prevCR.Conclusion) {
-				continue // already failing last poll, not a new signal
-			}
-			newFailing = append(newFailing, cr)
-		}
-		if len(newFailing) > 0 {
-			primary := newFailing[0]
-			meta := map[string]string{
-				"count":                fmt.Sprintf("%d", len(newFailing)),
-				"primary_check_run_id": fmt.Sprintf("%d", primary.ID),
-				"primary_check_name":   primary.Name,
-				"primary_conclusion":   primary.Conclusion,
-				"primary_details_url":  primary.DetailsURL,
-			}
-			if primary.WorkflowRunID != 0 {
-				meta["primary_workflow_run_id"] = fmt.Sprintf("%d", primary.WorkflowRunID)
-			}
-			// Full list as JSON so consumers that care about every failing
-			// check (auto-delegation prompts, task memory) can parse it.
-			if blob, err := json.Marshal(newFailing); err == nil {
-				meta["failing_checks"] = string(blob)
-			}
-			emit(domain.EventGitHubPRCIFailed, meta)
-		}
 
-		// Aggregate pass transition. Preserves the old scalar-era semantics
-		// of EventGitHubPRCIPassed: "the rollup just became all-green." Stays
-		// an aggregate signal rather than per-check because users care about
-		// "my PR is ready" not "check #3 passed."
-		prevStatus := domain.CIStatusFromCheckRuns(prev.CheckRuns)
-		currStatus := domain.CIStatusFromCheckRuns(curr.CheckRuns)
-		if currStatus == "success" && prevStatus != "success" {
-			emit(domain.EventGitHubPRCIPassed, map[string]string{
-				"prev": prevStatus, "new": currStatus,
-			})
+			if domain.IsFailingConclusion(cr.Conclusion) {
+				if existed && domain.IsFailingConclusion(prevCR.Conclusion) {
+					continue // already failing, old signal
+				}
+				emit(domain.EventGitHubPRCICheckFailed, "", events.GitHubPRCICheckFailedMetadata{
+					Author: curr.Author, AuthorIsSelf: authorIsSelf,
+					CheckRunID: cr.ID, CheckName: cr.Name, CheckURL: cr.DetailsURL,
+					HeadSHA: curr.HeadSHA, Repo: curr.Repo, PRNumber: curr.Number,
+					IsDraft: curr.IsDraft, Labels: curr.Labels,
+				})
+			} else if cr.Conclusion != "" && !domain.IsFailingConclusion(cr.Conclusion) {
+				// Any non-failing completed conclusion counts as "passed":
+				// success, neutral, skipped, stale. This matters for the
+				// inline close check — a check that was failing and transitions
+				// to skipped (e.g., path filter on new commits) needs to emit
+				// ci_check_passed so ci_check_failed tasks can close.
+				if existed && !domain.IsFailingConclusion(prevCR.Conclusion) && prevCR.Conclusion != "" {
+					continue // already non-failing, old signal
+				}
+				emit(domain.EventGitHubPRCICheckPassed, "", events.GitHubPRCICheckPassedMetadata{
+					Author: curr.Author, AuthorIsSelf: authorIsSelf,
+					CheckRunID: cr.ID, CheckName: cr.Name, Conclusion: cr.Conclusion,
+					HeadSHA: curr.HeadSHA, Repo: curr.Repo, PRNumber: curr.Number,
+					IsDraft: curr.IsDraft, Labels: curr.Labels,
+				})
+			}
 		}
 	}
 
-	// --- New commits (head SHA changed) ---
-	// An empty prev.HeadSHA means "unknown prior state" (first poll after the
-	// field was added, or a refresh that failed to surface it). Don't fire a
-	// spurious event in either case — only emit when both sides are known and
-	// genuinely differ.
+	// --- New commits -------------------------------------------------------
+
 	if prev.HeadSHA != "" && curr.HeadSHA != "" && prev.HeadSHA != curr.HeadSHA {
-		emit(domain.EventGitHubPRNewCommits, map[string]string{
-			"prev": prev.HeadSHA, "new": curr.HeadSHA,
+		emit(domain.EventGitHubPRNewCommits, "", events.GitHubPRNewCommitsMetadata{
+			Author: curr.Author, AuthorIsSelf: authorIsSelf,
+			IsDraft: curr.IsDraft, CommitCount: 0, // count not available in snapshot
+			HeadSHA: curr.HeadSHA, PrevHeadSHA: prev.HeadSHA,
+			Repo: curr.Repo, PRNumber: curr.Number, Labels: curr.Labels,
 		})
 	}
 
-	// --- Mergeable state (conflicts) ---
+	// --- Merge conflicts ---------------------------------------------------
+
 	if prev.Mergeable != "CONFLICTING" && curr.Mergeable == "CONFLICTING" {
-		emit(domain.EventGitHubPRConflicts, map[string]string{
-			"prev": prev.Mergeable, "new": curr.Mergeable,
+		emit(domain.EventGitHubPRConflicts, "", events.GitHubPRConflictsMetadata{
+			Author: curr.Author, AuthorIsSelf: authorIsSelf,
+			Repo: curr.Repo, PRNumber: curr.Number,
+			IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
 		})
 	}
 
-	// --- Review requests ---
-	// Only fire when the authenticated user is the one being requested.
+	// --- Review requests ---------------------------------------------------
+	// Fire when the session user appears in the request list.
 	prevRR := toSet(prev.ReviewRequests)
 	currRR := toSet(curr.ReviewRequests)
 	if username != "" && currRR[username] && !prevRR[username] {
-		emit(domain.EventGitHubPRReviewRequested, map[string]string{
-			"requested_reviewer": username,
+		emit(domain.EventGitHubPRReviewRequested, "", events.GitHubPRReviewRequestedMetadata{
+			Author: curr.Author, AuthorIsSelf: authorIsSelf,
+			Repo: curr.Repo, PRNumber: curr.Number,
+			IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA,
+			Labels: curr.Labels, Title: curr.Title,
 		})
 	}
 
-	// --- Review state changes (only on PRs you authored) ---
-	if curr.Author == username {
-		prevReviews := reviewMap(prev.Reviews)
-		currReviews := reviewMap(curr.Reviews)
-		for author, currState := range currReviews {
-			prevState := prevReviews[author]
-			if currState.State == prevState.State {
-				continue // no change for this reviewer
-			}
+	// --- Per-review events -------------------------------------------------
+	// Emit one event per review state transition, split by review type.
+	prevReviews := reviewMap(prev.Reviews)
+	currReviews := reviewMap(curr.Reviews)
 
-			switch currState.State {
-			case "APPROVED":
-				emit(domain.EventGitHubPRApproved, map[string]string{
-					"reviewer": author, "prev_state": prevState.State,
-				})
-			case "CHANGES_REQUESTED":
-				emit(domain.EventGitHubPRChangesReq, map[string]string{
-					"reviewer": author, "prev_state": prevState.State,
-				})
-			case "COMMENTED", "DISMISSED":
-				emit(domain.EventGitHubPRReviewReceived, map[string]string{
-					"reviewer": author, "state": currState.State,
-				})
-			}
+	for reviewer, currState := range currReviews {
+		prevState := prevReviews[reviewer]
+		if currState.State == prevState.State {
+			continue
+		}
+		reviewerIsSelf := reviewer == username
+
+		switch currState.State {
+		case "CHANGES_REQUESTED":
+			emit(domain.EventGitHubPRReviewChangesRequested, "", events.GitHubPRReviewChangesRequestedMetadata{
+				Author: curr.Author, AuthorIsSelf: authorIsSelf,
+				Reviewer: reviewer, ReviewerIsSelf: reviewerIsSelf,
+				ReviewID: 0, Repo: curr.Repo, PRNumber: curr.Number,
+				IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
+			})
+		case "APPROVED":
+			emit(domain.EventGitHubPRReviewApproved, "", events.GitHubPRReviewApprovedMetadata{
+				Author: curr.Author, AuthorIsSelf: authorIsSelf,
+				Reviewer: reviewer, ReviewerIsSelf: reviewerIsSelf,
+				ReviewID: 0, Repo: curr.Repo, PRNumber: curr.Number,
+				IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
+			})
+		case "COMMENTED":
+			emit(domain.EventGitHubPRReviewCommented, "", events.GitHubPRReviewCommentedMetadata{
+				Author: curr.Author, AuthorIsSelf: authorIsSelf,
+				Reviewer: reviewer, ReviewerIsSelf: reviewerIsSelf,
+				ReviewID: 0, CommentCount: 0, Repo: curr.Repo, PRNumber: curr.Number,
+				IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
+			})
+		case "DISMISSED":
+			emit(domain.EventGitHubPRReviewDismissed, "", events.GitHubPRReviewDismissedMetadata{
+				Author: curr.Author, AuthorIsSelf: authorIsSelf,
+				Reviewer: reviewer, ReviewerIsSelf: reviewerIsSelf,
+				ReviewID: 0, Repo: curr.Repo, PRNumber: curr.Number,
+				IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
+			})
+		}
+
+		// Also emit review_submitted when session user posted the review.
+		if reviewerIsSelf && currState.State != prevState.State {
+			emit(domain.EventGitHubPRReviewSubmitted, "", events.GitHubPRReviewSubmittedMetadata{
+				Author: curr.Author, AuthorIsSelf: authorIsSelf,
+				ReviewerIsSelf: true, Reviewer: username,
+				ReviewType: stateToReviewType(currState.State),
+				ReviewID:   0, Repo: curr.Repo, PRNumber: curr.Number,
+				IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
+			})
 		}
 	}
 
-	// --- Mentions (approximated by comment count increase) ---
-	// We can't detect @mentions without reading comment bodies, but a new comment
-	// on a PR where you're involved is worth surfacing. The poller's search query
-	// for mentions:{user} handles actual @mention detection at the discovery layer.
+	// --- Label diff --------------------------------------------------------
+	// New label → label_added; removed label → label_removed.
+	// dedup_key = label name (open-set discriminator).
+	prevLabels := toSet(prev.Labels)
+	currLabels := toSet(curr.Labels)
 
-	return events
+	for label := range currLabels {
+		if !prevLabels[label] {
+			emit(domain.EventGitHubPRLabelAdded, label, events.GitHubPRLabelAddedMetadata{
+				Author: curr.Author, AuthorIsSelf: authorIsSelf,
+				LabelName: label, Repo: curr.Repo, PRNumber: curr.Number,
+				IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
+			})
+		}
+	}
+	for label := range prevLabels {
+		if !currLabels[label] {
+			emit(domain.EventGitHubPRLabelRemoved, label, events.GitHubPRLabelRemovedMetadata{
+				Author: curr.Author, AuthorIsSelf: authorIsSelf,
+				LabelName: label, Repo: curr.Repo, PRNumber: curr.Number,
+				IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
+			})
+		}
+	}
+
+	return evts
 }
 
-// DiffJiraSnapshots compares two Jira issue snapshots and returns events.
-func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, sourceID string) []domain.Event {
+// DiffJiraSnapshots compares two Jira issue snapshots and returns per-action
+// events. username is needed for assignee_is_self metadata.
+func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID, username string) []domain.Event {
 	now := time.Now()
-	var events []domain.Event
+	eid := &entityID
+	var evts []domain.Event
 
-	emit := func(eventType string, meta map[string]string) {
-		events = append(events, domain.Event{
-			EventType: eventType,
-			SourceID:  sourceID,
-			Metadata:  mustJSON(meta),
-			CreatedAt: now,
+	emit := func(eventType, dedupKey string, metadata any) {
+		metaJSON, _ := json.Marshal(metadata)
+		evts = append(evts, domain.Event{
+			EventType:    eventType,
+			EntityID:     eid,
+			DedupKey:     dedupKey,
+			MetadataJSON: string(metaJSON),
+			CreatedAt:    now,
 		})
 	}
+
+	assigneeIsSelf := curr.Assignee != "" && curr.Assignee == username
 
 	if prev.Key == "" {
-		// First snapshot
-		return initialJiraEvents(curr, sourceID, now)
+		// First discovery — emit the matching initial event.
+		if isJiraTerminal(curr.Status) {
+			emit(domain.EventJiraIssueCompleted, "", events.JiraIssueCompletedMetadata{
+				Assignee: curr.Assignee, AssigneeIsSelf: assigneeIsSelf,
+				IssueKey: curr.Key, Project: extractProject(curr.Key),
+				IssueType: curr.IssueType, FinalStatus: curr.Status,
+			})
+		} else if curr.Assignee != "" {
+			emit(domain.EventJiraIssueAssigned, "", events.JiraIssueAssignedMetadata{
+				Assignee: curr.Assignee, AssigneeIsSelf: assigneeIsSelf,
+				Reporter: "", ReporterIsSelf: false,
+				IssueKey: curr.Key, Project: extractProject(curr.Key),
+				IssueType: curr.IssueType, Priority: curr.Priority,
+				Status: curr.Status, Summary: curr.Summary,
+			})
+		} else {
+			emit(domain.EventJiraIssueAvailable, "", events.JiraIssueAvailableMetadata{
+				Reporter: "", ReporterIsSelf: false,
+				IssueKey: curr.Key, Project: extractProject(curr.Key),
+				IssueType: curr.IssueType, Priority: curr.Priority,
+				Status: curr.Status, Summary: curr.Summary,
+			})
+		}
+		return evts
 	}
 
-	// Status change
+	project := extractProject(curr.Key)
+
+	// Status change — dedup_key = new status name.
 	if prev.Status != curr.Status && curr.Status != "" {
-		emit(domain.EventJiraIssueStatusChanged, map[string]string{
-			"prev_status": prev.Status, "new_status": curr.Status,
+		emit(domain.EventJiraIssueStatusChanged, curr.Status, events.JiraIssueStatusChangedMetadata{
+			Assignee: curr.Assignee, AssigneeIsSelf: assigneeIsSelf,
+			IssueKey: curr.Key, Project: project, IssueType: curr.IssueType,
+			OldStatus: prev.Status, NewStatus: curr.Status, Priority: curr.Priority,
 		})
-		// Also check for terminal
 		if isJiraTerminal(curr.Status) {
-			emit(domain.EventJiraIssueCompleted, map[string]string{
-				"status": curr.Status,
+			emit(domain.EventJiraIssueCompleted, "", events.JiraIssueCompletedMetadata{
+				Assignee: curr.Assignee, AssigneeIsSelf: assigneeIsSelf,
+				IssueKey: curr.Key, Project: project,
+				IssueType: curr.IssueType, FinalStatus: curr.Status,
 			})
 		}
 	}
 
-	// Assignment change
+	// Assignment change.
 	if prev.Assignee != curr.Assignee {
 		if curr.Assignee != "" {
-			emit(domain.EventJiraIssueAssigned, map[string]string{
-				"prev_assignee": prev.Assignee, "new_assignee": curr.Assignee,
+			emit(domain.EventJiraIssueAssigned, "", events.JiraIssueAssignedMetadata{
+				Assignee: curr.Assignee, AssigneeIsSelf: assigneeIsSelf,
+				Reporter: "", ReporterIsSelf: false,
+				IssueKey: curr.Key, Project: project,
+				IssueType: curr.IssueType, Priority: curr.Priority,
+				Status: curr.Status, Summary: curr.Summary,
 			})
-		}
-		// If assignee was removed, the issue became available again
-		if curr.Assignee == "" && prev.Assignee != "" {
-			emit(domain.EventJiraIssueAvailable, map[string]string{
-				"prev_assignee": prev.Assignee,
+		} else {
+			emit(domain.EventJiraIssueAvailable, "", events.JiraIssueAvailableMetadata{
+				Reporter: "", ReporterIsSelf: false,
+				IssueKey: curr.Key, Project: project,
+				IssueType: curr.IssueType, Priority: curr.Priority,
+				Status: curr.Status, Summary: curr.Summary,
 			})
 		}
 	}
 
-	// Priority change
+	// Priority change — dedup_key = new priority value.
 	if prev.Priority != curr.Priority && curr.Priority != "" {
-		emit(domain.EventJiraIssuePriorityChanged, map[string]string{
-			"prev_priority": prev.Priority, "new_priority": curr.Priority,
+		emit(domain.EventJiraIssuePriorityChanged, curr.Priority, events.JiraIssuePriorityChangedMetadata{
+			Assignee: curr.Assignee, AssigneeIsSelf: assigneeIsSelf,
+			IssueKey: curr.Key, Project: project,
+			OldPriority: prev.Priority, NewPriority: curr.Priority,
 		})
 	}
 
-	// New comments
+	// New comments.
 	if curr.CommentCount > prev.CommentCount {
-		emit(domain.EventJiraIssueCommented, map[string]string{
-			"prev_count": fmt.Sprintf("%d", prev.CommentCount),
-			"new_count":  fmt.Sprintf("%d", curr.CommentCount),
+		emit(domain.EventJiraIssueCommented, "", events.JiraIssueCommentedMetadata{
+			Assignee: curr.Assignee, AssigneeIsSelf: assigneeIsSelf,
+			Commenter: "", CommenterIsSelf: false, CommentID: "",
+			IssueKey: curr.Key, Project: project,
 		})
 	}
 
-	return events
+	return evts
 }
 
-// initialPREvents returns the events for a newly-discovered PR.
-// username is used to determine the relationship: authored, review requested, or mentioned.
-func initialPREvents(snap domain.PRSnapshot, sourceID, username string, now time.Time) []domain.Event {
-	var events []domain.Event
-	add := func(eventType string) {
-		events = append(events, domain.Event{
-			EventType: eventType,
-			SourceID:  sourceID,
-			Metadata:  mustJSON(map[string]string{"reason": "first_seen"}),
-			CreatedAt: now,
-		})
-	}
-
-	if snap.Merged {
-		add(domain.EventGitHubPRMerged)
-		return events
-	}
-
-	if snap.State == "CLOSED" {
-		add(domain.EventGitHubPRClosed)
-		return events
-	}
-
-	// Emit the most specific event for why we discovered this PR
-	for _, rr := range snap.ReviewRequests {
-		if rr == username {
-			add(domain.EventGitHubPRReviewRequested)
-			return events
-		}
-	}
-
-	if snap.Author == username {
-		add(domain.EventGitHubPROpened)
-	} else {
-		add(domain.EventGitHubPRMentioned)
-	}
-
-	return events
-}
-
-// initialJiraEvents returns the events for a newly-discovered Jira issue.
-func initialJiraEvents(snap domain.JiraSnapshot, sourceID string, now time.Time) []domain.Event {
-	var events []domain.Event
-	add := func(eventType string) {
-		events = append(events, domain.Event{
-			EventType: eventType,
-			SourceID:  sourceID,
-			Metadata:  mustJSON(map[string]string{"reason": "first_seen"}),
-			CreatedAt: now,
-		})
-	}
-
-	if isJiraTerminal(snap.Status) {
-		add(domain.EventJiraIssueCompleted)
-	} else if snap.Assignee != "" {
-		add(domain.EventJiraIssueAssigned)
-	} else {
-		add(domain.EventJiraIssueAvailable)
-	}
-	return events
-}
+// --- helpers ---------------------------------------------------------------
 
 func isJiraTerminal(status string) bool {
-	s := status
-	return s == "Done" || s == "Closed" || s == "Resolved"
+	return status == "Done" || status == "Closed" || status == "Resolved"
 }
-
-// --- helpers ---
 
 func toSet(items []string) map[string]bool {
 	m := make(map[string]bool, len(items))
@@ -333,4 +374,29 @@ func reviewMap(reviews []domain.ReviewState) map[string]domain.ReviewState {
 		m[r.Author] = r
 	}
 	return m
+}
+
+func stateToReviewType(state string) string {
+	switch state {
+	case "APPROVED":
+		return "approved"
+	case "CHANGES_REQUESTED":
+		return "changes_requested"
+	case "COMMENTED":
+		return "commented"
+	case "DISMISSED":
+		return "dismissed"
+	default:
+		return "unknown"
+	}
+}
+
+// extractProject extracts the project key from a Jira issue key (e.g. "SKY" from "SKY-123").
+func extractProject(key string) string {
+	for i, c := range key {
+		if c == '-' {
+			return key[:i]
+		}
+	}
+	return key
 }
