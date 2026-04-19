@@ -140,10 +140,39 @@ func (r *Runner) run() {
 	if err != nil {
 		log.Printf("[ai] scoring failed: %v", err)
 		r.reportError(err)
+		// Fatal scoring error — every task was MarkScoring'd but none of
+		// them will be transitioned to 'scored'. Reset the whole set back
+		// to 'pending' so the next cycle retries them; otherwise they stay
+		// stuck forever (UnscoredTasks only picks 'pending').
+		if resetErr := db.ResetScoringToPending(r.database, taskIDs); resetErr != nil {
+			log.Printf("[ai] warning: failed to reset tasks to pending after scoring failure: %v", resetErr)
+		}
 		return
 	}
-	if skippedTasks > 0 && r.callbacks.OnTasksSkipped != nil {
-		r.callbacks.OnTasksSkipped(skippedTasks, len(tasks))
+
+	// Reset tasks that were in failed batches back to 'pending' so they
+	// retry next cycle. Without this, a per-batch failure leaves those
+	// tasks marked 'in_progress' forever since UpdateTaskScores only
+	// transitions successfully-scored ones to 'scored'.
+	if skippedTasks > 0 {
+		scoredIDs := make(map[string]struct{}, len(scores))
+		for _, s := range scores {
+			scoredIDs[s.ID] = struct{}{}
+		}
+		var skippedIDs []string
+		for _, id := range taskIDs {
+			if _, ok := scoredIDs[id]; !ok {
+				skippedIDs = append(skippedIDs, id)
+			}
+		}
+		if len(skippedIDs) > 0 {
+			if resetErr := db.ResetScoringToPending(r.database, skippedIDs); resetErr != nil {
+				log.Printf("[ai] warning: failed to reset %d skipped tasks to pending: %v", len(skippedIDs), resetErr)
+			}
+		}
+		if r.callbacks.OnTasksSkipped != nil {
+			r.callbacks.OnTasksSkipped(skippedTasks, len(tasks))
+		}
 	}
 
 	// Build a source map for repo-match blocked_reason logic.
@@ -178,6 +207,13 @@ func (r *Runner) run() {
 	if err := db.UpdateTaskScores(r.database, updates); err != nil {
 		log.Printf("[ai] error saving scores: %v", err)
 		r.reportError(err)
+		// UpdateTaskScores failing means the in-memory scores are lost AND
+		// the scored tasks are still marked 'in_progress'. Reset everything
+		// still in that state so the next cycle re-scores. Previously-reset
+		// skipped tasks are already 'pending' and the reset is idempotent.
+		if resetErr := db.ResetScoringToPending(r.database, taskIDs); resetErr != nil {
+			log.Printf("[ai] warning: failed to reset tasks to pending after save failure: %v", resetErr)
+		}
 		return
 	}
 
