@@ -296,7 +296,19 @@ func (t *Tracker) backfillReviewRequested(entityID string, snap domain.PRSnapsho
 	if err != nil {
 		return fmt.Errorf("record event: %w", err)
 	}
-	if _, _, err := db.FindOrCreateTask(t.database, entityID, domain.EventGitHubPRReviewRequested, "", eventID, 0.5); err != nil {
+	// Stamp the backfilled task with the PR's createdAt rather than now.
+	// GitHub doesn't expose per-review-request timestamps, so PR.CreatedAt
+	// is the closest bound we have — a review request can't predate the PR.
+	// Better than "just now" on the card for a PR that's been pending your
+	// review for weeks. Falls back to time.Now() if the GraphQL timestamp
+	// is missing or unparseable (shouldn't happen in practice).
+	createdAt := time.Now()
+	if snap.CreatedAt != "" {
+		if parsed, perr := time.Parse(time.RFC3339, snap.CreatedAt); perr == nil {
+			createdAt = parsed
+		}
+	}
+	if _, _, err := db.FindOrCreateTaskAt(t.database, entityID, domain.EventGitHubPRReviewRequested, "", eventID, 0.5, createdAt); err != nil {
 		return fmt.Errorf("create task: %w", err)
 	}
 	return nil

@@ -26,6 +26,16 @@ const taskColumnsWithEntity = `
 // If an active task exists, returns it with created=false. Otherwise creates
 // one with created=true.
 func FindOrCreateTask(db *sql.DB, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64) (*domain.Task, bool, error) {
+	return FindOrCreateTaskAt(db, entityID, eventType, dedupKey, primaryEventID, defaultPriority, time.Now())
+}
+
+// FindOrCreateTaskAt is the same as FindOrCreateTask but stamps a caller-
+// supplied createdAt on the new row. Used by initial-discovery backfills
+// that represent activity older than "now" — e.g. a pending review request
+// observed on a 2-week-old PR should show the PR's age on the card, not
+// the moment we first polled. Existing tasks (find branch) keep their
+// original created_at.
+func FindOrCreateTaskAt(db *sql.DB, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error) {
 	// Try to find an existing active task.
 	var existing domain.Task
 	err := scanTaskRow(db.QueryRow(`
@@ -49,12 +59,11 @@ func FindOrCreateTask(db *sql.DB, entityID, eventType, dedupKey, primaryEventID 
 	// WHERE status NOT IN ('done','dismissed') will reject the INSERT. In
 	// that case, re-read the winner's row.
 	id := uuid.New().String()
-	now := time.Now()
 	_, err = db.Exec(`
 		INSERT INTO tasks (id, entity_id, event_type, dedup_key, primary_event_id,
 		                   status, priority_score, scoring_status, created_at)
 		VALUES (?, ?, ?, ?, ?, 'queued', ?, 'pending', ?)
-	`, id, entityID, eventType, dedupKey, primaryEventID, defaultPriority, now)
+	`, id, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt)
 	if err != nil {
 		// Race: another goroutine created the task between our SELECT and
 		// INSERT. Re-read to return the winner's row.
