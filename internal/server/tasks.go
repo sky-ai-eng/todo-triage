@@ -153,7 +153,7 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 				needTransition := state == nil || !rule.Contains(state.StatusName)
 
 				if !needAssign && !needTransition {
-					log.Printf("[jira] claim guard: %s already assigned to self and in in-progress (%q), skipping", issueKey, state.StatusName)
+					log.Printf("[jira] claim guard: %s already assigned to self and already in in-progress (%q), skipping", issueKey, state.StatusName)
 					return
 				}
 
