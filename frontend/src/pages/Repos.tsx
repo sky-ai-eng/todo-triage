@@ -38,6 +38,22 @@ function BranchPicker({
   const [branches, setBranches] = useState<string[]>([])
   const [loading, setLoading] = useState(false)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const mountedRef = useRef(true)
+
+  // Cleanup on unmount: drop any pending debounce timer AND mark the
+  // component unmounted so in-flight fetches (started before unmount but
+  // still resolving) don't setState on a dead tree. Two guards cover both
+  // pre-fetch and mid-fetch unmounts.
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      if (debounceRef.current !== undefined) {
+        clearTimeout(debounceRef.current)
+        debounceRef.current = undefined
+      }
+    }
+  }, [])
 
   useEffect(() => {
     setQuery(profile.base_branch || '')
@@ -48,18 +64,19 @@ function BranchPicker({
 
   const fetchBranches = useCallback(
     async (q: string) => {
+      if (!mountedRef.current) return
       setLoading(true)
       try {
         const res = await fetch(
           `/api/repos/${profile.owner}/${profile.repo}/branches?q=${encodeURIComponent(q)}`,
         )
-        if (res.ok) {
+        if (res.ok && mountedRef.current) {
           setBranches((await res.json()) as string[])
         }
       } catch {
         // non-critical — list just stays empty
       } finally {
-        setLoading(false)
+        if (mountedRef.current) setLoading(false)
       }
     },
     [profile.owner, profile.repo],
