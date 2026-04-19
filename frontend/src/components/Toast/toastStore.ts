@@ -14,6 +14,8 @@ export interface ToastItem {
 
 type Listener = (items: ToastItem[]) => void
 
+const MAX_TOASTS = 100
+
 let state: ToastItem[] = []
 const listeners = new Set<Listener>()
 
@@ -39,7 +41,8 @@ function push(item: Omit<ToastItem, 'id'> & { id?: string }): string {
   // call creates a new toast. If you want "one toast per auth-expired
   // poll cycle", rate-limit at the emit site instead.
   if (state.some((t) => t.id === id)) return id
-  state = [...state, { ...item, id }]
+  const nextState = [...state, { ...item, id }]
+  state = nextState.length > MAX_TOASTS ? nextState.slice(-MAX_TOASTS) : nextState
   emit()
   return id
 }
