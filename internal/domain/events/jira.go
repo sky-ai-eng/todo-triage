@@ -36,6 +36,7 @@ type JiraIssueAssignedPredicate struct {
 	Project        *string `json:"project,omitempty" doc:"Scope to a specific Jira project key."`
 	IssueType      *string `json:"issue_type,omitempty" doc:"Filter by issue type (Story, Bug, Task, ...)."`
 	Priority       *string `json:"priority,omitempty" doc:"Exact-match on priority name."`
+	Status         *string `json:"status,omitempty" doc:"Filter by the issue's current status (e.g. 'To Do', 'In Progress')."`
 }
 
 func (p JiraIssueAssignedPredicate) Matches(m JiraIssueAssignedMetadata) bool {
@@ -44,7 +45,8 @@ func (p JiraIssueAssignedPredicate) Matches(m JiraIssueAssignedMetadata) bool {
 		boolEq(p.ReporterIsSelf, m.ReporterIsSelf) &&
 		strEq(p.Project, m.Project) &&
 		strEq(p.IssueType, m.IssueType) &&
-		strEq(p.Priority, m.Priority)
+		strEq(p.Priority, m.Priority) &&
+		strEq(p.Status, m.Status)
 }
 
 // -----------------------------------------------------------------------------
@@ -66,12 +68,14 @@ type JiraIssueAvailablePredicate struct {
 	Project   *string `json:"project,omitempty"`
 	IssueType *string `json:"issue_type,omitempty"`
 	Priority  *string `json:"priority,omitempty"`
+	Status    *string `json:"status,omitempty" doc:"Filter by the issue's current status (e.g. 'To Do', 'Backlog')."`
 }
 
 func (p JiraIssueAvailablePredicate) Matches(m JiraIssueAvailableMetadata) bool {
 	return strEq(p.Project, m.Project) &&
 		strEq(p.IssueType, m.IssueType) &&
-		strEq(p.Priority, m.Priority)
+		strEq(p.Priority, m.Priority) &&
+		strEq(p.Status, m.Status)
 }
 
 // -----------------------------------------------------------------------------

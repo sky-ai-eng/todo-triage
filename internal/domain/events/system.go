@@ -18,8 +18,10 @@ import "github.com/sky-ai-eng/triage-factory/internal/domain"
 // -----------------------------------------------------------------------------
 
 type SystemPollCompletedMetadata struct {
-	Source   string `json:"source"`   // "github" | "jira"
-	Duration string `json:"duration"` // human-readable, e.g. "1.2s"
+	Source    string `json:"source"`     // "github" | "jira"
+	StartedAt int64  `json:"started_at"` // UnixNano of poll start — lets late sentinels from pre-restart generations be filtered out
+	Entities  int    `json:"entities"`   // active entity count at refresh
+	Events    int    `json:"events"`     // events emitted during this cycle
 }
 
 type SystemPollCompletedPredicate struct {

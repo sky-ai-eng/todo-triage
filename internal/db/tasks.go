@@ -166,6 +166,32 @@ func FindActiveTasksByEntity(db *sql.DB, entityID string) ([]domain.Task, error)
 	`, entityID)
 }
 
+// EntityIDsWithActiveTasks returns the set of entity IDs that have at least
+// one non-terminal task, scoped to the given entity source (e.g. "jira").
+// Used to batch-check active-task membership in one query instead of N.
+func EntityIDsWithActiveTasks(db *sql.DB, source string) (map[string]struct{}, error) {
+	rows, err := db.Query(`
+		SELECT DISTINCT t.entity_id
+		FROM tasks t
+		JOIN entities e ON t.entity_id = e.id
+		WHERE e.source = ? AND t.status NOT IN ('done', 'dismissed')
+	`, source)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	ids := map[string]struct{}{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids[id] = struct{}{}
+	}
+	return ids, rows.Err()
+}
+
 // GetTask returns a single task by ID, joined with its entity for display fields.
 func GetTask(db *sql.DB, id string) (*domain.Task, error) {
 	var t domain.Task

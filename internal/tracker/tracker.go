@@ -10,6 +10,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
@@ -39,6 +40,7 @@ func New(database *sql.DB, bus *eventbus.Bus) *Tracker {
 
 // RefreshGitHub runs the full tracking cycle for GitHub PRs.
 func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, repos []string) (int, error) {
+	startedAt := time.Now()
 	// Phase 1: Discovery — find new PRs and register as entities.
 	discovered, err := t.discoverGitHub(client, username, repos)
 	if err != nil {
@@ -189,7 +191,7 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, repos 
 		len(discovered), len(entities), len(refreshed), eventsEmitted)
 
 	if len(entities) > 0 {
-		t.EmitPollComplete("github", len(entities), eventsEmitted)
+		t.EmitPollComplete("github", startedAt, len(entities), eventsEmitted)
 	}
 
 	return eventsEmitted, nil
@@ -245,6 +247,7 @@ func (t *Tracker) discoverGitHub(client *ghclient.Client, username string, repos
 
 // RefreshJira runs the full tracking cycle for Jira issues.
 func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, projects, pickupStatuses []string, username string) (int, error) {
+	startedAt := time.Now()
 	// Phase 1: Discovery
 	discovered, err := t.discoverJira(client, baseURL, projects, pickupStatuses)
 	if err != nil {
@@ -289,6 +292,9 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 		return 0, fmt.Errorf("list active jira entities: %w", err)
 	}
 	if len(entities) == 0 {
+		// No entities to refresh, but still emit poll-complete so carry-over
+		// readiness flips true on fresh-setup / empty-project cases.
+		t.EmitPollComplete("jira", startedAt, 0, 0)
 		return 0, nil
 	}
 
@@ -339,9 +345,11 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 	log.Printf("[tracker] Jira refresh: %d discovered, %d entities, %d refreshed, %d events",
 		len(discovered), len(entities), len(refreshed), eventsEmitted)
 
-	if len(entities) > 0 {
-		t.EmitPollComplete("jira", len(entities), eventsEmitted)
-	}
+	// Always fire the sentinel — it means "a poll cycle completed," not "a
+	// poll produced work." Carry-over readiness depends on this firing even
+	// on an empty first poll (e.g. projects configured but nothing assigned
+	// yet), otherwise the setup step shimmers forever.
+	t.EmitPollComplete("jira", startedAt, len(entities), eventsEmitted)
 
 	return eventsEmitted, nil
 }
@@ -446,11 +454,19 @@ func issueToSnapshot(issue jiraclient.Issue, baseURL string) domain.JiraSnapshot
 
 // --- Helpers ---
 
-// EmitPollComplete publishes the system poll-completed sentinel.
-func (t *Tracker) EmitPollComplete(source string, entityCount, eventCount int) {
+// EmitPollComplete publishes the system poll-completed sentinel. startedAt
+// is the wall-clock time the poll cycle started, carried in metadata so
+// subscribers can ignore sentinels emitted by pre-restart poll generations
+// (an old RefreshXxx goroutine that finishes after a config-triggered restart).
+func (t *Tracker) EmitPollComplete(source string, startedAt time.Time, entityCount, eventCount int) {
 	t.bus.Publish(domain.Event{
-		EventType:    domain.EventSystemPollCompleted,
-		MetadataJSON: mustJSON(map[string]any{"source": source, "entities": entityCount, "events": eventCount}),
-		CreatedAt:    time.Now(),
+		EventType: domain.EventSystemPollCompleted,
+		MetadataJSON: mustJSON(events.SystemPollCompletedMetadata{
+			Source:    source,
+			StartedAt: startedAt.UnixNano(),
+			Entities:  entityCount,
+			Events:    eventCount,
+		}),
+		CreatedAt: time.Now(),
 	})
 }

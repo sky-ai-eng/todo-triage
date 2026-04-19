@@ -37,6 +37,7 @@ type jiraSettings struct {
 	Projects         []string `json:"projects"`
 	PickupStatuses   []string `json:"pickup_statuses"`
 	InProgressStatus string   `json:"in_progress_status"`
+	DoneStatus       string   `json:"done_status"`
 }
 
 type serverSettings struct {
@@ -73,6 +74,7 @@ func (s *Server) handleSettingsGet(w http.ResponseWriter, r *http.Request) {
 			Projects:         cfg.Jira.Projects,
 			PickupStatuses:   cfg.Jira.PickupStatuses,
 			InProgressStatus: cfg.Jira.InProgressStatus,
+			DoneStatus:       cfg.Jira.DoneStatus,
 		},
 		Server: serverSettings{
 			Port: cfg.Server.Port,
@@ -110,6 +112,7 @@ type settingsUpdateRequest struct {
 	JiraProjects         []string `json:"jira_projects"`
 	JiraPickupStatuses   []string `json:"jira_pickup_statuses"`
 	JiraInProgressStatus string   `json:"jira_in_progress_status"`
+	JiraDoneStatus       string   `json:"jira_done_status"`
 	AIModel              string   `json:"ai_model"`
 	AIAutoDelegate       *bool    `json:"ai_auto_delegate_enabled"` // pointer to distinguish absent from false
 	ServerPort           int      `json:"server_port"`
@@ -139,6 +142,7 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 	prevJiraProjects := cfg.Jira.Projects
 	prevJiraPickupStatuses := cfg.Jira.PickupStatuses
 	prevJiraInProgressStatus := cfg.Jira.InProgressStatus
+	prevJiraDoneStatus := cfg.Jira.DoneStatus
 	prevJiraPollInterval := cfg.Jira.PollInterval
 
 	// --- Handle GitHub ---
@@ -252,6 +256,9 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 	if req.JiraInProgressStatus != "" {
 		cfg.Jira.InProgressStatus = req.JiraInProgressStatus
 	}
+	if req.JiraDoneStatus != "" {
+		cfg.Jira.DoneStatus = req.JiraDoneStatus
+	}
 	if req.AIModel != "" {
 		cfg.AI.Model = req.AIModel
 	}
@@ -282,13 +289,20 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 		!slices.Equal(cfg.Jira.Projects, prevJiraProjects) ||
 		!slices.Equal(cfg.Jira.PickupStatuses, prevJiraPickupStatuses) ||
 		cfg.Jira.InProgressStatus != prevJiraInProgressStatus ||
+		cfg.Jira.DoneStatus != prevJiraDoneStatus ||
 		cfg.Jira.PollInterval != prevJiraPollInterval
 
+	// Mark Jira restarted synchronously before launching the async callback so
+	// jiraPollReady flips false before this request returns. Otherwise the
+	// frontend can race ahead and hit /api/jira/stock while the old state is
+	// still reported as ready.
 	if ghChanged && s.onGitHubChanged != nil {
 		// GitHub change triggers full restart (includes Jira poller restart)
+		s.MarkJiraRestarted()
 		go s.onGitHubChanged()
 	} else if jiraChanged && s.onJiraChanged != nil {
 		// Jira-only change — just restart Jira poller
+		s.MarkJiraRestarted()
 		go s.onJiraChanged()
 	}
 
