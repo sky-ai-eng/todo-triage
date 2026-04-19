@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
@@ -240,6 +242,40 @@ func main() {
 		} else {
 			srv.SetJiraClient(nil, "")
 		}
+	})
+
+	// Subscriber: track Jira poll completions so /api/jira/stock knows when
+	// snapshots are ready to read.
+	bus.Subscribe(eventbus.Subscriber{
+		Name:   "jira-poll-tracker",
+		Filter: []string{"system:poll:"},
+		Handle: func(evt domain.Event) {
+			if evt.EventType != domain.EventSystemPollCompleted {
+				return
+			}
+			var meta struct {
+				Source    string `json:"source"`
+				StartedAt int64  `json:"started_at"`
+			}
+			if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {
+				log.Printf("[jira-poll-tracker] warning: failed to parse poll completion metadata: %v; raw metadata=%q", err, evt.MetadataJSON)
+				return
+			}
+			if meta.Source != "jira" {
+				return
+			}
+			// Pass the poll's started_at so MarkJiraPollComplete can ignore
+			// stale sentinels from pre-restart poll goroutines that finish
+			// late — RestartJira doesn't cancel in-flight RefreshJira calls.
+			// A missing field yields StartedAt=0; pass a zero time.Time so
+			// MarkJiraPollComplete treats it as "unknown generation" and
+			// accepts it rather than getting stuck on {status:"polling"}.
+			var startedAt time.Time
+			if meta.StartedAt != 0 {
+				startedAt = time.Unix(0, meta.StartedAt)
+			}
+			srv.MarkJiraPollComplete(startedAt)
+		},
 	})
 
 	// Initial start with current credentials
