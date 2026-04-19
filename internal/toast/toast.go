@@ -8,6 +8,8 @@
 package toast
 
 import (
+	"reflect"
+
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
@@ -43,8 +45,14 @@ type Broadcaster interface {
 // Fire publishes a toast with the given level/title/body. No-op when hub
 // is nil or body is empty — empty-body toasts would render as confusing
 // blank cards, so we drop them silently.
+//
+// Handles both untyped-nil (`hub == nil`) and typed-nil interface values
+// (e.g. `var h *websocket.Hub; toast.Fire(h, ...)`). A typed-nil passes
+// the naive `== nil` check because the interface's type descriptor is
+// non-nil, but calling Broadcast on it would panic. Reflection closes
+// that hole so every caller gets a consistent "nil hub = no-op" contract.
 func Fire(hub Broadcaster, level Level, title, body string) {
-	if hub == nil || body == "" {
+	if isNilBroadcaster(hub) || body == "" {
 		return
 	}
 	hub.Broadcast(websocket.Event{
@@ -56,6 +64,16 @@ func Fire(hub Broadcaster, level Level, title, body string) {
 			Body:  body,
 		},
 	})
+}
+
+// isNilBroadcaster catches both untyped nil and typed-nil pointers
+// (the common case — *websocket.Hub that was never initialized).
+func isNilBroadcaster(hub Broadcaster) bool {
+	if hub == nil {
+		return true
+	}
+	v := reflect.ValueOf(hub)
+	return v.Kind() == reflect.Ptr && v.IsNil()
 }
 
 // Convenience helpers — the common case has no title.

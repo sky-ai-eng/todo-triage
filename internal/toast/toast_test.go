@@ -55,9 +55,20 @@ func TestFire_EmptyBody_NoOp(t *testing.T) {
 }
 
 func TestFire_NilHub_NoOp(t *testing.T) {
-	// Nil hub must not panic — simplifies test setup and makes toast-fires
+	// Untyped nil must not panic — simplifies test setup and makes toast-fires
 	// safe in code paths where WS setup was skipped.
 	Error(nil, "anything")
+	// no panic = pass
+}
+
+func TestFire_TypedNilHub_NoOp(t *testing.T) {
+	// Typed-nil *websocket.Hub is the realistic pre-wiring state in packages
+	// that hold a hub pointer field (spawner, server, etc.). The naive
+	// `hub == nil` check on a Broadcaster interface does NOT catch this
+	// because the interface's type descriptor is non-nil; only the wrapped
+	// pointer is nil. Without the reflect guard, Broadcast would panic.
+	var hub *websocket.Hub // nil pointer, assignable to Broadcaster
+	Error(hub, "anything")
 	// no panic = pass
 }
 
