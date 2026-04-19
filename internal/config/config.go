@@ -66,9 +66,28 @@ func (c GitHubConfig) Ready(pat, url string) bool {
 	return pat != "" && url != ""
 }
 
-// Ready returns true if Jira is fully configured: credentials + at least one project.
+// Ready returns true if Jira is fully configured: credentials, at least one
+// project, AND all three status rules populated. The rule check is deliberate
+// — after a config-shape upgrade old YAML keys silently drop out, leaving the
+// new Pickup/InProgress/Done rules empty. Without this gate the poller would
+// still start and emit degraded events (no terminal check, failing claims on
+// the server), which violates the "full re-setup on upgrade" contract.
+// Pickup only needs members (TF never writes to pickup); InProgress and Done
+// additionally need a canonical write target.
 func (c JiraConfig) Ready(pat, url string) bool {
-	return pat != "" && url != "" && len(c.Projects) > 0
+	if pat == "" || url == "" || len(c.Projects) == 0 {
+		return false
+	}
+	if len(c.Pickup.Members) == 0 {
+		return false
+	}
+	if c.InProgress.Canonical == "" || len(c.InProgress.Members) == 0 {
+		return false
+	}
+	if c.Done.Canonical == "" || len(c.Done.Members) == 0 {
+		return false
+	}
+	return true
 }
 
 // Default returns a Config with sensible defaults matching the spec.
