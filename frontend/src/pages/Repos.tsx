@@ -39,11 +39,15 @@ function BranchPicker({
   const [loading, setLoading] = useState(false)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const mountedRef = useRef(true)
+  // Current in-flight fetch's AbortController. Each new fetchBranches call
+  // aborts the previous one so out-of-order resolution can't clobber the
+  // list with stale results (user types "ma" then "main"; "ma" resolves
+  // later and overwrites "main"'s results without this guard).
+  const abortRef = useRef<AbortController | null>(null)
 
-  // Cleanup on unmount: drop any pending debounce timer AND mark the
-  // component unmounted so in-flight fetches (started before unmount but
-  // still resolving) don't setState on a dead tree. Two guards cover both
-  // pre-fetch and mid-fetch unmounts.
+  // Cleanup on unmount: drop any pending debounce timer, abort any in-flight
+  // fetch, and mark the component unmounted so anything that still resolves
+  // against stale references doesn't setState on a dead tree.
   useEffect(() => {
     mountedRef.current = true
     return () => {
@@ -52,6 +56,8 @@ function BranchPicker({
         clearTimeout(debounceRef.current)
         debounceRef.current = undefined
       }
+      abortRef.current?.abort()
+      abortRef.current = null
     }
   }, [])
 
@@ -65,18 +71,33 @@ function BranchPicker({
   const fetchBranches = useCallback(
     async (q: string) => {
       if (!mountedRef.current) return
+      // Cancel the previous in-flight so its late resolution can't overwrite
+      // the newer request's results, and save network work.
+      abortRef.current?.abort()
+      const controller = new AbortController()
+      abortRef.current = controller
+
       setLoading(true)
       try {
         const res = await fetch(
           `/api/repos/${profile.owner}/${profile.repo}/branches?q=${encodeURIComponent(q)}`,
+          { signal: controller.signal },
         )
         if (res.ok && mountedRef.current) {
           setBranches((await res.json()) as string[])
         }
-      } catch {
-        // non-critical — list just stays empty
+      } catch (err) {
+        // AbortError is expected when a newer request supersedes this one;
+        // the superseding call already set loading=true and will handle
+        // state. Any other error is non-critical — list stays as-is.
+        if ((err as { name?: string })?.name === 'AbortError') return
       } finally {
-        if (mountedRef.current) setLoading(false)
+        // Only clear loading if this request wasn't superseded — otherwise
+        // we'd flash the spinner off between two rapid keystrokes even
+        // though a newer fetch is still in flight.
+        if (!controller.signal.aborted && mountedRef.current) {
+          setLoading(false)
+        }
       }
     },
     [profile.owner, profile.repo],
