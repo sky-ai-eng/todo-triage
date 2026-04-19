@@ -97,6 +97,34 @@ func ListTriggersForPrompt(db *sql.DB, promptID string) ([]domain.PromptTrigger,
 	return triggers, rows.Err()
 }
 
+// SeedPromptTrigger inserts a system trigger or updates its config on
+// subsequent boots, but preserves the user's enabled/disabled choice.
+// The ON CONFLICT clause deliberately omits `enabled` so a user who
+// enabled (or disabled) the trigger keeps their preference across restarts.
+func SeedPromptTrigger(db *sql.DB, t domain.PromptTrigger) error {
+	if t.TriggerType != domain.TriggerTypeEvent {
+		return fmt.Errorf("unsupported trigger_type %q: only %q is supported", t.TriggerType, domain.TriggerTypeEvent)
+	}
+
+	now := time.Now()
+	_, err := db.Exec(`
+		INSERT INTO prompt_triggers (id, prompt_id, trigger_type, event_type, scope_predicate_json,
+		                             breaker_threshold, cooldown_seconds, min_autonomy_suitability, enabled, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			prompt_id = excluded.prompt_id,
+			trigger_type = excluded.trigger_type,
+			event_type = excluded.event_type,
+			scope_predicate_json = excluded.scope_predicate_json,
+			breaker_threshold = excluded.breaker_threshold,
+			cooldown_seconds = excluded.cooldown_seconds,
+			min_autonomy_suitability = excluded.min_autonomy_suitability,
+			updated_at = ?
+	`, t.ID, t.PromptID, t.TriggerType, t.EventType, t.ScopePredicateJSON,
+		t.BreakerThreshold, t.CooldownSeconds, t.MinAutonomySuitability, t.Enabled, now, now, now)
+	return err
+}
+
 // SavePromptTrigger inserts or updates a trigger. Validates trigger_type.
 func SavePromptTrigger(db *sql.DB, t domain.PromptTrigger) error {
 	if t.TriggerType != domain.TriggerTypeEvent {
