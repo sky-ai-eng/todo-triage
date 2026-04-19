@@ -175,10 +175,23 @@ function BranchPicker({
 
 type DotState = 'ready' | 'profiling' | 'no-docs'
 
+// Accessible labels for the status LED. Same string goes on title
+// (sighted hover) and aria-label (screen reader / AT), so the signal
+// the dot conveys visually is conveyed to every user.
+const DOT_LABELS: Record<DotState, string> = {
+  ready: 'Profile ready',
+  profiling: 'Profiling in progress',
+  'no-docs': 'No documentation files — profile cannot be generated',
+}
+
 function StatusDot({ state }: { state: DotState }) {
+  const label = DOT_LABELS[state]
   if (state === 'ready') {
     return (
       <span
+        role="img"
+        aria-label={label}
+        title={label}
         className="block h-2 w-2 shrink-0 rounded-full bg-[var(--color-accent)]"
         style={{ boxShadow: '0 0 8px 0 var(--color-accent-soft)' }}
       />
@@ -186,15 +199,24 @@ function StatusDot({ state }: { state: DotState }) {
   }
   if (state === 'profiling') {
     return (
-      <span className="relative block h-2 w-2 shrink-0">
-        <span className="absolute inset-0 animate-ping rounded-full bg-[var(--color-accent)] opacity-50" />
-        <span className="absolute inset-0 rounded-full border border-[var(--color-accent)]" />
+      <span role="img" aria-label={label} title={label} className="relative block h-2 w-2 shrink-0">
+        <span
+          aria-hidden
+          className="absolute inset-0 animate-ping rounded-full bg-[var(--color-accent)] opacity-50"
+        />
+        <span
+          aria-hidden
+          className="absolute inset-0 rounded-full border border-[var(--color-accent)]"
+        />
       </span>
     )
   }
   // no-docs
   return (
     <span
+      role="img"
+      aria-label={label}
+      title={label}
       className="block h-2 w-2 shrink-0 rounded-full border"
       style={{ borderColor: 'var(--color-dismiss)' }}
     />
