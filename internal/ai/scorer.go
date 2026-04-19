@@ -242,9 +242,18 @@ func StripCodeFences(b []byte) []byte {
 	return bytes.TrimSpace(s)
 }
 
-func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
+// truncate caps s at maxRunes codepoints. Rune-based (not byte-based) so we
+// never cut a multi-byte UTF-8 sequence in half — the downstream LLM call
+// tolerates invalid bytes, but treating the cap as "runes" everywhere keeps
+// the whole pipeline's semantics consistent with the tracker's store-time
+// truncation (descriptionStoreMaxRunes in internal/tracker/tracker.go).
+func truncate(s string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
 		return s
 	}
-	return s[:maxLen] + "..."
+	return string(runes[:maxRunes]) + "..."
 }
