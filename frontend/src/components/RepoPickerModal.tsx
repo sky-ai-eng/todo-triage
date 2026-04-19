@@ -114,8 +114,22 @@ export default function RepoPickerModal({
       {/* List */}
       <div className="flex-1 overflow-y-auto px-6 min-h-0">
         {loading && (
-          <div className="flex items-center justify-center py-12">
-            <p className="text-[13px] text-text-tertiary">Loading repositories...</p>
+          <div className="space-y-1 py-2">
+            {[1, 2, 3, 4, 5, 6, 7, 8].map((i) => (
+              <div key={i} className="flex items-center gap-3 px-3 py-2.5 rounded-xl">
+                <div className="w-4 h-4 rounded bg-black/[0.04] animate-pulse" />
+                <div className="flex-1 space-y-1.5">
+                  <div
+                    className="h-3 rounded bg-black/[0.04] animate-pulse"
+                    style={{ width: `${55 + ((i * 17) % 35)}%` }}
+                  />
+                  <div
+                    className="h-2.5 rounded bg-black/[0.03] animate-pulse"
+                    style={{ width: `${30 + ((i * 23) % 40)}%` }}
+                  />
+                </div>
+              </div>
+            ))}
           </div>
         )}
 
