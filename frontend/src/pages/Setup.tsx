@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { CheckCircle2, ChevronRight } from 'lucide-react'
-import RepoPickerModal from '../components/RepoPickerModal'
+import RepoPickerModal, { type GitHubRepo } from '../components/RepoPickerModal'
 
 interface JiraStatus {
   id: string
@@ -18,6 +18,10 @@ export default function Setup() {
 
   // GitHub (mandatory)
   const [githubForm, setGithubForm] = useState({ url: '', pat: '' })
+
+  // Repo selection — cached so navigating back doesn't re-fetch or lose selection
+  const [cachedRepos, setCachedRepos] = useState<GitHubRepo[] | undefined>(undefined)
+  const [selectedRepos, setSelectedRepos] = useState<string[]>([])
 
   // Jira state
   const [jiraConnected, setJiraConnected] = useState(false)
@@ -80,6 +84,7 @@ export default function Setup() {
         setLoading(false)
         return
       }
+      setSelectedRepos(repos)
       setStep('integrations')
     } catch {
       setError('Could not connect to server')
@@ -261,11 +266,14 @@ export default function Setup() {
       {/* Step 2: Repo selection */}
       {step === 'repos' && (
         <RepoPickerModal
-          selected={[]}
+          selected={selectedRepos}
           onSave={saveRepos}
           onClose={() => {
             /* cannot skip */
           }}
+          onBack={() => setStep('github')}
+          cachedRepos={cachedRepos}
+          onReposFetched={setCachedRepos}
           inline
         />
       )}

@@ -18,18 +18,34 @@ interface Props {
   onClose: () => void
   /** If true, renders as a full-page step instead of an overlay */
   inline?: boolean
+  /** If provided, shows a Back button in inline mode */
+  onBack?: () => void
+  /** Pre-fetched repo list — skips the /api/github/repos fetch if provided */
+  cachedRepos?: GitHubRepo[]
+  /** Called with fetched repos so the parent can cache them */
+  onReposFetched?: (repos: GitHubRepo[]) => void
 }
 
-export default function RepoPickerModal({ selected, onSave, onClose, inline }: Props) {
-  const [repos, setRepos] = useState<GitHubRepo[]>([])
-  const [loading, setLoading] = useState(true)
+export type { GitHubRepo }
+
+export default function RepoPickerModal({
+  selected,
+  onSave,
+  onClose,
+  inline,
+  onBack,
+  cachedRepos,
+  onReposFetched,
+}: Props) {
+  const [repos, setRepos] = useState<GitHubRepo[]>(cachedRepos ?? [])
+  const [loading, setLoading] = useState(!cachedRepos)
   const [error, setError] = useState('')
   const [search, setSearch] = useState('')
   const [checked, setChecked] = useState<Set<string>>(new Set(selected))
 
   useEffect(() => {
-    fetchRepos()
-  }, [])
+    if (!cachedRepos) fetchRepos()
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const fetchRepos = async () => {
     setLoading(true)
@@ -43,6 +59,7 @@ export default function RepoPickerModal({ selected, onSave, onClose, inline }: P
       }
       const data: GitHubRepo[] = await res.json()
       setRepos(data)
+      onReposFetched?.(data)
     } catch {
       setError('Could not connect to server')
     } finally {
@@ -178,6 +195,15 @@ export default function RepoPickerModal({ selected, onSave, onClose, inline }: P
           {checked.size} repo{checked.size !== 1 ? 's' : ''} selected
         </span>
         <div className="flex gap-3">
+          {inline && onBack && (
+            <button
+              type="button"
+              onClick={onBack}
+              className="text-[13px] text-text-secondary hover:text-text-primary bg-white/50 hover:bg-white/80 border border-border-subtle rounded-xl px-4 py-2 transition-colors"
+            >
+              Back
+            </button>
+          )}
           {!inline && (
             <button
               type="button"
