@@ -145,8 +145,18 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	creds, _ := auth.Load()
-	if creds.JiraPAT == "" || creds.JiraURL == "" {
+	if creds.JiraPAT == "" || creds.JiraURL == "" || creds.JiraDisplayName == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Jira not configured"})
+		return
+	}
+
+	// Batch-fetch the set of Jira entities that already have an active task so
+	// eligibility checks run in O(1) per action. Fail the request if this
+	// fails — otherwise we'd act on tickets without knowing whether they're
+	// already being tracked.
+	taskedEntityIDs, err := db.EntityIDsWithActiveTasks(s.db, "jira")
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to check active tasks: " + err.Error()})
 		return
 	}
 
@@ -164,6 +174,32 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 		entity, err := db.GetEntityBySource(s.db, "jira", a.IssueKey)
 		if err != nil || entity == nil {
 			failed = append(failed, stockFailure{a.IssueKey, a.Action, "entity not found"})
+			continue
+		}
+
+		// Enforce the same eligibility rules as the GET list. Prevents acting
+		// on tickets that shouldn't be in carry-over at all — stale frontend
+		// state, tampered requests, or tickets that changed since GET.
+		if entity.SnapshotJSON == "" || entity.SnapshotJSON == "{}" {
+			failed = append(failed, stockFailure{a.IssueKey, a.Action, "no snapshot yet"})
+			continue
+		}
+		var snap domain.JiraSnapshot
+		if err := json.Unmarshal([]byte(entity.SnapshotJSON), &snap); err != nil {
+			failed = append(failed, stockFailure{a.IssueKey, a.Action, "invalid snapshot"})
+			continue
+		}
+		if snap.Assignee != creds.JiraDisplayName {
+			failed = append(failed, stockFailure{a.IssueKey, a.Action, "not assigned to you"})
+			continue
+		}
+		if isJiraStatusTerminal(snap.Status) ||
+			(cfg.Jira.DoneStatus != "" && snap.Status == cfg.Jira.DoneStatus) {
+			failed = append(failed, stockFailure{a.IssueKey, a.Action, "ticket is already terminal"})
+			continue
+		}
+		if _, hasTask := taskedEntityIDs[entity.ID]; hasTask {
+			failed = append(failed, stockFailure{a.IssueKey, a.Action, "ticket already has an active task"})
 			continue
 		}
 
