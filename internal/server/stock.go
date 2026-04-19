@@ -53,10 +53,18 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Batch-fetch the set of Jira entity IDs that already have an active task
+	// so we don't run N queries inside the loop. If this fails we can't tell
+	// which entities are safe to show, so fail the request outright.
+	taskedEntityIDs, err := db.EntityIDsWithActiveTasks(s.db, "jira")
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to check active tasks: " + err.Error()})
+		return
+	}
+
 	tickets := make([]stockTicket, 0, len(entities))
 	for _, e := range entities {
-		active, _ := db.FindActiveTasksByEntity(s.db, e.ID)
-		if len(active) > 0 {
+		if _, hasTask := taskedEntityIDs[e.ID]; hasTask {
 			continue
 		}
 
