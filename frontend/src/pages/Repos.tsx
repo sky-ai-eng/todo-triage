@@ -139,7 +139,11 @@ function BranchPicker({
             ) : (
               branches.map((b) => {
                 const isDefault = b === profile.default_branch
-                const isCurrent = b === (profile.base_branch || '')
+                // Compare against the effective branch (same fallback chain
+                // as the trigger chip), not raw base_branch — otherwise
+                // when the user has no override set, nothing highlights
+                // even though a branch IS effectively selected.
+                const isCurrent = b === effective
                 return (
                   <button
                     key={b}
