@@ -78,9 +78,13 @@ const scoringModel = "haiku"
 
 // ScoreTasks runs the AI scoring pipeline on a set of tasks.
 // It batches into chunks of batchSize and runs them in parallel.
-func ScoreTasks(database *sql.DB, tasks []domain.Task) ([]TaskScore, error) {
+// The returned failedBatches count is the number of batches that errored —
+// non-fatal (the function still returns whatever scores succeeded), but the
+// caller surfaces it as a warning toast so the user knows some tasks were
+// skipped this cycle.
+func ScoreTasks(database *sql.DB, tasks []domain.Task) (scores []TaskScore, failedBatches int, err error) {
 	if len(tasks) == 0 {
-		return nil, nil
+		return nil, 0, nil
 	}
 
 	// Load repo profiles for context injection.
@@ -159,15 +163,17 @@ func ScoreTasks(database *sql.DB, tasks []domain.Task) ([]TaskScore, error) {
 
 	// Collect results
 	var allScores []TaskScore
+	failed := 0
 	for i, r := range results {
 		if r.err != nil {
 			log.Printf("[ai] batch %d/%d failed: %v", i+1, len(batches), r.err)
+			failed++
 			continue
 		}
 		allScores = append(allScores, r.scores...)
 	}
 
-	return allScores, nil
+	return allScores, failed, nil
 }
 
 func scoreBatch(tasks []TaskInput, repoContext string) ([]TaskScore, error) {

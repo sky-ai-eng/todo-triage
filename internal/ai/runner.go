@@ -14,6 +14,14 @@ import (
 type RunnerCallbacks struct {
 	OnScoringStarted   func(taskIDs []string)
 	OnScoringCompleted func(taskIDs []string)
+	// OnBatchFailures fires once per scoring cycle if one or more batches
+	// errored. failed is the number of failed batches (out of total). Wired
+	// to a warning toast in main so the user knows tasks were skipped without
+	// log-diving. Fatal errors (DB failures) go through OnError.
+	OnBatchFailures func(failed, total int)
+	// OnError fires on fatal scoring errors (query, write, or scorer-returned
+	// errors that abort the cycle).
+	OnError func(err error)
 }
 
 // Runner manages AI scoring as a background process.
@@ -50,6 +58,13 @@ func (r *Runner) Trigger() {
 	case r.trigger <- struct{}{}:
 	default:
 		// already triggered, skip
+	}
+}
+
+// reportError invokes the OnError callback if set.
+func (r *Runner) reportError(err error) {
+	if r.callbacks.OnError != nil {
+		r.callbacks.OnError(err)
 	}
 }
 
@@ -95,6 +110,7 @@ func (r *Runner) run() {
 	tasks, err := db.UnscoredTasks(r.database)
 	if err != nil {
 		log.Printf("[ai] error fetching unscored tasks: %v", err)
+		r.reportError(err)
 		return
 	}
 
@@ -119,10 +135,16 @@ func (r *Runner) run() {
 		r.callbacks.OnScoringStarted(taskIDs)
 	}
 
-	scores, err := ScoreTasks(r.database, tasks)
+	scores, failedBatches, err := ScoreTasks(r.database, tasks)
 	if err != nil {
 		log.Printf("[ai] scoring failed: %v", err)
+		r.reportError(err)
 		return
+	}
+	if failedBatches > 0 && r.callbacks.OnBatchFailures != nil {
+		// Compute total batch count from the number of tasks (ceil div).
+		total := (len(tasks) + batchSize - 1) / batchSize
+		r.callbacks.OnBatchFailures(failedBatches, total)
 	}
 
 	// Build a source map for repo-match blocked_reason logic.
@@ -156,6 +178,7 @@ func (r *Runner) run() {
 
 	if err := db.UpdateTaskScores(r.database, updates); err != nil {
 		log.Printf("[ai] error saving scores: %v", err)
+		r.reportError(err)
 		return
 	}
 
