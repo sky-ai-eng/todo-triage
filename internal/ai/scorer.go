@@ -94,30 +94,34 @@ func ScoreTasks(database *sql.DB, tasks []domain.Task) ([]TaskScore, error) {
 		}
 	}
 
-	// Batch-load entity snapshots so we can enrich inputs with descriptions
-	// in a single query instead of N per-task lookups. Snapshot parse errors
-	// are tolerated — the scorer can still run with title-only context.
+	// Batch-load descriptions from the dedicated entities.description column
+	// (not snapshot_json — description is bulk text, kept outside diff scope).
+	// Failures degrade to title-only context rather than aborting scoring.
 	entityIDs := make([]string, 0, len(tasks))
 	for _, t := range tasks {
 		entityIDs = append(entityIDs, t.EntityID)
 	}
-	snapshots := map[string]string{}
+	descriptions := map[string]string{}
 	if database != nil {
-		if snaps, err := db.GetEntitySnapshots(database, entityIDs); err != nil {
-			log.Printf("[ai] warning: failed to load entity snapshots for scoring: %v", err)
+		if descs, err := db.GetEntityDescriptions(database, entityIDs); err != nil {
+			log.Printf("[ai] warning: failed to load entity descriptions for scoring: %v", err)
 		} else {
-			snapshots = snaps
+			descriptions = descs
 		}
 	}
 
 	// Build inputs
 	inputs := make([]TaskInput, len(tasks))
 	for i, t := range tasks {
+		desc := descriptions[t.EntityID]
+		if desc != "" {
+			desc = truncate(strings.TrimSpace(desc), descriptionMaxLen)
+		}
 		inputs[i] = TaskInput{
 			ID:              t.ID,
 			Source:          t.EntitySource,
 			Title:           t.Title,
-			Description:     extractDescription(t, snapshots[t.EntityID]),
+			Description:     desc,
 			EventType:       t.EventType,
 			EntitySourceID:  t.EntitySourceID,
 			Severity:        t.Severity,
@@ -243,24 +247,4 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
-}
-
-// extractDescription pulls the description body out of an entity snapshot so
-// the scorer sees the ticket body, not just the title. Returns empty when
-// the snapshot is missing or the entity has no body field. Currently wired
-// for Jira; GitHub PR snapshots don't carry a Description today, so this
-// gracefully returns "" for that source.
-func extractDescription(t domain.Task, snapshotJSON string) string {
-	if snapshotJSON == "" {
-		return ""
-	}
-	switch t.EntitySource {
-	case "jira":
-		var snap domain.JiraSnapshot
-		if err := json.Unmarshal([]byte(snapshotJSON), &snap); err != nil {
-			return ""
-		}
-		return truncate(strings.TrimSpace(snap.Description), descriptionMaxLen)
-	}
-	return ""
 }

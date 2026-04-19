@@ -265,7 +265,8 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 		log.Printf("[tracker] Jira discovery error: %v", err)
 	}
 
-	for _, snap := range discovered {
+	for _, state := range discovered {
+		snap := state.Snap
 		entity, created, err := db.FindOrCreateEntity(t.database,
 			"jira", snap.Key, "issue", snap.Summary, snap.URL)
 		if err != nil {
@@ -277,6 +278,11 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 			if err := db.UpdateEntitySnapshot(t.database, entity.ID, string(snapJSON)); err != nil {
 				log.Printf("[tracker] failed to seed snapshot for %s: %v", snap.Key, err)
 			}
+			if state.Description != "" {
+				if err := db.UpdateEntityDescription(t.database, entity.ID, state.Description); err != nil {
+					log.Printf("[tracker] failed to seed description for %s: %v", snap.Key, err)
+				}
+			}
 			if terminal(snap.Status) {
 				if err := db.MarkEntityClosed(t.database, entity.ID); err != nil {
 					log.Printf("[tracker] failed to mark entity %s closed on discovery: %v", snap.Key, err)
@@ -285,6 +291,9 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 		} else {
 			if entity.Title != snap.Summary {
 				_ = db.UpdateEntityTitle(t.database, entity.ID, snap.Summary)
+			}
+			if entity.Description != state.Description {
+				_ = db.UpdateEntityDescription(t.database, entity.ID, state.Description)
 			}
 			// Reactivate if a previously-closed issue reappears as open.
 			if !terminal(snap.Status) && entity.State == "closed" {
@@ -322,10 +331,11 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 	// Phase 3: Diff + emit events.
 	eventsEmitted := 0
 	for _, e := range entities {
-		newSnap, ok := refreshed[e.SourceID]
+		newState, ok := refreshed[e.SourceID]
 		if !ok {
 			continue
 		}
+		newSnap := newState.Snap
 
 		var prevSnap domain.JiraSnapshot
 		if e.SnapshotJSON != "" && e.SnapshotJSON != "{}" {
@@ -345,6 +355,12 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 		}
 		if e.Title != newSnap.Summary {
 			_ = db.UpdateEntityTitle(t.database, e.ID, newSnap.Summary)
+		}
+		// Description is kept on a dedicated column rather than in the
+		// snapshot; only write when it actually changed so we don't churn
+		// disk on every poll for unchanged multi-KB bodies.
+		if e.Description != newState.Description {
+			_ = db.UpdateEntityDescription(t.database, e.ID, newState.Description)
 		}
 
 		for _, evt := range events {
@@ -366,7 +382,7 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 }
 
 // discoverJira runs JQL queries to find new issues.
-func (t *Tracker) discoverJira(client *jiraclient.Client, baseURL string, projects, pickupStatuses []string) ([]domain.JiraSnapshot, error) {
+func (t *Tracker) discoverJira(client *jiraclient.Client, baseURL string, projects, pickupStatuses []string) ([]jiraIssueState, error) {
 	if len(projects) == 0 {
 		return nil, nil
 	}
@@ -387,7 +403,7 @@ func (t *Tracker) discoverJira(client *jiraclient.Client, baseURL string, projec
 		`project IN (%s) AND assignee = currentUser() AND status NOT IN (Done, Closed, Resolved)`, projectList))
 
 	seen := map[string]bool{}
-	var all []domain.JiraSnapshot
+	var all []jiraIssueState
 
 	fields := []string{"summary", "description", "status", "assignee", "priority", "labels", "issuetype", "parent", "comment"}
 
@@ -400,7 +416,7 @@ func (t *Tracker) discoverJira(client *jiraclient.Client, baseURL string, projec
 		for _, issue := range issues {
 			if !seen[issue.Key] {
 				seen[issue.Key] = true
-				all = append(all, issueToSnapshot(issue, baseURL))
+				all = append(all, issueToState(issue, baseURL))
 			}
 		}
 	}
@@ -409,8 +425,8 @@ func (t *Tracker) discoverJira(client *jiraclient.Client, baseURL string, projec
 }
 
 // batchFetchJira fetches current state for tracked Jira issues.
-func (t *Tracker) batchFetchJira(client *jiraclient.Client, baseURL string, keys []string) (map[string]domain.JiraSnapshot, error) {
-	results := make(map[string]domain.JiraSnapshot, len(keys))
+func (t *Tracker) batchFetchJira(client *jiraclient.Client, baseURL string, keys []string) (map[string]jiraIssueState, error) {
+	results := make(map[string]jiraIssueState, len(keys))
 	fields := []string{"summary", "description", "status", "assignee", "priority", "labels", "issuetype", "parent", "comment"}
 
 	for i := 0; i < len(keys); i += jiraBatchSize {
@@ -427,20 +443,31 @@ func (t *Tracker) batchFetchJira(client *jiraclient.Client, baseURL string, keys
 		}
 
 		for _, issue := range issues {
-			results[issue.Key] = issueToSnapshot(issue, baseURL)
+			results[issue.Key] = issueToState(issue, baseURL)
 		}
 	}
 
 	return results, nil
 }
 
-// issueToSnapshot converts a Jira API Issue to our snapshot type.
-func issueToSnapshot(issue jiraclient.Issue, baseURL string) domain.JiraSnapshot {
+// jiraIssueState bundles the diff-scope snapshot with the bulk description
+// body. Description is carried alongside rather than inside the snapshot so
+// the persisted snapshot_json stays small — diff reads don't drag multi-KB
+// issue bodies through every poll.
+type jiraIssueState struct {
+	Snap        domain.JiraSnapshot
+	Description string
+}
+
+// issueToState converts a Jira API Issue into the diff-scope snapshot plus
+// a flattened description. The description is stored on entities.description
+// separately; the snapshot itself only carries fields that DiffJiraSnapshots
+// compares.
+func issueToState(issue jiraclient.Issue, baseURL string) jiraIssueState {
 	snap := domain.JiraSnapshot{
-		Key:         issue.Key,
-		Summary:     issue.Fields.Summary,
-		Description: jiraclient.ExtractDescriptionText(issue.Fields.Description),
-		URL:         fmt.Sprintf("%s/browse/%s", baseURL, issue.Key),
+		Key:     issue.Key,
+		Summary: issue.Fields.Summary,
+		URL:     fmt.Sprintf("%s/browse/%s", baseURL, issue.Key),
 	}
 	if issue.Fields.Status != nil {
 		snap.Status = issue.Fields.Status.Name
@@ -461,7 +488,10 @@ func issueToSnapshot(issue jiraclient.Issue, baseURL string) domain.JiraSnapshot
 		snap.CommentCount = issue.Fields.Comment.Total
 	}
 	snap.Labels = issue.Fields.Labels
-	return snap
+	return jiraIssueState{
+		Snap:        snap,
+		Description: jiraclient.ExtractDescriptionText(issue.Fields.Description),
+	}
 }
 
 // --- Helpers ---

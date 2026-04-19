@@ -91,6 +91,15 @@ func UpdateEntityTitle(db *sql.DB, entityID, title string) error {
 	return err
 }
 
+// UpdateEntityDescription updates the flattened description body for an entity.
+// Description lives outside snapshot_json because it's large and not part of
+// the diff scope — keeping it off the snapshot means diff reads stay small
+// even on tickets with multi-KB bodies.
+func UpdateEntityDescription(db *sql.DB, entityID, description string) error {
+	_, err := db.Exec(`UPDATE entities SET description = ? WHERE id = ?`, description, entityID)
+	return err
+}
+
 // CloseEntity sets state='closed' and closed_at=now. Called by the entity
 // lifecycle handler when an entity-terminating event fires.
 func CloseEntity(db *sql.DB, entityID string) error {
@@ -104,7 +113,7 @@ func CloseEntity(db *sql.DB, entityID string) error {
 func GetEntity(db *sql.DB, id string) (*domain.Entity, error) {
 	row := db.QueryRow(`
 		SELECT id, source, source_id, kind, COALESCE(title, ''), COALESCE(url, ''),
-		       COALESCE(snapshot_json, ''), state, created_at, last_polled_at, closed_at
+		       COALESCE(snapshot_json, ''), COALESCE(description, ''), state, created_at, last_polled_at, closed_at
 		FROM entities WHERE id = ?
 	`, id)
 	return scanEntity(row)
@@ -114,32 +123,31 @@ func GetEntity(db *sql.DB, id string) (*domain.Entity, error) {
 func GetEntityBySource(db *sql.DB, source, sourceID string) (*domain.Entity, error) {
 	row := db.QueryRow(`
 		SELECT id, source, source_id, kind, COALESCE(title, ''), COALESCE(url, ''),
-		       COALESCE(snapshot_json, ''), state, created_at, last_polled_at, closed_at
+		       COALESCE(snapshot_json, ''), COALESCE(description, ''), state, created_at, last_polled_at, closed_at
 		FROM entities WHERE source = ? AND source_id = ?
 	`, source, sourceID)
 	return scanEntity(row)
 }
 
-// entitySnapshotsChunkSize caps the number of `?` placeholders per query so
-// we stay well under SQLite's default SQLITE_LIMIT_VARIABLE_NUMBER (999).
-// Chunking runs multiple round-trips but keeps the query schema compatible
-// with the default build — the scorer's entity set can easily exceed 1k
-// tasks on large repos.
-const entitySnapshotsChunkSize = 500
+// entityIDInChunkSize caps the number of `?` placeholders per batched
+// WHERE id IN (...) query so we stay well under SQLite's default
+// SQLITE_LIMIT_VARIABLE_NUMBER (999). Chunking runs multiple round-trips
+// but keeps the query schema compatible with the default build — the
+// scorer's entity set can easily exceed 1k tasks on large repos.
+const entityIDInChunkSize = 500
 
-// GetEntitySnapshots returns snapshot_json for the given entity IDs as a map
-// keyed by entity ID. Missing/empty snapshots are omitted. Callers commonly
-// pass duplicates (multiple tasks per entity), so IDs are deduplicated before
-// the query runs. Chunks the IN clause to respect SQLite's variable limit.
-func GetEntitySnapshots(database *sql.DB, ids []string) (map[string]string, error) {
+// GetEntityDescriptions returns the flattened description body for each of
+// the given entity IDs as a map keyed by entity ID. Empty descriptions are
+// omitted. Used by the scorer to enrich TaskInput without dragging the
+// full snapshot_json through the call. Dedupes IDs (multiple tasks can
+// share an entity — e.g. ci_failed + new_commits on the same PR) and
+// chunks the IN clause to respect SQLite's variable limit.
+func GetEntityDescriptions(database *sql.DB, ids []string) (map[string]string, error) {
 	out := make(map[string]string, len(ids))
 	if len(ids) == 0 {
 		return out, nil
 	}
 
-	// Dedupe first — the scorer passes one ID per task, and multiple tasks
-	// share an entity (e.g. ci_failed + new_commits on the same PR). Also
-	// pushes us further under the variable limit before chunking kicks in.
 	seen := make(map[string]struct{}, len(ids))
 	unique := make([]string, 0, len(ids))
 	for _, id := range ids {
@@ -153,8 +161,8 @@ func GetEntitySnapshots(database *sql.DB, ids []string) (map[string]string, erro
 		unique = append(unique, id)
 	}
 
-	for start := 0; start < len(unique); start += entitySnapshotsChunkSize {
-		end := start + entitySnapshotsChunkSize
+	for start := 0; start < len(unique); start += entityIDInChunkSize {
+		end := start + entityIDInChunkSize
 		if end > len(unique) {
 			end = len(unique)
 		}
@@ -166,20 +174,20 @@ func GetEntitySnapshots(database *sql.DB, ids []string) (map[string]string, erro
 			placeholders[i] = "?"
 			args[i] = id
 		}
-		query := `SELECT id, COALESCE(snapshot_json, '') FROM entities WHERE id IN (` +
+		query := `SELECT id, COALESCE(description, '') FROM entities WHERE id IN (` +
 			strings.Join(placeholders, ",") + `)`
 		rows, err := database.Query(query, args...)
 		if err != nil {
 			return nil, err
 		}
 		for rows.Next() {
-			var id, snap string
-			if err := rows.Scan(&id, &snap); err != nil {
+			var id, desc string
+			if err := rows.Scan(&id, &desc); err != nil {
 				rows.Close()
 				return nil, err
 			}
-			if snap != "" && snap != "{}" {
-				out[id] = snap
+			if desc != "" {
+				out[id] = desc
 			}
 		}
 		if err := rows.Err(); err != nil {
@@ -196,7 +204,7 @@ func GetEntitySnapshots(database *sql.DB, ids []string) (map[string]string, erro
 func ListActiveEntities(db *sql.DB, source string) ([]domain.Entity, error) {
 	rows, err := db.Query(`
 		SELECT id, source, source_id, kind, COALESCE(title, ''), COALESCE(url, ''),
-		       COALESCE(snapshot_json, ''), state, created_at, last_polled_at, closed_at
+		       COALESCE(snapshot_json, ''), COALESCE(description, ''), state, created_at, last_polled_at, closed_at
 		FROM entities WHERE source = ? AND state = 'active'
 		ORDER BY last_polled_at ASC
 	`, source)
@@ -209,7 +217,7 @@ func ListActiveEntities(db *sql.DB, source string) ([]domain.Entity, error) {
 	for rows.Next() {
 		var e domain.Entity
 		if err := rows.Scan(&e.ID, &e.Source, &e.SourceID, &e.Kind, &e.Title, &e.URL,
-			&e.SnapshotJSON, &e.State, &e.CreatedAt, &e.LastPolledAt, &e.ClosedAt); err != nil {
+			&e.SnapshotJSON, &e.Description, &e.State, &e.CreatedAt, &e.LastPolledAt, &e.ClosedAt); err != nil {
 			return nil, err
 		}
 		entities = append(entities, e)
@@ -220,7 +228,7 @@ func ListActiveEntities(db *sql.DB, source string) ([]domain.Entity, error) {
 func scanEntity(row *sql.Row) (*domain.Entity, error) {
 	var e domain.Entity
 	err := row.Scan(&e.ID, &e.Source, &e.SourceID, &e.Kind, &e.Title, &e.URL,
-		&e.SnapshotJSON, &e.State, &e.CreatedAt, &e.LastPolledAt, &e.ClosedAt)
+		&e.SnapshotJSON, &e.Description, &e.State, &e.CreatedAt, &e.LastPolledAt, &e.ClosedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
