@@ -188,7 +188,7 @@ func (s *Server) SetJiraClient(client *jira.Client, inProgressStatus string) {
 
 // MarkJiraRestarted records the moment the Jira poller was restarted. Clears
 // the last-poll timestamp so jiraPollReady reports false until a completion
-// event arrives. Call from the Jira-changed callback.
+// event arrives. Call this before kicking off a Jira poller restart.
 func (s *Server) MarkJiraRestarted() {
 	s.jiraPollMu.Lock()
 	defer s.jiraPollMu.Unlock()
