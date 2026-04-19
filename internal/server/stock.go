@@ -71,7 +71,14 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 		if snap.Assignee != creds.JiraDisplayName {
 			continue
 		}
+		// Skip tickets that are already in a terminal state — either one of
+		// the well-known done-like statuses (Done/Closed/Resolved) or the
+		// user's configured DoneStatus, which may be a custom label outside
+		// that set (e.g. "Complete", "Shipped").
 		if isJiraStatusTerminal(snap.Status) {
+			continue
+		}
+		if cfg.Jira.DoneStatus != "" && snap.Status == cfg.Jira.DoneStatus {
 			continue
 		}
 
