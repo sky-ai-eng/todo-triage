@@ -129,6 +129,7 @@ func (c *Client) TransitionTo(issueKey, targetStatusName string) error {
 // claim guards to skip redundant API mutations on multi-task entities.
 type ClaimState struct {
 	AssignedToSelf bool
+	Unassigned     bool   // true when assignee is null (no one assigned)
 	StatusName     string // current workflow status
 }
 
@@ -160,7 +161,9 @@ func (c *Client) GetClaimState(issueKey string) *ClaimState {
 	if issue.Fields.Status != nil {
 		state.StatusName = issue.Fields.Status.Name
 	}
-	if issue.Fields.Assignee != nil {
+	if issue.Fields.Assignee == nil {
+		state.Unassigned = true
+	} else {
 		if myself.AccountID != "" {
 			state.AssignedToSelf = issue.Fields.Assignee.AccountID == myself.AccountID
 		} else {

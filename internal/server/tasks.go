@@ -228,7 +228,12 @@ func (s *Server) handleUndo(w http.ResponseWriter, r *http.Request) {
 	if task != nil && task.EntitySource == "jira" && task.SourceStatus != "" && s.jiraClient != nil {
 		go func(issueKey, originalStatus string) {
 			state := s.jiraClient.GetClaimState(issueKey)
-			if state != nil && !state.AssignedToSelf {
+
+			// Three assignee cases:
+			//   - assigned to someone else -> skip undo entirely (manual reassignment)
+			//   - unassigned -> skip Unassign (already unassigned), still transition
+			//   - assigned to self -> proceed normally (unassign + transition)
+			if state != nil && !state.AssignedToSelf && !state.Unassigned {
 				log.Printf("[jira] undo guard: %s reassigned to someone else, skipping undo", issueKey)
 				return
 			}
@@ -237,8 +242,10 @@ func (s *Server) handleUndo(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			if err := s.jiraClient.Unassign(issueKey); err != nil {
-				log.Printf("[jira] failed to unassign %s on undo: %v", issueKey, err)
+			if state == nil || state.AssignedToSelf {
+				if err := s.jiraClient.Unassign(issueKey); err != nil {
+					log.Printf("[jira] failed to unassign %s on undo: %v", issueKey, err)
+				}
 			}
 			if err := s.jiraClient.TransitionTo(issueKey, originalStatus); err != nil {
 				log.Printf("[jira] failed to transition %s back to %q on undo: %v", issueKey, originalStatus, err)
