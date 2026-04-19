@@ -170,7 +170,10 @@ func DedupCheckRunsByName(runs []CheckRun) []CheckRun {
 	return out
 }
 
-// JiraSnapshot is the extracted state we store for a Jira issue.
+// JiraSnapshot is the extracted state we diff against on each poll to emit
+// per-action events. Keep it small — large bulk text (issue descriptions,
+// PR bodies) lives on entities.description instead so diff reads don't
+// drag it through every refresh cycle.
 type JiraSnapshot struct {
 	Key          string   `json:"key"`
 	Summary      string   `json:"summary"`

@@ -249,8 +249,18 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string) []
 }
 
 // DiffJiraSnapshots compares two Jira issue snapshots and returns per-action
-// events. username is needed for assignee_is_self metadata.
-func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID, username string) []domain.Event {
+// events. username is needed for assignee_is_self metadata. doneStatuses is
+// the configured Done.Members set — any status in it is treated as terminal
+// for the purpose of emitting jira:issue:completed.
+func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID, username string, doneStatuses []string) []domain.Event {
+	terminal := func(s string) bool {
+		for _, d := range doneStatuses {
+			if d == s {
+				return true
+			}
+		}
+		return false
+	}
 	now := time.Now()
 	eid := &entityID
 	var evts []domain.Event
@@ -270,7 +280,7 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID, username string
 
 	if prev.Key == "" {
 		// First discovery — emit the matching initial event.
-		if isJiraTerminal(curr.Status) {
+		if terminal(curr.Status) {
 			emit(domain.EventJiraIssueCompleted, "", events.JiraIssueCompletedMetadata{
 				Assignee: curr.Assignee, AssigneeIsSelf: assigneeIsSelf,
 				IssueKey: curr.Key, Project: extractProject(curr.Key),
@@ -304,7 +314,7 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID, username string
 			IssueKey: curr.Key, Project: project, IssueType: curr.IssueType,
 			OldStatus: prev.Status, NewStatus: curr.Status, Priority: curr.Priority,
 		})
-		if isJiraTerminal(curr.Status) {
+		if terminal(curr.Status) {
 			emit(domain.EventJiraIssueCompleted, "", events.JiraIssueCompletedMetadata{
 				Assignee: curr.Assignee, AssigneeIsSelf: assigneeIsSelf,
 				IssueKey: curr.Key, Project: project,
@@ -355,10 +365,6 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID, username string
 }
 
 // --- helpers ---------------------------------------------------------------
-
-func isJiraTerminal(status string) bool {
-	return status == "Done" || status == "Closed" || status == "Resolved"
-}
 
 func toSet(items []string) map[string]bool {
 	m := make(map[string]bool, len(items))

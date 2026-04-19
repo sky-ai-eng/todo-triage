@@ -26,10 +26,10 @@ type stockTicket struct {
 	ParentKey string `json:"parent_key,omitempty"`
 	ParentURL string `json:"parent_url,omitempty"`
 	URL       string `json:"url"`
-	// AlreadyDone is true when snap.Status already matches the user's configured
-	// DoneStatus. Frontend pre-selects the "done" action so the user can close
-	// orphan entities with one click — the POST handler's existing no-op guard
-	// skips the Jira transition when the status is already correct.
+	// AlreadyDone is true when snap.Status is in the user's configured
+	// Done.Members set. Frontend pre-selects the "done" action so the user can
+	// close orphan entities with one click — the POST handler's no-op guard
+	// skips the Jira transition when the status is already in Done.Members.
 	AlreadyDone bool `json:"already_done,omitempty"`
 }
 
@@ -95,17 +95,12 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 		if snap.Assignee != creds.JiraDisplayName {
 			continue
 		}
-		// Skip well-known terminal statuses (Done/Closed/Resolved) — these
-		// get MarkEntityClosed at tracker-discovery time, so seeing them here
-		// is usually impossible, but guard anyway for safety.
-		if isJiraStatusTerminal(snap.Status) {
-			continue
-		}
-		// Include tickets already in the user's configured DoneStatus with a
-		// flag so the frontend can pre-select "done" — lets the user close
-		// orphan entities without side-effects on Jira (the POST no-op guard
-		// skips the transition when status already matches).
-		alreadyDone := cfg.Jira.DoneStatus != "" && snap.Status == cfg.Jira.DoneStatus
+		// Tickets in the Done.Members set should normally be closed by the
+		// tracker before they reach here, but in the transitional window right
+		// after a user widens Done.Members (e.g. adds "Verified") the next poll
+		// hasn't run yet. Include them with already_done=true so the user can
+		// clean up in one click without Jira side effects.
+		alreadyDone := cfg.Jira.Done.Contains(snap.Status)
 
 		var parentURL string
 		if snap.ParentKey != "" && cfg.Jira.BaseURL != "" {
@@ -181,6 +176,7 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 	client := jira.NewClient(creds.JiraURL, creds.JiraPAT)
 
 	applied := 0
+	queued := 0 // number of queue actions applied — gates the scorer trigger
 	failed := make([]stockFailure, 0)
 
 	for _, a := range req.Actions {
@@ -221,14 +217,13 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 			failed = append(failed, stockFailure{a.IssueKey, a.Action, "not assigned to you"})
 			continue
 		}
-		// Hard-terminal statuses (Done/Closed/Resolved) should never reach here
-		// because the tracker marks those entities closed at discovery, but
-		// guard anyway. Tickets already in the user's DoneStatus ARE allowed
-		// through — the GET flags them as already_done so the user can close
-		// the orphan entity, and the "done" branch below no-ops the Jira
-		// transition when the status already matches.
-		if isJiraStatusTerminal(snap.Status) {
-			failed = append(failed, stockFailure{a.IssueKey, a.Action, "ticket is already terminal"})
+		// Tickets already in Done.Members are allowed through — the GET flags
+		// them as already_done so the user can close the orphan entity, and the
+		// "done" branch below no-ops the Jira transition when the status is
+		// already a Done member. queue/claim on an already-done ticket is
+		// pointless though, so reject those outright.
+		if cfg.Jira.Done.Contains(snap.Status) && a.Action != "done" {
+			failed = append(failed, stockFailure{a.IssueKey, a.Action, "ticket is already in a done status — only the done action is valid"})
 			continue
 		}
 		if _, hasTask := taskedEntityIDs[entity.ID]; hasTask {
@@ -247,17 +242,20 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 				failed = append(failed, stockFailure{a.IssueKey, a.Action, err.Error()})
 				continue
 			}
+			queued++
 
 		case "claim":
-			if cfg.Jira.InProgressStatus == "" {
-				failed = append(failed, stockFailure{a.IssueKey, a.Action, "in_progress_status not configured"})
+			if cfg.Jira.InProgress.Canonical == "" {
+				failed = append(failed, stockFailure{a.IssueKey, a.Action, "in_progress canonical status not configured"})
 				continue
 			}
 
 			// Do Jira mutations first: if Jira fails we bail before touching
 			// the task table, so there's no claimed-task orphan pointing at a
 			// Jira issue that never got assigned or transitioned. Claim-guard
-			// pattern skips the API calls when state is already correct.
+			// pattern skips the API calls when state is already correct —
+			// containment against InProgress.Members so a ticket in any
+			// in-progress variant isn't transitioned back to canonical.
 			state := client.GetClaimState(a.IssueKey)
 			if state == nil || !state.AssignedToSelf {
 				if err := client.AssignToSelf(a.IssueKey); err != nil {
@@ -265,19 +263,20 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 			}
-			if state == nil || state.StatusName != cfg.Jira.InProgressStatus {
-				if err := client.TransitionTo(a.IssueKey, cfg.Jira.InProgressStatus); err != nil {
+			if state == nil || !cfg.Jira.InProgress.Contains(state.StatusName) {
+				if err := client.TransitionTo(a.IssueKey, cfg.Jira.InProgress.Canonical); err != nil {
 					failed = append(failed, stockFailure{a.IssueKey, a.Action, "transition: " + err.Error()})
 					continue
 				}
+				snap.Status = cfg.Jira.InProgress.Canonical
+			} else {
+				snap.Status = state.StatusName
 			}
 
 			// Refresh the snap with the known post-mutation state so the
 			// synthesized event metadata matches the ticket's actual Jira
-			// state at the moment of claim. Otherwise predicates that filter
-			// on status would see stale pre-claim values.
+			// state at the moment of claim.
 			snap.Assignee = creds.JiraDisplayName
-			snap.Status = cfg.Jira.InProgressStatus
 
 			// Jira is now consistent — create the task and promote to claimed.
 			// If either of these fails the ticket stays assigned + in-progress
@@ -299,13 +298,18 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 			}
 
 		case "done":
-			if cfg.Jira.DoneStatus == "" {
-				failed = append(failed, stockFailure{a.IssueKey, a.Action, "done_status not configured"})
+			if cfg.Jira.Done.Canonical == "" {
+				failed = append(failed, stockFailure{a.IssueKey, a.Action, "done canonical status not configured"})
 				continue
 			}
+			// Skip the transition when the ticket is already in any Done
+			// member (not just the canonical) — a ticket in "Verified" when
+			// Done.Members=[Resolved,Verified] is already done from TF's
+			// perspective; transitioning to Resolved would be a no-op at best
+			// and a workflow violation at worst.
 			state := client.GetClaimState(a.IssueKey)
-			if state == nil || state.StatusName != cfg.Jira.DoneStatus {
-				if err := client.TransitionTo(a.IssueKey, cfg.Jira.DoneStatus); err != nil {
+			if state == nil || !cfg.Jira.Done.Contains(state.StatusName) {
+				if err := client.TransitionTo(a.IssueKey, cfg.Jira.Done.Canonical); err != nil {
 					failed = append(failed, stockFailure{a.IssueKey, a.Action, "transition: " + err.Error()})
 					continue
 				}
@@ -317,6 +321,16 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 		}
 
 		applied++
+	}
+
+	// Carry-over creates tasks without going through the poller, so no
+	// system:poll:completed fires to wake the scorer via its event-bus
+	// subscription. Poke it directly, but only when we actually produced
+	// queued tasks — claim promotes straight to 'claimed' (skipped by the
+	// UnscoredTasks query) and done doesn't create a task at all, so those
+	// two branches have nothing for the scorer to pick up.
+	if queued > 0 && s.scorerTrigger != nil {
+		s.scorerTrigger()
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -353,12 +367,6 @@ func recordCarryOverAssignedEvent(database *sql.DB, entityID string, snap domain
 		EventType:    domain.EventJiraIssueAssigned,
 		MetadataJSON: string(metaJSON),
 	})
-}
-
-// isJiraStatusTerminal mirrors the terminal-status set used by the tracker.
-// Kept local to avoid exporting the tracker helper.
-func isJiraStatusTerminal(status string) bool {
-	return status == "Done" || status == "Closed" || status == "Resolved"
 }
 
 // projectFromKey pulls "SKY" out of "SKY-123". Mirrors tracker.extractProject.

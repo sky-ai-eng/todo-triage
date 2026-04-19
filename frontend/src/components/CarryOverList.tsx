@@ -76,8 +76,8 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
       }
       const fetched: StockTicket[] = data.tickets || []
       setTickets(fetched)
-      // Pre-select "done" for tickets already in the user's configured
-      // DoneStatus — one-click cleanup of orphan entities. User can still
+      // Pre-select "done" for tickets already in any configured Done.Members
+      // status — one-click cleanup of orphan entities. User can still
       // deselect or change the action before saving.
       setSelections((prev) => {
         const next = { ...prev }
@@ -337,31 +337,7 @@ function TicketRow({
             </span>
           )}
         </div>
-        <div className="flex items-center gap-1.5 mt-0.5 text-[11px] text-text-tertiary">
-          {ticket.parent_key && ticket.parent_url && (
-            <>
-              <a
-                href={ticket.parent_url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="hover:text-accent transition-colors"
-              >
-                {ticket.parent_key}
-              </a>
-              <span>·</span>
-            </>
-          )}
-          {ticket.issue_type && (
-            <>
-              <span>{ticket.issue_type}</span>
-              {ticket.priority && <span>·</span>}
-            </>
-          )}
-          {ticket.priority && <span>{ticket.priority}</span>}
-          {!ticket.issue_type && !ticket.priority && !ticket.parent_key && (
-            <span className="italic">no metadata</span>
-          )}
-        </div>
+        <MetadataLine ticket={ticket} />
         {failure && (
           <div className="mt-1 text-[11px] text-dismiss" title={failure}>
             {failure}
@@ -370,6 +346,61 @@ function TicketRow({
       </div>
 
       <TriSelector selection={selection} onToggle={onToggle} />
+    </div>
+  )
+}
+
+// MetadataLine renders ticket metadata in the order: status · priority ·
+// issue_type · parent. Separators are inserted only between present values
+// so trailing/leading dots never appear. Status is hidden when already_done
+// is showing it via the trailing pill on the first line.
+//
+// Each part carries its own stable key ("status" / "priority" / ...) so
+// React reconciliation doesn't mis-match nodes when visibility changes (e.g.
+// a ticket flipping already_done causes status to drop out of the list, and
+// index keys would then shift "priority" into "status"'s slot).
+function MetadataLine({ ticket }: { ticket: StockTicket }) {
+  const parts: { key: string; node: React.ReactNode }[] = []
+  if (ticket.status && !ticket.already_done) {
+    parts.push({
+      key: 'status',
+      node: <span className="text-text-secondary font-medium">{ticket.status}</span>,
+    })
+  }
+  if (ticket.priority) {
+    parts.push({ key: 'priority', node: <span>{ticket.priority}</span> })
+  }
+  if (ticket.issue_type) {
+    parts.push({ key: 'type', node: <span>{ticket.issue_type}</span> })
+  }
+  if (ticket.parent_key && ticket.parent_url) {
+    parts.push({
+      key: 'parent',
+      node: (
+        <a
+          href={ticket.parent_url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="hover:text-accent transition-colors"
+        >
+          {ticket.parent_key}
+        </a>
+      ),
+    })
+  }
+
+  return (
+    <div className="flex items-center gap-1.5 mt-0.5 text-[11px] text-text-tertiary">
+      {parts.length === 0 ? (
+        <span className="italic">no metadata</span>
+      ) : (
+        parts.map((p, i) => (
+          <span key={p.key} className="flex items-center gap-1.5">
+            {i > 0 && <span>·</span>}
+            {p.node}
+          </span>
+        ))
+      )}
     </div>
   )
 }

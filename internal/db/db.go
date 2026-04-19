@@ -89,7 +89,8 @@ CREATE TABLE IF NOT EXISTS entities (
     kind TEXT NOT NULL,                 -- pr | issue | epic | message
     title TEXT,
     url TEXT,
-    snapshot_json TEXT,                 -- opaque poller state (head_sha, CI, draft, etc.)
+    snapshot_json TEXT,                 -- opaque poller state (diff scope only) — keep small
+    description TEXT NOT NULL DEFAULT '', -- flattened issue/PR body; NOT diffed. Lives outside snapshot so diff reads stay small.
     state TEXT NOT NULL DEFAULT 'active',  -- active | closed
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_polled_at DATETIME,

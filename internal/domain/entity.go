@@ -12,7 +12,8 @@ type Entity struct {
 	Kind         string     `json:"kind"`      // "pr" | "issue" | "epic" | "message"
 	Title        string     `json:"title"`
 	URL          string     `json:"url"`
-	SnapshotJSON string     `json:"snapshot_json"` // opaque poller state
+	SnapshotJSON string     `json:"snapshot_json"` // opaque poller state — diff scope only, kept small
+	Description  string     `json:"description"`   // flattened issue/PR body; NOT diffed
 	State        string     `json:"state"`         // "active" | "closed"
 	CreatedAt    time.Time  `json:"created_at"`
 	LastPolledAt *time.Time `json:"last_polled_at"`

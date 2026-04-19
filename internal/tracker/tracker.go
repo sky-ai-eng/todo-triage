@@ -18,6 +18,15 @@ import (
 
 const (
 	jiraBatchSize = 100 // max issues per JQL key IN (...) query
+
+	// descriptionStoreMaxRunes caps what we persist on entities.description.
+	// Jira descriptions are unbounded (teams regularly paste multi-KB specs,
+	// stack traces, etc.); storing them raw would bloat the column for no
+	// current benefit — the scorer already truncates at 1500 runes for the
+	// LLM prompt, so 2000 gives a small buffer while keeping rows compact.
+	// If a future UI wants to render the full body it should re-fetch from
+	// Jira directly rather than relying on this mirror.
+	descriptionStoreMaxRunes = 2000
 )
 
 // Tracker manages the discover → refresh → diff → emit cycle for both
@@ -245,16 +254,28 @@ func (t *Tracker) discoverGitHub(client *ghclient.Client, username string, repos
 
 // --- Jira ---
 
-// RefreshJira runs the full tracking cycle for Jira issues.
-func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, projects, pickupStatuses []string, username string) (int, error) {
+// RefreshJira runs the full tracking cycle for Jira issues. doneStatuses is
+// the configured Done.Members set — used to decide whether a newly-discovered
+// or reopened issue should be marked closed, and passed through to the diff
+// pass for jira:issue:completed emission.
+func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, projects, pickupStatuses, doneStatuses []string, username string) (int, error) {
 	startedAt := time.Now()
+	terminal := func(s string) bool {
+		for _, d := range doneStatuses {
+			if d == s {
+				return true
+			}
+		}
+		return false
+	}
 	// Phase 1: Discovery
-	discovered, err := t.discoverJira(client, baseURL, projects, pickupStatuses)
+	discovered, err := t.discoverJira(client, baseURL, projects, pickupStatuses, doneStatuses)
 	if err != nil {
 		log.Printf("[tracker] Jira discovery error: %v", err)
 	}
 
-	for _, snap := range discovered {
+	for _, state := range discovered {
+		snap := state.Snap
 		entity, created, err := db.FindOrCreateEntity(t.database,
 			"jira", snap.Key, "issue", snap.Summary, snap.URL)
 		if err != nil {
@@ -266,7 +287,12 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 			if err := db.UpdateEntitySnapshot(t.database, entity.ID, string(snapJSON)); err != nil {
 				log.Printf("[tracker] failed to seed snapshot for %s: %v", snap.Key, err)
 			}
-			if isJiraTerminal(snap.Status) {
+			if state.Description != "" {
+				if err := db.UpdateEntityDescription(t.database, entity.ID, state.Description); err != nil {
+					log.Printf("[tracker] failed to seed description for %s: %v", snap.Key, err)
+				}
+			}
+			if terminal(snap.Status) {
 				if err := db.MarkEntityClosed(t.database, entity.ID); err != nil {
 					log.Printf("[tracker] failed to mark entity %s closed on discovery: %v", snap.Key, err)
 				}
@@ -275,8 +301,11 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 			if entity.Title != snap.Summary {
 				_ = db.UpdateEntityTitle(t.database, entity.ID, snap.Summary)
 			}
+			if entity.Description != state.Description {
+				_ = db.UpdateEntityDescription(t.database, entity.ID, state.Description)
+			}
 			// Reactivate if a previously-closed issue reappears as open.
-			if !isJiraTerminal(snap.Status) && entity.State == "closed" {
+			if !terminal(snap.Status) && entity.State == "closed" {
 				if reactivated, err := db.ReactivateEntity(t.database, entity.ID); err != nil {
 					log.Printf("[tracker] error reactivating %s: %v", snap.Key, err)
 				} else if reactivated {
@@ -311,10 +340,11 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 	// Phase 3: Diff + emit events.
 	eventsEmitted := 0
 	for _, e := range entities {
-		newSnap, ok := refreshed[e.SourceID]
+		newState, ok := refreshed[e.SourceID]
 		if !ok {
 			continue
 		}
+		newSnap := newState.Snap
 
 		var prevSnap domain.JiraSnapshot
 		if e.SnapshotJSON != "" && e.SnapshotJSON != "{}" {
@@ -326,7 +356,7 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 			}
 		}
 
-		events := DiffJiraSnapshots(prevSnap, newSnap, e.ID, username)
+		events := DiffJiraSnapshots(prevSnap, newSnap, e.ID, username, doneStatuses)
 
 		snapJSON, _ := json.Marshal(newSnap)
 		if err := db.UpdateEntitySnapshot(t.database, e.ID, string(snapJSON)); err != nil {
@@ -335,6 +365,12 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 		if e.Title != newSnap.Summary {
 			_ = db.UpdateEntityTitle(t.database, e.ID, newSnap.Summary)
 		}
+		// Description intentionally not updated here — batchFetchJira
+		// excludes the description field to save bandwidth, so newState's
+		// description would be the empty-string parse result of an absent
+		// field and writing it back would wipe the stored value. Description
+		// is seeded and refreshed by phase 1 (discoverJira), which is the
+		// only place that actually carries the field in the response.
 
 		for _, evt := range events {
 			t.bus.Publish(evt)
@@ -354,8 +390,13 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 	return eventsEmitted, nil
 }
 
-// discoverJira runs JQL queries to find new issues.
-func (t *Tracker) discoverJira(client *jiraclient.Client, baseURL string, projects, pickupStatuses []string) ([]domain.JiraSnapshot, error) {
+// discoverJira runs JQL queries to find new issues. doneStatuses is the
+// configured Done.Members set — used to exclude terminal tickets from the
+// assigned-user discovery query. Hardcoding the exclusion list would mean
+// any user-defined "done" variant (e.g. "Verified") stayed eligible for
+// rediscovery on every poll, churning the DB and contradicting the
+// per-deployment-workflow contract.
+func (t *Tracker) discoverJira(client *jiraclient.Client, baseURL string, projects, pickupStatuses, doneStatuses []string) ([]jiraIssueState, error) {
 	if len(projects) == 0 {
 		return nil, nil
 	}
@@ -372,13 +413,25 @@ func (t *Tracker) discoverJira(client *jiraclient.Client, baseURL string, projec
 			`project IN (%s) AND status IN (%s) AND assignee IS EMPTY`, projectList, strings.Join(quoted, ", ")))
 	}
 
-	queries = append(queries, fmt.Sprintf(
-		`project IN (%s) AND assignee = currentUser() AND status NOT IN (Done, Closed, Resolved)`, projectList))
+	// Assigned-to-me query, with terminal statuses excluded via the user's
+	// Done.Members set. If empty (defensive — Ready() gates the poller on
+	// non-empty Done.Members, so we shouldn't hit this in practice), the
+	// NOT IN clause is dropped entirely rather than falling back to a
+	// hardcoded list that would contradict the user's workflow.
+	assignedJQL := fmt.Sprintf(`project IN (%s) AND assignee = currentUser()`, projectList)
+	if len(doneStatuses) > 0 {
+		quoted := make([]string, len(doneStatuses))
+		for i, s := range doneStatuses {
+			quoted[i] = fmt.Sprintf("%q", s)
+		}
+		assignedJQL += fmt.Sprintf(` AND status NOT IN (%s)`, strings.Join(quoted, ", "))
+	}
+	queries = append(queries, assignedJQL)
 
 	seen := map[string]bool{}
-	var all []domain.JiraSnapshot
+	var all []jiraIssueState
 
-	fields := []string{"summary", "status", "assignee", "priority", "labels", "issuetype", "parent", "comment"}
+	fields := []string{"summary", "description", "status", "assignee", "priority", "labels", "issuetype", "parent", "comment"}
 
 	for _, jql := range queries {
 		issues, err := client.SearchIssues(jql, fields, 100)
@@ -389,7 +442,7 @@ func (t *Tracker) discoverJira(client *jiraclient.Client, baseURL string, projec
 		for _, issue := range issues {
 			if !seen[issue.Key] {
 				seen[issue.Key] = true
-				all = append(all, issueToSnapshot(issue, baseURL))
+				all = append(all, issueToState(issue, baseURL))
 			}
 		}
 	}
@@ -397,9 +450,16 @@ func (t *Tracker) discoverJira(client *jiraclient.Client, baseURL string, projec
 	return all, nil
 }
 
-// batchFetchJira fetches current state for tracked Jira issues.
-func (t *Tracker) batchFetchJira(client *jiraclient.Client, baseURL string, keys []string) (map[string]domain.JiraSnapshot, error) {
-	results := make(map[string]domain.JiraSnapshot, len(keys))
+// batchFetchJira fetches current state for tracked Jira issues. Description
+// is deliberately excluded from the field list — it's seeded on discovery
+// and only relevant to the scorer, which reads from the stored column rather
+// than the API response. Skipping the multi-KB body on every poll saves
+// bandwidth and latency; the tradeoff is that descriptions for entities
+// that stop matching discovery's JQL (e.g. reassigned to someone else) stay
+// pinned at their last-captured value. Acceptable — description relevance
+// drops fast once a ticket is off the user's plate.
+func (t *Tracker) batchFetchJira(client *jiraclient.Client, baseURL string, keys []string) (map[string]jiraIssueState, error) {
+	results := make(map[string]jiraIssueState, len(keys))
 	fields := []string{"summary", "status", "assignee", "priority", "labels", "issuetype", "parent", "comment"}
 
 	for i := 0; i < len(keys); i += jiraBatchSize {
@@ -416,15 +476,27 @@ func (t *Tracker) batchFetchJira(client *jiraclient.Client, baseURL string, keys
 		}
 
 		for _, issue := range issues {
-			results[issue.Key] = issueToSnapshot(issue, baseURL)
+			results[issue.Key] = issueToState(issue, baseURL)
 		}
 	}
 
 	return results, nil
 }
 
-// issueToSnapshot converts a Jira API Issue to our snapshot type.
-func issueToSnapshot(issue jiraclient.Issue, baseURL string) domain.JiraSnapshot {
+// jiraIssueState bundles the diff-scope snapshot with the bulk description
+// body. Description is carried alongside rather than inside the snapshot so
+// the persisted snapshot_json stays small — diff reads don't drag multi-KB
+// issue bodies through every poll.
+type jiraIssueState struct {
+	Snap        domain.JiraSnapshot
+	Description string
+}
+
+// issueToState converts a Jira API Issue into the diff-scope snapshot plus
+// a flattened description. The description is stored on entities.description
+// separately; the snapshot itself only carries fields that DiffJiraSnapshots
+// compares.
+func issueToState(issue jiraclient.Issue, baseURL string) jiraIssueState {
 	snap := domain.JiraSnapshot{
 		Key:     issue.Key,
 		Summary: issue.Fields.Summary,
@@ -449,7 +521,26 @@ func issueToSnapshot(issue jiraclient.Issue, baseURL string) domain.JiraSnapshot
 		snap.CommentCount = issue.Fields.Comment.Total
 	}
 	snap.Labels = issue.Fields.Labels
-	return snap
+	return jiraIssueState{
+		Snap:        snap,
+		Description: truncateDescription(jiraclient.ExtractDescriptionText(issue.Fields.Description), descriptionStoreMaxRunes),
+	}
+}
+
+// truncateDescription caps the stored description at maxRunes codepoints
+// (rune-based so we never persist a string that ends mid-UTF-8-codepoint).
+// Strict cap — when truncation happens the returned string contains exactly
+// maxRunes runes, with the last rune replaced by an ellipsis so downstream
+// readers can distinguish a cut string from a genuinely short one.
+func truncateDescription(s string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return s
+	}
+	return string(runes[:maxRunes-1]) + "…"
 }
 
 // --- Helpers ---

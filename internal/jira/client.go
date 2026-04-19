@@ -293,6 +293,51 @@ func (c *Client) GetChildIssues(parentKey string) ([]Issue, error) {
 // DefaultSearchFields is the default set of fields returned by SearchIssues.
 var DefaultSearchFields = []string{"summary", "description", "status", "issuetype", "priority", "assignee", "parent", "labels"}
 
+// ExtractDescriptionText flattens a Jira issue description to plain text.
+// Server/DC returns description as a JSON string; Cloud returns an ADF
+// document ({type:"doc", content:[...]}). Returns empty string for null,
+// missing, or unparseable input. Caller should truncate as needed — Jira
+// descriptions can be arbitrarily large.
+func ExtractDescriptionText(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	// Try plain string first (Server/DC).
+	var asString string
+	if err := json.Unmarshal(raw, &asString); err == nil {
+		return asString
+	}
+	// Otherwise assume ADF — recursively collect every `text` field.
+	var node map[string]any
+	if err := json.Unmarshal(raw, &node); err != nil {
+		return ""
+	}
+	var sb strings.Builder
+	walkADF(node, &sb)
+	return strings.TrimSpace(sb.String())
+}
+
+// walkADF recursively extracts text content from an ADF node. Paragraphs,
+// list items, and headings get a trailing newline so the output is readable
+// rather than one long run-on line.
+func walkADF(node map[string]any, sb *strings.Builder) {
+	if text, ok := node["text"].(string); ok {
+		sb.WriteString(text)
+	}
+	if content, ok := node["content"].([]any); ok {
+		for _, c := range content {
+			if child, ok := c.(map[string]any); ok {
+				walkADF(child, sb)
+			}
+		}
+	}
+	// Block-level nodes get a separator so output reads as multi-line prose.
+	switch node["type"] {
+	case "paragraph", "heading", "listItem", "codeBlock", "blockquote":
+		sb.WriteString("\n")
+	}
+}
+
 // SearchIssues runs a JQL query and returns matching issues.
 // If fields is nil, DefaultSearchFields is used. Pass []string{"*all"} for everything.
 func (c *Client) SearchIssues(jql string, fields []string, maxResults int) ([]Issue, error) {

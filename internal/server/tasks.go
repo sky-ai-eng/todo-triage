@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
-	"strings"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/config"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -137,19 +137,23 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 
 	// On claim: if Jira task, assign to self and transition to in-progress.
 	// Claim guard: with multiple tasks per entity, a second claim on the same
-	// Jira issue would re-assign + re-transition redundantly (and probably error).
-	// Check current state first and skip mutations that are already done.
-	if req.Action == "claim" && s.jiraClient != nil && s.jiraInProgressStatus != "" {
+	// Jira issue would re-assign + re-transition redundantly (and probably
+	// error). Skip the transition when the ticket is already in ANY member of
+	// the in-progress rule — if the user (or an earlier claim) moved it to
+	// "In Review" while canonical is "In Progress", transitioning back to the
+	// canonical would be a spurious status change that would confuse watchers.
+	rule := s.jiraInProgressRule
+	if req.Action == "claim" && s.jiraClient != nil && rule.Canonical != "" {
 		task, err := db.GetTask(s.db, id)
 		if err == nil && task != nil && task.EntitySource == "jira" {
-			go func(issueKey, targetStatus string) {
+			go func(issueKey string, rule config.JiraStatusRule) {
 				state := s.jiraClient.GetClaimState(issueKey)
 
 				needAssign := state == nil || !state.AssignedToSelf
-				needTransition := state == nil || !strings.EqualFold(state.StatusName, targetStatus)
+				needTransition := state == nil || !rule.Contains(state.StatusName)
 
 				if !needAssign && !needTransition {
-					log.Printf("[jira] claim guard: %s already assigned to self and in %q, skipping", issueKey, targetStatus)
+					log.Printf("[jira] claim guard: %s already assigned to self and already in in-progress (%q), skipping", issueKey, state.StatusName)
 					return
 				}
 
@@ -160,11 +164,11 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				if needTransition {
-					if err := s.jiraClient.TransitionTo(issueKey, targetStatus); err != nil {
-						log.Printf("[jira] failed to transition %s to %q: %v", issueKey, targetStatus, err)
+					if err := s.jiraClient.TransitionTo(issueKey, rule.Canonical); err != nil {
+						log.Printf("[jira] failed to transition %s to %q: %v", issueKey, rule.Canonical, err)
 					}
 				}
-			}(task.EntitySourceID, s.jiraInProgressStatus)
+			}(task.EntitySourceID, rule)
 		}
 	}
 
@@ -237,8 +241,14 @@ func (s *Server) handleUndo(w http.ResponseWriter, r *http.Request) {
 				log.Printf("[jira] undo guard: %s reassigned to someone else, skipping undo", issueKey)
 				return
 			}
-			if state != nil && s.jiraInProgressStatus != "" && !strings.EqualFold(state.StatusName, s.jiraInProgressStatus) {
-				log.Printf("[jira] undo guard: %s status is %q (not %q), skipping undo", issueKey, state.StatusName, s.jiraInProgressStatus)
+			// Skip undo if the ticket has moved out of the in-progress rule
+			// entirely — that means someone progressed it (to done, back to
+			// pickup, etc.) and we shouldn't yank it back. Membership rather
+			// than strict-canonical match, because a user moving Claim →
+			// "In Review" is still "working on it on my plate" and undo should
+			// still unwind to the original status.
+			if state != nil && len(s.jiraInProgressRule.Members) > 0 && !s.jiraInProgressRule.Contains(state.StatusName) {
+				log.Printf("[jira] undo guard: %s status is %q (not in in-progress members %v), skipping undo", issueKey, state.StatusName, s.jiraInProgressRule.Members)
 				return
 			}
 

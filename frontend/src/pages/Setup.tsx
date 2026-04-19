@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { CheckCircle2, ChevronRight } from 'lucide-react'
 import RepoPickerModal, { type GitHubRepo } from '../components/RepoPickerModal'
 import CarryOverList from '../components/CarryOverList'
+import JiraStatusRule, { type JiraStatusRuleValue } from '../components/JiraStatusRule'
 
 interface JiraStatus {
   id: string
@@ -26,13 +27,20 @@ export default function Setup() {
 
   // Jira state
   const [jiraConnected, setJiraConnected] = useState(false)
-  const [jiraForm, setJiraForm] = useState({
+  const [jiraForm, setJiraForm] = useState<{
+    url: string
+    pat: string
+    projects: string
+    pickup: JiraStatusRuleValue
+    in_progress: JiraStatusRuleValue
+    done: JiraStatusRuleValue
+  }>({
     url: '',
     pat: '',
     projects: '',
-    pickup_statuses: [] as string[],
-    in_progress_status: '',
-    done_status: '',
+    pickup: { members: [] },
+    in_progress: { members: [] },
+    done: { members: [] },
   })
   const [jiraStatuses, setJiraStatuses] = useState<JiraStatus[]>([])
   const [statusesLoading, setStatusesLoading] = useState(false)
@@ -171,9 +179,11 @@ export default function Setup() {
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean).length > 0 &&
-    jiraForm.pickup_statuses.length > 0 &&
-    jiraForm.in_progress_status !== '' &&
-    jiraForm.done_status !== ''
+    jiraForm.pickup.members.length > 0 &&
+    jiraForm.in_progress.members.length > 0 &&
+    !!jiraForm.in_progress.canonical &&
+    jiraForm.done.members.length > 0 &&
+    !!jiraForm.done.canonical
 
   const saveJiraConfig = async () => {
     setError('')
@@ -191,9 +201,9 @@ export default function Setup() {
           github_enabled: true,
           jira_enabled: true,
           jira_projects: projects,
-          jira_pickup_statuses: jiraForm.pickup_statuses,
-          jira_in_progress_status: jiraForm.in_progress_status,
-          jira_done_status: jiraForm.done_status,
+          jira_pickup: jiraForm.pickup,
+          jira_in_progress: jiraForm.in_progress,
+          jira_done: jiraForm.done,
         }),
       })
       if (!res.ok) {
@@ -224,9 +234,9 @@ export default function Setup() {
       ...f,
       pat: '',
       projects: '',
-      pickup_statuses: [],
-      in_progress_status: '',
-      done_status: '',
+      pickup: { members: [] },
+      in_progress: { members: [] },
+      done: { members: [] },
     }))
     setJiraStatuses([])
     setStep('jira-creds')
@@ -470,70 +480,34 @@ export default function Setup() {
             </div>
 
             {jiraStatuses.length > 0 && (
-              <>
-                <div>
-                  <span className="text-[11px] text-text-tertiary mb-1.5 block">
-                    Pickup statuses (poll for unassigned tickets in these states)
-                  </span>
-                  <div className="flex flex-wrap gap-2">
-                    {jiraStatuses.map((s) => (
-                      <StatusChip
-                        key={s.id}
-                        label={s.name}
-                        selected={jiraForm.pickup_statuses.includes(s.name)}
-                        onClick={() =>
-                          setJiraForm((f) => ({
-                            ...f,
-                            pickup_statuses: f.pickup_statuses.includes(s.name)
-                              ? f.pickup_statuses.filter((n) => n !== s.name)
-                              : [...f.pickup_statuses, s.name],
-                          }))
-                        }
-                      />
-                    ))}
-                  </div>
-                </div>
-                <div>
-                  <span className="text-[11px] text-text-tertiary mb-1.5 block">
-                    In-progress status (set when you claim a ticket)
-                  </span>
-                  <div className="flex flex-wrap gap-2">
-                    {jiraStatuses.map((s) => (
-                      <StatusChip
-                        key={s.id}
-                        label={s.name}
-                        selected={jiraForm.in_progress_status === s.name}
-                        onClick={() =>
-                          setJiraForm((f) => ({
-                            ...f,
-                            in_progress_status: f.in_progress_status === s.name ? '' : s.name,
-                          }))
-                        }
-                      />
-                    ))}
-                  </div>
-                </div>
-                <div>
-                  <span className="text-[11px] text-text-tertiary mb-1.5 block">
-                    Done status (set when you mark a ticket as complete)
-                  </span>
-                  <div className="flex flex-wrap gap-2">
-                    {jiraStatuses.map((s) => (
-                      <StatusChip
-                        key={s.id}
-                        label={s.name}
-                        selected={jiraForm.done_status === s.name}
-                        onClick={() =>
-                          setJiraForm((f) => ({
-                            ...f,
-                            done_status: f.done_status === s.name ? '' : s.name,
-                          }))
-                        }
-                      />
-                    ))}
-                  </div>
-                </div>
-              </>
+              <div className="space-y-4">
+                <JiraStatusRule
+                  label="Pickup"
+                  description="Poll for unassigned tickets in these states."
+                  allStatuses={jiraStatuses}
+                  value={jiraForm.pickup}
+                  onChange={(v) => setJiraForm((f) => ({ ...f, pickup: v }))}
+                  requireCanonical={false}
+                />
+                <JiraStatusRule
+                  label="In progress"
+                  description="Count as actively being worked on."
+                  allStatuses={jiraStatuses}
+                  value={jiraForm.in_progress}
+                  onChange={(v) => setJiraForm((f) => ({ ...f, in_progress: v }))}
+                  requireCanonical={true}
+                  canonicalPrompt="Claim →"
+                />
+                <JiraStatusRule
+                  label="Done"
+                  description="Count as complete (add every variant — e.g. Resolved + Verified)."
+                  allStatuses={jiraStatuses}
+                  value={jiraForm.done}
+                  onChange={(v) => setJiraForm((f) => ({ ...f, done: v }))}
+                  requireCanonical={true}
+                  canonicalPrompt="Complete →"
+                />
+              </div>
             )}
           </div>
 
@@ -596,29 +570,5 @@ function ErrorBanner({ error }: { error: string }) {
     <div className="rounded-xl bg-dismiss/[0.08] border border-dismiss/20 px-4 py-2.5 text-[13px] text-dismiss">
       {error}
     </div>
-  )
-}
-
-function StatusChip({
-  label,
-  selected,
-  onClick,
-}: {
-  label: string
-  selected: boolean
-  onClick: () => void
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`text-[11px] px-3 py-1.5 rounded-full border transition-colors ${
-        selected
-          ? 'bg-accent/[0.1] border-accent/30 text-accent font-medium'
-          : 'bg-white/50 border-border-subtle text-text-tertiary hover:text-text-secondary hover:border-border-subtle/80'
-      }`}
-    >
-      {label}
-    </button>
   )
 }

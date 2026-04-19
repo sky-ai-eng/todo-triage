@@ -217,7 +217,7 @@ export default function Cards() {
             <SwipeCard
               key={tasks[1].id}
               task={tasks[1]}
-              isScoring={tasks[1].scoring_status === 'scoring'}
+              isScoring={tasks[1].scoring_status !== 'scored'}
               style={{
                 zIndex: 1,
                 transform: 'scale(0.96) translateY(10px)',
@@ -232,7 +232,7 @@ export default function Cards() {
           <SwipeCard
             key={tasks[0].id}
             task={tasks[0]}
-            isScoring={tasks[0].scoring_status === 'scoring'}
+            isScoring={tasks[0].scoring_status !== 'scored'}
             onSwipe={swipe}
             style={{ zIndex: 2 }}
             interactive

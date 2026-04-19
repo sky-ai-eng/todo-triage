@@ -49,11 +49,17 @@ type TaskInput struct {
 	ID              string `json:"id"`
 	Source          string `json:"source"`
 	Title           string `json:"title"`
+	Description     string `json:"description,omitempty"` // Jira description or PR body, flattened + truncated
 	EventType       string `json:"event_type,omitempty"`
 	EntitySourceID  string `json:"entity_source_id,omitempty"` // e.g. "owner/repo#42"
 	Severity        string `json:"severity,omitempty"`
 	RelevanceReason string `json:"relevance_reason,omitempty"`
 }
+
+// descriptionMaxLen caps per-task description size sent to the LLM. Jira
+// descriptions can be arbitrarily large; at ~1500 chars we get enough context
+// for a useful summary without inflating the prompt budget on big batches.
+const descriptionMaxLen = 1500
 
 // TaskScore is what we get back from the LLM per task.
 type TaskScore struct {
@@ -88,13 +94,34 @@ func ScoreTasks(database *sql.DB, tasks []domain.Task) ([]TaskScore, error) {
 		}
 	}
 
+	// Batch-load descriptions from the dedicated entities.description column
+	// (not snapshot_json — description is bulk text, kept outside diff scope).
+	// Failures degrade to title-only context rather than aborting scoring.
+	entityIDs := make([]string, 0, len(tasks))
+	for _, t := range tasks {
+		entityIDs = append(entityIDs, t.EntityID)
+	}
+	descriptions := map[string]string{}
+	if database != nil {
+		if descs, err := db.GetEntityDescriptions(database, entityIDs); err != nil {
+			log.Printf("[ai] warning: failed to load entity descriptions for scoring: %v", err)
+		} else {
+			descriptions = descs
+		}
+	}
+
 	// Build inputs
 	inputs := make([]TaskInput, len(tasks))
 	for i, t := range tasks {
+		desc := descriptions[t.EntityID]
+		if desc != "" {
+			desc = truncate(strings.TrimSpace(desc), descriptionMaxLen)
+		}
 		inputs[i] = TaskInput{
 			ID:              t.ID,
 			Source:          t.EntitySource,
 			Title:           t.Title,
+			Description:     desc,
 			EventType:       t.EventType,
 			EntitySourceID:  t.EntitySourceID,
 			Severity:        t.Severity,
@@ -215,9 +242,18 @@ func StripCodeFences(b []byte) []byte {
 	return bytes.TrimSpace(s)
 }
 
-func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
+// truncate caps s at maxRunes codepoints. Rune-based (not byte-based) so we
+// never cut a multi-byte UTF-8 sequence in half. Strict cap — the returned
+// string contains at most maxRunes runes, with the last rune replaced by an
+// ellipsis when truncation happens so the LLM can tell the content was cut
+// rather than a genuinely short input.
+func truncate(s string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
 		return s
 	}
-	return s[:maxLen] + "..."
+	return string(runes[:maxRunes-1]) + "…"
 }

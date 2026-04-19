@@ -11,6 +11,10 @@ import (
 const testEntityID = "entity-123"
 const testUser = "aidan"
 
+// testDoneStatuses matches the pre-existing hardcoded terminal set, kept so
+// the Jira diff tests continue exercising the Done/Closed/Resolved branch.
+var testDoneStatuses = []string{"Done", "Closed", "Resolved"}
+
 // --- Helpers ----------------------------------------------------------------
 
 func eventTypes(evts []domain.Event) []string {
@@ -672,7 +676,7 @@ func TestDiffJira_FirstDiscovery_Assigned(t *testing.T) {
 		Assignee: testUser,
 		Priority: "High",
 	}
-	evts := DiffJiraSnapshots(domain.JiraSnapshot{}, curr, testEntityID, testUser)
+	evts := DiffJiraSnapshots(domain.JiraSnapshot{}, curr, testEntityID, testUser, testDoneStatuses)
 	if len(evts) != 1 || evts[0].EventType != domain.EventJiraIssueAssigned {
 		t.Errorf("expected [jira:issue:assigned], got %v", eventTypes(evts))
 	}
@@ -688,7 +692,7 @@ func TestDiffJira_FirstDiscovery_Available(t *testing.T) {
 		Status: "To Do",
 		// no Assignee
 	}
-	evts := DiffJiraSnapshots(domain.JiraSnapshot{}, curr, testEntityID, testUser)
+	evts := DiffJiraSnapshots(domain.JiraSnapshot{}, curr, testEntityID, testUser, testDoneStatuses)
 	if len(evts) != 1 || evts[0].EventType != domain.EventJiraIssueAvailable {
 		t.Errorf("expected [jira:issue:available], got %v", eventTypes(evts))
 	}
@@ -696,7 +700,7 @@ func TestDiffJira_FirstDiscovery_Available(t *testing.T) {
 
 func TestDiffJira_FirstDiscovery_Completed(t *testing.T) {
 	curr := domain.JiraSnapshot{Key: "SKY-125", Status: "Done"}
-	evts := DiffJiraSnapshots(domain.JiraSnapshot{}, curr, testEntityID, testUser)
+	evts := DiffJiraSnapshots(domain.JiraSnapshot{}, curr, testEntityID, testUser, testDoneStatuses)
 	if len(evts) != 1 || evts[0].EventType != domain.EventJiraIssueCompleted {
 		t.Errorf("expected [jira:issue:completed], got %v", eventTypes(evts))
 	}
@@ -706,7 +710,7 @@ func TestDiffJira_StatusChanged_DedupKey(t *testing.T) {
 	prev := domain.JiraSnapshot{Key: "SKY-1", Status: "To Do"}
 	curr := domain.JiraSnapshot{Key: "SKY-1", Status: "In Review"}
 
-	evts := DiffJiraSnapshots(prev, curr, testEntityID, testUser)
+	evts := DiffJiraSnapshots(prev, curr, testEntityID, testUser, testDoneStatuses)
 	evt := findEvent(evts, domain.EventJiraIssueStatusChanged)
 	if evt == nil {
 		t.Fatal("expected status_changed event")
@@ -721,7 +725,7 @@ func TestDiffJira_StatusChanged_Terminal_AlsoEmitsCompleted(t *testing.T) {
 	prev := domain.JiraSnapshot{Key: "SKY-1", Status: "In Progress"}
 	curr := domain.JiraSnapshot{Key: "SKY-1", Status: "Done"}
 
-	evts := DiffJiraSnapshots(prev, curr, testEntityID, testUser)
+	evts := DiffJiraSnapshots(prev, curr, testEntityID, testUser, testDoneStatuses)
 	types := eventTypes(evts)
 	hasStatusChanged := false
 	hasCompleted := false
@@ -745,7 +749,7 @@ func TestDiffJira_Reassigned(t *testing.T) {
 	prev := domain.JiraSnapshot{Key: "SKY-1", Assignee: testUser}
 	curr := domain.JiraSnapshot{Key: "SKY-1", Assignee: "bob"}
 
-	evts := DiffJiraSnapshots(prev, curr, testEntityID, testUser)
+	evts := DiffJiraSnapshots(prev, curr, testEntityID, testUser, testDoneStatuses)
 	evt := findEvent(evts, domain.EventJiraIssueAssigned)
 	if evt == nil {
 		t.Fatal("expected assigned event on reassignment")
@@ -760,7 +764,7 @@ func TestDiffJira_Unassigned(t *testing.T) {
 	prev := domain.JiraSnapshot{Key: "SKY-1", Assignee: testUser}
 	curr := domain.JiraSnapshot{Key: "SKY-1", Assignee: ""}
 
-	evts := DiffJiraSnapshots(prev, curr, testEntityID, testUser)
+	evts := DiffJiraSnapshots(prev, curr, testEntityID, testUser, testDoneStatuses)
 	if findEvent(evts, domain.EventJiraIssueAvailable) == nil {
 		t.Error("expected available event when assignee removed")
 	}
@@ -770,7 +774,7 @@ func TestDiffJira_PriorityChanged_DedupKey(t *testing.T) {
 	prev := domain.JiraSnapshot{Key: "SKY-1", Priority: "Low"}
 	curr := domain.JiraSnapshot{Key: "SKY-1", Priority: "High"}
 
-	evts := DiffJiraSnapshots(prev, curr, testEntityID, testUser)
+	evts := DiffJiraSnapshots(prev, curr, testEntityID, testUser, testDoneStatuses)
 	evt := findEvent(evts, domain.EventJiraIssuePriorityChanged)
 	if evt == nil {
 		t.Fatal("expected priority_changed event")
@@ -784,7 +788,7 @@ func TestDiffJira_NewComment(t *testing.T) {
 	prev := domain.JiraSnapshot{Key: "SKY-1", CommentCount: 3}
 	curr := domain.JiraSnapshot{Key: "SKY-1", CommentCount: 5}
 
-	evts := DiffJiraSnapshots(prev, curr, testEntityID, testUser)
+	evts := DiffJiraSnapshots(prev, curr, testEntityID, testUser, testDoneStatuses)
 	if findEvent(evts, domain.EventJiraIssueCommented) == nil {
 		t.Error("expected commented event when comment count increases")
 	}
@@ -794,7 +798,7 @@ func TestDiffJira_CommentCountDecrease_NoEvent(t *testing.T) {
 	prev := domain.JiraSnapshot{Key: "SKY-1", CommentCount: 5}
 	curr := domain.JiraSnapshot{Key: "SKY-1", CommentCount: 3} // deleted comments
 
-	evts := DiffJiraSnapshots(prev, curr, testEntityID, testUser)
+	evts := DiffJiraSnapshots(prev, curr, testEntityID, testUser, testDoneStatuses)
 	if findEvent(evts, domain.EventJiraIssueCommented) != nil {
 		t.Error("should not emit commented when count decreases")
 	}

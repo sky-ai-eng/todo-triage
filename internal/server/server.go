@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/config"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
@@ -17,16 +18,17 @@ import (
 
 // Server is the main HTTP server for Triage Factory.
 type Server struct {
-	db                   *sql.DB
-	mux                  *http.ServeMux
-	static               fs.FS
-	ws                   *websocket.Hub
-	spawner              *delegate.Spawner
-	ghClient             *ghclient.Client
-	jiraClient           *jira.Client
-	jiraInProgressStatus string
-	onGitHubChanged      func() // GitHub creds/repos changed — full restart + re-profile
-	onJiraChanged        func() // Jira config changed — restart Jira poller only
+	db                 *sql.DB
+	mux                *http.ServeMux
+	static             fs.FS
+	ws                 *websocket.Hub
+	spawner            *delegate.Spawner
+	ghClient           *ghclient.Client
+	jiraClient         *jira.Client
+	jiraInProgressRule config.JiraStatusRule // full rule — Members for guards, Canonical for writes
+	onGitHubChanged    func()                // GitHub creds/repos changed — full restart + re-profile
+	onJiraChanged      func()                // Jira config changed — restart Jira poller only
+	scorerTrigger      func()                // invoked after non-poll task creation (e.g. carry-over) to kick scoring immediately
 
 	// Jira poll readiness — used by /api/jira/stock to decide whether the
 	// poller has completed its first cycle after a restart. Carry-over reads
@@ -175,15 +177,26 @@ func (s *Server) SetOnJiraChanged(fn func()) {
 	s.onJiraChanged = fn
 }
 
+// SetScorerTrigger registers a callback to kick the AI scorer. Used by
+// flows that create tasks outside the normal poll→event path (e.g.
+// carry-over) so scoring starts immediately rather than waiting for the
+// next poll cycle.
+func (s *Server) SetScorerTrigger(fn func()) {
+	s.scorerTrigger = fn
+}
+
 // SetGitHubClient sets the GitHub client for review approval submissions.
 func (s *Server) SetGitHubClient(client *ghclient.Client) {
 	s.ghClient = client
 }
 
-// SetJiraClient sets the Jira client and in-progress status for claim actions.
-func (s *Server) SetJiraClient(client *jira.Client, inProgressStatus string) {
+// SetJiraClient sets the Jira client and the in-progress rule used by claim
+// and undo handlers. The rule carries both Members (for guards — is the
+// ticket already in *any* in-progress variant?) and Canonical (the status
+// we actually transition into when claiming).
+func (s *Server) SetJiraClient(client *jira.Client, inProgressRule config.JiraStatusRule) {
 	s.jiraClient = client
-	s.jiraInProgressStatus = inProgressStatus
+	s.jiraInProgressRule = inProgressRule
 }
 
 // MarkJiraRestarted records the moment the Jira poller was restarted. Clears

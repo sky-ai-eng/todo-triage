@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import JiraStatusRule, { type JiraStatusRuleValue } from '../components/JiraStatusRule'
 
 interface JiraStatus {
   id: string
@@ -18,8 +19,9 @@ interface SettingsData {
     has_token: boolean
     poll_interval: string
     projects: string[]
-    pickup_statuses: string[]
-    in_progress_status: string
+    pickup: JiraStatusRuleValue
+    in_progress: JiraStatusRuleValue
+    done: JiraStatusRuleValue
   }
   server: { port: number }
   ai: {
@@ -32,7 +34,23 @@ interface SettingsData {
 
 export default function Settings() {
   const [data, setData] = useState<SettingsData | null>(null)
-  const [form, setForm] = useState({
+  const [form, setForm] = useState<{
+    github_enabled: boolean
+    github_url: string
+    github_pat: string
+    jira_enabled: boolean
+    jira_url: string
+    jira_pat: string
+    github_poll_interval: string
+    jira_poll_interval: string
+    jira_projects: string
+    jira_pickup: JiraStatusRuleValue
+    jira_in_progress: JiraStatusRuleValue
+    jira_done: JiraStatusRuleValue
+    ai_model: string
+    ai_auto_delegate_enabled: boolean
+    server_port: number
+  }>({
     github_enabled: true,
     github_url: '',
     github_pat: '',
@@ -42,8 +60,9 @@ export default function Settings() {
     github_poll_interval: '60s',
     jira_poll_interval: '60s',
     jira_projects: '',
-    jira_pickup_statuses: [] as string[],
-    jira_in_progress_status: '',
+    jira_pickup: { members: [] },
+    jira_in_progress: { members: [] },
+    jira_done: { members: [] },
     ai_model: 'sonnet',
     ai_auto_delegate_enabled: true,
     server_port: 3000,
@@ -71,8 +90,9 @@ export default function Settings() {
           github_poll_interval: d.github.poll_interval,
           jira_poll_interval: d.jira.poll_interval,
           jira_projects: (d.jira.projects || []).join(', '),
-          jira_pickup_statuses: d.jira.pickup_statuses || [],
-          jira_in_progress_status: d.jira.in_progress_status || '',
+          jira_pickup: d.jira.pickup || { members: [] },
+          jira_in_progress: d.jira.in_progress || { members: [] },
+          jira_done: d.jira.done || { members: [] },
           ai_model: d.ai.model,
           ai_auto_delegate_enabled: d.ai.auto_delegate_enabled,
           server_port: d.server.port,
@@ -133,8 +153,9 @@ export default function Settings() {
           ...f,
           jira_pat: '',
           jira_projects: '',
-          jira_pickup_statuses: [],
-          jira_in_progress_status: '',
+          jira_pickup: { members: [] },
+          jira_in_progress: { members: [] },
+          jira_done: { members: [] },
         }))
         setJiraStatuses([])
       } else {
@@ -175,8 +196,9 @@ export default function Settings() {
       jira_url: '',
       jira_pat: '',
       jira_projects: '',
-      jira_pickup_statuses: [],
-      jira_in_progress_status: '',
+      jira_pickup: { members: [] },
+      jira_in_progress: { members: [] },
+      jira_done: { members: [] },
     }))
   }
 
@@ -207,8 +229,9 @@ export default function Settings() {
           github_poll_interval: form.github_poll_interval,
           jira_poll_interval: form.jira_poll_interval,
           jira_projects: projects,
-          jira_pickup_statuses: form.jira_pickup_statuses,
-          jira_in_progress_status: form.jira_in_progress_status,
+          jira_pickup: form.jira_pickup,
+          jira_in_progress: form.jira_in_progress,
+          jira_done: form.jira_done,
           ai_model: form.ai_model,
           ai_auto_delegate_enabled: form.ai_auto_delegate_enabled,
           server_port: form.server_port,
@@ -381,45 +404,34 @@ export default function Settings() {
                 </div>
               </Field>
               {jiraStatuses.length > 0 && (
-                <>
-                  <Field label="Pickup statuses (poll for these unassigned tickets)">
-                    <div className="flex flex-wrap gap-2">
-                      {jiraStatuses.map((s) => (
-                        <StatusChip
-                          key={s.id}
-                          label={s.name}
-                          selected={form.jira_pickup_statuses.includes(s.name)}
-                          onClick={() =>
-                            setForm((f) => ({
-                              ...f,
-                              jira_pickup_statuses: f.jira_pickup_statuses.includes(s.name)
-                                ? f.jira_pickup_statuses.filter((n) => n !== s.name)
-                                : [...f.jira_pickup_statuses, s.name],
-                            }))
-                          }
-                        />
-                      ))}
-                    </div>
-                  </Field>
-                  <Field label="In-progress status (set when you claim a ticket)">
-                    <div className="flex flex-wrap gap-2">
-                      {jiraStatuses.map((s) => (
-                        <StatusChip
-                          key={s.id}
-                          label={s.name}
-                          selected={form.jira_in_progress_status === s.name}
-                          onClick={() =>
-                            setForm((f) => ({
-                              ...f,
-                              jira_in_progress_status:
-                                f.jira_in_progress_status === s.name ? '' : s.name,
-                            }))
-                          }
-                        />
-                      ))}
-                    </div>
-                  </Field>
-                </>
+                <div className="space-y-4 pt-2">
+                  <JiraStatusRule
+                    label="Pickup"
+                    description="Poll for unassigned tickets in these states."
+                    allStatuses={jiraStatuses}
+                    value={form.jira_pickup}
+                    onChange={(v) => setForm((f) => ({ ...f, jira_pickup: v }))}
+                    requireCanonical={false}
+                  />
+                  <JiraStatusRule
+                    label="In progress"
+                    description="Count as actively being worked on."
+                    allStatuses={jiraStatuses}
+                    value={form.jira_in_progress}
+                    onChange={(v) => setForm((f) => ({ ...f, jira_in_progress: v }))}
+                    requireCanonical={true}
+                    canonicalPrompt="Claim →"
+                  />
+                  <JiraStatusRule
+                    label="Done"
+                    description="Count as complete (add every variant — e.g. Resolved + Verified)."
+                    allStatuses={jiraStatuses}
+                    value={form.jira_done}
+                    onChange={(v) => setForm((f) => ({ ...f, jira_done: v }))}
+                    requireCanonical={true}
+                    canonicalPrompt="Complete →"
+                  />
+                </div>
               )}
             </div>
           )}
@@ -483,8 +495,11 @@ export default function Settings() {
             saving ||
             (jiraConnected &&
               (!form.jira_projects.trim() ||
-                form.jira_pickup_statuses.length === 0 ||
-                !form.jira_in_progress_status))
+                form.jira_pickup.members.length === 0 ||
+                form.jira_in_progress.members.length === 0 ||
+                !form.jira_in_progress.canonical ||
+                form.jira_done.members.length === 0 ||
+                !form.jira_done.canonical))
           }
           className="w-full bg-accent hover:bg-accent/90 disabled:opacity-40 text-white font-medium rounded-xl px-4 py-2.5 text-[13px] transition-colors"
         >
@@ -562,29 +577,5 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <span className="text-[11px] text-text-tertiary mb-1.5 block">{label}</span>
       {children}
     </label>
-  )
-}
-
-function StatusChip({
-  label,
-  selected,
-  onClick,
-}: {
-  label: string
-  selected: boolean
-  onClick: () => void
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`text-[11px] px-3 py-1.5 rounded-full border transition-colors ${
-        selected
-          ? 'bg-accent/[0.1] border-accent/30 text-accent font-medium'
-          : 'bg-white/50 border-border-subtle text-text-tertiary hover:text-text-secondary hover:border-border-subtle/80'
-      }`}
-    >
-      {label}
-    </button>
   )
 }
