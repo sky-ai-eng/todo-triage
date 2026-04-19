@@ -337,37 +337,7 @@ function TicketRow({
             </span>
           )}
         </div>
-        <div className="flex items-center gap-1.5 mt-0.5 text-[11px] text-text-tertiary">
-          {ticket.parent_key && ticket.parent_url && (
-            <>
-              <a
-                href={ticket.parent_url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="hover:text-accent transition-colors"
-              >
-                {ticket.parent_key}
-              </a>
-              <span>·</span>
-            </>
-          )}
-          {ticket.status && !ticket.already_done && (
-            <>
-              <span className="text-text-secondary font-medium">{ticket.status}</span>
-              {(ticket.issue_type || ticket.priority) && <span>·</span>}
-            </>
-          )}
-          {ticket.issue_type && (
-            <>
-              <span>{ticket.issue_type}</span>
-              {ticket.priority && <span>·</span>}
-            </>
-          )}
-          {ticket.priority && <span>{ticket.priority}</span>}
-          {!ticket.status && !ticket.issue_type && !ticket.priority && !ticket.parent_key && (
-            <span className="italic">no metadata</span>
-          )}
-        </div>
+        <MetadataLine ticket={ticket} />
         {failure && (
           <div className="mt-1 text-[11px] text-dismiss" title={failure}>
             {failure}
@@ -376,6 +346,55 @@ function TicketRow({
       </div>
 
       <TriSelector selection={selection} onToggle={onToggle} />
+    </div>
+  )
+}
+
+// MetadataLine renders ticket metadata in the order: status · priority ·
+// issue_type · parent. Separators are inserted only between present values
+// so trailing/leading dots never appear. Status is hidden when already_done
+// is showing it via the trailing pill on the first line.
+function MetadataLine({ ticket }: { ticket: StockTicket }) {
+  const parts: React.ReactNode[] = []
+  if (ticket.status && !ticket.already_done) {
+    parts.push(
+      <span key="status" className="text-text-secondary font-medium">
+        {ticket.status}
+      </span>,
+    )
+  }
+  if (ticket.priority) {
+    parts.push(<span key="priority">{ticket.priority}</span>)
+  }
+  if (ticket.issue_type) {
+    parts.push(<span key="type">{ticket.issue_type}</span>)
+  }
+  if (ticket.parent_key && ticket.parent_url) {
+    parts.push(
+      <a
+        key="parent"
+        href={ticket.parent_url}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="hover:text-accent transition-colors"
+      >
+        {ticket.parent_key}
+      </a>,
+    )
+  }
+
+  return (
+    <div className="flex items-center gap-1.5 mt-0.5 text-[11px] text-text-tertiary">
+      {parts.length === 0 ? (
+        <span className="italic">no metadata</span>
+      ) : (
+        parts.map((p, i) => (
+          <span key={i} className="flex items-center gap-1.5">
+            {i > 0 && <span>·</span>}
+            {p}
+          </span>
+        ))
+      )}
     </div>
   )
 }
