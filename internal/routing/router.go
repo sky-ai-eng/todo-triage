@@ -87,6 +87,27 @@ func (r *Router) HandleEvent(evt domain.Event) {
 		return
 	}
 
+	// became_atomic is the belated-discovery path for parents whose
+	// subtasks just closed. Only create a task when none exists on the
+	// entity — otherwise an atomic ticket that gained and then lost
+	// subtasks would end up with two cards for the same entity. The
+	// dedup index doesn't catch this because the existing task's
+	// event_type is jira:issue:assigned while the new one would be
+	// jira:issue:became_atomic. Event is still recorded (audit trail
+	// stays honest); only task creation and trigger firing are
+	// suppressed.
+	if evt.EventType == domain.EventJiraIssueBecameAtomic {
+		active, err := dbpkg.FindActiveTasksByEntity(r.db, entityID)
+		if err != nil {
+			log.Printf("[router] became_atomic: failed to check active tasks on entity %s: %v", entityID, err)
+			return
+		}
+		if len(active) > 0 {
+			log.Printf("[router] became_atomic: entity %s has %d active task(s), skipping duplicate creation", entityID, len(active))
+			return
+		}
+	}
+
 	// Step 5: Match task_rules for this event type.
 	rules, err := dbpkg.GetEnabledRulesForEvent(r.db, evt.EventType)
 	if err != nil {

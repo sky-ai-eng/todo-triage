@@ -130,6 +130,11 @@ const EVENT_DISPLAY: Record<string, { label: string; description: string; color:
     description: 'Issue was marked as done',
     color: 'bg-emerald-500/10 text-emerald-700',
   },
+  'jira:issue:became_atomic': {
+    label: 'Now Actionable',
+    description: 'All subtasks closed — parent ticket is now an atomic work unit',
+    color: 'bg-blue-500/10 text-blue-600',
+  },
 }
 
 const FALLBACK = {

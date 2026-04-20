@@ -804,6 +804,207 @@ func TestDiffJira_CommentCountDecrease_NoEvent(t *testing.T) {
 	}
 }
 
+// --- Jira: subtask gating (SKY-173) ----------------------------------------
+
+func TestDiffJira_FirstDiscovery_OpenSubtasks_NoEvents(t *testing.T) {
+	// Parent ticket discovered with open subtasks: suppress assigned/available
+	// so it doesn't clutter the queue. Entity is still created (tracker.go
+	// handles that); this test just confirms no events fire.
+	curr := domain.JiraSnapshot{
+		Key:              "SKY-200",
+		Summary:          "Epic: Rebuild auth",
+		Status:           "In Progress",
+		Assignee:         testUser,
+		Priority:         "High",
+		OpenSubtaskCount: 2,
+	}
+	evts := DiffJiraSnapshots(domain.JiraSnapshot{}, curr, testEntityID, testUser, testDoneStatuses)
+	if len(evts) != 0 {
+		t.Errorf("expected 0 events for parent-with-subtasks on first discovery, got %d: %v",
+			len(evts), eventTypes(evts))
+	}
+}
+
+func TestDiffJira_FirstDiscovery_OpenSubtasks_AvailableSuppressed(t *testing.T) {
+	// Same gate for the unassigned/available path — a parent in pickup
+	// status with open subtasks shouldn't surface either.
+	curr := domain.JiraSnapshot{
+		Key:              "SKY-201",
+		Status:           "To Do",
+		OpenSubtaskCount: 1,
+		// no Assignee — would normally emit Available
+	}
+	evts := DiffJiraSnapshots(domain.JiraSnapshot{}, curr, testEntityID, testUser, testDoneStatuses)
+	if len(evts) != 0 {
+		t.Errorf("expected 0 events for unassigned parent-with-subtasks, got %d: %v",
+			len(evts), eventTypes(evts))
+	}
+}
+
+func TestDiffJira_FirstDiscovery_TerminalWithSubtasks_EmitsCompleted(t *testing.T) {
+	// Terminal parents still emit Completed regardless of subtasks — that
+	// branch runs before the subtask gate. The entity-lifecycle handler
+	// uses Completed to close the entity, and we want that to happen even
+	// if the parent had dangling subtasks when it was force-closed.
+	curr := domain.JiraSnapshot{
+		Key:              "SKY-202",
+		Status:           "Done",
+		Assignee:         testUser,
+		OpenSubtaskCount: 3,
+	}
+	evts := DiffJiraSnapshots(domain.JiraSnapshot{}, curr, testEntityID, testUser, testDoneStatuses)
+	if len(evts) != 1 || evts[0].EventType != domain.EventJiraIssueCompleted {
+		t.Errorf("expected [jira:issue:completed] even with open subtasks, got %v", eventTypes(evts))
+	}
+}
+
+func TestDiffJira_BecameAtomic_DownwardTransition(t *testing.T) {
+	// Parent had one open subtask, subtask closes -> count goes 1 -> 0.
+	// Belated discovery path: fire became_atomic so the task-rule can
+	// create the queued task that was suppressed on first poll.
+	prev := domain.JiraSnapshot{
+		Key:              "SKY-300",
+		Status:           "In Progress",
+		Assignee:         testUser,
+		OpenSubtaskCount: 1,
+	}
+	curr := domain.JiraSnapshot{
+		Key:              "SKY-300",
+		Status:           "In Progress",
+		Assignee:         testUser,
+		Priority:         "High",
+		Summary:          "Rework the auth flow",
+		IssueType:        "Story",
+		OpenSubtaskCount: 0,
+	}
+	evts := DiffJiraSnapshots(prev, curr, testEntityID, testUser, testDoneStatuses)
+	evt := findEvent(evts, domain.EventJiraIssueBecameAtomic)
+	if evt == nil {
+		t.Fatalf("expected became_atomic on 1->0 transition, got events: %v", eventTypes(evts))
+	}
+	meta := decodeMetadata[events.JiraIssueBecameAtomicMetadata](t, *evt)
+	if !meta.AssigneeIsSelf {
+		t.Error("expected AssigneeIsSelf=true")
+	}
+	if meta.IssueKey != "SKY-300" || meta.Project != "SKY" {
+		t.Errorf("unexpected key/project: %s / %s", meta.IssueKey, meta.Project)
+	}
+	if meta.Priority != "High" || meta.IssueType != "Story" {
+		t.Errorf("metadata missing snapshot fields: priority=%q type=%q", meta.Priority, meta.IssueType)
+	}
+}
+
+func TestDiffJira_BecameAtomic_NoTransition_NoEvent(t *testing.T) {
+	// Never had subtasks (0->0): the ticket was atomic throughout. No
+	// became_atomic event should fire — it's strictly a downward-transition
+	// signal, not a repeat-on-every-poll heartbeat.
+	prev := domain.JiraSnapshot{Key: "SKY-301", OpenSubtaskCount: 0, Assignee: testUser}
+	curr := domain.JiraSnapshot{Key: "SKY-301", OpenSubtaskCount: 0, Assignee: testUser}
+
+	evts := DiffJiraSnapshots(prev, curr, testEntityID, testUser, testDoneStatuses)
+	if findEvent(evts, domain.EventJiraIssueBecameAtomic) != nil {
+		t.Error("should not emit became_atomic when prev count was already 0")
+	}
+}
+
+func TestDiffJira_BecameAtomic_AddedThenRemoved_NoEventOnAdd(t *testing.T) {
+	// Upward transition (0 -> N, subtasks appear on an atomic ticket) is
+	// deliberately NOT an event — we don't retroactively do anything to
+	// the existing task, the UI pill surfaces the change instead. Confirm
+	// no became_atomic fires here.
+	prev := domain.JiraSnapshot{Key: "SKY-302", OpenSubtaskCount: 0, Assignee: testUser}
+	curr := domain.JiraSnapshot{Key: "SKY-302", OpenSubtaskCount: 2, Assignee: testUser}
+
+	evts := DiffJiraSnapshots(prev, curr, testEntityID, testUser, testDoneStatuses)
+	if findEvent(evts, domain.EventJiraIssueBecameAtomic) != nil {
+		t.Error("became_atomic should only fire on downward transition, not upward")
+	}
+}
+
+func TestDiffJira_Reassigned_WithOpenSubtasks_NoEvent(t *testing.T) {
+	// Reassignment on a parent that still has open subtasks: the subtask
+	// gate has to apply to this path too, not just first-discovery —
+	// otherwise a non-atomic parent could sneak a task into the queue via
+	// reassignment after the initial suppression. became_atomic handles
+	// the belated-discovery path once the decomposition collapses.
+	prev := domain.JiraSnapshot{
+		Key:              "SKY-310",
+		Assignee:         "",
+		OpenSubtaskCount: 2,
+	}
+	curr := domain.JiraSnapshot{
+		Key:              "SKY-310",
+		Assignee:         testUser,
+		OpenSubtaskCount: 2,
+	}
+	evts := DiffJiraSnapshots(prev, curr, testEntityID, testUser, testDoneStatuses)
+	if findEvent(evts, domain.EventJiraIssueAssigned) != nil {
+		t.Error("should not emit assigned on reassignment while parent still has open subtasks")
+	}
+	if findEvent(evts, domain.EventJiraIssueAvailable) != nil {
+		t.Error("should not emit available on reassignment while parent still has open subtasks")
+	}
+}
+
+func TestDiffJira_Unassigned_WithOpenSubtasks_NoEvent(t *testing.T) {
+	// Same gate on the opposite direction (assigned -> unassigned).
+	prev := domain.JiraSnapshot{
+		Key:              "SKY-311",
+		Assignee:         testUser,
+		OpenSubtaskCount: 1,
+	}
+	curr := domain.JiraSnapshot{
+		Key:              "SKY-311",
+		Assignee:         "",
+		OpenSubtaskCount: 1,
+	}
+	evts := DiffJiraSnapshots(prev, curr, testEntityID, testUser, testDoneStatuses)
+	if findEvent(evts, domain.EventJiraIssueAvailable) != nil {
+		t.Error("should not emit available on unassignment while parent still has open subtasks")
+	}
+}
+
+func TestDiffJira_Reassigned_NoSubtasks_StillFires(t *testing.T) {
+	// Negative control: the subtask gate only applies when subtasks are
+	// present. Atomic tickets still emit assigned on reassignment.
+	prev := domain.JiraSnapshot{Key: "SKY-312", Assignee: "", OpenSubtaskCount: 0}
+	curr := domain.JiraSnapshot{Key: "SKY-312", Assignee: testUser, OpenSubtaskCount: 0}
+
+	evts := DiffJiraSnapshots(prev, curr, testEntityID, testUser, testDoneStatuses)
+	if findEvent(evts, domain.EventJiraIssueAssigned) == nil {
+		t.Error("expected assigned on reassignment of atomic ticket")
+	}
+}
+
+func TestDiffJira_BecameAtomic_TerminalStatus_NoEvent(t *testing.T) {
+	// Edge: subtasks close at the same poll the parent moves to a terminal
+	// status. The completed path handles termination; firing became_atomic
+	// would race with CloseEntity and potentially create a task on a ticket
+	// that's about to be closed. Suppress became_atomic when curr status
+	// is terminal — the completed event is the one that matters.
+	prev := domain.JiraSnapshot{
+		Key:              "SKY-303",
+		Status:           "In Progress",
+		Assignee:         testUser,
+		OpenSubtaskCount: 2,
+	}
+	curr := domain.JiraSnapshot{
+		Key:              "SKY-303",
+		Status:           "Done",
+		Assignee:         testUser,
+		OpenSubtaskCount: 0,
+	}
+
+	evts := DiffJiraSnapshots(prev, curr, testEntityID, testUser, testDoneStatuses)
+	if findEvent(evts, domain.EventJiraIssueBecameAtomic) != nil {
+		t.Error("should not emit became_atomic when transitioning to terminal status")
+	}
+	// status_changed + completed are the right signals for this transition.
+	if findEvent(evts, domain.EventJiraIssueCompleted) == nil {
+		t.Error("expected completed event on transition to Done")
+	}
+}
+
 // --- Compound scenario: multiple changes in one poll ------------------------
 
 func TestDiff_CompoundPoll_CIAndNewCommitsAndLabels(t *testing.T) {
