@@ -13,6 +13,9 @@ interface Props {
 const TaskCard = forwardRef<HTMLDivElement, Props & React.HTMLAttributes<HTMLDivElement>>(
   ({ task, style, isDragging, onRequeue, ...props }, ref) => {
     const age = formatAge(task.created_at)
+    // Normalize once so the condition and the prop share the same non-nullable
+    // value — avoids the non-null assertion on a field typed as optional.
+    const subtaskCount = task.open_subtask_count ?? 0
 
     return (
       <div
@@ -26,7 +29,7 @@ const TaskCard = forwardRef<HTMLDivElement, Props & React.HTMLAttributes<HTMLDiv
         <div className="flex items-center gap-2 mb-2">
           <SourceBadge task={task} />
           <EventBadge eventType={task.event_type} compact />
-          {(task.open_subtask_count ?? 0) > 0 && <SubtaskHint count={task.open_subtask_count!} />}
+          {subtaskCount > 0 && <SubtaskHint count={subtaskCount} />}
         </div>
 
         <h3 className="text-[13px] font-semibold text-text-primary leading-snug line-clamp-2 mb-1">
