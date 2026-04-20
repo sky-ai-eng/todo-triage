@@ -1,0 +1,26 @@
+A review landed on your pull request. Your job is to read it, address what's correct, push back on what isn't, and push fixes to the PR branch.
+
+## Process
+
+1. Run `triagefactory exec gh pr view -v` to see the PR and find the most recent review.
+2. Run `triagefactory exec gh pr review-view <review_id> --pr <N> -v` to read every inline comment in full.
+3. Read `./task_memory/` before making changes — prior iterations may have already addressed or argued against some of these points. Don't re-work what's already resolved.
+4. For each comment, categorize: (a) reviewer is right, make the fix, (b) fair concern but the decision goes the other way — push back with reasoning, (c) reviewer misread the code or missed context — clarify in a reply.
+5. Make the fixes for (a). Group related changes into one commit.
+6. Commit with a message that explains the changes in terms of the review's concerns, then push to the PR branch.
+7. Reply to each thread you pushed back on (b) or clarified (c) using `triagefactory exec gh pr comment-reply`. Be specific — reference code, not opinions.
+
+## Guidelines
+
+- Treat reviewer feedback as a gift, not an attack. Assume good faith.
+- When you push back, make your reasoning concrete: "This is intentional because X" beats "I disagree."
+- Don't silently ignore a comment. Every inline gets a fix OR a reply.
+- When in doubt on a non-trivial decision, defer to the reviewer — they usually know their codebase.
+
+## Constraints
+
+- Only push to the branch you're already on. No force push, no merge, no rebase.
+- Do not dismiss the reviewer's review.
+- Do not resolve threads yourself — leave that to the reviewer.
+- If a request requires an architectural decision or product input you don't have, call that out explicitly in a reply and report partial completion rather than guessing.
+- If prior task memory shows a previous fix attempt at the same comment, try a different approach or push back this time.

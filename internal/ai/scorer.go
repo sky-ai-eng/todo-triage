@@ -42,14 +42,8 @@ var RepoProfilePrompt string
 //go:embed prompts/ci-fix.txt
 var CIFixPromptTemplate string
 
-//go:embed prompts/self-review-draft-pr.txt
-var SelfReviewDraftPRPromptTemplate string
-
-//go:embed prompts/address-self-review.txt
-var AddressSelfReviewPromptTemplate string
-
-//go:embed prompts/respond-to-external-review.txt
-var RespondToExternalReviewPromptTemplate string
+//go:embed prompts/fix-review-feedback.txt
+var FixReviewFeedbackPromptTemplate string
 
 const batchSize = 10
 
