@@ -511,6 +511,21 @@ func TestDiff_ReviewRequested_OtherTeam_NoEvent(t *testing.T) {
 	}
 }
 
+func TestDiff_ReviewRequested_SelfAuthoredViaTeam_NoEvent(t *testing.T) {
+	// PR authored by the session user; their team gets auto-assigned via
+	// CODEOWNERS. This is a reviewer-pool artifact, not an ask — no event.
+	prev := basePRSnapshot()
+	prev.Author = testUser
+	curr := basePRSnapshot()
+	curr.Author = testUser
+	curr.ReviewRequests = []string{"eng/pulsar"}
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, []string{"eng/pulsar"})
+	if findEvent(evts, domain.EventGitHubPRReviewRequested) != nil {
+		t.Error("should not emit review_requested when PR is self-authored (team auto-assigned to own PR)")
+	}
+}
+
 // --- Labels -----------------------------------------------------------------
 
 func TestDiff_Labels_AddAndRemove(t *testing.T) {

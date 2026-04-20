@@ -86,7 +86,7 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, userTe
 				if err := db.MarkEntityClosed(t.database, entity.ID); err != nil {
 					log.Printf("[tracker] failed to mark entity %s closed on discovery: %v", sid, err)
 				}
-			} else if isReviewerMatch(snap.ReviewRequests, username, userTeams) {
+			} else if snap.Author != username && isReviewerMatch(snap.ReviewRequests, username, userTeams) {
 				// Backfill: user is a pending reviewer (directly or via one
 				// of their teams) on a just-discovered open PR.
 				// DiffPRSnapshots' "no events on initial load" rule means
@@ -96,6 +96,12 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, userTe
 				// task directly so existing review-requests land in the queue
 				// on first connect. Mirrors the Jira carry-over queue path in
 				// handleJiraStockPost.
+				//
+				// Self-authored PRs are skipped: GitHub forbids self-requests,
+				// so the only way the match fires here is via a team the user
+				// is on (CODEOWNERS auto-assigning them to their own PR). That
+				// isn't an ask — surfacing it as a queued task pollutes the
+				// queue. Matches the same guard in DiffPRSnapshots.
 				if err := t.backfillReviewRequested(entity.ID, snap, username); err != nil {
 					log.Printf("[tracker] failed to backfill review_requested for %s: %v", sid, err)
 				}

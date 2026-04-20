@@ -160,15 +160,25 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, us
 	// (username) or via any of their teams (org/slug). Transition is "was
 	// not matched before, is matched now" so repeated team-level requests
 	// don't re-fire across polls where nothing changed.
-	prevMatched := matchesAny(prev.ReviewRequests, username, userTeams)
-	currMatched := matchesAny(curr.ReviewRequests, username, userTeams)
-	if currMatched && !prevMatched {
-		emit(domain.EventGitHubPRReviewRequested, "", events.GitHubPRReviewRequestedMetadata{
-			Author: curr.Author, AuthorIsSelf: authorIsSelf,
-			Repo: curr.Repo, PRNumber: curr.Number,
-			IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA,
-			Labels: curr.Labels, Title: curr.Title,
-		})
+	//
+	// Suppress entirely when the PR is self-authored: GitHub forbids
+	// requesting yourself directly, so the only way this fires on your own
+	// PR is via a team you're on (CODEOWNERS auto-assigning your team to
+	// paths you own). That's not an "ask" — it's a reviewer-pool artifact
+	// — and surfacing it as a task pollutes the queue. The default
+	// review_requested rule is match-all, so we can't defer the filtering
+	// to predicates without forcing every user to customize it.
+	if !authorIsSelf {
+		prevMatched := matchesAny(prev.ReviewRequests, username, userTeams)
+		currMatched := matchesAny(curr.ReviewRequests, username, userTeams)
+		if currMatched && !prevMatched {
+			emit(domain.EventGitHubPRReviewRequested, "", events.GitHubPRReviewRequestedMetadata{
+				Author: curr.Author, AuthorIsSelf: authorIsSelf,
+				Repo: curr.Repo, PRNumber: curr.Number,
+				IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA,
+				Labels: curr.Labels, Title: curr.Title,
+			})
+		}
 	}
 
 	// --- Per-review events -------------------------------------------------
