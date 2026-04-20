@@ -3,6 +3,7 @@ package github
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 )
 
 // userTeam is the subset of GET /user/teams we care about. See:
@@ -53,6 +54,9 @@ func (c *Client) ListMyTeams() ([]string, error) {
 		}
 		if len(teams) < teamsPerPage {
 			break
+		}
+		if page == teamsPageCap {
+			log.Printf("[github] WARN: team membership list truncated at %d pages (%d teams max) — team-based review-request matching may miss memberships past this cap", teamsPageCap, teamsPageCap*teamsPerPage)
 		}
 	}
 	return out, nil
