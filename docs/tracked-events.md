@@ -22,7 +22,7 @@ Events are emitted once per transition, not continuously. If a PR stays in the s
 |-------|----|---------|
 | **Changes Requested** | `github:pr:changes_requested` | A reviewer's latest review state changes to `CHANGES_REQUESTED` |
 | **CI Failed** | `github:pr:ci_failed` | The head commit's `statusCheckRollup` transitions to `FAILURE` or `ERROR` |
-| **Review Requested** | `github:pr:review_requested` | A user/team appears in the PR's `reviewRequests` that wasn't there before. Detects both initial requests and re-requests after changes |
+| **Review Requested** | `github:pr:review_requested` | A user/team appears in the PR's `reviewRequests` that wasn't there before. Matches the session user directly or via any team they belong to (fetched from `GET /user/teams`, stored as `org/slug`). Detects both initial requests and re-requests after changes |
 | **Merge Conflicts** | `github:pr:conflicts` | The PR's `mergeable` state transitions to `CONFLICTING` |
 | **Ready for Review** | `github:pr:ready_for_review` | The PR's `isDraft` changes from `true` to `false` |
 | **PR Approved** | `github:pr:approved` | A reviewer's latest review state changes to `APPROVED` |
@@ -77,7 +77,7 @@ The tracker stores these fields for each PR and diffs them between cycles:
 - `head_ref`, `base_ref`, `head_sha`
 - `additions`, `deletions`, `changed_files`
 - `check_runs[]` — structured per-check-run data for the current head SHA, deduped by name (latest execution wins). Each entry: `id`, `name`, `status`, `conclusion`, `completed_at`, `details_url`, `workflow_run_id`. `details_url` is GitHub's `details_url` — the CI provider's "more info" link (for Actions: `/actions/runs/N/job/M`; for third-party CI: provider-defined), not GitHub's narrower check-run page URL.
-- `review_requests[]` — logins of users/teams with pending review requests
+- `review_requests[]` — pending reviewer identifiers: user logins for direct requests, `org/slug` for team requests
 - `reviews[]` — latest review per reviewer (author, state, submitted_at)
 - `review_count` — total number of reviews submitted
 - `labels[]`, `comment_count`, `updated_at`

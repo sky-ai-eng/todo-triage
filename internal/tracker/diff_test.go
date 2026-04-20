@@ -81,7 +81,7 @@ func TestDiff_FirstDiscovery_OpenPR_NoEvents(t *testing.T) {
 	// First discovery of an open PR should emit no events — events fire
 	// on the NEXT poll when we can meaningfully diff.
 	curr := basePRSnapshot()
-	evts := DiffPRSnapshots(domain.PRSnapshot{}, curr, testEntityID, testUser)
+	evts := DiffPRSnapshots(domain.PRSnapshot{}, curr, testEntityID, testUser, nil)
 	if len(evts) != 0 {
 		t.Errorf("expected 0 events on first discovery of open PR, got %d: %v", len(evts), eventTypes(evts))
 	}
@@ -90,7 +90,7 @@ func TestDiff_FirstDiscovery_OpenPR_NoEvents(t *testing.T) {
 func TestDiff_FirstDiscovery_MergedPR_EmitsMerged(t *testing.T) {
 	curr := basePRSnapshot()
 	curr.Merged = true
-	evts := DiffPRSnapshots(domain.PRSnapshot{}, curr, testEntityID, testUser)
+	evts := DiffPRSnapshots(domain.PRSnapshot{}, curr, testEntityID, testUser, nil)
 	if len(evts) != 1 || evts[0].EventType != domain.EventGitHubPRMerged {
 		t.Errorf("expected [pr:merged], got %v", eventTypes(evts))
 	}
@@ -100,7 +100,7 @@ func TestDiff_FirstDiscovery_MergedPR_EmitsMerged(t *testing.T) {
 func TestDiff_FirstDiscovery_ClosedPR_EmitsClosed(t *testing.T) {
 	curr := basePRSnapshot()
 	curr.State = "CLOSED"
-	evts := DiffPRSnapshots(domain.PRSnapshot{}, curr, testEntityID, testUser)
+	evts := DiffPRSnapshots(domain.PRSnapshot{}, curr, testEntityID, testUser, nil)
 	if len(evts) != 1 || evts[0].EventType != domain.EventGitHubPRClosed {
 		t.Errorf("expected [pr:closed], got %v", eventTypes(evts))
 	}
@@ -117,7 +117,7 @@ func TestDiff_CI_NewFailingCheck_EmitsPerCheck(t *testing.T) {
 		{ID: 3, Name: "lint", Conclusion: "success"},
 	}
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
 
 	failed := findEvents(evts, domain.EventGitHubPRCICheckFailed)
 	passed := findEvents(evts, domain.EventGitHubPRCICheckPassed)
@@ -150,7 +150,7 @@ func TestDiff_CI_SameFailingCheckID_NoEvent(t *testing.T) {
 		{ID: 1, Name: "build", Conclusion: "failure"}, // same ID, still failing
 	}
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
 	failed := findEvents(evts, domain.EventGitHubPRCICheckFailed)
 	if len(failed) != 0 {
 		t.Errorf("expected 0 ci_check_failed (same ID still failing), got %d", len(failed))
@@ -169,7 +169,7 @@ func TestDiff_CI_NewExecutionSameCheck_EmitsEvent(t *testing.T) {
 		{ID: 2, Name: "build", Conclusion: "failure"}, // new execution
 	}
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
 	failed := findEvents(evts, domain.EventGitHubPRCICheckFailed)
 	if len(failed) != 1 {
 		t.Errorf("expected 1 ci_check_failed (new execution ID), got %d", len(failed))
@@ -187,7 +187,7 @@ func TestDiff_CI_PendingToFailure_EmitsEvent(t *testing.T) {
 		{ID: 1, Name: "build", Conclusion: "failure"},
 	}
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
 	failed := findEvents(evts, domain.EventGitHubPRCICheckFailed)
 	if len(failed) != 1 {
 		t.Errorf("expected 1 ci_check_failed (pending→failure), got %d", len(failed))
@@ -206,7 +206,7 @@ func TestDiff_CI_NilPrevCheckRuns_TreatedAsEmpty(t *testing.T) {
 		{ID: 2, Name: "lint", Conclusion: "success"},
 	}
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
 	failed := findEvents(evts, domain.EventGitHubPRCICheckFailed)
 	passed := findEvents(evts, domain.EventGitHubPRCICheckPassed)
 	if len(failed) != 1 {
@@ -227,7 +227,7 @@ func TestDiff_CI_NilCurrCheckRuns_SkipsCISection(t *testing.T) {
 	curr := basePRSnapshot()
 	curr.CheckRuns = nil
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
 	if len(findEvents(evts, domain.EventGitHubPRCICheckPassed)) != 0 {
 		t.Error("should not emit ci events when curr.CheckRuns is nil")
 	}
@@ -246,7 +246,7 @@ func TestDiff_CI_FailureToSuccess_EmitsCheckPassed(t *testing.T) {
 		{ID: 1, Name: "build", Conclusion: "success"},
 	}
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
 	passed := findEvents(evts, domain.EventGitHubPRCICheckPassed)
 	if len(passed) != 1 {
 		t.Errorf("expected 1 ci_check_passed, got %d", len(passed))
@@ -270,7 +270,7 @@ func TestDiff_CI_FailureToSkipped_EmitsCheckPassed(t *testing.T) {
 		{ID: 1, Name: "integration", Conclusion: "skipped"},
 	}
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
 	passed := findEvents(evts, domain.EventGitHubPRCICheckPassed)
 	if len(passed) != 1 {
 		t.Errorf("expected 1 ci_check_passed (failure→skipped), got %d", len(passed))
@@ -291,7 +291,7 @@ func TestDiff_CI_FailureToNeutral_EmitsCheckPassed(t *testing.T) {
 		{ID: 1, Name: "lint", Conclusion: "neutral"},
 	}
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
 	passed := findEvents(evts, domain.EventGitHubPRCICheckPassed)
 	if len(passed) != 1 {
 		t.Errorf("expected 1 ci_check_passed (failure→neutral), got %d", len(passed))
@@ -309,7 +309,7 @@ func TestDiff_CI_SkippedToSkipped_NoEvent(t *testing.T) {
 		{ID: 1, Name: "optional", Conclusion: "skipped"},
 	}
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
 	if len(findEvents(evts, domain.EventGitHubPRCICheckPassed)) != 0 {
 		t.Error("should not emit ci_check_passed when already non-failing")
 	}
@@ -326,7 +326,7 @@ func TestDiff_CI_PendingToSkipped_EmitsCheckPassed(t *testing.T) {
 		{ID: 1, Name: "optional", Conclusion: "skipped"},
 	}
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
 	passed := findEvents(evts, domain.EventGitHubPRCICheckPassed)
 	if len(passed) != 1 {
 		t.Errorf("expected 1 ci_check_passed (pending→skipped), got %d", len(passed))
@@ -342,7 +342,7 @@ func TestDiff_Review_NewChangesRequested(t *testing.T) {
 		{Author: "alice", State: "CHANGES_REQUESTED"},
 	}
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
 	evt := findEvent(evts, domain.EventGitHubPRReviewChangesRequested)
 	if evt == nil {
 		t.Fatal("expected review_changes_requested event")
@@ -369,7 +369,7 @@ func TestDiff_Review_SameState_NoEvent(t *testing.T) {
 		{Author: "alice", State: "APPROVED"}, // unchanged
 	}
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
 	reviewEvts := findEvents(evts, domain.EventGitHubPRReviewApproved)
 	if len(reviewEvts) != 0 {
 		t.Errorf("expected no review events (state unchanged), got %d", len(reviewEvts))
@@ -385,7 +385,7 @@ func TestDiff_Review_SelfReview_EmitsSubmitted(t *testing.T) {
 		{Author: testUser, State: "COMMENTED"},
 	}
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
 
 	// Should emit review_commented (the specific type) AND review_submitted (I reviewed).
 	commented := findEvent(evts, domain.EventGitHubPRReviewCommented)
@@ -416,7 +416,7 @@ func TestDiff_Review_MultipleReviewers_IndependentEvents(t *testing.T) {
 		{Author: "bob", State: "CHANGES_REQUESTED"}, // new
 	}
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
 	approved := findEvents(evts, domain.EventGitHubPRReviewApproved)
 	changes := findEvents(evts, domain.EventGitHubPRReviewChangesRequested)
 
@@ -437,7 +437,7 @@ func TestDiff_ReviewRequested_ForSelf(t *testing.T) {
 	curr.Author = "bob"
 	curr.ReviewRequests = []string{testUser}
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
 	if findEvent(evts, domain.EventGitHubPRReviewRequested) == nil {
 		t.Error("expected review_requested event when self added to requests")
 	}
@@ -448,7 +448,7 @@ func TestDiff_ReviewRequested_ForOther_NoEvent(t *testing.T) {
 	curr := basePRSnapshot()
 	curr.ReviewRequests = []string{"someone-else"}
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
 	if findEvent(evts, domain.EventGitHubPRReviewRequested) != nil {
 		t.Error("should not emit review_requested when the request is for someone else")
 	}
@@ -462,9 +462,67 @@ func TestDiff_ReviewRequested_AlreadyPresent_NoEvent(t *testing.T) {
 	curr.Author = "bob"
 	curr.ReviewRequests = []string{testUser}
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
 	if findEvent(evts, domain.EventGitHubPRReviewRequested) != nil {
 		t.Error("should not re-emit review_requested when already in list")
+	}
+}
+
+func TestDiff_ReviewRequested_ViaTeam(t *testing.T) {
+	// Reviewer list contains only the team ("eng/pulsar"), not the user's
+	// login. With the user's team memberships passed in, this should still
+	// fire review_requested.
+	prev := basePRSnapshot()
+	prev.Author = "bob"
+	curr := basePRSnapshot()
+	curr.Author = "bob"
+	curr.ReviewRequests = []string{"eng/pulsar"}
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, []string{"eng/pulsar"})
+	if findEvent(evts, domain.EventGitHubPRReviewRequested) == nil {
+		t.Error("expected review_requested event when user's team is added to requests")
+	}
+}
+
+func TestDiff_ReviewRequested_ViaTeam_AlreadyPresent_NoEvent(t *testing.T) {
+	// Team was already requested — no transition, no re-emit.
+	prev := basePRSnapshot()
+	prev.Author = "bob"
+	prev.ReviewRequests = []string{"eng/pulsar"}
+	curr := basePRSnapshot()
+	curr.Author = "bob"
+	curr.ReviewRequests = []string{"eng/pulsar"}
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, []string{"eng/pulsar"})
+	if findEvent(evts, domain.EventGitHubPRReviewRequested) != nil {
+		t.Error("should not re-emit review_requested when team was already requested")
+	}
+}
+
+func TestDiff_ReviewRequested_OtherTeam_NoEvent(t *testing.T) {
+	// A team we're not on is requested — no event.
+	prev := basePRSnapshot()
+	curr := basePRSnapshot()
+	curr.ReviewRequests = []string{"eng/other-team"}
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, []string{"eng/pulsar"})
+	if findEvent(evts, domain.EventGitHubPRReviewRequested) != nil {
+		t.Error("should not emit review_requested for a team the user isn't on")
+	}
+}
+
+func TestDiff_ReviewRequested_SelfAuthoredViaTeam_NoEvent(t *testing.T) {
+	// PR authored by the session user; their team gets auto-assigned via
+	// CODEOWNERS. This is a reviewer-pool artifact, not an ask — no event.
+	prev := basePRSnapshot()
+	prev.Author = testUser
+	curr := basePRSnapshot()
+	curr.Author = testUser
+	curr.ReviewRequests = []string{"eng/pulsar"}
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, []string{"eng/pulsar"})
+	if findEvent(evts, domain.EventGitHubPRReviewRequested) != nil {
+		t.Error("should not emit review_requested when PR is self-authored (team auto-assigned to own PR)")
 	}
 }
 
@@ -476,7 +534,7 @@ func TestDiff_Labels_AddAndRemove(t *testing.T) {
 	curr := basePRSnapshot()
 	curr.Labels = []string{"bug", "urgent"} // wip removed, urgent added
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
 
 	added := findEvents(evts, domain.EventGitHubPRLabelAdded)
 	removed := findEvents(evts, domain.EventGitHubPRLabelRemoved)
@@ -509,7 +567,7 @@ func TestDiff_Labels_NoChange_NoEvents(t *testing.T) {
 	curr := basePRSnapshot()
 	curr.Labels = []string{"wip", "bug"} // same set, different order
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
 	if len(findEvents(evts, domain.EventGitHubPRLabelAdded)) != 0 {
 		t.Error("should not emit label_added when labels are the same set")
 	}
@@ -525,7 +583,7 @@ func TestDiff_Merged(t *testing.T) {
 	curr := basePRSnapshot()
 	curr.Merged = true
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
 	if findEvent(evts, domain.EventGitHubPRMerged) == nil {
 		t.Error("expected pr:merged event")
 	}
@@ -536,7 +594,7 @@ func TestDiff_Closed(t *testing.T) {
 	curr := basePRSnapshot()
 	curr.State = "CLOSED"
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
 	if findEvent(evts, domain.EventGitHubPRClosed) == nil {
 		t.Error("expected pr:closed event")
 	}
@@ -548,7 +606,7 @@ func TestDiff_ReadyForReview(t *testing.T) {
 	curr := basePRSnapshot()
 	curr.IsDraft = false
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
 	if findEvent(evts, domain.EventGitHubPRReadyForReview) == nil {
 		t.Error("expected pr:ready_for_review event")
 	}
@@ -560,7 +618,7 @@ func TestDiff_NewCommits(t *testing.T) {
 	curr := basePRSnapshot()
 	curr.HeadSHA = "bbb"
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
 	evt := findEvent(evts, domain.EventGitHubPRNewCommits)
 	if evt == nil {
 		t.Fatal("expected pr:new_commits event")
@@ -577,7 +635,7 @@ func TestDiff_NewCommits_EmptyPrev_NoEvent(t *testing.T) {
 	curr := basePRSnapshot()
 	curr.HeadSHA = "bbb"
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
 	if findEvent(evts, domain.EventGitHubPRNewCommits) != nil {
 		t.Error("should not emit new_commits when prev SHA is empty")
 	}
@@ -589,7 +647,7 @@ func TestDiff_Conflicts(t *testing.T) {
 	curr := basePRSnapshot()
 	curr.Mergeable = "CONFLICTING"
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
 	if findEvent(evts, domain.EventGitHubPRConflicts) == nil {
 		t.Error("expected pr:conflicts event")
 	}
@@ -601,7 +659,7 @@ func TestDiff_Conflicts_AlreadyConflicting_NoEvent(t *testing.T) {
 	curr := basePRSnapshot()
 	curr.Mergeable = "CONFLICTING"
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
 	if findEvent(evts, domain.EventGitHubPRConflicts) != nil {
 		t.Error("should not re-emit conflicts when already conflicting")
 	}
@@ -616,7 +674,7 @@ func TestDiff_AllPREvents_CarryLabels(t *testing.T) {
 	curr.HeadSHA = "bbb"
 	curr.Labels = []string{"self-review", "wip"}
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
 	// new_commits should fire; check its metadata has Labels.
 	evt := findEvent(evts, domain.EventGitHubPRNewCommits)
 	if evt == nil {
@@ -637,7 +695,7 @@ func TestDiff_AuthorIsSelf_True(t *testing.T) {
 	curr.HeadSHA = "bbb"
 	curr.Author = testUser
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
 	evt := findEvent(evts, domain.EventGitHubPRNewCommits)
 	if evt == nil {
 		t.Fatal("expected event")
@@ -655,7 +713,7 @@ func TestDiff_AuthorIsSelf_False(t *testing.T) {
 	curr.HeadSHA = "bbb"
 	curr.Author = "someone-else"
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
 	evt := findEvent(evts, domain.EventGitHubPRNewCommits)
 	if evt == nil {
 		t.Fatal("expected event")
@@ -1020,7 +1078,7 @@ func TestDiff_CompoundPoll_CIAndNewCommitsAndLabels(t *testing.T) {
 		{ID: 11, Name: "test", Conclusion: "success"},
 	}
 
-	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser)
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
 
 	// Should see: new_commits + ci_check_failed + ci_check_passed + label_added
 	types := eventTypes(evts)

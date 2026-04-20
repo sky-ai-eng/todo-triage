@@ -149,9 +149,22 @@ func (m *Manager) startGitHub(cfg config.Config, creds auth.Credentials) {
 	m.ghStop = stop
 	m.mu.Unlock()
 
+	// Resolve the user's team memberships once per GitHub start. Teams
+	// rarely change mid-session, and every GitHub config change (creds,
+	// repos) already triggers a RestartGitHub which re-enters this path —
+	// so picking up new memberships is a question of when the user next
+	// reconnects, not of refresh cadence. An empty list on failure means
+	// team-based review requests won't surface until next restart; that's
+	// a degraded-but-honest state and the error is logged.
+	userTeams, err := client.ListMyTeams()
+	if err != nil {
+		log.Printf("[github] failed to list teams for %s: %v (team-based review requests will be missed until next restart)", creds.GitHubUsername, err)
+		userTeams = nil
+	}
+
 	go func() {
 		// Initial poll
-		if _, err := m.tracker.RefreshGitHub(client, creds.GitHubUsername, repos); err != nil {
+		if _, err := m.tracker.RefreshGitHub(client, creds.GitHubUsername, userTeams, repos); err != nil {
 			log.Printf("[github] tracker error: %v", err)
 			m.reportError("github", err)
 		}
@@ -161,7 +174,7 @@ func (m *Manager) startGitHub(cfg config.Config, creds auth.Credentials) {
 		for {
 			select {
 			case <-ticker.C:
-				if _, err := m.tracker.RefreshGitHub(client, creds.GitHubUsername, repos); err != nil {
+				if _, err := m.tracker.RefreshGitHub(client, creds.GitHubUsername, userTeams, repos); err != nil {
 					log.Printf("[github] tracker error: %v", err)
 					m.reportError("github", err)
 				}
@@ -171,7 +184,7 @@ func (m *Manager) startGitHub(cfg config.Config, creds auth.Credentials) {
 		}
 	}()
 
-	log.Printf("[github] tracker started (interval: %s, user: %s, repos: %d)", interval, creds.GitHubUsername, len(repos))
+	log.Printf("[github] tracker started (interval: %s, user: %s, repos: %d, teams: %d)", interval, creds.GitHubUsername, len(repos), len(userTeams))
 }
 
 // startJira launches the Jira tracking loop.

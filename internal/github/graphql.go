@@ -29,11 +29,12 @@ const prBaseFields = `
 	additions
 	deletions
 	changedFiles
-	reviewRequests(first: 10) {
+	reviewRequests(first: 100) {
+		pageInfo { hasNextPage }
 		nodes {
 			requestedReviewer {
 				... on User { login }
-				... on Team { name }
+				... on Team { slug organization { login } }
 			}
 		}
 	}
@@ -316,14 +317,24 @@ type gqlRepo struct {
 }
 
 type gqlRRNodes struct {
-	Nodes []struct {
+	PageInfo gqlPageInfo `json:"pageInfo"`
+	Nodes    []struct {
 		RequestedReviewer gqlReviewer `json:"requestedReviewer"`
 	} `json:"nodes"`
 }
 
+// gqlReviewer unions GraphQL's User/Team reviewer node. Login is populated
+// for User reviewers; Slug + Organization.Login are populated for Team
+// reviewers. We emit team identifiers as "org/slug" (matching what
+// GET /user/teams returns) so team-based review requests can be matched
+// against the user's team memberships. The older Name field is no longer
+// requested — display names aren't a stable identifier.
 type gqlReviewer struct {
-	Login string `json:"login"` // User
-	Name  string `json:"name"`  // Team
+	Login        string `json:"login"` // User
+	Slug         string `json:"slug"`  // Team slug
+	Organization struct {
+		Login string `json:"login"`
+	} `json:"organization"` // Team's org, for building "org/slug"
 }
 
 type gqlRevNodes struct {
@@ -488,14 +499,30 @@ func (pr gqlPR) buildSnapshot(includeCheckRuns bool) domain.PRSnapshot {
 		// state" — so the diff logic skips CI evaluation for this snapshot.
 	}
 
-	// Review requests
+	// Review requests. The first: cap is load-bearing for detecting whether
+	// the session user is a pending reviewer — if they fall outside the
+	// returned slice, both the discovery backfill (tracker.go) and the diff
+	// transition (diff.go) silently skip emitting review_requested. Log on
+	// truncation so a future CODEOWNERS-spam case that trips the cap is
+	// visible rather than manifesting as missing queue items.
+	if pr.ReviewRequests.PageInfo.HasNextPage {
+		log.Printf("[github] WARN: review requests truncated at 100 for %s#%d — reviewer detection may miss users past the cap", snap.Repo, snap.Number)
+	}
 	for _, rr := range pr.ReviewRequests.Nodes {
-		name := rr.RequestedReviewer.Login
-		if name == "" {
-			name = rr.RequestedReviewer.Name // team
+		if login := rr.RequestedReviewer.Login; login != "" {
+			snap.ReviewRequests = append(snap.ReviewRequests, login)
+			continue
 		}
-		if name != "" {
-			snap.ReviewRequests = append(snap.ReviewRequests, name)
+		// Team reviewer: emit "org/slug" so it matches the format returned
+		// by GET /user/teams. Without the org prefix, two teams named
+		// "platform" in different orgs would collide.
+		if slug := rr.RequestedReviewer.Slug; slug != "" {
+			org := rr.RequestedReviewer.Organization.Login
+			if org != "" {
+				snap.ReviewRequests = append(snap.ReviewRequests, org+"/"+slug)
+			} else {
+				snap.ReviewRequests = append(snap.ReviewRequests, slug)
+			}
 		}
 	}
 

@@ -14,8 +14,11 @@ import (
 // discriminators (labels). A zero-value prev (Number == 0) indicates first
 // discovery — emits initial events from the current state.
 //
+// userTeams is the "org/slug" list of teams the session user belongs to,
+// used so team-requested reviews also emit pr:review_requested.
+//
 // Pure function — no IO.
-func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string) []domain.Event {
+func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, userTeams []string) []domain.Event {
 	now := time.Now()
 	eid := &entityID
 	authorIsSelf := curr.Author == username
@@ -153,16 +156,29 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string) []
 	}
 
 	// --- Review requests ---------------------------------------------------
-	// Fire when the session user appears in the request list.
-	prevRR := toSet(prev.ReviewRequests)
-	currRR := toSet(curr.ReviewRequests)
-	if username != "" && currRR[username] && !prevRR[username] {
-		emit(domain.EventGitHubPRReviewRequested, "", events.GitHubPRReviewRequestedMetadata{
-			Author: curr.Author, AuthorIsSelf: authorIsSelf,
-			Repo: curr.Repo, PRNumber: curr.Number,
-			IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA,
-			Labels: curr.Labels, Title: curr.Title,
-		})
+	// Fire when the session user appears in the request list — directly
+	// (username) or via any of their teams (org/slug). Transition is "was
+	// not matched before, is matched now" so repeated team-level requests
+	// don't re-fire across polls where nothing changed.
+	//
+	// Suppress entirely when the PR is self-authored: GitHub forbids
+	// requesting yourself directly, so the only way this fires on your own
+	// PR is via a team you're on (CODEOWNERS auto-assigning your team to
+	// paths you own). That's not an "ask" — it's a reviewer-pool artifact
+	// — and surfacing it as a task pollutes the queue. The default
+	// review_requested rule is match-all, so we can't defer the filtering
+	// to predicates without forcing every user to customize it.
+	if !authorIsSelf {
+		prevMatched := matchesAny(prev.ReviewRequests, username, userTeams)
+		currMatched := matchesAny(curr.ReviewRequests, username, userTeams)
+		if currMatched && !prevMatched {
+			emit(domain.EventGitHubPRReviewRequested, "", events.GitHubPRReviewRequestedMetadata{
+				Author: curr.Author, AuthorIsSelf: authorIsSelf,
+				Repo: curr.Repo, PRNumber: curr.Number,
+				IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA,
+				Labels: curr.Labels, Title: curr.Title,
+			})
+		}
 	}
 
 	// --- Per-review events -------------------------------------------------
@@ -401,6 +417,13 @@ func toSet(items []string) map[string]bool {
 		m[item] = true
 	}
 	return m
+}
+
+// matchesAny reports whether the session user's identities (direct
+// username or any team they belong to, in "org/slug" form) overlap with
+// the reviewers list.
+func matchesAny(reviewers []string, username string, userTeams []string) bool {
+	return isReviewerMatch(reviewers, username, userTeams)
 }
 
 func reviewMap(reviews []domain.ReviewState) map[string]domain.ReviewState {
