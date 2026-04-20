@@ -1,0 +1,109 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Build, lint, test
+
+```bash
+# Full build — frontend first (Go embeds frontend/dist/), then the binary.
+cd frontend && npm install && npm run build && cd ..
+go build -o ./triagefactory .
+
+# Run (default :3000, opens browser)
+./triagefactory [--port N] [--no-browser]
+
+# Lint + format (Go + frontend)
+./scripts/lint.sh           # check only
+./scripts/lint.sh --fix     # auto-fix
+
+# Go tests
+go test ./...
+go test ./internal/routing -run TestRouter_Dedup
+
+# Frontend dev server (proxies /api to backend)
+cd frontend && npm run dev
+
+# Nuke local DB + config + keychain entries (fresh first-run flow)
+./scripts/clean-slate.sh
+```
+
+The repo-root `.claude/settings.json` registers a `PostToolUse` hook that runs `goimports -w` on edited `.go` files and `prettier --write` on frontend sources — do not duplicate that work manually.
+
+## Architecture
+
+Triage Factory is a **single Go binary** (HTTP server + pollers + delegated-agent spawner) with a **React SPA embedded via `go:embed`** (see `embed.go`). State lives entirely on the user's machine: SQLite at `~/.triagefactory/triagefactory.db`, YAML config at `~/.triagefactory/config.yaml`, credentials in the OS keychain (`internal/auth`).
+
+### The binary has two modes
+
+`main.go` dispatches on `os.Args[1]`:
+
+- **Server mode** (default) — HTTP API + websocket hub + pollers + scorer + event router + delegation spawner.
+- **CLI mode** (`exec`, `status`) — invoked *by delegated Claude Code agents* inside a worktree. `cmd/exec/` provides scoped GitHub/Jira subcommands the agent uses instead of calling those APIs directly, so credentials stay in the keychain and activity is auditable via `runs` / `run_artifacts`.
+
+### Core data model (target state)
+
+Documented in full in `docs/data-model-target.md`. Four levels, each with its own lifecycle:
+
+```
+Entity (PR #18 / Jira SKY-123)     ← long-lived, from first poll until closed/merged
+  ↓
+Events                              ← append-only; every poller detection + system emission
+  ↓  (0 or 1 — only if a task_rule or prompt_trigger predicate matches)
+Task                                ← "this entity needs attention, because of this event type"
+  ↓
+Runs                                ← one prompt execution against one task
+```
+
+Key invariants:
+
+- **Entities are durable, events are immutable, tasks are ephemeral, runs are the work.** Memory is written per-run but materialized per-entity via `entity_links`.
+- **Dedup:** at most one active task per `(entity_id, event_type, dedup_key)` — enforced by a partial unique index in `tasks`. `dedup_key` is usually empty; open-set discriminators (label name, status name) use it to get separate tasks per value.
+- **No retroactive task creation.** A new task_rule or trigger applies to events *going forward*. Historical events in the log are not re-evaluated.
+- **Events split on discriminators that change whether the situation needs attention** (`ci_check_failed` ≠ `ci_check_passed`, `review_approved` ≠ `review_changes_requested`). Attributes that just narrow the same situation (reviewer, check name, repo, label) stay as predicate-filterable metadata. Don't proliferate event types for Cartesian products.
+
+### Event bus is the central pub/sub
+
+`internal/eventbus` — `main.go` wires subscribers:
+
+- `ws-broadcast` forwards every event to the frontend via websocket.
+- `scorer` reacts to `system:poll:*` sentinels and kicks `ai.Runner.Trigger()`.
+- `router` (`internal/routing/router.go`) consumes `github:*` / `jira:*` events, records them, creates/bumps tasks per task_rules, and fires matching prompt_triggers (auto-delegation). Also owns inline close checks and `ReDeriveAfterScoring` (post-scoring trigger pass for deferred `min_autonomy_suitability` thresholds).
+- `poll-tracker` gates `/api/jira/stock` on first-poll-after-restart and surfaces one-shot "config took effect" toasts (announce-pending flag, flipped off after one completion).
+
+Pollers publish events to the bus rather than invoking callbacks directly. This is how a poll cycle, a scorer run, and a UI push all stay decoupled.
+
+### Poller / tracker
+
+`internal/poller` manages GitHub + Jira pollers. `internal/tracker` does the diff logic: snapshot → refresh → diff against prior snapshot → emit typed events only on transitions. The snapshot-diff is the *sole* source of truth for re-emit prevention — a check-run ID seen last cycle doesn't fire again. See `docs/tracked-events.md` for the taxonomy.
+
+### Delegation (the "Agent" column)
+
+`internal/delegate/spawner.go` + `internal/worktree` — delegation spins up a **headless Claude Code instance inside an isolated git worktree**. Credentials are hot-swapped into the spawner on config change (see `SetOnGitHubChanged` in `main.go`); the spawner instance itself is created once at startup. Agents stream stdout into `run_messages`; structured outputs (PRs opened, reviews posted) land in `run_artifacts` with a unique `is_primary` per run. Orphaned worktrees from crashed runs are cleaned on startup via `worktree.Cleanup()`.
+
+### AI scoring
+
+`internal/ai/runner.go` — a singleton runner with a trigger channel. `Trigger()` is idempotent during an active cycle. The `ProfileGate` forces the scorer to wait until repo profiling (`internal/repoprofile`) completes so the scorer has project context. Repo profiles have a 3-day TTL and regenerate on GitHub config change.
+
+### HTTP server
+
+`internal/server/server.go` — plain `net/http` + `http.ServeMux` using Go 1.22+ pattern-based routing (`"POST /api/tasks/{id}/swipe"`). Each handler group lives in its own file (`tasks.go`, `settings.go`, `triggers_handler.go`, ...). The SPA is served from `embed.FS`; unknown paths fall through to `index.html` for client-side routing.
+
+### Frontend
+
+React 19 + Vite + TypeScript + Tailwind v4. Router routes live in `frontend/src/main.tsx`. All API calls go to `/api/*`; a long-lived websocket at `/api/ws` streams events (frontend listens via `hooks/useWebSocket`). `AuthGate` blocks the app until setup is complete.
+
+## Conventions to know before editing
+
+- **Schema: no ALTER TABLE migrations.** `internal/db/db.go` is the source of truth. On breaking changes, update the pristine `CREATE TABLE` and assume the dev DB will be wiped (`scripts/clean-slate.sh`). Pre-release — backwards compatibility is deliberately not maintained.
+- **Events catalog** is a read-only system registry seeded from `domain.AllEventTypes()` via `db.SeedEventTypes`. New event types must be added there *and* the events_catalog table will reject emissions of unregistered types (FK from `events.event_type`).
+- **System triggers ship disabled.** They're reference examples — users opt in or replace them. See `seed.go`.
+- **Go module path:** `github.com/sky-ai-eng/triage-factory`. The GitHub org is `sky-ai-eng`.
+- **Go version:** `go.mod` says 1.26.1, README says 1.23+; keep the floor modern but don't bump without reason.
+- **Credentials never touch disk.** `internal/auth` wraps the keychain. Token fields in Settings show "leave blank to keep current" when a token is stored.
+
+## Reference docs
+
+- `docs/data-model-target.md` — authoritative spec for the entity/event/task/run model (the big ongoing rewrite).
+- `docs/tracked-events.md` — GitHub/Jira event taxonomy + snapshot field list.
+- `docs/usage.md` — CLI flags, config reference, polling details.
+- `docs/for-agents/auto-delegation-briefing.md` — briefing for delegated agents.
