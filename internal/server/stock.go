@@ -97,6 +97,16 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 		if snap.Assignee != creds.JiraDisplayName {
 			continue
 		}
+		// Apply the same subtask gate as the normal discovery path (SKY-173):
+		// a parent ticket with open subtasks is a container, not a work unit,
+		// and shouldn't be an option in carry-over. Its subtasks (if assigned
+		// to the user) show up here on their own, and if the decomposition
+		// later collapses, became_atomic surfaces the parent via normal
+		// routing. Skipping without a flag — unlike AlreadyDone, there's no
+		// user-facing action for "parent with subtasks" in this UI.
+		if snap.OpenSubtaskCount > 0 {
+			continue
+		}
 		// Tickets in the Done.Members set should normally be closed by the
 		// tracker before they reach here, but in the transitional window right
 		// after a user widens Done.Members (e.g. adds "Verified") the next poll
@@ -219,6 +229,17 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 		}
 		if snap.Assignee != creds.JiraDisplayName {
 			failed = append(failed, stockFailure{a.IssueKey, a.Action, "not assigned to you"})
+			continue
+		}
+		// Defensive subtask gate (SKY-173 principle): queue/claim on a parent
+		// with open subtasks would create the exact non-atomic task the main
+		// flow works hard to suppress. The GET handler already filters these
+		// out so legitimate UI flows never submit them, but subtasks could be
+		// added between GET and POST, or the request could come from a stale
+		// frontend. "done" is still allowed — closing a parent with dangling
+		// subtasks is a valid cleanup action.
+		if snap.OpenSubtaskCount > 0 && a.Action != "done" {
+			failed = append(failed, stockFailure{a.IssueKey, a.Action, "ticket has open subtasks — delegate those atomic subtasks directly rather than the parent"})
 			continue
 		}
 		// Tickets already in Done.Members are allowed through — the GET flags
