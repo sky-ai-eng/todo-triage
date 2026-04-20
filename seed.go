@@ -141,6 +141,25 @@ func seedDefaultPrompts(database *sql.DB) {
 		log.Printf("[seed] warning: failed to seed Jira implement atomic trigger: %v", err)
 	}
 
+	// Trigger: auto-review PRs when someone requests your review. No
+	// predicate needed — review_requested only fires when the session user
+	// is added to the PR's review request list (diff.go scopes this at emit
+	// time), so the event itself is already user-scoped. 5-minute cooldown
+	// because a second review on the same PR right after the first is
+	// pointless unless the PR changed, and new commits on the same PR route
+	// through a different event type entirely.
+	if err := db.SeedPromptTrigger(database, domain.PromptTrigger{
+		ID:               "system-trigger-pr-review",
+		PromptID:         "system-pr-review",
+		TriggerType:      domain.TriggerTypeEvent,
+		EventType:        domain.EventGitHubPRReviewRequested,
+		BreakerThreshold: 3,
+		CooldownSeconds:  300,
+		Enabled:          false,
+	}); err != nil {
+		log.Printf("[seed] warning: failed to seed PR review trigger: %v", err)
+	}
+
 	// Trigger: fix review feedback when changes are requested on the user's
 	// own PR. Fires regardless of reviewer identity — self-review loop and
 	// external reviewer response route through the same prompt since the
