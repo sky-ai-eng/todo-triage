@@ -331,8 +331,14 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID, username string
 		}
 	}
 
-	// Assignment change.
-	if prev.Assignee != curr.Assignee {
+	// Assignment change. Same subtask gate as first-discovery: if the parent
+	// has open subtasks, suppress assigned/available so task creation doesn't
+	// sneak in via reassignment after the initial suppression. Without this,
+	// a parent tracked-but-not-queued could get reassigned and a task would
+	// be created even though the ticket is still a container, not work.
+	// The became_atomic branch below handles the belated-discovery path once
+	// the decomposition collapses.
+	if prev.Assignee != curr.Assignee && curr.OpenSubtaskCount == 0 {
 		if curr.Assignee != "" {
 			emit(domain.EventJiraIssueAssigned, "", events.JiraIssueAssignedMetadata{
 				Assignee: curr.Assignee, AssigneeIsSelf: assigneeIsSelf,
