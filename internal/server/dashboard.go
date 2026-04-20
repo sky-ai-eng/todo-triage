@@ -165,11 +165,15 @@ func patchPRSnapshotDraft(database *sql.DB, sourceID string, draft bool) error {
 	if err != nil {
 		return err
 	}
-	if entity == nil || entity.SnapshotJSON == "" {
+	if entity == nil {
+		return nil
+	}
+	snapshotJSON := strings.TrimSpace(entity.SnapshotJSON)
+	if snapshotJSON == "" || snapshotJSON == "{}" {
 		return nil
 	}
 	var snap domain.PRSnapshot
-	if err := json.Unmarshal([]byte(entity.SnapshotJSON), &snap); err != nil {
+	if err := json.Unmarshal([]byte(snapshotJSON), &snap); err != nil {
 		return err
 	}
 	snap.IsDraft = draft
