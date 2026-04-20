@@ -177,5 +177,6 @@ func patchPRSnapshotDraft(database *sql.DB, sourceID string, draft bool) error {
 	if err != nil {
 		return err
 	}
-	return db.UpdateEntitySnapshot(database, entity.ID, string(patched))
+	_, err = database.Exec(`UPDATE entities SET snapshot_json = ? WHERE id = ?`, string(patched), entity.ID)
+	return err
 }
