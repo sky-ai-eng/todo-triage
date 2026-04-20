@@ -24,6 +24,7 @@ import {
 import { SortableContext, verticalListSortingStrategy, useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import PRCard from '../components/PRCard'
+import { useWebSocket } from '../hooks/useWebSocket'
 
 export interface PRSummary {
   number: number
@@ -108,7 +109,12 @@ export default function PRDashboard() {
   }, [fetchAll])
 
   useEffect(() => {
-    const interval = setInterval(fetchAll, 120000)
+    // WS-driven updates cover the common case; keep a longer interval as
+    // insurance against a missed message (useWebSocket auto-reconnects but
+    // doesn't replay events dropped during a disconnect window). 10m is
+    // generous enough to avoid redundant DB reads while still recovering
+    // within a user's typical session.
+    const interval = setInterval(fetchAll, 600000)
     const handleVis = () => {
       if (document.visibilityState === 'visible') fetchAll()
     }
@@ -118,6 +124,28 @@ export default function PRDashboard() {
       document.removeEventListener('visibilitychange', handleVis)
     }
   }, [fetchAll])
+
+  // Debounced refetch on PR-relevant events. A single poll cycle on one PR
+  // can emit a burst of events (new commit + ci_check_* + review_requested);
+  // coalescing into one refetch keeps the DB quiet without sacrificing
+  // perceived responsiveness.
+  const wsDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useWebSocket((event) => {
+    if (event.type !== 'event') return
+    const evt = event.data.event_type
+    if (!evt || !evt.startsWith('github:pr:')) return
+    if (wsDebounceRef.current) clearTimeout(wsDebounceRef.current)
+    wsDebounceRef.current = setTimeout(() => {
+      wsDebounceRef.current = null
+      fetchAll()
+    }, 500)
+  })
+
+  useEffect(() => {
+    return () => {
+      if (wsDebounceRef.current) clearTimeout(wsDebounceRef.current)
+    }
+  }, [])
 
   const byRecent = (a: PRSummary, b: PRSummary) =>
     new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
