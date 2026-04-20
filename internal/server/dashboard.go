@@ -1,7 +1,10 @@
 package server
 
 import (
+	"database/sql"
 	"encoding/json"
+	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -9,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/config"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 )
 
@@ -131,5 +135,47 @@ func (s *Server) handleDashboardPRDraft(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Patch the local entity snapshot to match the state we just pushed to
+	// GitHub. Without this, the frontend's subsequent fetchAll() reads the
+	// stale pre-mutation snapshot and the card snaps back to its old column
+	// until the next poll cycle (30-60s later).
+	//
+	// TODO(SKY-193): we deliberately don't fire a synthetic pr:ready_for_review
+	// / pr:converted_to_draft event here — the user's UI click is its own
+	// signal and a second event would race the next poll's diff and confuse
+	// the audit trail. Revisit if a user reports "my trigger didn't fire
+	// when I dragged the card."
+	sourceID := fmt.Sprintf("%s/%s#%d", parts[0], parts[1], number)
+	if patchErr := patchPRSnapshotDraft(s.db, sourceID, body.Draft); patchErr != nil {
+		log.Printf("[dashboard] warning: failed to patch snapshot for %s after draft toggle: %v", sourceID, patchErr)
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{"draft": body.Draft})
+}
+
+// patchPRSnapshotDraft flips the is_draft field on an entity's PR snapshot
+// in place after a successful external mutation. Best-effort: returns nil
+// silently if the entity hasn't been discovered yet (e.g. user mutated
+// before the first poll) — the poller will populate it eventually.
+// Race window: a concurrent in-flight poll can overwrite our patch with
+// its pre-mutation snapshot. Acceptable for beta — the next poll corrects
+// it, and the window is small.
+func patchPRSnapshotDraft(database *sql.DB, sourceID string, draft bool) error {
+	entity, err := db.GetEntityBySource(database, "github", sourceID)
+	if err != nil {
+		return err
+	}
+	if entity == nil || entity.SnapshotJSON == "" {
+		return nil
+	}
+	var snap domain.PRSnapshot
+	if err := json.Unmarshal([]byte(entity.SnapshotJSON), &snap); err != nil {
+		return err
+	}
+	snap.IsDraft = draft
+	patched, err := json.Marshal(snap)
+	if err != nil {
+		return err
+	}
+	return db.UpdateEntitySnapshot(database, entity.ID, string(patched))
 }
