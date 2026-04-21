@@ -119,8 +119,12 @@ func TestBuildPromptReplacer_JiraAssigned(t *testing.T) {
 
 	// GitHub-specific placeholders must render empty on a Jira task —
 	// prompts authored for mixed triggers shouldn't leak stale PR numbers.
-	if strings.Contains(interpolate(r, "x{{OWNER}}x{{REPO}}x{{PR_NUMBER}}x"), "owner") {
-		t.Error("expected GitHub placeholders to be empty on a Jira task")
+	gotGitHubPlaceholders := interpolate(r, "x{{OWNER}}x{{REPO}}x{{PR_NUMBER}}x")
+	if strings.Contains(gotGitHubPlaceholders, "{{") {
+		t.Errorf("expected GitHub placeholders to be replaced on a Jira task, got %q", gotGitHubPlaceholders)
+	}
+	if gotGitHubPlaceholders != "xxxx" {
+		t.Errorf("expected GitHub placeholders to be empty on a Jira task, got %q want %q", gotGitHubPlaceholders, "xxxx")
 	}
 }
 
