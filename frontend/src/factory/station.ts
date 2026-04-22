@@ -106,6 +106,7 @@ export interface StationHandle {
   kind: 'station'
   container: Container
   center: { x: number; y: number }
+  eventType: string
   leftPort: Port
   rightPort: Port
   /** Stations don't expose top/bottom ports — those live on splitter/merger
@@ -113,8 +114,27 @@ export interface StationHandle {
    * consumers use in the routing layer. */
   topPort?: undefined
   bottomPort?: undefined
-  update(dt: number): void
+  /** Station world-space size — used by the detail overlay to compute a
+   * screen-space anchor rect without re-deriving from hard-coded constants. */
+  worldSize: { w: number; h: number; coreY: number; coreH: number }
+  /** dt is seconds since last frame; scale is the current viewport scale
+   * (1 = neutral, <1 = zoomed out, >1 = zoomed in). The station toggles
+   * LOD sub-groups based on scale — at near zoom the predicate chips and
+   * glyph hide so an HTML overlay can take over the interior. */
+  update(dt: number, scale: number): void
 }
+
+/** Viewport scale at or above which the station enters "near" LOD: chips
+ * and glyph hide so the HTML detail overlay can render active runs and
+ * throughput in the freed space. */
+export const NEAR_ZOOM_THRESHOLD = 1.5
+
+/** Viewport scale below which the station enters "far" LOD: the dense
+ * header + core + chips visuals all collapse to a single oversized label
+ * so the station stays legible when the whole factory fits on screen.
+ * 14px Pixi text at scale 0.5 renders at ~7 CSS px — unreadable — so we
+ * swap in a 36px label that holds up when the viewport is zoomed out. */
+export const FAR_ZOOM_THRESHOLD = 0.6
 
 export function buildStation(parent: Container, opts: StationOptions): StationHandle {
   const { event, fields, enabled = true, center } = opts
@@ -172,18 +192,26 @@ export function buildStation(parent: Container, opts: StationOptions): StationHa
   innerRim.stroke({ width: 1, color: RIM_HIGHLIGHT, alpha: 0.9, alignment: 0 })
   root.addChild(innerRim)
 
+  // ── Detail layer ──────────────────────────────────────────────────────────
+  // Wraps everything that belongs to the "mid+near" LOD: header visuals,
+  // core chamber, HUD brackets. At far zoom this whole layer hides and the
+  // farLayer below (a single big label) takes over — 14px Pixi text shrinks
+  // to unreadable at scale 0.4, so we need a distinct simplified view.
+  const detailLayer = new Container()
+  root.addChild(detailLayer)
+
   // ── Header ────────────────────────────────────────────────────────────────
   const headerBottomY = fy + HEADER_H
   const headerDivider = new Graphics()
   headerDivider.moveTo(fx + 14, headerBottomY)
   headerDivider.lineTo(fx + W - 14, headerBottomY)
   headerDivider.stroke({ width: 1, color: 0x000000, alpha: 0.05 })
-  root.addChild(headerDivider)
+  detailLayer.addChild(headerDivider)
 
   const pip = new Graphics()
   pip.circle(fx + 16, fy + 20, 4)
   pip.fill({ color: enabled ? STATE_ENABLED : TEXT_TERTIARY, alpha: enabled ? 0.9 : 0.5 })
-  root.addChild(pip)
+  detailLayer.addChild(pip)
 
   const title = new Text({
     text: event.label,
@@ -198,7 +226,7 @@ export function buildStation(parent: Container, opts: StationOptions): StationHa
   title.anchor.set(0, 0.5)
   title.x = fx + 28
   title.y = fy + 20
-  root.addChild(title)
+  detailLayer.addChild(title)
 
   // Source badge — rounded pill, right side of header.
   const badgeText = new Text({
@@ -219,11 +247,11 @@ export function buildStation(parent: Container, opts: StationOptions): StationHa
   badge.roundRect(badgeX, badgeY, badgeW, badgeH, badgeH / 2)
   badge.fill({ color, alpha: 0.1 })
   badge.stroke({ width: 0.75, color, alpha: 0.35 })
-  root.addChild(badge)
+  detailLayer.addChild(badge)
   badgeText.anchor.set(0.5, 0.5)
   badgeText.x = badgeX + badgeW / 2
   badgeText.y = badgeY + badgeH / 2 + 0.5
-  root.addChild(badgeText)
+  detailLayer.addChild(badgeText)
 
   // ── Core chamber ──────────────────────────────────────────────────────────
   const coreX = fx + CORE_PAD_X
@@ -235,17 +263,17 @@ export function buildStation(parent: Container, opts: StationOptions): StationHa
   const coreRecess = new Graphics()
   coreRecess.roundRect(coreX, CORE_Y, coreW, CORE_H, CORE_R)
   coreRecess.fill({ color: 0x000000, alpha: 0.04 })
-  root.addChild(coreRecess)
+  detailLayer.addChild(coreRecess)
 
   const coreFill = new Graphics()
   coreFill.roundRect(coreX + 1, CORE_Y + 1, coreW - 2, CORE_H - 2, CORE_R - 1)
   coreFill.fill({ color: 0xf7f5f2, alpha: 0.9 })
-  root.addChild(coreFill)
+  detailLayer.addChild(coreFill)
 
   const coreTint = new Graphics()
   coreTint.roundRect(coreX + 1, CORE_Y + 1, coreW - 2, CORE_H - 2, CORE_R - 1)
   coreTint.fill({ color, alpha: 0.06 })
-  root.addChild(coreTint)
+  detailLayer.addChild(coreTint)
 
   // HUD corner brackets — four L-shapes inset inside the core. Very thin,
   // accent-tinted. Adds "tech object" texture without being busy.
@@ -269,9 +297,77 @@ export function buildStation(parent: Container, opts: StationOptions): StationHa
   brackets.lineTo(bX2, bY2)
   brackets.lineTo(bX2, bY2 - BRACKET)
   brackets.stroke({ width: 1, color, alpha: 0.4 })
-  root.addChild(brackets)
+  detailLayer.addChild(brackets)
 
-  // Procedural glyph centered in the core.
+  // ── Far layer ─────────────────────────────────────────────────────────────
+  // Visible only at far zoom (scale < FAR_ZOOM_THRESHOLD). Three pieces,
+  // all in the category color so the station reads as a single semantic
+  // unit when the whole factory fits on screen:
+  //   - procedural glyph centered above the label (same glyph shown in the
+  //     core chamber at mid zoom — gives instant identity: check vs.
+  //     merge vs. cross etc.)
+  //   - big 32px label below, wraps on multi-line event names
+  //   - four HUD-style corner brackets framing the card, echoing the mid-
+  //     zoom brackets inside the core chamber
+  const farLayer = new Container()
+  root.addChild(farLayer)
+
+  const farGlyph = new Container()
+  farGlyph.x = 0
+  farGlyph.y = -28
+  farLayer.addChild(farGlyph)
+  drawGlyph(farGlyph, event.glyph, color)
+  // drawGlyph emits at its natural procedural size (~32px tall). Scale it
+  // up a touch so it reads comfortably against the large label.
+  farGlyph.scale.set(1.4)
+
+  const farTitle = new Text({
+    text: event.label,
+    style: {
+      fontFamily: 'Inter, system-ui, sans-serif',
+      fontSize: 32,
+      fontWeight: '700',
+      fill: TEXT_PRIMARY,
+      letterSpacing: 0.2,
+      align: 'center',
+      wordWrap: true,
+      wordWrapWidth: W - 40,
+    },
+  })
+  farTitle.anchor.set(0.5, 0.5)
+  farTitle.x = 0
+  farTitle.y = 28
+  farLayer.addChild(farTitle)
+
+  // Halo-style corner brackets on the card itself. Bigger and more inset
+  // than the core brackets (10 long / 8 margin) so they read as part of
+  // the card silhouette, not competition with the smaller core brackets
+  // they replace at this zoom.
+  const CARD_BRACKET = 18
+  const CARD_BM = 14
+  const cx1 = fx + CARD_BM
+  const cy1 = fy + CARD_BM
+  const cx2 = fx + W - CARD_BM
+  const cy2 = fy + H - CARD_BM
+  const farBrackets = new Graphics()
+  farBrackets.moveTo(cx1, cy1 + CARD_BRACKET)
+  farBrackets.lineTo(cx1, cy1)
+  farBrackets.lineTo(cx1 + CARD_BRACKET, cy1)
+  farBrackets.moveTo(cx2 - CARD_BRACKET, cy1)
+  farBrackets.lineTo(cx2, cy1)
+  farBrackets.lineTo(cx2, cy1 + CARD_BRACKET)
+  farBrackets.moveTo(cx1, cy2 - CARD_BRACKET)
+  farBrackets.lineTo(cx1, cy2)
+  farBrackets.lineTo(cx1 + CARD_BRACKET, cy2)
+  farBrackets.moveTo(cx2 - CARD_BRACKET, cy2)
+  farBrackets.lineTo(cx2, cy2)
+  farBrackets.lineTo(cx2, cy2 - CARD_BRACKET)
+  farBrackets.stroke({ width: 2, color, alpha: 0.6 })
+  farLayer.addChild(farBrackets)
+
+  // Procedural glyph centered in the core. Wrapped in its own container so
+  // the near-zoom LOD can hide it, yielding the core's interior to the HTML
+  // detail overlay.
   const glyphLayer = new Container()
   glyphLayer.x = coreX + coreW / 2
   glyphLayer.y = CORE_Y + CORE_H / 2
@@ -279,6 +375,10 @@ export function buildStation(parent: Container, opts: StationOptions): StationHa
   drawGlyph(glyphLayer, event.glyph, color)
 
   // ── Predicate chips ───────────────────────────────────────────────────────
+  // Wrapped in their own container so near-zoom LOD can hide the entire row
+  // — the overlay puts live throughput in this strip instead.
+  const chipsLayer = new Container()
+  root.addChild(chipsLayer)
   const chipsY = fy + H - CHIPS_H + 6
   const chipsStartX = fx + 14
   const chipsEndX = fx + W - 14
@@ -295,13 +395,13 @@ export function buildStation(parent: Container, opts: StationOptions): StationHa
     const needOverflow = i < fields.length - 1
     const reserve = needOverflow ? 30 : 0
     if (cursor + estW + reserve > chipsStartX + available) break
-    drawChip(root, cursor, chipsY, abbrev, color, false)
+    drawChip(chipsLayer, cursor, chipsY, abbrev, color, false)
     cursor += estW + chipGap
     shown++
   }
   const overflow = fields.length - shown
   if (overflow > 0) {
-    drawChip(root, cursor, chipsY, `+${overflow}`, color, true)
+    drawChip(chipsLayer, cursor, chipsY, `+${overflow}`, color, true)
   }
 
   // Station-wide dim when disabled.
@@ -319,6 +419,8 @@ export function buildStation(parent: Container, opts: StationOptions): StationHa
     kind: 'station',
     container: root,
     center,
+    eventType: event.eventType,
+    worldSize: { w: W, h: H, coreY: CORE_Y, coreH: CORE_H },
     leftPort: {
       x: center.x - W / 2 - PORT_STUB_LEN,
       y: center.y + PORT_LOCAL_Y,
@@ -329,10 +431,23 @@ export function buildStation(parent: Container, opts: StationOptions): StationHa
       y: center.y + PORT_LOCAL_Y,
       dir: { x: 1, y: 0 },
     },
-    update(dt: number) {
+    update(dt: number, scale: number) {
       t += dt
       const breathe = 0.78 + 0.22 * (0.5 + 0.5 * Math.sin(t * 1.5))
       glyphLayer.alpha = baseAlpha * breathe
+
+      // Three LOD tiers, gated on the viewport scale:
+      //   far  (scale < 0.6): show only the big label + pip in farLayer;
+      //                       hide the dense header / core / chips / glyph
+      //   mid  (0.6..1.5):    full detail — header, core, glyph, chips
+      //   near (scale >= 1.5): detail stays, but chips + glyph hide so the
+      //                       HTML overlay can own the interior
+      const far = scale < FAR_ZOOM_THRESHOLD
+      const near = scale >= NEAR_ZOOM_THRESHOLD
+      farLayer.visible = far
+      detailLayer.visible = !far
+      chipsLayer.visible = !far && !near
+      glyphLayer.visible = !far && !near
     },
   }
 }

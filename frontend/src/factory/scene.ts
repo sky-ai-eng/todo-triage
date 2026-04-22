@@ -14,7 +14,13 @@ import { Application, Container, Graphics, Text, Ticker } from 'pixi.js'
 import { Viewport } from 'pixi-viewport'
 import type { FieldSchema } from '../types'
 import { FACTORY_EVENTS } from './events'
-import { buildStation, BELT_WIDTH, type Port, type StationHandle } from './station'
+import {
+  buildStation,
+  BELT_WIDTH,
+  NEAR_ZOOM_THRESHOLD,
+  type Port,
+  type StationHandle,
+} from './station'
 import {
   buildNode,
   buildPole,
@@ -240,8 +246,37 @@ interface Belt {
   pointAt: (t: number) => { x: number; y: number }
 }
 
-interface SceneHandle {
+/** Snapshot of one station's screen-space placement. Recomputed each time
+ * the viewport pans or zooms and published via ViewSnapshot — the HTML
+ * detail overlay uses these rects to position itself over the Pixi stations
+ * without having to know anything about the world coordinate system. */
+export interface StationScreenPlacement {
+  /** Node index in the scene's node list. Stable across frames. */
+  id: number
+  eventType: string
+  /** Station frame top-left, in CSS pixels relative to the canvas container. */
+  screenX: number
+  screenY: number
+  /** Station frame dimensions, in CSS pixels (already multiplied by scale). */
+  screenW: number
+  screenH: number
+}
+
+export interface ViewSnapshot {
+  /** Current viewport scale — 1 = neutral, <1 = zoomed out, >1 = zoomed in. */
+  scale: number
+  /** True once `scale >= NEAR_ZOOM_THRESHOLD`; the overlay layer uses this
+   * to decide whether to render station-detail cards. */
+  nearZoom: boolean
+  stations: StationScreenPlacement[]
+}
+
+export interface SceneHandle {
   destroy: () => void
+  /** Subscribe to viewport changes (pan + zoom). Invoked once immediately
+   * with the current snapshot, then on every `moved` / `zoomed` event, and
+   * on container resize. Returns an unsubscribe function. */
+  onView: (cb: (snapshot: ViewSnapshot) => void) => () => void
 }
 
 /** Predicate-field schemas keyed by event_type — what `GET /api/event-schemas` returns. */
@@ -280,9 +315,18 @@ export async function createFactoryScene(
     .decelerate({ friction: 0.94 })
     .clampZoom({ minScale: 0.35, maxScale: 3 })
 
+  // Initial zoom floor. `scene.fit(true)` alone drops small screens down
+  // to ~0.4, well below FAR_ZOOM_THRESHOLD (0.6), so the page would open
+  // stuck in the simplified far view even on a normal laptop. Floor the
+  // initial scale at 0.7 — comfortably inside the mid tier — and let the
+  // user zoom out further themselves if they want the overview.
+  const INITIAL_MIN_SCALE = 0.7
   const fitAndCenter = () => {
     scene.resize(app.screen.width, app.screen.height, SCENE_W, SCENE_H)
     scene.fit(true, SCENE_W, SCENE_H)
+    if (scene.scaled < INITIAL_MIN_SCALE) {
+      scene.setZoom(INITIAL_MIN_SCALE, true)
+    }
     scene.moveCenter(SCENE_W / 2, SCENE_H / 2)
   }
   fitAndCenter()
@@ -358,17 +402,75 @@ export async function createFactoryScene(
 
   const tick = (t: Ticker) => {
     const dt = t.deltaMS / 1000
-    for (const n of nodes) n.update(dt)
+    const scale = scene.scaled
+    for (const n of nodes) {
+      if (n.kind === 'station') n.update(dt, scale)
+      else n.update(dt)
+    }
     for (const ch of chevronLayers) ch.update(dt)
     items.update(dt)
   }
   app.ticker.add(tick)
 
+  // ── View subscription ─────────────────────────────────────────────────────
+  // HTML overlay components need to know where each station lands on screen
+  // and whether we're at near zoom. Recomputing on every frame would re-
+  // render the React tree needlessly — instead we publish snapshots only
+  // when the viewport moves or zooms (user interaction) plus on resize.
+  const stationHandles: Array<{ index: number; station: StationHandle }> = []
+  nodes.forEach((n, index) => {
+    if (n.kind === 'station') stationHandles.push({ index, station: n })
+  })
+
+  const computeSnapshot = (): ViewSnapshot => {
+    const scale = scene.scaled
+    const stations = stationHandles.map(({ index, station }) => {
+      const { w, h } = station.worldSize
+      const tl = scene.toScreen(station.center.x - w / 2, station.center.y - h / 2)
+      return {
+        id: index,
+        eventType: station.eventType,
+        screenX: tl.x,
+        screenY: tl.y,
+        screenW: w * scale,
+        screenH: h * scale,
+      }
+    })
+    return { scale, nearZoom: scale >= NEAR_ZOOM_THRESHOLD, stations }
+  }
+
+  const viewListeners = new Set<(s: ViewSnapshot) => void>()
+  const publish = () => {
+    if (viewListeners.size === 0) return
+    const snapshot = computeSnapshot()
+    for (const cb of viewListeners) cb(snapshot)
+  }
+  // pixi-viewport emits `moved` during drag and `zoomed` during wheel/pinch.
+  // Both fire once per frame of interaction — plenty for overlay tracking
+  // while avoiding per-frame work when the user isn't interacting.
+  scene.on('moved', publish)
+  scene.on('zoomed', publish)
+  // Resize via ResizeObserver already calls scene.resize above; re-publish
+  // so overlays re-anchor after the canvas changes size.
+  const resizeRo = new ResizeObserver(() => publish())
+  resizeRo.observe(container)
+
   return {
     destroy: () => {
       app.ticker.remove(tick)
       ro.disconnect()
+      resizeRo.disconnect()
+      viewListeners.clear()
       app.destroy(true, { children: true, texture: true })
+    },
+    onView(cb) {
+      viewListeners.add(cb)
+      // Fire once immediately so the subscriber starts with a fresh snapshot
+      // rather than waiting for the next interaction.
+      cb(computeSnapshot())
+      return () => {
+        viewListeners.delete(cb)
+      }
     },
   }
 }
