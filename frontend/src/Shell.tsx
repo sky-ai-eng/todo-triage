@@ -7,6 +7,7 @@ const navItems = [
   { to: '/prs', label: 'PRs' },
   { to: '/repos', label: 'Repos' },
   { to: '/prompts', label: 'Prompts' },
+  { to: '/factory', label: 'Factory' },
   { to: '/brief', label: 'Brief' },
 ]
 

@@ -10,6 +10,7 @@ import Brief from './pages/Brief'
 import Settings from './pages/Settings'
 import Prompts from './pages/Prompts'
 import Repos from './pages/Repos'
+import Factory from './pages/Factory'
 import Shell from './Shell'
 import AuthGate from './AuthGate'
 import ToastProvider from './components/Toast/ToastProvider'
@@ -32,6 +33,7 @@ createRoot(document.getElementById('root')!).render(
           <Route path="/prompts" element={<Prompts />} />
           <Route path="/repos" element={<Repos />} />
           <Route path="/brief" element={<Brief />} />
+          <Route path="/factory" element={<Factory />} />
           <Route path="/settings" element={<Settings />} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />

@@ -1,0 +1,437 @@
+// Station renderer — one machine on the factory floor, populated from event
+// catalog metadata + the live predicate schema fetched from the API.
+//
+// Anatomy:
+//
+//   ┌───────────────────────────────────────────┐
+//   │ ●  PR Opened                 [ github ]   │  header band
+//   │ ┌───────────────────────────────────────┐ │
+//   │ │ ┏━┓                                ┏━┓ │ │
+//   │●│                  ✦                   │●│  core chamber — glyph + HUD brackets
+//   │ │ ┗━┛                                ┗━┛ │ │  port nubs protrude from the frame
+//   │ └───────────────────────────────────────┘ │
+//   │  [self]  [author]  [repo]  +2             │  predicate chips
+//   └───────────────────────────────────────────┘
+//
+// The frame is glass; the core is a recessed chamber where tasks (coming
+// soon) will dwell and event-fire ripples will animate. Port nubs on the
+// left/right edges are the visible docking points the belts snap to.
+//
+// Presentation data (label, category, lifecycle, glyph) comes from
+// factory/events.ts. The filterable-field schema comes from the API.
+
+import { Container, Graphics, Text } from 'pixi.js'
+import type { FieldSchema } from '../types'
+import type { FactoryEvent } from './events'
+import { drawGlyph } from './glyphs'
+
+const W = 260
+const H = 180
+const R = 18
+const CORE_R = 10
+const HEADER_H = 40
+const CHIPS_H = 32
+const CORE_PAD_X = 12
+const CORE_PAD_TOP = 4
+const CORE_PAD_BOT = 6
+
+/** Conveyor belt width — exported so scene.ts can draw the belt flush with
+ * the port stubs. */
+export const BELT_WIDTH = 28
+
+/** How far each port stub protrudes outward from the station frame edge.
+ * Belts connect at the stub's outer end, not the station edge, so the
+ * conveyor material is visually continuous. */
+export const PORT_STUB_LEN = 24
+
+// Port offsets in station-local coords. Port y is the vertical center of
+// the core chamber — the belt visually aligns with the core's interior.
+const CORE_Y = -H / 2 + HEADER_H + CORE_PAD_TOP
+const CORE_H = H - HEADER_H - CHIPS_H - CORE_PAD_TOP - CORE_PAD_BOT
+const PORT_LOCAL_Y = CORE_Y + CORE_H / 2
+
+const CATEGORY_COLOR: Record<string, number> = {
+  pr_flow: 0xc47a5a,
+  pr_review: 0x7a9aad,
+  pr_ci: 0x6ea87a,
+  pr_signals: 0x9a7aad,
+  jira_flow: 0xb8943a,
+  jira_signals: 0x8a8480,
+}
+
+const TEXT_PRIMARY = 0x1a1a1a
+const TEXT_TERTIARY = 0xa09a94
+const STATE_ENABLED = 0x5a8c6a
+const RIM_HIGHLIGHT = 0xffffff
+
+// Abbreviations for predicate field names so chips stay readable. Anything
+// missing falls back to the raw field name (lowercased, truncated if huge).
+const FIELD_ABBREV: Record<string, string> = {
+  author_is_self: 'self',
+  is_draft: 'draft',
+  has_label: 'label',
+  label_name: 'label',
+  reviewer_is_self: 'reviewer',
+  commenter_is_self: 'commenter',
+  assignee_is_self: 'assignee',
+  reporter_is_self: 'reporter',
+  check_name: 'check',
+  review_type: 'review',
+  new_status: 'to',
+  old_status: 'from',
+  new_priority: 'to',
+  old_priority: 'from',
+  issue_type: 'type',
+}
+
+export interface StationOptions {
+  event: FactoryEvent
+  fields: FieldSchema[]
+  /** Whether any prompt is currently wired to this event. Dims the station when false. */
+  enabled?: boolean
+  center: { x: number; y: number }
+}
+
+/** A belt dock point. `dir` is the outward unit vector the port faces —
+ * belts exit along this direction and arrive against it, which lets the
+ * belt renderer build smooth S-curves that tangent-match the port on both
+ * ends. Left ports face west (-1, 0); right ports face east (1, 0). */
+export interface Port {
+  x: number
+  y: number
+  dir: { x: number; y: number }
+}
+
+export interface StationHandle {
+  kind: 'station'
+  container: Container
+  center: { x: number; y: number }
+  leftPort: Port
+  rightPort: Port
+  /** Stations don't expose top/bottom ports — those live on splitter/merger
+   * nodes only. Declared for shape-compatibility with the GraphNode union
+   * consumers use in the routing layer. */
+  topPort?: undefined
+  bottomPort?: undefined
+  update(dt: number): void
+}
+
+export function buildStation(parent: Container, opts: StationOptions): StationHandle {
+  const { event, fields, enabled = true, center } = opts
+  const color = event.tint ?? CATEGORY_COLOR[event.category] ?? CATEGORY_COLOR.pr_flow
+
+  const root = new Container()
+  root.x = center.x
+  root.y = center.y
+  parent.addChild(root)
+
+  const fx = -W / 2
+  const fy = -H / 2
+
+  // Drop shadow — soft warm lift, drawn as a slightly-larger filled shape so
+  // we don't pay for a blur filter per-station. Reads fine at this scale on
+  // the light surface.
+  const shadow = new Graphics()
+  shadow.roundRect(fx - 5, fy + 8, W + 10, H + 10, R + 5)
+  shadow.fill({ color: 0x000000, alpha: 0.06 })
+  root.addChild(shadow)
+
+  // Port stubs — short belt extensions protruding from the left and right
+  // edges of the frame. Drawn BEFORE the frame body so the body overlaps
+  // the stub's inner end, making the stub appear to emerge from inside the
+  // station. Belts attach at the stub's outer end.
+  drawPortStub(root, fx, PORT_LOCAL_Y, -1, color)
+  drawPortStub(root, fx + W, PORT_LOCAL_Y, 1, color)
+
+  // Frame body — translucent white over the warm surface.
+  const body = new Graphics()
+  body.roundRect(fx, fy, W, H, R)
+  body.fill({ color: 0xffffff, alpha: 0.78 })
+  root.addChild(body)
+
+  // Category wash on the frame — barely-there warmth hinting at the row.
+  const tint = new Graphics()
+  tint.roundRect(fx, fy, W, H, R)
+  tint.fill({ color, alpha: 0.04 })
+  root.addChild(tint)
+
+  // Top sheen — the "light catches the top" liquid-glass cue.
+  const sheen = new Graphics()
+  sheen.roundRect(fx + 4, fy + 4, W - 8, H / 3, R - 6)
+  sheen.fill({ color: 0xffffff, alpha: 0.3 })
+  root.addChild(sheen)
+
+  // Outer hairline + inner rim highlight.
+  const outerRim = new Graphics()
+  outerRim.roundRect(fx, fy, W, H, R)
+  outerRim.stroke({ width: 1, color: 0x000000, alpha: 0.08, alignment: 1 })
+  root.addChild(outerRim)
+
+  const innerRim = new Graphics()
+  innerRim.roundRect(fx + 1, fy + 1, W - 2, H - 2, R - 1)
+  innerRim.stroke({ width: 1, color: RIM_HIGHLIGHT, alpha: 0.9, alignment: 0 })
+  root.addChild(innerRim)
+
+  // ── Header ────────────────────────────────────────────────────────────────
+  const headerBottomY = fy + HEADER_H
+  const headerDivider = new Graphics()
+  headerDivider.moveTo(fx + 14, headerBottomY)
+  headerDivider.lineTo(fx + W - 14, headerBottomY)
+  headerDivider.stroke({ width: 1, color: 0x000000, alpha: 0.05 })
+  root.addChild(headerDivider)
+
+  const pip = new Graphics()
+  pip.circle(fx + 16, fy + 20, 4)
+  pip.fill({ color: enabled ? STATE_ENABLED : TEXT_TERTIARY, alpha: enabled ? 0.9 : 0.5 })
+  root.addChild(pip)
+
+  const title = new Text({
+    text: event.label,
+    style: {
+      fontFamily: 'Inter, system-ui, sans-serif',
+      fontSize: 14,
+      fontWeight: '600',
+      fill: TEXT_PRIMARY,
+      letterSpacing: 0.1,
+    },
+  })
+  title.anchor.set(0, 0.5)
+  title.x = fx + 28
+  title.y = fy + 20
+  root.addChild(title)
+
+  // Source badge — rounded pill, right side of header.
+  const badgeText = new Text({
+    text: event.source,
+    style: {
+      fontFamily: 'Inter, system-ui, sans-serif',
+      fontSize: 9,
+      fontWeight: '700',
+      fill: color,
+      letterSpacing: 0.8,
+    },
+  })
+  const badgeW = Math.ceil(badgeText.width) + 14
+  const badgeH = 16
+  const badgeX = fx + W - 14 - badgeW
+  const badgeY = fy + 12
+  const badge = new Graphics()
+  badge.roundRect(badgeX, badgeY, badgeW, badgeH, badgeH / 2)
+  badge.fill({ color, alpha: 0.1 })
+  badge.stroke({ width: 0.75, color, alpha: 0.35 })
+  root.addChild(badge)
+  badgeText.anchor.set(0.5, 0.5)
+  badgeText.x = badgeX + badgeW / 2
+  badgeText.y = badgeY + badgeH / 2 + 0.5
+  root.addChild(badgeText)
+
+  // ── Core chamber ──────────────────────────────────────────────────────────
+  const coreX = fx + CORE_PAD_X
+  const coreW = W - CORE_PAD_X * 2
+
+  // Recession hint: draw a slightly-offset dark rect, then a warm-tinted fill
+  // on top. The 1px mismatch between the two creates a subtle top-edge shadow
+  // that reads as "this is set into the frame."
+  const coreRecess = new Graphics()
+  coreRecess.roundRect(coreX, CORE_Y, coreW, CORE_H, CORE_R)
+  coreRecess.fill({ color: 0x000000, alpha: 0.04 })
+  root.addChild(coreRecess)
+
+  const coreFill = new Graphics()
+  coreFill.roundRect(coreX + 1, CORE_Y + 1, coreW - 2, CORE_H - 2, CORE_R - 1)
+  coreFill.fill({ color: 0xf7f5f2, alpha: 0.9 })
+  root.addChild(coreFill)
+
+  const coreTint = new Graphics()
+  coreTint.roundRect(coreX + 1, CORE_Y + 1, coreW - 2, CORE_H - 2, CORE_R - 1)
+  coreTint.fill({ color, alpha: 0.06 })
+  root.addChild(coreTint)
+
+  // HUD corner brackets — four L-shapes inset inside the core. Very thin,
+  // accent-tinted. Adds "tech object" texture without being busy.
+  const BRACKET = 10
+  const BM = 8 // margin from core edge
+  const bX1 = coreX + BM
+  const bY1 = CORE_Y + BM
+  const bX2 = coreX + coreW - BM
+  const bY2 = CORE_Y + CORE_H - BM
+  const brackets = new Graphics()
+  brackets.moveTo(bX1, bY1 + BRACKET)
+  brackets.lineTo(bX1, bY1)
+  brackets.lineTo(bX1 + BRACKET, bY1)
+  brackets.moveTo(bX2 - BRACKET, bY1)
+  brackets.lineTo(bX2, bY1)
+  brackets.lineTo(bX2, bY1 + BRACKET)
+  brackets.moveTo(bX1, bY2 - BRACKET)
+  brackets.lineTo(bX1, bY2)
+  brackets.lineTo(bX1 + BRACKET, bY2)
+  brackets.moveTo(bX2 - BRACKET, bY2)
+  brackets.lineTo(bX2, bY2)
+  brackets.lineTo(bX2, bY2 - BRACKET)
+  brackets.stroke({ width: 1, color, alpha: 0.4 })
+  root.addChild(brackets)
+
+  // Procedural glyph centered in the core.
+  const glyphLayer = new Container()
+  glyphLayer.x = coreX + coreW / 2
+  glyphLayer.y = CORE_Y + CORE_H / 2
+  root.addChild(glyphLayer)
+  drawGlyph(glyphLayer, event.glyph, color)
+
+  // ── Predicate chips ───────────────────────────────────────────────────────
+  const chipsY = fy + H - CHIPS_H + 6
+  const chipsStartX = fx + 14
+  const chipsEndX = fx + W - 14
+  const available = chipsEndX - chipsStartX
+  // Greedy fit — keep adding chips while there's room; overflow counter for
+  // anything that didn't fit.
+  let cursor = chipsStartX
+  const chipGap = 4
+  let shown = 0
+  for (let i = 0; i < fields.length; i++) {
+    const abbrev = FIELD_ABBREV[fields[i].name] ?? fields[i].name
+    const estW = estimateChipWidth(abbrev)
+    // Reserve ~26px for a possible +N overflow on the last fitting iteration.
+    const needOverflow = i < fields.length - 1
+    const reserve = needOverflow ? 30 : 0
+    if (cursor + estW + reserve > chipsStartX + available) break
+    drawChip(root, cursor, chipsY, abbrev, color, false)
+    cursor += estW + chipGap
+    shown++
+  }
+  const overflow = fields.length - shown
+  if (overflow > 0) {
+    drawChip(root, cursor, chipsY, `+${overflow}`, color, true)
+  }
+
+  // Station-wide dim when disabled.
+  if (!enabled) {
+    root.alpha = 0.6
+  }
+
+  // ── Ambient animation ─────────────────────────────────────────────────────
+  // Subtle glyph alpha breathing — reads as "standby, powered on" rather
+  // than the static card feeling we had before. No scale pulse (distracting
+  // at multi-station scale).
+  let t = 0
+  const baseAlpha = glyphLayer.alpha
+  return {
+    kind: 'station',
+    container: root,
+    center,
+    leftPort: {
+      x: center.x - W / 2 - PORT_STUB_LEN,
+      y: center.y + PORT_LOCAL_Y,
+      dir: { x: -1, y: 0 },
+    },
+    rightPort: {
+      x: center.x + W / 2 + PORT_STUB_LEN,
+      y: center.y + PORT_LOCAL_Y,
+      dir: { x: 1, y: 0 },
+    },
+    update(dt: number) {
+      t += dt
+      const breathe = 0.78 + 0.22 * (0.5 + 0.5 * Math.sin(t * 1.5))
+      glyphLayer.alpha = baseAlpha * breathe
+    },
+  }
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function drawPortStub(
+  parent: Container,
+  attachX: number,
+  attachY: number,
+  direction: 1 | -1,
+  color: number,
+) {
+  // A short flat belt-like stub extending outward from the station frame
+  // edge. Same fill and edge treatment as the main belt so the conveyor
+  // material reads as one continuous piece. The inner end starts at the
+  // station's outer edge (station body overlaps it); the outer end is
+  // where the belt docks.
+  const outerX = attachX + direction * PORT_STUB_LEN
+  const topY = attachY - BELT_WIDTH / 2
+  const botY = attachY + BELT_WIDTH / 2
+  const leftX = Math.min(attachX, outerX)
+  const rightX = Math.max(attachX, outerX)
+
+  // Belt material fill.
+  const body = new Graphics()
+  body.rect(leftX, topY, rightX - leftX, BELT_WIDTH)
+  body.fill({ color: 0xffffff, alpha: 0.82 })
+  parent.addChild(body)
+
+  // Warm tint so the stub inherits the category accent.
+  const tint = new Graphics()
+  tint.rect(leftX, topY, rightX - leftX, BELT_WIDTH)
+  tint.fill({ color, alpha: 0.1 })
+  parent.addChild(tint)
+
+  // Top edge highlight (reads as "light hitting the near rail").
+  const top = new Graphics()
+  top.moveTo(leftX, topY)
+  top.lineTo(rightX, topY)
+  top.stroke({ width: 1.25, color: 0xffffff, alpha: 0.95 })
+  parent.addChild(top)
+
+  // Bottom edge shadow (far rail, in shadow).
+  const bot = new Graphics()
+  bot.moveTo(leftX, botY)
+  bot.lineTo(rightX, botY)
+  bot.stroke({ width: 1.25, color: 0x000000, alpha: 0.18 })
+  parent.addChild(bot)
+
+  // Outer end-cap — a short accent-colored band marking the dock point.
+  const capX = direction === 1 ? outerX - 3 : outerX
+  const cap = new Graphics()
+  cap.rect(capX, topY + 2, 3, BELT_WIDTH - 4)
+  cap.fill({ color, alpha: 0.45 })
+  parent.addChild(cap)
+}
+
+function estimateChipWidth(label: string): number {
+  // Rough text-width estimate in Inter 9px bold — measuring for real would
+  // require mounting the Text first, which is fine but more allocations.
+  // A flat per-char width is close enough at this size, slightly over-
+  // estimating to be safe.
+  return Math.ceil(label.length * 5.6) + 12
+}
+
+function drawChip(
+  parent: Container,
+  cx: number,
+  cy: number,
+  label: string,
+  color: number,
+  muted: boolean,
+) {
+  const text = new Text({
+    text: label,
+    style: {
+      fontFamily: 'Inter, system-ui, sans-serif',
+      fontSize: 9,
+      fontWeight: '600',
+      fill: muted ? TEXT_TERTIARY : color,
+      letterSpacing: 0.5,
+    },
+  })
+  const padX = 6
+  const padY = 3
+  const w = Math.ceil(text.width) + padX * 2
+  const h = Math.ceil(text.height) + padY * 2
+
+  const bg = new Graphics()
+  bg.roundRect(cx, cy, w, h, h / 2)
+  bg.fill({ color: muted ? 0x000000 : color, alpha: muted ? 0.04 : 0.09 })
+  bg.stroke({ width: 0.75, color: muted ? 0x000000 : color, alpha: muted ? 0.1 : 0.3 })
+  parent.addChild(bg)
+
+  text.anchor.set(0, 0)
+  text.x = cx + padX
+  text.y = cy + padY - 0.5
+  parent.addChild(text)
+
+  return w
+}
