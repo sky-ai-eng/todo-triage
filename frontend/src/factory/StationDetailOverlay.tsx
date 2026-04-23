@@ -1,3 +1,6 @@
+import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
+
 // Near-zoom HTML overlay that takes over a station's interior when the
 // viewport zooms in far enough for the Pixi-drawn core chamber to feel
 // empty. Positioned absolutely over the Pixi station using the screen-
@@ -44,6 +47,12 @@ export interface StationThroughput {
 export interface StationWaitingEntity {
   id: string
   label: string
+  title: string
+  repo?: string
+  author?: string
+  /** Additions/deletions for GitHub PRs; undefined for Jira issues. */
+  diffAdd?: number
+  diffDel?: number
   mine: boolean
   url: string
 }
@@ -215,6 +224,27 @@ function RunRow({ summary, onOpen }: RunRowProps) {
 
 function WaitingPill({ entity, color }: { entity: StationWaitingEntity; color: number }) {
   const tint = entity.mine ? '#c47a5a' : '#7a9aad'
+  const hasDiff = entity.diffAdd != null || entity.diffDel != null
+  const [hovered, setHovered] = useState(false)
+  const anchorRef = useRef<HTMLElement | null>(null)
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null)
+
+  // On hover, compute the anchor's viewport rect and place the card just
+  // below it. Rendered via a portal to document.body so the overlay's
+  // overflow-hidden + the strip's overflow-x-auto (which forces vertical
+  // clipping too) can't hide the card. Fixed positioning keeps it
+  // anchored while the user moves their cursor between pills.
+  useEffect(() => {
+    if (!hovered) {
+      setPos(null)
+      return
+    }
+    const el = anchorRef.current
+    if (!el) return
+    const rect = el.getBoundingClientRect()
+    setPos({ left: rect.left + rect.width / 2, top: rect.bottom + 6 })
+  }, [hovered])
+
   const body = (
     <>
       <span
@@ -225,29 +255,97 @@ function WaitingPill({ entity, color }: { entity: StationWaitingEntity; color: n
       <span className="text-[11px] font-medium text-text-primary">{entity.label}</span>
     </>
   )
-  const className =
+  const pillClass =
     'shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md border transition-colors'
-  const style = {
+  const pillStyle = {
     borderColor: hex(color, 0.2),
     background: 'rgba(255, 255, 255, 0.6)',
   }
+
+  const card =
+    pos &&
+    createPortal(
+      <div
+        className="pointer-events-none fixed z-50"
+        style={{
+          left: pos.left,
+          top: pos.top,
+          transform: 'translateX(-50%)',
+          minWidth: 180,
+          maxWidth: 260,
+        }}
+      >
+        <div
+          className="rounded-md border px-2.5 py-1.5 shadow-lg"
+          style={{
+            borderColor: hex(color, 0.25),
+            background: 'rgba(252, 250, 247, 0.98)',
+            backdropFilter: 'blur(8px)',
+            WebkitBackdropFilter: 'blur(8px)',
+          }}
+        >
+          <div className="text-[11px] font-semibold text-text-primary leading-snug">
+            {entity.title}
+          </div>
+          {entity.repo && (
+            <div className="text-[10px] text-text-tertiary mt-0.5">{entity.repo}</div>
+          )}
+          <div className="flex items-center justify-between gap-2 mt-1">
+            {entity.author && (
+              <span className="text-[10px] font-medium" style={{ color: tint }}>
+                {entity.author}
+              </span>
+            )}
+            {hasDiff && (
+              <span className="text-[10px] font-mono text-text-secondary tabular-nums">
+                +{entity.diffAdd ?? 0} −{entity.diffDel ?? 0}
+              </span>
+            )}
+          </div>
+        </div>
+      </div>,
+      document.body,
+    )
+
+  const handlers = {
+    onMouseEnter: () => setHovered(true),
+    onMouseLeave: () => setHovered(false),
+  }
+
   if (!entity.url) {
     return (
-      <span className={className} style={style}>
-        {body}
-      </span>
+      <>
+        <span
+          ref={(el) => {
+            anchorRef.current = el
+          }}
+          className={pillClass}
+          style={pillStyle}
+          {...handlers}
+        >
+          {body}
+        </span>
+        {card}
+      </>
     )
   }
   return (
-    <a
-      href={entity.url}
-      target="_blank"
-      rel="noopener noreferrer"
-      className={`${className} hover:bg-white/90`}
-      style={style}
-    >
-      {body}
-    </a>
+    <>
+      <a
+        ref={(el) => {
+          anchorRef.current = el
+        }}
+        href={entity.url}
+        target="_blank"
+        rel="noopener noreferrer"
+        className={`${pillClass} hover:bg-white/90`}
+        style={pillStyle}
+        {...handlers}
+      >
+        {body}
+      </a>
+      {card}
+    </>
   )
 }
 

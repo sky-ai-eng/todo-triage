@@ -203,6 +203,11 @@ export default function Factory() {
             e.source === 'github' && e.number
               ? `#${e.number}`
               : e.source_id || e.title.slice(0, 18),
+          title: e.title || e.source_id,
+          repo: e.source === 'github' ? e.repo : e.source_id,
+          author: e.source === 'github' ? (e.author ? `@${e.author}` : undefined) : e.assignee,
+          diffAdd: e.additions,
+          diffDel: e.deletions,
           mine: e.mine,
           url: e.url,
         })) ?? []

@@ -144,8 +144,23 @@ const NODE_DEFS: NodeDef[] = [
   // retry line. The merger sits mid-line, splitting the old direct belt
   // from pole 31 → pole 34 into two segments with conflicts joining from
   // below.
-  { kind: 'pole', col: 27, row: 5 }, //                                                      43 conflicts east-turn pole
+  //
+  // T-merger now: conflicts enters from the left, the ci-passed "refresh"
+  // path enters from the right, and the combined flow heads north to the
+  // retry line. Before SKY-CI-refresh this was a plain pole — only one
+  // input (conflicts) and one output (north).
+  { kind: 'merger', col: 27, row: 5, orientation: 'top' }, //                                43 T-merger: conflicts (L) + ci-passed refresh (R) → north
   { kind: 'merger', col: 27, row: 2, orientation: 'left' }, //                               44 retry-line merger (conflicts drops in from south)
+
+  // ─── CI-passed split: continue to review OR refresh new_commits ────────────
+  // CI passed used to flow diagonally straight to merger_main. Split it so
+  // some runs bypass review and re-enter the build branch (as if they
+  // pushed a new commit that needs re-validation). The right-hand branch
+  // steps one column east then heads straight north into the T-merger at
+  // node 43, which feeds up to the retry line and back into merger_nc →
+  // new_commits.
+  { kind: 'splitter', label: 'next?', col: 26, row: 8, orientation: 'left' }, //             45 ci-passed split (input L, outputs T/R)
+  { kind: 'pole', col: 27, row: 8 }, //                                                      46 east-turn on ci-passed refresh path; col-aligned with T-merger 43
 ]
 
 interface EdgeDef {
@@ -179,7 +194,13 @@ const BELT_EDGES: EdgeDef[] = [
   { from: 5, to: 6, fromSide: 'top', toSide: 'left' }, //     ci_splitter.top → conflicts.left (direct diagonal)
   { from: 5, to: 7, fromSide: 'right', toSide: 'left' }, //   ci_splitter → ci_passed
   { from: 5, to: 8, fromSide: 'bottom', toSide: 'left' }, //  ci_splitter.bottom → ci_failed
-  { from: 7, to: 12, fromSide: 'right', toSide: 'bottom' }, // ci_passed → merger_main.bottom (climb up to row 2)
+  // ci_passed splits: continue to review (top → merger_main) OR loop back
+  // to new_commits via the T-merger at node 43 (right → pole 46 → merger
+  // 43 → retry line).
+  { from: 7, to: 45, fromSide: 'right', toSide: 'left' }, //   ci_passed → splitter
+  { from: 45, to: 12, fromSide: 'top', toSide: 'bottom' }, //  splitter.top → merger_main.bottom (row 8 → row 4)
+  { from: 45, to: 46, fromSide: 'right', toSide: 'left' }, //  splitter.right → pole 46 (east, one step)
+  { from: 46, to: 43, fromSide: 'top', toSide: 'bottom' }, //  pole 46 → T-merger.bottom (vertical north, col 27)
   { from: 8, to: 9, fromSide: 'right', toSide: 'left' }, //   ci_failed.right → pole(9)
   { from: 9, to: 10, fromSide: 'bottom', toSide: 'top' }, //  pole(9) → pole(10)
   { from: 10, to: 11, fromSide: 'left', toSide: 'right' }, // pole(10) → pole(11)
@@ -673,7 +694,7 @@ function buildBeltChevrons(parent: Container, belt: FlatBelt) {
   })
 
   let t = 0
-  const speed = 0.32
+  const speed = 0.64
 
   return {
     update(dt: number) {
@@ -720,7 +741,7 @@ function buildItemSpawner(
   const layer = new Container()
   parent.addChild(layer)
 
-  const LEG_DURATION = 2.8
+  const LEG_DURATION = 1.4
   const MAX_HOPS = 40
 
   const outgoingByNode = new Map<number, Edge[]>()
