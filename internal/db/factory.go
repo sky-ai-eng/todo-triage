@@ -304,12 +304,16 @@ func parseDBDatetime(s string) (time.Time, error) {
 }
 
 // ListFactoryEntities returns up to `limit` active entities with their
-// most-recent-event context. Ordered by last_polled_at DESC so fresh
-// movement lives at the top of the list when the frontend caps display.
+// most-recent-event context. Ordered by entities.created_at DESC — a
+// stable key that doesn't move as pollers run, so the displayed set
+// doesn't churn when GitHub and Jira pollers alternate (which bumps
+// last_polled_at on whichever side just finished and would shove the
+// other source out of the capped window).
 //
-// The latest-event subquery uses idx_events_entity_created and runs per
-// row — fine at 100-entity scope, would need reworking at 10k+ (window
-// function or a materialized "current" column).
+// The latest-event subqueries use idx_events_entity_created, and the
+// source-time lookup additionally pulls occurred_at via COALESCE so the
+// factory chain animation orders by actual event time rather than
+// insertion time when the poller captured it.
 func ListFactoryEntities(database *sql.DB, limit int) ([]FactoryEntityRow, error) {
 	rows, err := database.Query(`
 		SELECT
@@ -318,10 +322,14 @@ func ListFactoryEntities(database *sql.DB, limit int) ([]FactoryEntityRow, error
 			COALESCE(e.snapshot_json, ''), COALESCE(e.description, ''),
 			e.state, e.created_at, e.last_polled_at, e.closed_at,
 			(SELECT event_type FROM events WHERE entity_id = e.id ORDER BY created_at DESC LIMIT 1),
+			-- Direct column read (not COALESCE) so mattn/go-sqlite3 keeps the
+			-- DATETIME column-type hint and scans into sql.NullTime. The
+			-- per-event source timestamps come via ListRecentEventsByEntity,
+			-- which does the COALESCE + string-parse dance.
 			(SELECT created_at FROM events WHERE entity_id = e.id ORDER BY created_at DESC LIMIT 1)
 		FROM entities e
 		WHERE e.state = 'active'
-		ORDER BY e.last_polled_at DESC
+		ORDER BY e.created_at DESC
 		LIMIT ?
 	`, limit)
 	if err != nil {

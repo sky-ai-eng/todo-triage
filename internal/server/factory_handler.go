@@ -13,10 +13,11 @@ import (
 
 // factoryEntityLimit caps how many active entities we ship per snapshot.
 // The factory view renders each entity as an item on the belt network;
-// hundreds of items would swamp the canvas visually and the belt pathing
-// hops would start to stutter. 100 is chosen to match the "floor feels
-// populated" target discussed during the factory design session.
-const factoryEntityLimit = 100
+// at some point the canvas gets visually swamped, but 500 comfortably
+// covers an enterprise Jira stock plus tracked GitHub repos without
+// churning the displayed set when pollers from different sources
+// alternate their last_polled_at updates.
+const factoryEntityLimit = 500
 
 // factoryStationJSON is the per-event-type payload for the factory view.
 // The frontend keys StationDetailOverlay data off event_type; any event
