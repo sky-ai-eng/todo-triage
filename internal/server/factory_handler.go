@@ -149,16 +149,22 @@ func (s *Server) handleFactorySnapshot(w http.ResponseWriter, r *http.Request) {
 
 	stations := map[string]factoryStationJSON{}
 	// Seed stations with counters first so event types with activity but no
-	// active run still show up in the throughput strip.
+	// active run still show up in the throughput strip. Initialize Runs as
+	// an empty slice (not nil) so json.Marshal emits `[]` instead of `null`;
+	// the frontend maps over this without a defensive fallback.
+	ensureStation := func(eventType string) factoryStationJSON {
+		if st, ok := stations[eventType]; ok {
+			return st
+		}
+		return factoryStationJSON{EventType: eventType, Runs: []factoryRunJSON{}}
+	}
 	for eventType, count := range eventCounts {
-		st := stations[eventType]
-		st.EventType = eventType
+		st := ensureStation(eventType)
 		st.Items24h = count
 		stations[eventType] = st
 	}
 	for eventType, count := range taskCounts {
-		st := stations[eventType]
-		st.EventType = eventType
+		st := ensureStation(eventType)
 		st.Triggered24h = count
 		stations[eventType] = st
 	}
@@ -179,8 +185,7 @@ func (s *Server) handleFactorySnapshot(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, ar := range activeRuns {
-		st := stations[ar.Task.EventType]
-		st.EventType = ar.Task.EventType
+		st := ensureStation(ar.Task.EventType)
 		st.ActiveRuns++
 		st.Runs = append(st.Runs, factoryRunJSON{
 			Run:  toFactoryRunSummary(ar.Run),

@@ -411,7 +411,17 @@ export async function createFactoryScene(
   const chevronLayers = edges
     .filter((e) => !e.isTunnel)
     .map((e) => buildBeltChevrons(scene, e.belt))
-  const items = buildItemSpawner(scene, nodes, edges)
+
+  // Event-type → station node index map. Items park at whichever station's
+  // event_type matches their entity's current_event_type; entities whose
+  // current_event_type doesn't correspond to a station on the board are
+  // skipped entirely (system events, non-visualized PR events).
+  const eventTypeToNode = new Map<string, number>()
+  NODE_DEFS.forEach((def, idx) => {
+    if (def.kind === 'station') eventTypeToNode.set(def.eventType, idx)
+  })
+
+  const items = buildItemSpawner(scene, nodes, edges, eventTypeToNode)
 
   const tick = (t: Ticker) => {
     const dt = t.deltaMS / 1000
@@ -690,30 +700,26 @@ interface Edge {
   isTunnel: boolean
 }
 
-function buildItemSpawner(parent: Container, nodes: GraphNode[], edges: Edge[]) {
-  // Items are scripted visitors: each spawns with a list of station indices
-  // to traverse in order. Pathfinding (next-hop shortest-path BFS) handles
-  // getting from one scripted stop to the next — intermediate splitter/
-  // merger nodes are transited automatically.
+function buildItemSpawner(
+  parent: Container,
+  nodes: GraphNode[],
+  edges: Edge[],
+  eventTypeToNode: Map<string, number>,
+) {
+  // Items are entity-identified, not script-driven: each real entity gets
+  // exactly one item, parked at the station matching its
+  // `current_event_type`. When a snapshot update shifts an entity's current
+  // station, the item animates along the belt network to the new station.
+  // Entities whose current_event_type doesn't correspond to any station on
+  // the board are skipped (system events, non-visualized PR events).
   //
-  // This is deliberately the same primitive we'll use for real events:
-  // an entity's script IS its event history. In the real-event model a
-  // new event for entity X appends to its script and the item animates
-  // from its current position to that next stop. The demo pre-generates
-  // weighted scripts so we see varied journeys including CI retry loops,
-  // direct approvals, and the review-outcome branches.
-  //
-  // Behaviour at each arrival:
-  //   - arrived node matches the next scripted stop (station): dwell
-  //     briefly, then advance script, then pathfind to the new next stop
-  //   - arrived node is transit (splitter / merger): pathfind toward the
-  //     current scripted stop and keep going, no dwell
-  //   - reached the last scripted stop: dwell briefly, then despawn
+  // `setEntityPool(entities)` is the reconciler — it diffs the new pool
+  // against existing items: new entity → spawn parked, changed station →
+  // retarget, missing entity → despawn. Static data ⇒ static floor.
   const layer = new Container()
   parent.addChild(layer)
 
   const LEG_DURATION = 2.8
-  const DWELL = 0.55
   const MAX_HOPS = 40
 
   const outgoingByNode = new Map<number, Edge[]>()
@@ -753,43 +759,9 @@ function buildItemSpawner(parent: Container, nodes: GraphNode[], edges: Edge[]) 
     return nextHop.get(`${fromNode}:${target}`) ?? null
   }
 
-  // Weighted scripted journeys — each is a list of station node indices.
-  // Pathfinding handles transitions through splitter / merger / pole nodes
-  // between consecutive scripted stops. Station indices in the current
-  // graph:
-  //   0 opened · 1 rfr · 4 new_commits · 6 conflicts · 7 ci_passed
-  //   8 ci_failed · 13 review_requested · 14 review_received
-  //   18 review_commented · 19 review_approved · 20 changes_requested
-  //   21 merged · 22 closed
-  const SCRIPTS: { weight: number; stops: number[] }[] = [
-    { weight: 18, stops: [0, 1, 4, 7, 13, 14, 19, 21] }, //                     happy path
-    { weight: 15, stops: [0, 1, 4, 8, 4, 7, 13, 14, 19, 21] }, //               CI retry once
-    { weight: 6, stops: [0, 1, 4, 8, 4, 8, 4, 7, 13, 14, 19, 21] }, //          CI retry twice
-    { weight: 6, stops: [0, 1, 13, 14, 19, 21] }, //                            direct approval (skip build via arc)
-    { weight: 8, stops: [0, 1, 4, 7, 13, 14, 20] }, //                          changes requested (not addressed)
-    { weight: 8, stops: [0, 1, 4, 7, 13, 14, 20, 4, 7, 13, 14, 19, 21] }, //    changes requested → retry → approved (retry loopback!)
-    { weight: 6, stops: [0, 1, 4, 7, 13, 14, 20, 22] }, //                      changes requested → abandoned (via closed bus)
-    { weight: 6, stops: [0, 1, 4, 7, 13, 14, 18] }, //                          review commented (terminal)
-    { weight: 6, stops: [0, 1, 4, 7, 13, 14, 18, 22] }, //                      review commented → abandoned (via closed bus)
-    { weight: 5, stops: [0, 1, 4, 6] }, //                                      merge conflicts (abandoned there)
-    { weight: 6, stops: [0, 1, 4, 6, 4, 7, 13, 14, 19, 21] }, //                 merge conflicts → retry → merged
-    { weight: 5, stops: [0, 1, 22] }, //                                        abandoned at rfr (via closed bus)
-    { weight: 6, stops: [0, 1, 4, 22] }, //                                     abandoned at new_commits (via closed bus)
-  ]
-  const totalScriptWeight = SCRIPTS.reduce((s, x) => s + x.weight, 0)
-  const pickScript = (): number[] => {
-    let r = Math.random() * totalScriptWeight
-    for (const s of SCRIPTS) {
-      r -= s.weight
-      if (r <= 0) return s.stops
-    }
-    return SCRIPTS[0].stops
-  }
-
   interface ItemMeta {
-    /** Stable label for the compact pill. For real entities this is the
-     * source id ("owner/repo#123" or "SKY-123"); for demo items it's
-     * `PR #<nextId>` as before. */
+    /** Stable label for the compact pill. For GitHub entities: `PR #<number>`;
+     * for Jira entities: the ticket key (e.g. `SKY-123`). */
     label: string
     mine: boolean
     title: string
@@ -800,6 +772,7 @@ function buildItemSpawner(parent: Container, nodes: GraphNode[], edges: Edge[]) 
   }
 
   interface Item {
+    entityId: string
     gfx: Container
     /** Compact pill — label only. Shown at mid / far zoom or when the
      * item is off-screen at near zoom. */
@@ -807,23 +780,29 @@ function buildItemSpawner(parent: Container, nodes: GraphNode[], edges: Edge[]) 
     /** Expanded card — title, repo, author, diff. Shown only when near
      * zoom AND the item is inside the viewport's visible world rect. */
     detailGroup: Container
-    script: number[]
-    /** Index of the NEXT scripted stop to reach. scriptIdx-1 is the stop
-     * we most recently arrived at (or script[0] if we haven't moved yet). */
-    scriptIdx: number
+    /** Station node index where the item is currently parked. -1 while
+     * traveling between stations. */
+    parkedAt: number
+    /** Station node index the item is heading toward. -1 when parked. */
+    target: number
+    /** Edge currently being traversed. Null while parked. */
     currentEdge: Edge | null
     t: number
-    dwelling: number
     hopsRemaining: number
+    /** Stacking ordinal among items parked at the same station. Assigned
+     * on reconcile so parked items don't all land on identical coords. */
+    stackIdx: number
   }
 
-  const items: Item[] = []
-  let sinceSpawn = 1.0
-  const spawnInterval = 3.2
+  const items = new Map<string, Item>()
 
   const ITEM_LIFT = 12
   const ITEM_W = 60
   const ITEM_H = 22
+  // Vertical gap between parked items stacked at the same station. Enough
+  // to read distinct pills without the column sprawling past the station
+  // core at mid zoom.
+  const STACK_SPACING = 26
 
   // Detail card — shown at near zoom instead of the compact pill. Sized
   // small enough to fit between adjacent stations on the main row without
@@ -839,60 +818,7 @@ function buildItemSpawner(parent: Container, nodes: GraphNode[], edges: Edge[]) 
   const TINT_MINE = COLOR_ACCENT // 0xc47a5a terracotta
   const TINT_OTHER = 0x7a9aad // muted slate-blue
 
-  // Demo pools for the synthetic item metadata. Real-event wiring will
-  // replace these with entity data from the events stream; for now they
-  // just populate the expanded item card with plausible-looking content
-  // so the near-zoom experience isn't empty.
-  const REPOS = [
-    'sky-ai-eng/triage-factory',
-    'sky-ai-eng/poller',
-    'acme/payments',
-    'acme/dashboard',
-    'acme/auth-service',
-  ]
-  const TITLES = [
-    'Fix CI flakes in build step',
-    'Add retry logic for poller',
-    'Refactor auth middleware',
-    'Improve error handling in tracker',
-    'Bump Go toolchain to 1.26',
-    'Cache repo profiles for 3 days',
-    'Wire WS event broadcasts',
-    'Handle merge conflicts safely',
-    'Add task dedup key',
-    'Clean up stale worktrees',
-    'Parallelize CI matrix jobs',
-    'Fix race in snapshot diff',
-    'Tighten scope predicate schema',
-    'Move secrets to keychain',
-    'Reduce scorer cold-start time',
-  ]
-  const MY_HANDLE = '@aidan'
-  const OTHER_HANDLES = ['@maria', '@jun', '@priya', '@sam', '@alex', '@devon']
-  const pick = <T>(arr: T[]): T => arr[Math.floor(Math.random() * arr.length)]
-
-  const genDemoMeta = (id: number, mine: boolean): ItemMeta => ({
-    label: `PR #${id}`,
-    mine,
-    title: pick(TITLES),
-    repo: pick(REPOS),
-    author: mine ? MY_HANDLE : pick(OTHER_HANDLES),
-    diffAdd: 3 + Math.floor(Math.random() * 240),
-    diffDel: Math.floor(Math.random() * 120),
-  })
-
-  // Entity pool seeded from /api/factory/snapshot. When non-empty, new
-  // items spawn with real entity metadata (repo, title, author, diff);
-  // when empty we fall back to the demo pools above. Using a single
-  // pool with round-robin picking keeps the "same entity appears on
-  // multiple belts briefly" behaviour bounded — we don't want ten items
-  // all representing PR #42. Real belt paths still come from scripted
-  // journeys (current_event_type → station projection is a phase-2
-  // concern per the session plan).
-  let entityPool: FactoryEntity[] = []
-  const entityFromPool = (): ItemMeta | null => {
-    if (entityPool.length === 0) return null
-    const e = entityPool[Math.floor(Math.random() * entityPool.length)]
+  const metaFromEntity = (e: FactoryEntity): ItemMeta => {
     const label =
       e.source === 'github' && e.number ? `PR #${e.number}` : e.source_id || e.title.slice(0, 18)
     return {
@@ -911,7 +837,7 @@ function buildItemSpawner(parent: Container, nodes: GraphNode[], edges: Edge[]) 
   // the viewport zooms.
   const TEXT_RES = 3
 
-  const createItem = (meta: ItemMeta): Item => {
+  const createItem = (entityId: string, meta: ItemMeta, parkedAt: number): Item => {
     const g = new Container()
     layer.addChild(g)
     const tint = meta.mine ? TINT_MINE : TINT_OTHER
@@ -1073,27 +999,26 @@ function buildItemSpawner(parent: Container, nodes: GraphNode[], edges: Edge[]) 
     diffText.y = footerY
     detailGroup.addChild(diffText)
 
-    // Pick a scripted journey and seed the item on the first belt heading
-    // toward script[1] (item starts at script[0] and travels from there).
-    const script = pickScript()
-    const initial = script.length >= 2 ? edgeToward(script[0], script[1]) : null
+    // Seed the item parked at its station. Position is applied by the
+    // update loop; we just record the state here.
     return {
+      entityId,
       gfx: g,
       compactGroup,
       detailGroup,
-      script,
-      scriptIdx: 1,
-      currentEdge: initial,
+      parkedAt,
+      target: -1,
+      currentEdge: null,
       t: 0,
-      dwelling: 0,
       hopsRemaining: MAX_HOPS,
+      stackIdx: 0,
     }
   }
 
-  const despawn = (i: number, item: Item) => {
+  const despawn = (item: Item) => {
     layer.removeChild(item.gfx)
     item.gfx.destroy({ children: true })
-    items.splice(i, 1)
+    items.delete(item.entityId)
   }
 
   // Precomputed station rects (AABBs) in world coords. Items near a
@@ -1132,8 +1057,6 @@ function buildItemSpawner(parent: Container, nodes: GraphNode[], edges: Edge[]) 
     return false
   }
 
-  let nextId = 1042
-
   interface ViewContext {
     scale: number
     /** Viewport's visible world rect. Used to cull expanded-detail
@@ -1142,134 +1065,151 @@ function buildItemSpawner(parent: Container, nodes: GraphNode[], edges: Edge[]) 
     visibleBounds: { x: number; y: number; width: number; height: number }
   }
 
+  // Recompute parked-item stacking ordinals. Multiple entities can share a
+  // station (e.g., 5 open PRs all at github:pr:opened); giving each a
+  // distinct stackIdx offsets them vertically so the pile reads as N items
+  // rather than 1.
+  const restack = () => {
+    const byStation = new Map<number, Item[]>()
+    for (const it of items.values()) {
+      if (it.parkedAt < 0) continue
+      const list = byStation.get(it.parkedAt) ?? []
+      list.push(it)
+      byStation.set(it.parkedAt, list)
+    }
+    for (const list of byStation.values()) {
+      // Deterministic order so the same set of items at a station doesn't
+      // reshuffle on every reconcile — sort by entityId.
+      list.sort((a, b) => (a.entityId < b.entityId ? -1 : 1))
+      list.forEach((it, i) => {
+        it.stackIdx = i - (list.length - 1) / 2
+      })
+    }
+  }
+
   return {
     setEntityPool(next: FactoryEntity[]) {
-      entityPool = next
-    },
-    update(dt: number, view: ViewContext) {
-      sinceSpawn += dt
-      if (sinceSpawn >= spawnInterval) {
-        sinceSpawn = 0
-        // Prefer a real entity from the snapshot pool. Falls back to the
-        // demo pool for fresh installs before the poller has surfaced
-        // anything. The mix toward "mine" is inherent in the pool itself
-        // once populated (the handler tags each entity), so no coin flip.
-        const meta = entityFromPool() ?? genDemoMeta(nextId++, Math.random() < 0.6)
-        items.push(createItem(meta))
+      const seen = new Set<string>()
+      for (const e of next) {
+        const targetNode = e.current_event_type
+          ? eventTypeToNode.get(e.current_event_type)
+          : undefined
+        if (targetNode == null) continue // event type not visualized on the board
+        seen.add(e.id)
+
+        const existing = items.get(e.id)
+        if (existing) {
+          // If this entity is parked at a different station than the new
+          // snapshot says, kick off movement. Retarget even while in-flight
+          // — the currently-running edge finishes before the new target is
+          // consulted.
+          if (existing.parkedAt !== targetNode) {
+            existing.target = targetNode
+            if (existing.parkedAt >= 0) {
+              const first = edgeToward(existing.parkedAt, targetNode)
+              if (first) {
+                existing.currentEdge = first
+                existing.t = 0
+                existing.hopsRemaining = MAX_HOPS
+                existing.parkedAt = -1
+              }
+            }
+          }
+        } else {
+          const item = createItem(e.id, metaFromEntity(e), targetNode)
+          items.set(e.id, item)
+        }
       }
 
+      // Despawn items whose entity has left the pool (closed, merged,
+      // dropped off the 100-entity window).
+      for (const it of Array.from(items.values())) {
+        if (!seen.has(it.entityId)) despawn(it)
+      }
+
+      restack()
+    },
+    update(dt: number, view: ViewContext) {
       const nearZoom = view.scale >= NEAR_ZOOM_THRESHOLD
       const vb = view.visibleBounds
 
-      for (let i = items.length - 1; i >= 0; i--) {
-        const it = items[i]
-
-        // Dwelling at a scripted station stop.
-        if (it.dwelling > 0) {
-          it.dwelling -= dt
-          it.gfx.visible = false
-          if (it.dwelling <= 0) {
-            it.dwelling = 0
-            // If we've consumed the whole script, dwell was the final-stop
-            // farewell — despawn now.
-            if (it.scriptIdx >= it.script.length) {
-              despawn(i, it)
-              continue
-            }
-            // Otherwise find the edge toward the next scripted stop.
-            if (!it.currentEdge) {
-              despawn(i, it)
-              continue
-            }
+      for (const it of items.values()) {
+        // Parked items sit at station center, offset by their stack ordinal.
+        // No per-frame pathfinding, no alpha animation — static unless a
+        // snapshot update retargets them.
+        if (it.parkedAt >= 0 && !it.currentEdge) {
+          const n = nodes[it.parkedAt]
+          it.gfx.visible = true
+          it.gfx.alpha = 1
+          it.gfx.x = n.center.x
+          it.gfx.y = n.center.y + it.stackIdx * STACK_SPACING
+        } else if (it.currentEdge) {
+          // Traveling. Advance along the edge; if we reach its end, either
+          // park (arrived at target) or hop to the next edge toward target.
+          it.t += dt / LEG_DURATION
+          if (it.t >= 1) {
             const atNode = it.currentEdge.to
-            const next = edgeToward(atNode, it.script[it.scriptIdx])
-            if (!next || it.hopsRemaining <= 0) {
-              despawn(i, it)
+            if (atNode === it.target) {
+              // Arrived. Snap to station center so the next tick's parked
+              // branch lines up visually with the final belt position.
+              it.parkedAt = atNode
+              it.target = -1
+              it.currentEdge = null
+              it.t = 0
+              restack()
+              continue
+            }
+            if (it.hopsRemaining <= 0) {
+              // Safety: pathing loop got too long. Park here so the item
+              // doesn't vanish mid-graph; a later snapshot will re-target.
+              it.parkedAt = atNode
+              it.target = -1
+              it.currentEdge = null
+              it.t = 0
+              restack()
+              continue
+            }
+            const next = edgeToward(atNode, it.target)
+            if (!next) {
+              // No path exists (disconnected graph). Park at current node.
+              it.parkedAt = atNode
+              it.target = -1
+              it.currentEdge = null
+              it.t = 0
+              restack()
               continue
             }
             it.currentEdge = next
             it.t = 0
             it.hopsRemaining -= 1
           }
-          continue
-        }
 
-        if (!it.currentEdge) {
-          despawn(i, it)
-          continue
-        }
-
-        it.gfx.visible = true
-        it.t += dt / LEG_DURATION
-        if (it.t >= 1) {
-          const atNode = it.currentEdge.to
-          // Are we at the next scripted stop?
-          if (atNode === it.script[it.scriptIdx]) {
-            it.scriptIdx += 1
-            // Stations always dwell (including the terminal — brief farewell
-            // dwell, then despawn). Non-stations as scripted stops would be
-            // a script-authoring error, but handle gracefully by transiting.
-            const arrived = nodes[atNode]
-            if (arrived.kind === 'station') {
-              it.dwelling = DWELL
-              it.gfx.visible = false
-            } else if (it.scriptIdx >= it.script.length) {
-              despawn(i, it)
-            } else {
-              const next = edgeToward(atNode, it.script[it.scriptIdx])
-              if (!next || it.hopsRemaining <= 0) {
-                despawn(i, it)
-                continue
-              }
-              it.currentEdge = next
-              it.t = 0
-              it.hopsRemaining -= 1
-            }
-            continue
+          const pos = it.currentEdge!.belt.pointAt(it.t)
+          it.gfx.x = pos.x
+          it.gfx.y = pos.y
+          it.gfx.visible = true
+          if (it.currentEdge!.isTunnel) {
+            let alpha = 0
+            if (it.t < 0.2) alpha = 1 - it.t / 0.2
+            else if (it.t > 0.8) alpha = (it.t - 0.8) / 0.2
+            it.gfx.alpha = Math.max(0, alpha)
+          } else {
+            it.gfx.alpha = 1
           }
-          // Transit node (splitter/merger) — no dwell, route onward.
-          if (it.hopsRemaining <= 0) {
-            despawn(i, it)
-            continue
-          }
-          const next = edgeToward(atNode, it.script[it.scriptIdx])
-          if (!next) {
-            despawn(i, it)
-            continue
-          }
-          it.currentEdge = next
-          it.t = 0
-          it.hopsRemaining -= 1
-          continue
-        }
-
-        const pos = it.currentEdge.belt.pointAt(it.t)
-        it.gfx.x = pos.x
-        it.gfx.y = pos.y
-        if (it.currentEdge.isTunnel) {
-          // Tunnel fade: visible at the edges, invisible in the middle —
-          // item "dives under" at entrance and "pops up" at exit.
-          let alpha = 0
-          if (it.t < 0.2) alpha = 1 - it.t / 0.2
-          else if (it.t > 0.8) alpha = (it.t - 0.8) / 0.2
-          it.gfx.alpha = Math.max(0, alpha)
         } else {
-          const fade = Math.min(1, it.t / 0.08, (1 - it.t) / 0.08)
-          it.gfx.alpha = Math.max(0, fade)
+          it.gfx.visible = false
         }
 
         // LOD + culling. At near zoom the item switches to the expanded
         // detail card, but ONLY when:
-        //   - currently inside the viewport's visible world rect (Pixi
-        //     skips drawing detail text for off-screen items), AND
+        //   - currently inside the viewport's visible world rect, AND
         //   - not overlapping any station's footprint, since stations
         //     have HTML detail overlays at near zoom and we can't raise
-        //     canvas-drawn items above DOM overlays. Falling back to the
-        //     compact pill near stations reads as the item docking
-        //     briefly rather than half-disappearing behind an overlay.
-        const inView =
-          pos.x >= vb.x && pos.x <= vb.x + vb.width && pos.y >= vb.y && pos.y <= vb.y + vb.height
-        const showDetail = nearZoom && inView && !detailOverlapsAnyStation(pos.x, pos.y)
+        //     canvas-drawn items above DOM overlays.
+        const px = it.gfx.x
+        const py = it.gfx.y
+        const inView = px >= vb.x && px <= vb.x + vb.width && py >= vb.y && py <= vb.y + vb.height
+        const showDetail = nearZoom && inView && !detailOverlapsAnyStation(px, py)
         it.compactGroup.visible = !showDetail
         it.detailGroup.visible = showDetail
       }

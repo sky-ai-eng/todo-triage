@@ -30,6 +30,7 @@ export default function Factory() {
   const [schemas, setSchemas] = useState<SchemaIndex | null>(null)
   const [snapshot, setSnapshot] = useState<ViewSnapshot | null>(null)
   const [factoryData, setFactoryData] = useState<FactorySnapshot | null>(null)
+  const [sceneReady, setSceneReady] = useState(false)
   const [drawer, setDrawer] = useState<{ task: Task; run: AgentRun } | null>(null)
 
   // Fetch the predicate-field schemas once up front. Stations render their
@@ -73,7 +74,9 @@ export default function Factory() {
         .then((data) => {
           if (cancelled) return
           setFactoryData(data)
-          sceneRef.current?.setEntityPool(data.entities)
+          // sceneRef may be null if the scene hasn't finished initializing
+          // yet; the dedicated effect below re-applies the pool on both
+          // sceneReady and factoryData changes so no update is dropped.
         })
         .catch((err) => {
           if (cancelled) return
@@ -128,16 +131,13 @@ export default function Factory() {
         return
       }
       sceneRef.current = scene
-      // If a snapshot already landed while the scene was initializing,
-      // hand it off now so items stop using demo data the moment the
-      // pool is available.
-      if (factoryData) scene.setEntityPool(factoryData.entities)
       // Snapshot drives overlay placement. Setting via state is the simplest
       // integration — at ~13 stations and view events only firing during pan
       // and zoom interactions, React's reconciliation cost is negligible.
       unsubscribeView = scene.onView((snap) => {
         setSnapshot(snap)
       })
+      setSceneReady(true)
     })
 
     return () => {
@@ -145,12 +145,18 @@ export default function Factory() {
       unsubscribeView?.()
       sceneRef.current?.destroy()
       sceneRef.current = null
+      setSceneReady(false)
     }
-    // factoryData intentionally excluded — we don't rebuild the scene when
-    // the snapshot changes, we just push the new pool into the existing
-    // scene via sceneRef.current.setEntityPool in the fetch effect.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, schemas])
+
+  // Push entity pool into the scene whenever either input changes. Separate
+  // effect so it re-runs on both sceneReady and factoryData updates — the
+  // original inline-in-fetch path dropped the first pool when the snapshot
+  // returned before scene init finished.
+  useEffect(() => {
+    if (!sceneReady || !factoryData || !sceneRef.current) return
+    sceneRef.current.setEntityPool(factoryData.entities)
+  }, [sceneReady, factoryData])
 
   const nearZoom = snapshot?.nearZoom ?? false
   const stations = snapshot?.stations ?? []
@@ -165,7 +171,9 @@ export default function Factory() {
   const stationData = (eventType: string) => {
     const fs = factoryData?.stations[eventType]
     if (!fs) return { runs: undefined, throughput: undefined }
-    const runs: StationRunSummary[] = fs.runs.map((r) => ({
+    // fs.runs may be null (Go marshals a nil slice as `null` when the
+    // station has counters but no active run). Default before mapping.
+    const runs: StationRunSummary[] = (fs.runs ?? []).map((r) => ({
       task: r.task,
       run: r.run,
       mine: r.mine,
