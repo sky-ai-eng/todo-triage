@@ -38,12 +38,24 @@ export interface StationThroughput {
   active: number
 }
 
+/** Entity parked at this station with no active run — "waiting" (nothing
+ * fired on it, it's just sitting there as its latest event). Rendered in
+ * the horizontally scrollable strip between the runs list and throughput. */
+export interface StationWaitingEntity {
+  id: string
+  label: string
+  mine: boolean
+  url: string
+}
+
 interface Props {
   placement: StationScreenPlacement
   /** Live runs currently active at this station. May be empty — in that
    * case the list area shows a neutral "no active runs" label and the
    * throughput strip carries the signal. */
   runs?: StationRunSummary[]
+  /** Entities parked at this station without an active run. */
+  waiting?: StationWaitingEntity[]
   throughput?: StationThroughput
   onOpenRun: (summary: StationRunSummary) => void
 }
@@ -55,7 +67,13 @@ interface Props {
 const HEADER_FRACTION = 44 / 180 // header + top padding
 const INNER_PAD_X_FRACTION = 12 / 260
 
-export default function StationDetailOverlay({ placement, runs, throughput, onOpenRun }: Props) {
+export default function StationDetailOverlay({
+  placement,
+  runs,
+  waiting,
+  throughput,
+  onOpenRun,
+}: Props) {
   const event = FACTORY_EVENTS[placement.eventType]
   const color = event?.tint ?? categoryColor(event?.category)
 
@@ -65,6 +83,7 @@ export default function StationDetailOverlay({ placement, runs, throughput, onOp
   const height = placement.screenH - (top - placement.screenY) - placement.screenH * 0.04
 
   const activeRuns = runs ?? []
+  const waitingEntities = waiting ?? []
   const t = throughput ?? { items24h: 0, triggered24h: 0, active: activeRuns.length }
 
   return (
@@ -108,6 +127,31 @@ export default function StationDetailOverlay({ placement, runs, throughput, onOp
           )}
         </div>
       </div>
+
+      {/* Waiting entities — parked at this station with no active run.
+          Horizontally scrollable so a long queue doesn't push other
+          overlay regions. Hidden when nothing's waiting to keep the
+          resting state clean. */}
+      {waitingEntities.length > 0 && (
+        <div
+          className="px-2 py-1 flex items-center gap-1 overflow-x-auto border-t shrink-0"
+          style={{
+            borderColor: hex(color, 0.15),
+            background: hex(color, 0.02),
+            scrollbarWidth: 'thin',
+          }}
+        >
+          <span
+            className="shrink-0 text-[9px] font-semibold uppercase tracking-wider mr-1"
+            style={{ color: hex(color, 0.7), letterSpacing: '0.08em' }}
+          >
+            Waiting
+          </span>
+          {waitingEntities.map((e) => (
+            <WaitingPill key={e.id} entity={e} color={color} />
+          ))}
+        </div>
+      )}
 
       {/* Throughput strip — replaces the predicate chip row */}
       <div
@@ -166,6 +210,44 @@ function RunRow({ summary, onOpen }: RunRowProps) {
         )}
       </button>
     </li>
+  )
+}
+
+function WaitingPill({ entity, color }: { entity: StationWaitingEntity; color: number }) {
+  const tint = entity.mine ? '#c47a5a' : '#7a9aad'
+  const body = (
+    <>
+      <span
+        className="shrink-0 w-1.5 h-1.5 rounded-full"
+        style={{ background: tint }}
+        aria-hidden
+      />
+      <span className="text-[11px] font-medium text-text-primary">{entity.label}</span>
+    </>
+  )
+  const className =
+    'shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md border transition-colors'
+  const style = {
+    borderColor: hex(color, 0.2),
+    background: 'rgba(255, 255, 255, 0.6)',
+  }
+  if (!entity.url) {
+    return (
+      <span className={className} style={style}>
+        {body}
+      </span>
+    )
+  }
+  return (
+    <a
+      href={entity.url}
+      target="_blank"
+      rel="noopener noreferrer"
+      className={`${className} hover:bg-white/90`}
+      style={style}
+    >
+      {body}
+    </a>
   )
 }
 

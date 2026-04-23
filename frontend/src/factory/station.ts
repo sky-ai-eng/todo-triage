@@ -122,6 +122,11 @@ export interface StationHandle {
    * LOD sub-groups based on scale — at near zoom the predicate chips and
    * glyph hide so an HTML overlay can take over the interior. */
   update(dt: number, scale: number): void
+  /** Set the count of entities currently parked at this station. At far
+   * zoom a small badge renders this near the glyph in place of the
+   * individual item pills, which get too dense to read when the whole
+   * factory fits on screen. Zero hides the badge. */
+  setItemCount(n: number): void
 }
 
 /** Viewport scale at or above which the station enters "near" LOD: chips
@@ -371,6 +376,35 @@ export function buildStation(parent: Container, opts: StationOptions): StationHa
   farBrackets.stroke({ width: 2, color, alpha: 0.6 })
   farLayer.addChild(farBrackets)
 
+  // Count badge rendered next to the far-view glyph. At far zoom
+  // individual item pills hide (too dense to read), so the count is the
+  // only signal of how many entities are parked here. Positioned to the
+  // upper-right of the glyph center so it doesn't occlude the title.
+  const farCountBadge = new Container()
+  farCountBadge.x = 24
+  farCountBadge.y = -38
+  farCountBadge.visible = false
+  farLayer.addChild(farCountBadge)
+
+  const farCountBg = new Graphics()
+  farCountBg.circle(0, 0, 11)
+  farCountBg.fill({ color, alpha: 0.9 })
+  farCountBg.stroke({ width: 1, color: 0xffffff, alpha: 0.8 })
+  farCountBadge.addChild(farCountBg)
+
+  const farCountText = new Text({
+    text: '',
+    resolution: 2,
+    style: {
+      fontFamily: 'Inter, system-ui, sans-serif',
+      fontSize: 11,
+      fontWeight: '700',
+      fill: 0xffffff,
+    },
+  })
+  farCountText.anchor.set(0.5, 0.5)
+  farCountBadge.addChild(farCountText)
+
   // Procedural glyph centered in the core. Wrapped in its own container so
   // the near-zoom LOD can hide it, yielding the core's interior to the HTML
   // detail overlay.
@@ -454,6 +488,14 @@ export function buildStation(parent: Container, opts: StationOptions): StationHa
       detailLayer.visible = !far
       chipsLayer.visible = !far && !near
       glyphLayer.visible = !far && !near
+    },
+    setItemCount(n: number) {
+      if (n <= 0) {
+        farCountBadge.visible = false
+        return
+      }
+      farCountText.text = String(n)
+      farCountBadge.visible = true
     },
   }
 }

@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -178,6 +179,83 @@ type FactoryEntityRow struct {
 	Entity          domain.Entity
 	LatestEventType string
 	LatestEventAt   *time.Time
+}
+
+// FactoryRecentEvent is a single entry in an entity's recent event history.
+// Ordered chronologically ascending by caller (ListRecentEventsByEntity).
+type FactoryRecentEvent struct {
+	EventType string
+	CreatedAt time.Time
+}
+
+// ListRecentEventsByEntity returns the last `perEntity` events per
+// entity id, grouped in a map keyed by entity_id with each slice ordered
+// chronologically ascending (oldest first). Used to drive the factory's
+// chain animation — when two events fire for the same entity in a single
+// poll cycle (new_commits → ci_passed), we want to see the item travel
+// both stations rather than teleport to the second.
+//
+// Single query with a row-number window partition so we pull at most
+// perEntity*len(ids) rows rather than scanning the whole events table.
+// Chunks on len(ids) > SQLite's variable limit the same way the scorer's
+// description loader does — factoryEntityLimit is 100 today so we never
+// hit it, but the guard is cheap.
+func ListRecentEventsByEntity(database *sql.DB, ids []string, perEntity int) (map[string][]FactoryRecentEvent, error) {
+	out := map[string][]FactoryRecentEvent{}
+	if len(ids) == 0 || perEntity <= 0 {
+		return out, nil
+	}
+	// Chunk to respect SQLite's SQLITE_LIMIT_VARIABLE_NUMBER.
+	const chunkSize = 500
+	for start := 0; start < len(ids); start += chunkSize {
+		end := start + chunkSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		chunk := ids[start:end]
+
+		placeholders := make([]string, len(chunk))
+		args := make([]any, 0, len(chunk)+1)
+		for i, id := range chunk {
+			placeholders[i] = "?"
+			args = append(args, id)
+		}
+		args = append(args, perEntity)
+
+		query := `
+			SELECT entity_id, event_type, created_at
+			FROM (
+				SELECT entity_id, event_type, created_at,
+					ROW_NUMBER() OVER (PARTITION BY entity_id ORDER BY created_at DESC) AS rn
+				FROM events
+				WHERE entity_id IN (` + strings.Join(placeholders, ",") + `)
+			)
+			WHERE rn <= ?
+			ORDER BY entity_id, created_at ASC
+		`
+		rows, err := database.Query(query, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var entityID, eventType string
+			var createdAt time.Time
+			if err := rows.Scan(&entityID, &eventType, &createdAt); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			out[entityID] = append(out[entityID], FactoryRecentEvent{
+				EventType: eventType,
+				CreatedAt: createdAt,
+			})
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return out, nil
 }
 
 // ListFactoryEntities returns up to `limit` active entities with their

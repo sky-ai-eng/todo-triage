@@ -8,6 +8,7 @@ import {
 import StationDetailOverlay, {
   type StationRunSummary,
   type StationThroughput,
+  type StationWaitingEntity,
 } from '../factory/StationDetailOverlay'
 import RunDrawer from '../factory/RunDrawer'
 import { useWebSocket } from '../hooks/useWebSocket'
@@ -168,11 +169,19 @@ export default function Factory() {
   // Resolve per-station overlay props from the factory snapshot. Stations
   // with no activity get undefined so the overlay falls back to its own
   // empty-state rendering.
+  //
+  // `waiting` is the set of entities parked here with NO active run —
+  // entities whose latest event landed on this station but didn't trigger
+  // any delegation. Built by filtering the entity list against the station
+  // and excluding any entity that already appears in the active runs list.
   const stationData = (eventType: string) => {
     const fs = factoryData?.stations[eventType]
-    if (!fs) return { runs: undefined, throughput: undefined }
-    // fs.runs may be null (Go marshals a nil slice as `null` when the
-    // station has counters but no active run). Default before mapping.
+    if (!fs)
+      return {
+        runs: undefined,
+        throughput: undefined,
+        waiting: undefined as undefined | StationWaitingEntity[],
+      }
     const runs: StationRunSummary[] = (fs.runs ?? []).map((r) => ({
       task: r.task,
       run: r.run,
@@ -183,7 +192,21 @@ export default function Factory() {
       triggered24h: fs.triggered_24h,
       active: fs.active_runs,
     }
-    return { runs, throughput }
+    const runEntityIds = new Set((fs.runs ?? []).map((r) => r.task.id))
+    const waiting: StationWaitingEntity[] =
+      factoryData?.entities
+        .filter((e) => e.current_event_type === eventType)
+        .filter((e) => !runEntityIds.has(e.id))
+        .map((e) => ({
+          id: e.id,
+          label:
+            e.source === 'github' && e.number
+              ? `#${e.number}`
+              : e.source_id || e.title.slice(0, 18),
+          mine: e.mine,
+          url: e.url,
+        })) ?? []
+    return { runs, throughput, waiting }
   }
 
   return (
@@ -221,12 +244,13 @@ export default function Factory() {
         >
           {nearZoom &&
             stations.map((placement) => {
-              const { runs, throughput } = stationData(placement.eventType)
+              const { runs, waiting, throughput } = stationData(placement.eventType)
               return (
                 <StationDetailOverlay
                   key={placement.id}
                   placement={placement}
                   runs={runs}
+                  waiting={waiting}
                   throughput={throughput}
                   onOpenRun={handleOpenRun}
                 />

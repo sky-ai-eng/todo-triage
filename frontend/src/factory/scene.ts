@@ -17,6 +17,7 @@ import { FACTORY_EVENTS } from './events'
 import {
   buildStation,
   BELT_WIDTH,
+  FAR_ZOOM_THRESHOLD,
   NEAR_ZOOM_THRESHOLD,
   type Port,
   type StationHandle,
@@ -792,6 +793,11 @@ function buildItemSpawner(
     /** Stacking ordinal among items parked at the same station. Assigned
      * on reconcile so parked items don't all land on identical coords. */
     stackIdx: number
+    /** FIFO queue of station node indices still to visit AFTER the
+     * current parkedAt / target. Each snapshot update refills this from
+     * the entity's recent_events chain so multi-event poll cycles show
+     * the full progression rather than teleporting to the latest. */
+    chain: number[]
   }
 
   const items = new Map<string, Item>()
@@ -1012,6 +1018,7 @@ function buildItemSpawner(
       t: 0,
       hopsRemaining: MAX_HOPS,
       stackIdx: 0,
+      chain: [],
     }
   }
 
@@ -1085,38 +1092,97 @@ function buildItemSpawner(
         it.stackIdx = i - (list.length - 1) / 2
       })
     }
+    publishStationCounts(byStation)
+  }
+
+  // Push per-station item counts into the station handles. Drives the
+  // far-view count badge (setItemCount on each station). Called from
+  // restack so every change to the parked set — reconcile, arrivals,
+  // despawns — refreshes the counts.
+  const publishStationCounts = (byStation?: Map<number, Item[]>) => {
+    const counts = new Map<number, number>()
+    if (byStation) {
+      for (const [idx, list] of byStation) counts.set(idx, list.length)
+    } else {
+      for (const it of items.values()) {
+        if (it.parkedAt < 0) continue
+        counts.set(it.parkedAt, (counts.get(it.parkedAt) ?? 0) + 1)
+      }
+    }
+    for (let i = 0; i < nodes.length; i++) {
+      const n = nodes[i]
+      if (n.kind !== 'station') continue
+      n.setItemCount(counts.get(i) ?? 0)
+    }
+  }
+
+  // Build the full chain of station node indices from an entity's
+  // recent_events, oldest first. Non-station-mapped events are dropped;
+  // consecutive duplicates collapsed (no point animating ci_passed →
+  // ci_passed). Falls back to [current_event_type] if recent_events is
+  // absent — pre-existing entities on a snapshot before we added the
+  // field won't lose their parked position.
+  const chainFromEntity = (e: FactoryEntity): number[] => {
+    const chain: number[] = []
+    const push = (eventType: string) => {
+      const n = eventTypeToNode.get(eventType)
+      if (n == null) return
+      if (chain.length > 0 && chain[chain.length - 1] === n) return
+      chain.push(n)
+    }
+    if (e.recent_events && e.recent_events.length > 0) {
+      for (const ev of e.recent_events) push(ev.event_type)
+    } else if (e.current_event_type) {
+      push(e.current_event_type)
+    }
+    return chain
   }
 
   return {
     setEntityPool(next: FactoryEntity[]) {
       const seen = new Set<string>()
       for (const e of next) {
-        const targetNode = e.current_event_type
-          ? eventTypeToNode.get(e.current_event_type)
-          : undefined
-        if (targetNode == null) continue // event type not visualized on the board
+        const chain = chainFromEntity(e)
+        if (chain.length === 0) continue // event types not visualized on the board
         seen.add(e.id)
 
         const existing = items.get(e.id)
         if (existing) {
-          // If this entity is parked at a different station than the new
-          // snapshot says, kick off movement. Retarget even while in-flight
-          // — the currently-running edge finishes before the new target is
-          // consulted.
-          if (existing.parkedAt !== targetNode) {
-            existing.target = targetNode
-            if (existing.parkedAt >= 0) {
-              const first = edgeToward(existing.parkedAt, targetNode)
-              if (first) {
-                existing.currentEdge = first
-                existing.t = 0
-                existing.hopsRemaining = MAX_HOPS
-                existing.parkedAt = -1
-              }
+          // Project the remaining-to-visit tail of the chain. Any station
+          // appearing at-or-before the item's current location (parkedAt
+          // or active target) is considered already visited; the queue
+          // is the suffix after that. For an item in motion the
+          // currently-traveling leg finishes naturally before the new
+          // chain is consulted.
+          const anchor = existing.target >= 0 ? existing.target : existing.parkedAt
+          let cut = -1
+          for (let i = chain.length - 1; i >= 0; i--) {
+            if (chain[i] === anchor) {
+              cut = i
+              break
+            }
+          }
+          existing.chain = cut >= 0 ? chain.slice(cut + 1) : chain.slice()
+          // If we're parked and the chain has something new to visit,
+          // pop the next station and start moving right away. Travel
+          // logic in update() handles further hops as each leg completes.
+          if (existing.parkedAt >= 0 && !existing.currentEdge && existing.chain.length > 0) {
+            const next = existing.chain.shift()!
+            const first = edgeToward(existing.parkedAt, next)
+            if (first) {
+              existing.target = next
+              existing.currentEdge = first
+              existing.t = 0
+              existing.hopsRemaining = MAX_HOPS
+              existing.parkedAt = -1
             }
           }
         } else {
-          const item = createItem(e.id, metaFromEntity(e), targetNode)
+          // New entity: park at the oldest station in the chain and
+          // queue the rest so the full progression animates from there.
+          const first = chain[0]
+          const item = createItem(e.id, metaFromEntity(e), first)
+          item.chain = chain.slice(1)
           items.set(e.id, item)
         }
       }
@@ -1128,10 +1194,20 @@ function buildItemSpawner(
       }
 
       restack()
+      publishStationCounts()
     },
     update(dt: number, view: ViewContext) {
+      const farZoom = view.scale < FAR_ZOOM_THRESHOLD
       const nearZoom = view.scale >= NEAR_ZOOM_THRESHOLD
       const vb = view.visibleBounds
+
+      // At far zoom individual item pills are unreadable and clutter the
+      // glyph — stations carry the count badge instead. Hide the whole
+      // item layer rather than iterating per-item to flip visibility.
+      if (farZoom) {
+        for (const it of items.values()) it.gfx.visible = false
+        return
+      }
 
       for (const it of items.values()) {
         // Parked items sit at station center, offset by their stack ordinal.
@@ -1144,14 +1220,19 @@ function buildItemSpawner(
           it.gfx.x = n.center.x
           it.gfx.y = n.center.y + it.stackIdx * STACK_SPACING
         } else if (it.currentEdge) {
-          // Traveling. Advance along the edge; if we reach its end, either
-          // park (arrived at target) or hop to the next edge toward target.
+          // Traveling. Advance along the edge; on arrival at an
+          // intermediate station we just switch to the next edge — no
+          // dwell, no parking. Intermediate stations read as pure
+          // passthrough: nothing fired here, the item just flowed past.
+          // Only the terminal (chain exhausted) parks.
           it.t += dt / LEG_DURATION
           if (it.t >= 1) {
             const atNode = it.currentEdge.to
-            if (atNode === it.target) {
-              // Arrived. Snap to station center so the next tick's parked
-              // branch lines up visually with the final belt position.
+            const reachedTarget = atNode === it.target
+            const outOfHops = it.hopsRemaining <= 0
+
+            // Terminal arrival: target with no more chain, or safety cap.
+            if ((reachedTarget && it.chain.length === 0) || outOfHops) {
               it.parkedAt = atNode
               it.target = -1
               it.currentEdge = null
@@ -1159,29 +1240,41 @@ function buildItemSpawner(
               restack()
               continue
             }
-            if (it.hopsRemaining <= 0) {
-              // Safety: pathing loop got too long. Park here so the item
-              // doesn't vanish mid-graph; a later snapshot will re-target.
-              it.parkedAt = atNode
-              it.target = -1
-              it.currentEdge = null
+
+            // Intermediate: either we reached the current target and
+            // there's more chain, or we're transiting a splitter/merger
+            // between targets. Either way, pick the next target+edge.
+            if (reachedTarget) {
+              const nextTarget = it.chain.shift()!
+              const next = edgeToward(atNode, nextTarget)
+              if (!next) {
+                // Can't reach next station — park here; future snapshot
+                // may retarget via an available route.
+                it.parkedAt = atNode
+                it.target = -1
+                it.currentEdge = null
+                it.t = 0
+                restack()
+                continue
+              }
+              it.target = nextTarget
+              it.currentEdge = next
               it.t = 0
-              restack()
-              continue
-            }
-            const next = edgeToward(atNode, it.target)
-            if (!next) {
-              // No path exists (disconnected graph). Park at current node.
-              it.parkedAt = atNode
-              it.target = -1
-              it.currentEdge = null
+              it.hopsRemaining -= 1
+            } else {
+              const next = edgeToward(atNode, it.target)
+              if (!next) {
+                it.parkedAt = atNode
+                it.target = -1
+                it.currentEdge = null
+                it.t = 0
+                restack()
+                continue
+              }
+              it.currentEdge = next
               it.t = 0
-              restack()
-              continue
+              it.hopsRemaining -= 1
             }
-            it.currentEdge = next
-            it.t = 0
-            it.hopsRemaining -= 1
           }
 
           const pos = it.currentEdge!.belt.pointAt(it.t)

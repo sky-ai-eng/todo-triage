@@ -138,6 +138,11 @@ export interface ToastPayload {
   body: string
 }
 
+export interface FactoryRecentEvent {
+  event_type: string
+  at: string
+}
+
 export interface FactoryEntity {
   id: string
   source: string
@@ -148,6 +153,11 @@ export interface FactoryEntity {
   mine: boolean
   current_event_type?: string
   last_event_at?: string
+  /** Last ~10 events for this entity, oldest first. The factory reconciler
+   * walks this as an animation chain — a poll cycle that emitted two
+   * events in sequence (new_commits → ci_passed) shows both transitions
+   * rather than teleporting to the latest. */
+  recent_events?: FactoryRecentEvent[]
   // GitHub PR fields.
   number?: number
   repo?: string

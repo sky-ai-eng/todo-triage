@@ -93,6 +93,12 @@ type factoryEntityJSON struct {
 	Mine             bool   `json:"mine"`
 	CurrentEventType string `json:"current_event_type,omitempty"`
 	LastEventAt      string `json:"last_event_at,omitempty"`
+	// RecentEvents is the tail of this entity's event history, ordered
+	// oldest first. The factory reconciler walks it as an animation chain
+	// so a poll that fires two events for the same entity (new_commits →
+	// ci_passed) shows both transitions rather than teleporting to the
+	// latest. Bounded per-entity by factoryRecentEventsPerEntity.
+	RecentEvents []factoryRecentEventJSON `json:"recent_events,omitempty"`
 
 	// GitHub PR fields.
 	Number    int    `json:"number,omitempty"`
@@ -106,6 +112,17 @@ type factoryEntityJSON struct {
 	Priority string `json:"priority,omitempty"`
 	Assignee string `json:"assignee,omitempty"`
 }
+
+type factoryRecentEventJSON struct {
+	EventType string `json:"event_type"`
+	At        string `json:"at"`
+}
+
+// factoryRecentEventsPerEntity caps how many events we ship per entity for
+// the chain animation. 10 comfortably covers a busy poll cycle's worth
+// (PR opened + ready_for_review + several CI checks + a review) without
+// bloating the snapshot.
+const factoryRecentEventsPerEntity = 10
 
 type factorySnapshotJSON struct {
 	Stations map[string]factoryStationJSON `json:"stations"`
@@ -202,6 +219,16 @@ func (s *Server) handleFactorySnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	entityIDs := make([]string, 0, len(entityRows))
+	for _, row := range entityRows {
+		entityIDs = append(entityIDs, row.Entity.ID)
+	}
+	recentByEntity, err := db.ListRecentEventsByEntity(s.db, entityIDs, factoryRecentEventsPerEntity)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
 	entities := make([]factoryEntityJSON, 0, len(entityRows))
 	for _, row := range entityRows {
 		ej := factoryEntityJSON{
@@ -215,6 +242,15 @@ func (s *Server) handleFactorySnapshot(w http.ResponseWriter, r *http.Request) {
 		}
 		if row.LatestEventAt != nil {
 			ej.LastEventAt = row.LatestEventAt.Format(time.RFC3339)
+		}
+		if recent, ok := recentByEntity[row.Entity.ID]; ok {
+			ej.RecentEvents = make([]factoryRecentEventJSON, len(recent))
+			for i, r := range recent {
+				ej.RecentEvents[i] = factoryRecentEventJSON{
+					EventType: r.EventType,
+					At:        r.CreatedAt.Format(time.RFC3339),
+				}
+			}
 		}
 		switch row.Entity.Source {
 		case "github":
