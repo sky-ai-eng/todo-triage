@@ -41,21 +41,27 @@ func BuildPromptReplacer(task domain.Task, metadataJSON, runID, binaryPath, scop
 		_ = json.Unmarshal([]byte(metadataJSON), &meta)
 	}
 
+	// Declare every source-specific placeholder unconditionally so a
+	// cross-source prompt (e.g., a trigger that matches both GitHub and
+	// Jira events) renders the non-applicable side as empty rather than
+	// leaking literal "{{OWNER}}" through. Upholds the doc contract:
+	// "Unresolved placeholders render empty."
+	owner, repo, prNumber := "", "", ""
+	issueKey, project := "", ""
 	switch task.EntitySource {
 	case "github":
-		owner, repo, prNumber := parseGitHubEntitySourceID(task.EntitySourceID)
-		pairs = append(pairs,
-			"{{OWNER}}", owner,
-			"{{REPO}}", repo,
-			"{{PR_NUMBER}}", prNumber,
-		)
+		owner, repo, prNumber = parseGitHubEntitySourceID(task.EntitySourceID)
 	case "jira":
-		issueKey := task.EntitySourceID
-		pairs = append(pairs,
-			"{{ISSUE_KEY}}", issueKey,
-			"{{PROJECT}}", projectFromJiraKey(issueKey),
-		)
+		issueKey = task.EntitySourceID
+		project = projectFromJiraKey(issueKey)
 	}
+	pairs = append(pairs,
+		"{{OWNER}}", owner,
+		"{{REPO}}", repo,
+		"{{PR_NUMBER}}", prNumber,
+		"{{ISSUE_KEY}}", issueKey,
+		"{{PROJECT}}", project,
+	)
 
 	// Event-specific placeholders. We list every name the shipped prompts
 	// reference (plus a few adjacent ones that user-authored prompts would
