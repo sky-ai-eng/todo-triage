@@ -795,6 +795,11 @@ function buildItemSpawner(
 
   interface Item {
     entityId: string
+    /** Compact label used in the station's mid-zoom entity strip. Stored
+     * alongside the Pixi text so restack can hand it back to the station
+     * without re-deriving from entity metadata. */
+    label: string
+    mine: boolean
     gfx: Container
     /** Compact pill — label only. Shown at mid / far zoom or when the
      * item is off-screen at near zoom. */
@@ -811,9 +816,6 @@ function buildItemSpawner(
     currentEdge: Edge | null
     t: number
     hopsRemaining: number
-    /** Stacking ordinal among items parked at the same station. Assigned
-     * on reconcile so parked items don't all land on identical coords. */
-    stackIdx: number
     /** FIFO queue of station node indices still to visit AFTER the
      * current parkedAt / target. Each snapshot update appends new
      * events (those with timestamp > lastSeenEventAt) so multi-event
@@ -832,10 +834,6 @@ function buildItemSpawner(
   const ITEM_LIFT = 12
   const ITEM_W = 60
   const ITEM_H = 22
-  // Vertical gap between parked items stacked at the same station. Enough
-  // to read distinct pills without the column sprawling past the station
-  // core at mid zoom.
-  const STACK_SPACING = 26
 
   // Detail card — shown at near zoom instead of the compact pill. Sized
   // small enough to fit between adjacent stations on the main row without
@@ -1036,6 +1034,8 @@ function buildItemSpawner(
     // update loop; we just record the state here.
     return {
       entityId,
+      label: meta.label,
+      mine: meta.mine,
       gfx: g,
       compactGroup,
       detailGroup,
@@ -1044,7 +1044,6 @@ function buildItemSpawner(
       currentEdge: null,
       t: 0,
       hopsRemaining: MAX_HOPS,
-      stackIdx: 0,
       chain: [],
       lastSeenEventAt: '',
     }
@@ -1114,13 +1113,26 @@ function buildItemSpawner(
     }
     for (const list of byStation.values()) {
       // Deterministic order so the same set of items at a station doesn't
-      // reshuffle on every reconcile — sort by entityId.
+      // reshuffle on every reconcile — sort by entityId. Feeds the
+      // station's entity-pill strip (and, indirectly, the near-zoom
+      // overlay's waiting list) in stable order.
       list.sort((a, b) => (a.entityId < b.entityId ? -1 : 1))
-      list.forEach((it, i) => {
-        it.stackIdx = i - (list.length - 1) / 2
-      })
     }
     publishStationCounts(byStation)
+    publishStationEntities(byStation)
+  }
+
+  // Push the current list of parked entities per station into its handle,
+  // driving the mid-zoom entity-pills strip that replaces predicate chips
+  // when items are waiting. Order follows the restack sort so the pill
+  // order matches the vertical stacking used at zoomed-in views.
+  const publishStationEntities = (byStation: Map<number, Item[]>) => {
+    for (let i = 0; i < nodes.length; i++) {
+      const n = nodes[i]
+      if (n.kind !== 'station') continue
+      const list = byStation.get(i) ?? []
+      n.setEntities(list.map((it) => ({ label: it.label, mine: it.mine })))
+    }
   }
 
   // Push per-station item counts into the station handles. Drives the
@@ -1257,12 +1269,19 @@ function buildItemSpawner(
         // Parked items sit at station center, offset by their stack ordinal.
         // No per-frame pathfinding, no alpha animation — static unless a
         // snapshot update retargets them.
+        //
+        // At mid zoom, parked items don't render on-canvas at all — the
+        // station handles that itself via setEntities (entity-pill strip
+        // replaces predicate chips). Keeping gfx hidden for parked items
+        // avoids the duplicate "item pill at station center AND entity
+        // pill in the bottom strip" redundancy and clears the core
+        // chamber for the glyph.
         if (it.parkedAt >= 0 && !it.currentEdge) {
-          const n = nodes[it.parkedAt]
-          it.gfx.visible = true
-          it.gfx.alpha = 1
-          it.gfx.x = n.center.x
-          it.gfx.y = n.center.y + it.stackIdx * STACK_SPACING
+          // Parked items are represented by the station itself, not by
+          // the on-canvas pill: mid-zoom → station's entity-pill strip;
+          // near-zoom → HTML overlay's waiting strip; far-zoom → count
+          // badge. The core/chamber stays clear for the glyph.
+          it.gfx.visible = false
         } else if (it.currentEdge) {
           // Traveling. Advance along the edge; on arrival at an
           // intermediate station we just switch to the next edge — no

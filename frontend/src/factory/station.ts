@@ -127,6 +127,13 @@ export interface StationHandle {
    * individual item pills, which get too dense to read when the whole
    * factory fits on screen. Zero hides the badge. */
   setItemCount(n: number): void
+  /** Set the list of entities currently parked at this station. At mid
+   * zoom, the predicate chip row is replaced by these pills so the
+   * station self-describes "these PRs are waiting here" rather than
+   * showing static schema hints. Empty list falls back to predicate
+   * chips. At near/far zoom the entity pills hide (overlay / badge
+   * take over). */
+  setEntities(entities: Array<{ label: string; mine: boolean }>): void
 }
 
 /** Viewport scale at or above which the station enters "near" LOD: chips
@@ -416,7 +423,9 @@ export function buildStation(parent: Container, opts: StationOptions): StationHa
 
   // ── Predicate chips ───────────────────────────────────────────────────────
   // Wrapped in their own container so near-zoom LOD can hide the entire row
-  // — the overlay puts live throughput in this strip instead.
+  // — the overlay puts live throughput in this strip instead. At mid zoom
+  // this layer only renders when there are NO parked entities to display;
+  // if entities exist, the entitiesLayer below takes over this strip.
   const chipsLayer = new Container()
   root.addChild(chipsLayer)
   const chipsY = fy + H - CHIPS_H + 6
@@ -442,6 +451,39 @@ export function buildStation(parent: Container, opts: StationOptions): StationHa
   const overflow = fields.length - shown
   if (overflow > 0) {
     drawChip(chipsLayer, cursor, chipsY, `+${overflow}`, color, true)
+  }
+
+  // ── Entity pills (mid-zoom strip) ─────────────────────────────────────────
+  // When entities are parked at this station, replace the static predicate
+  // chips with live entity pills. Same strip, same greedy-fit rules, but
+  // each pill carries an ownership dot + the entity's label (PR # / source
+  // id). Repopulated by scene.ts's reconciler via setEntities on every
+  // restack — stable order matches the stacking sort.
+  const entitiesLayer = new Container()
+  entitiesLayer.visible = false
+  root.addChild(entitiesLayer)
+  let hasEntities = false
+  const rebuildEntityPills = (entities: Array<{ label: string; mine: boolean }>) => {
+    entitiesLayer.removeChildren().forEach((c) => c.destroy({ children: true }))
+    hasEntities = entities.length > 0
+    if (!hasEntities) return
+    let cur = chipsStartX
+    const gap = 4
+    let fit = 0
+    for (let i = 0; i < entities.length; i++) {
+      const ent = entities[i]
+      const estW = estimateEntityPillWidth(ent.label)
+      const needOverflow = i < entities.length - 1
+      const reserve = needOverflow ? 30 : 0
+      if (cur + estW + reserve > chipsStartX + available) break
+      drawEntityPill(entitiesLayer, cur, chipsY, ent.label, ent.mine, color)
+      cur += estW + gap
+      fit++
+    }
+    const hidden = entities.length - fit
+    if (hidden > 0) {
+      drawChip(entitiesLayer, cur, chipsY, `+${hidden}`, color, true)
+    }
   }
 
   // Station-wide dim when disabled.
@@ -484,10 +526,15 @@ export function buildStation(parent: Container, opts: StationOptions): StationHa
       //                       HTML overlay can own the interior
       const far = scale < FAR_ZOOM_THRESHOLD
       const near = scale >= NEAR_ZOOM_THRESHOLD
+      const mid = !far && !near
       farLayer.visible = far
       detailLayer.visible = !far
-      chipsLayer.visible = !far && !near
-      glyphLayer.visible = !far && !near
+      glyphLayer.visible = mid
+      // At mid zoom, the bottom strip shows either the entity pills (when
+      // entities are parked) or the predicate chips (resting state). At
+      // near/far both hide — the HTML overlay / count badge owns signal.
+      chipsLayer.visible = mid && !hasEntities
+      entitiesLayer.visible = mid && hasEntities
     },
     setItemCount(n: number) {
       if (n <= 0) {
@@ -496,6 +543,9 @@ export function buildStation(parent: Container, opts: StationOptions): StationHa
       }
       farCountText.text = String(n)
       farCountBadge.visible = true
+    },
+    setEntities(entities: Array<{ label: string; mine: boolean }>) {
+      rebuildEntityPills(entities)
     },
   }
 }
@@ -552,6 +602,62 @@ function drawPortStub(
   cap.rect(capX, topY + 2, 3, BELT_WIDTH - 4)
   cap.fill({ color, alpha: 0.45 })
   parent.addChild(cap)
+}
+
+function estimateEntityPillWidth(label: string): number {
+  // Entity pill = tint dot (4px + 3px gap) + label, padded. Over-
+  // estimates slightly (same tradeoff as estimateChipWidth) so greedy
+  // layout doesn't overshoot the right edge.
+  return Math.ceil(label.length * 5.8) + 20
+}
+
+const TINT_MINE_HEX = 0xc47a5a
+const TINT_OTHER_HEX = 0x7a9aad
+
+function drawEntityPill(
+  parent: Container,
+  cx: number,
+  cy: number,
+  label: string,
+  mine: boolean,
+  color: number,
+) {
+  const tint = mine ? TINT_MINE_HEX : TINT_OTHER_HEX
+  const text = new Text({
+    text: label,
+    resolution: 3,
+    style: {
+      fontFamily: 'Inter, system-ui, sans-serif',
+      fontSize: 9,
+      fontWeight: '600',
+      fill: tint,
+      letterSpacing: 0.3,
+    },
+  })
+  const padX = 6
+  const padY = 3
+  const dotR = 2
+  const dotGap = 4
+  const w = Math.ceil(text.width) + padX * 2 + dotR * 2 + dotGap
+  const h = Math.ceil(text.height) + padY * 2
+
+  const bg = new Graphics()
+  bg.roundRect(cx, cy, w, h, h / 2)
+  bg.fill({ color: 0xffffff, alpha: 0.92 })
+  bg.stroke({ width: 0.75, color, alpha: 0.25 })
+  parent.addChild(bg)
+
+  const dot = new Graphics()
+  dot.circle(cx + padX + dotR, cy + h / 2, dotR)
+  dot.fill({ color: tint, alpha: 1 })
+  parent.addChild(dot)
+
+  text.anchor.set(0, 0)
+  text.x = cx + padX + dotR * 2 + dotGap
+  text.y = cy + padY - 0.5
+  parent.addChild(text)
+
+  return w
 }
 
 function estimateChipWidth(label: string): number {
