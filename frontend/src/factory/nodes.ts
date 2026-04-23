@@ -13,12 +13,11 @@
 //   - pole: small round waypoint with 4 sides. Purely visual/routing,
 //     no semantic. Used to bend belts at grid corners.
 
-import { Container, Graphics, Text } from 'pixi.js'
+import { Container, Graphics } from 'pixi.js'
 import type { Port } from './station'
 
 const ACCENT = 0xc47a5a
-const TEXT_TERTIARY = 0xa09a94
-const NODE_R = 24 // half-diagonal of the diamond
+const NODE_R = 24 // half-side of the rounded-square body
 const POLE_R = 8
 const TUNNEL_R = 10 // half-size of the tunnel endpoint square
 
@@ -78,118 +77,112 @@ export interface TunnelHandle {
 }
 
 export function buildNode(parent: Container, opts: NodeOptions): NodeHandle {
-  const { kind, center, label } = opts
+  const { kind, center, orientation } = opts
 
   const root = new Container()
   root.x = center.x
   root.y = center.y
   parent.addChild(root)
 
-  // Drop shadow — same stacked-fill approach as stations, scaled down.
+  // Body: rounded square flush with the belt width on every side, axis-
+  // aligned rather than diamond so the conveyor visually slots INTO the
+  // block instead of meeting a pointed corner. Ports land exactly on
+  // the body edges at center.y / center.x ± NODE_R, so belts connect
+  // without any visible gap.
+  const B = NODE_R
+  const CORNER_R = 6
+
+  // Drop shadow.
   const shadow = new Graphics()
-  shadow.moveTo(0, -NODE_R + 3)
-  shadow.lineTo(NODE_R, 3)
-  shadow.lineTo(0, NODE_R + 3)
-  shadow.lineTo(-NODE_R, 3)
-  shadow.closePath()
-  shadow.fill({ color: 0x000000, alpha: 0.07 })
+  shadow.roundRect(-B, -B + 3, B * 2, B * 2, CORNER_R)
+  shadow.fill({ color: 0x000000, alpha: 0.08 })
   root.addChild(shadow)
 
-  // Body (diamond glass).
+  // Main glass body — same liquid-glass layering as stations, scaled down.
   const body = new Graphics()
-  body.moveTo(0, -NODE_R)
-  body.lineTo(NODE_R, 0)
-  body.lineTo(0, NODE_R)
-  body.lineTo(-NODE_R, 0)
-  body.closePath()
-  body.fill({ color: 0xffffff, alpha: 0.9 })
+  body.roundRect(-B, -B, B * 2, B * 2, CORNER_R)
+  body.fill({ color: 0xffffff, alpha: 0.92 })
   root.addChild(body)
 
-  // Warm tint.
   const tint = new Graphics()
-  tint.moveTo(0, -NODE_R)
-  tint.lineTo(NODE_R, 0)
-  tint.lineTo(0, NODE_R)
-  tint.lineTo(-NODE_R, 0)
-  tint.closePath()
-  tint.fill({ color: ACCENT, alpha: 0.1 })
+  tint.roundRect(-B, -B, B * 2, B * 2, CORNER_R)
+  tint.fill({ color: ACCENT, alpha: 0.09 })
   root.addChild(tint)
 
-  // Inner highlight — a smaller diamond outline inside, catches "light."
-  const IR = NODE_R - 6
+  // Inner highlight — inset rounded-rect stroke for depth.
   const inner = new Graphics()
-  inner.moveTo(0, -IR)
-  inner.lineTo(IR, 0)
-  inner.lineTo(0, IR)
-  inner.lineTo(-IR, 0)
-  inner.closePath()
+  inner.roundRect(-B + 3, -B + 3, B * 2 - 6, B * 2 - 6, CORNER_R - 1)
   inner.stroke({ width: 0.75, color: 0xffffff, alpha: 0.85 })
   root.addChild(inner)
 
-  // Outer rim — accent-colored, hairline.
+  // Outer rim — accent, hairline.
   const rim = new Graphics()
-  rim.moveTo(0, -NODE_R)
-  rim.lineTo(NODE_R, 0)
-  rim.lineTo(0, NODE_R)
-  rim.lineTo(-NODE_R, 0)
-  rim.closePath()
+  rim.roundRect(-B, -B, B * 2, B * 2, CORNER_R)
   rim.stroke({ width: 1, color: ACCENT, alpha: 0.55 })
   root.addChild(rim)
 
-  // Directional hint — for splitters draw outward tick marks from center,
-  // for mergers draw inward. Subtle; helps disambiguate the two kinds at
-  // a glance when ports are hidden.
-  const hint = new Graphics()
-  const tick = 4
-  if (kind === 'splitter') {
-    hint.moveTo(0, 0)
-    hint.lineTo(tick, 0)
-    hint.moveTo(0, 0)
-    hint.lineTo(-tick, 0)
-    hint.moveTo(0, 0)
-    hint.lineTo(0, tick)
-    hint.moveTo(0, 0)
-    hint.lineTo(0, -tick)
-  } else {
-    hint.moveTo(tick, 0)
-    hint.lineTo(0, 0)
-    hint.moveTo(-tick, 0)
-    hint.lineTo(0, 0)
-    hint.moveTo(0, tick)
-    hint.lineTo(0, 0)
-    hint.moveTo(0, -tick)
-    hint.lineTo(0, 0)
+  // Directional chevrons — one per side, placed just inside the edge,
+  // pointing in the flow direction at that port. For a splitter the
+  // orientation side is the input (chevron points INward); the other
+  // three sides are outputs (chevrons point OUTward). Mergers invert.
+  //
+  // Rendered as open-stroke chevrons at the same weight as the belt
+  // chevrons so the routing primitives feel like members of the same
+  // family — quiet direction-of-flow hints, not punchy arrowheads.
+  const sides: Array<{ side: Side; dx: number; dy: number }> = [
+    { side: 'left', dx: -1, dy: 0 },
+    { side: 'right', dx: 1, dy: 0 },
+    { side: 'top', dx: 0, dy: -1 },
+    { side: 'bottom', dx: 0, dy: 1 },
+  ]
+  const arrows = new Graphics()
+  for (const { side, dx, dy } of sides) {
+    const isOrientation = side === orientation
+    const isOutputSide = kind === 'splitter' ? !isOrientation : isOrientation
+    const flowSign = isOutputSide ? 1 : -1 // +1 = points outward, -1 = points inward
+    const ax = dx * B * 0.55
+    const ay = dy * B * 0.55
+    drawChevron(arrows, ax, ay, dx * flowSign, dy * flowSign)
   }
-  hint.stroke({ width: 1, color: ACCENT, alpha: 0.7 })
-  root.addChild(hint)
-
-  if (label) {
-    const text = new Text({
-      text: label,
-      style: {
-        fontFamily: 'Inter, system-ui, sans-serif',
-        fontSize: 10,
-        fontWeight: '500',
-        fill: TEXT_TERTIARY,
-        letterSpacing: 0.6,
-      },
-    })
-    text.anchor.set(0.5, 0)
-    text.y = NODE_R + 6
-    root.addChild(text)
-  }
+  arrows.stroke({ width: 1.25, color: ACCENT, alpha: 0.5 })
+  root.addChild(arrows)
 
   return {
     kind,
     center,
-    leftPort: { x: center.x - NODE_R, y: center.y, dir: { x: -1, y: 0 } },
-    rightPort: { x: center.x + NODE_R, y: center.y, dir: { x: 1, y: 0 } },
-    topPort: { x: center.x, y: center.y - NODE_R, dir: { x: 0, y: -1 } },
-    bottomPort: { x: center.x, y: center.y + NODE_R, dir: { x: 0, y: 1 } },
+    leftPort: { x: center.x - B, y: center.y, dir: { x: -1, y: 0 } },
+    rightPort: { x: center.x + B, y: center.y, dir: { x: 1, y: 0 } },
+    topPort: { x: center.x, y: center.y - B, dir: { x: 0, y: -1 } },
+    bottomPort: { x: center.x, y: center.y + B, dir: { x: 0, y: 1 } },
     update() {
       // No ambient animation yet — nodes are quiet. Hook in if we want
       // splitter-activating pulses when items route through.
     },
+  }
+}
+
+// drawChevron draws an open (unfilled) "V" chevron at (cx, cy) pointing
+// in direction (px, py). Caller is responsible for calling .stroke() on
+// the Graphics after all chevrons have been added so they share a single
+// draw call. Direction uses unit vectors — exactly one of (px, py) is ±1.
+function drawChevron(g: Graphics, cx: number, cy: number, px: number, py: number) {
+  const s = 4 // half-width along the base; tip sits one unit ahead
+  if (px === 1) {
+    g.moveTo(cx - s, cy - s)
+    g.lineTo(cx + s, cy)
+    g.lineTo(cx - s, cy + s)
+  } else if (px === -1) {
+    g.moveTo(cx + s, cy - s)
+    g.lineTo(cx - s, cy)
+    g.lineTo(cx + s, cy + s)
+  } else if (py === 1) {
+    g.moveTo(cx - s, cy - s)
+    g.lineTo(cx, cy + s)
+    g.lineTo(cx + s, cy - s)
+  } else if (py === -1) {
+    g.moveTo(cx - s, cy + s)
+    g.lineTo(cx, cy - s)
+    g.lineTo(cx + s, cy + s)
   }
 }
 
