@@ -3,6 +3,7 @@ export type EntityKind = 'pr' | 'issue' | 'epic' | 'message'
 
 export interface Task {
   id: string
+  entity_id: string
   source: TaskSource
   source_id: string
   source_url: string
@@ -136,6 +137,55 @@ export interface ToastPayload {
   level: 'info' | 'success' | 'warning' | 'error'
   title?: string
   body: string
+}
+
+export interface FactoryRecentEvent {
+  event_type: string
+  at: string
+}
+
+export interface FactoryEntity {
+  id: string
+  source: string
+  source_id: string
+  kind: string
+  title: string
+  url: string
+  mine: boolean
+  current_event_type?: string
+  last_event_at?: string
+  /** Last ~10 events for this entity, oldest first. The factory reconciler
+   * walks this as an animation chain — a poll cycle that emitted two
+   * events in sequence (new_commits → ci_passed) shows both transitions
+   * rather than teleporting to the latest. */
+  recent_events?: FactoryRecentEvent[]
+  // GitHub PR fields.
+  number?: number
+  repo?: string
+  author?: string
+  additions?: number
+  deletions?: number
+  // Jira fields.
+  status?: string
+  priority?: string
+  assignee?: string
+}
+
+export interface FactoryStation {
+  event_type: string
+  items_24h: number
+  triggered_24h: number
+  active_runs: number
+  runs: Array<{
+    run: AgentRun
+    task: Task
+    mine: boolean
+  }>
+}
+
+export interface FactorySnapshot {
+  stations: Record<string, FactoryStation>
+  entities: FactoryEntity[]
 }
 
 export type WSEvent =

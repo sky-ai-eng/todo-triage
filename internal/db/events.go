@@ -58,10 +58,17 @@ func RecordEvent(db *sql.DB, evt domain.Event) (string, error) {
 	if id == "" {
 		id = uuid.New().String()
 	}
+	// occurred_at is nullable — leave it unset in the row when the caller
+	// doesn't have a source timestamp. Factory and other chronological
+	// queries COALESCE(occurred_at, created_at) and degrade gracefully.
+	var occurredAt any
+	if !evt.OccurredAt.IsZero() {
+		occurredAt = evt.OccurredAt
+	}
 	_, err := db.Exec(`
-		INSERT INTO events (id, entity_id, event_type, dedup_key, metadata_json)
-		VALUES (?, ?, ?, ?, ?)
-	`, id, evt.EntityID, evt.EventType, evt.DedupKey, evt.MetadataJSON)
+		INSERT INTO events (id, entity_id, event_type, dedup_key, metadata_json, occurred_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, id, evt.EntityID, evt.EventType, evt.DedupKey, evt.MetadataJSON, occurredAt)
 	if err != nil {
 		return "", err
 	}

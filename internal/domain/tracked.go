@@ -26,6 +26,12 @@ type PRSnapshot struct {
 	HeadRef string `json:"head_ref"`
 	BaseRef string `json:"base_ref"`
 	HeadSHA string `json:"head_sha"`
+	// HeadCommittedAt is the git-side commit time of the current HEAD (ISO
+	// 8601 from GitHub's commit.committedDate). Used as the source time
+	// for new_commits events so the factory's chain animation orders
+	// transitions by when the push actually happened rather than when we
+	// polled. Empty when the field is missing (pre-field snapshots).
+	HeadCommittedAt string `json:"head_committed_at,omitempty"`
 
 	// Size
 	Additions    int `json:"additions"`

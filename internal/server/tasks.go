@@ -15,6 +15,7 @@ import (
 // to the frontend's expected shape for backward compatibility.
 type taskJSON struct {
 	ID                  string   `json:"id"`
+	EntityID            string   `json:"entity_id"`   // FK to entities.id — lets callers correlate tasks back to their entity
 	Source              string   `json:"source"`      // from entity
 	SourceID            string   `json:"source_id"`   // from entity
 	SourceURL           string   `json:"source_url"`  // from entity
@@ -41,6 +42,7 @@ type taskJSON struct {
 func taskToJSON(t domain.Task) taskJSON {
 	return taskJSON{
 		ID:                  t.ID,
+		EntityID:            t.EntityID,
 		Source:              t.EntitySource,
 		SourceID:            t.EntitySourceID,
 		SourceURL:           t.SourceURL,
@@ -136,6 +138,24 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
+	}
+
+	// Dismiss is a terminal state — if the user swipes away a task mid-run
+	// (rare, but possible on a delegated card via the Board gesture rather
+	// than the AgentCard cancel button), the run must stop. Mirrors the
+	// inline-close and entity-close cascades: task state is authoritative;
+	// runs follow.
+	if req.Action == "dismiss" && s.spawner != nil {
+		ids, err := db.ActiveRunIDsForTask(s.db, id)
+		if err != nil {
+			log.Printf("[swipe] active-run lookup for task %s failed: %v", id, err)
+		} else {
+			for _, runID := range ids {
+				if err := s.spawner.Cancel(runID); err != nil {
+					log.Printf("[swipe] cancel run %s on dismiss of task %s: %v", runID, id, err)
+				}
+			}
+		}
 	}
 
 	response := map[string]any{"status": newStatus}

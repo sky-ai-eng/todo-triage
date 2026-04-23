@@ -125,11 +125,21 @@ CREATE TABLE IF NOT EXISTS events (
     event_type TEXT NOT NULL REFERENCES events_catalog(id),
     dedup_key TEXT NOT NULL DEFAULT '',  -- open-set discriminator (label name, status name); empty when event_type alone is the dedup unit
     metadata_json TEXT,
+    -- When the event actually occurred at the source (commit timestamp, check-run completion, review submission).
+    -- Nullable: left NULL for events without a source timestamp (e.g. system events, discovery-time emissions).
+    -- Chronological consumers (factory chain, timeline views) should COALESCE(occurred_at, created_at).
+    occurred_at DATETIME,
+    -- When this row was inserted. Independent of source time so the audit/debugging
+    -- trail stays intact even as source time becomes the preferred chronological key.
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_entity_created ON events(entity_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_type_created ON events(event_type, created_at DESC);
+-- Chronological queries (factory chain) prefer source time when available.
+-- Index on the entity/occurred_at axis so the factory's per-entity tail
+-- reads remain a plain index scan rather than a sort.
+CREATE INDEX IF NOT EXISTS idx_events_entity_occurred ON events(entity_id, occurred_at DESC);
 
 -- === Task rules (declarative task creation) ===============================
 -- Independent of automation. A user who just wants surfacing (no auto-fire)

@@ -24,6 +24,8 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, us
 	authorIsSelf := curr.Author == username
 	var evts []domain.Event
 
+	// emit records an event without a source timestamp — occurred_at stays
+	// zero-valued. Chronological consumers fall back to created_at.
 	emit := func(eventType, dedupKey string, metadata any) {
 		metaJSON, _ := json.Marshal(metadata)
 		evts = append(evts, domain.Event{
@@ -35,6 +37,27 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, us
 		})
 	}
 
+	// emitAt records an event with a source timestamp parsed from the
+	// GitHub ISO-8601 string on the snapshot. Blank/unparseable values
+	// degrade to the plain emit() path — an event with an unknown source
+	// time is still better than dropping the signal entirely.
+	emitAt := func(eventType, dedupKey, sourceAt string, metadata any) {
+		t, err := time.Parse(time.RFC3339, sourceAt)
+		if sourceAt == "" || err != nil {
+			emit(eventType, dedupKey, metadata)
+			return
+		}
+		metaJSON, _ := json.Marshal(metadata)
+		evts = append(evts, domain.Event{
+			EventType:    eventType,
+			EntityID:     eid,
+			DedupKey:     dedupKey,
+			MetadataJSON: string(metaJSON),
+			OccurredAt:   t,
+			CreatedAt:    now,
+		})
+	}
+
 	// --- First discovery: no previous state to diff against ----------------
 	// On first discovery we DON'T emit events — the entity just gets created
 	// and the snapshot seeds. Events fire on the NEXT poll when we can
@@ -42,13 +65,13 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, us
 	// immediately since there won't be another diff.
 	if prev.Number == 0 {
 		if curr.Merged {
-			emit(domain.EventGitHubPRMerged, "", events.GitHubPRMergedMetadata{
+			emitAt(domain.EventGitHubPRMerged, "", curr.MergedAt, events.GitHubPRMergedMetadata{
 				Author: curr.Author, AuthorIsSelf: authorIsSelf,
 				Repo: curr.Repo, PRNumber: curr.Number,
 				MergedBy: "", HeadSHA: curr.HeadSHA, Labels: curr.Labels,
 			})
 		} else if curr.State == "CLOSED" {
-			emit(domain.EventGitHubPRClosed, "", events.GitHubPRClosedMetadata{
+			emitAt(domain.EventGitHubPRClosed, "", curr.ClosedAt, events.GitHubPRClosedMetadata{
 				Author: curr.Author, AuthorIsSelf: authorIsSelf,
 				Repo: curr.Repo, PRNumber: curr.Number,
 				ClosedBy: "", Labels: curr.Labels,
@@ -63,7 +86,7 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, us
 	// --- Entity-terminating transitions ------------------------------------
 
 	if !prev.Merged && curr.Merged {
-		emit(domain.EventGitHubPRMerged, "", events.GitHubPRMergedMetadata{
+		emitAt(domain.EventGitHubPRMerged, "", curr.MergedAt, events.GitHubPRMergedMetadata{
 			Author: curr.Author, AuthorIsSelf: authorIsSelf,
 			Repo: curr.Repo, PRNumber: curr.Number,
 			MergedBy: "", HeadSHA: curr.HeadSHA, Labels: curr.Labels,
@@ -71,7 +94,7 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, us
 	}
 
 	if prev.State != "CLOSED" && curr.State == "CLOSED" && !curr.Merged {
-		emit(domain.EventGitHubPRClosed, "", events.GitHubPRClosedMetadata{
+		emitAt(domain.EventGitHubPRClosed, "", curr.ClosedAt, events.GitHubPRClosedMetadata{
 			Author: curr.Author, AuthorIsSelf: authorIsSelf,
 			Repo: curr.Repo, PRNumber: curr.Number,
 			ClosedBy: "", Labels: curr.Labels,
@@ -109,7 +132,7 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, us
 				if existed && domain.IsFailingConclusion(prevCR.Conclusion) {
 					continue // already failing, old signal
 				}
-				emit(domain.EventGitHubPRCICheckFailed, "", events.GitHubPRCICheckFailedMetadata{
+				emitAt(domain.EventGitHubPRCICheckFailed, "", cr.CompletedAt, events.GitHubPRCICheckFailedMetadata{
 					Author: curr.Author, AuthorIsSelf: authorIsSelf,
 					CheckRunID: cr.ID, CheckName: cr.Name, CheckURL: cr.DetailsURL,
 					WorkflowRunID: cr.WorkflowRunID,
@@ -125,7 +148,7 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, us
 				if existed && !domain.IsFailingConclusion(prevCR.Conclusion) && prevCR.Conclusion != "" {
 					continue // already non-failing, old signal
 				}
-				emit(domain.EventGitHubPRCICheckPassed, "", events.GitHubPRCICheckPassedMetadata{
+				emitAt(domain.EventGitHubPRCICheckPassed, "", cr.CompletedAt, events.GitHubPRCICheckPassedMetadata{
 					Author: curr.Author, AuthorIsSelf: authorIsSelf,
 					CheckRunID: cr.ID, CheckName: cr.Name, Conclusion: cr.Conclusion,
 					WorkflowRunID: cr.WorkflowRunID,
@@ -139,7 +162,7 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, us
 	// --- New commits -------------------------------------------------------
 
 	if prev.HeadSHA != "" && curr.HeadSHA != "" && prev.HeadSHA != curr.HeadSHA {
-		emit(domain.EventGitHubPRNewCommits, "", events.GitHubPRNewCommitsMetadata{
+		emitAt(domain.EventGitHubPRNewCommits, "", curr.HeadCommittedAt, events.GitHubPRNewCommitsMetadata{
 			Author: curr.Author, AuthorIsSelf: authorIsSelf,
 			IsDraft: curr.IsDraft, CommitCount: 0, // count not available in snapshot
 			HeadSHA: curr.HeadSHA, PrevHeadSHA: prev.HeadSHA,
@@ -197,28 +220,28 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, us
 
 		switch currState.State {
 		case "CHANGES_REQUESTED":
-			emit(domain.EventGitHubPRReviewChangesRequested, "", events.GitHubPRReviewChangesRequestedMetadata{
+			emitAt(domain.EventGitHubPRReviewChangesRequested, "", currState.SubmittedAt, events.GitHubPRReviewChangesRequestedMetadata{
 				Author: curr.Author, AuthorIsSelf: authorIsSelf,
 				Reviewer: reviewer, ReviewerIsSelf: reviewerIsSelf,
 				ReviewID: 0, Repo: curr.Repo, PRNumber: curr.Number,
 				IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
 			})
 		case "APPROVED":
-			emit(domain.EventGitHubPRReviewApproved, "", events.GitHubPRReviewApprovedMetadata{
+			emitAt(domain.EventGitHubPRReviewApproved, "", currState.SubmittedAt, events.GitHubPRReviewApprovedMetadata{
 				Author: curr.Author, AuthorIsSelf: authorIsSelf,
 				Reviewer: reviewer, ReviewerIsSelf: reviewerIsSelf,
 				ReviewID: 0, Repo: curr.Repo, PRNumber: curr.Number,
 				IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
 			})
 		case "COMMENTED":
-			emit(domain.EventGitHubPRReviewCommented, "", events.GitHubPRReviewCommentedMetadata{
+			emitAt(domain.EventGitHubPRReviewCommented, "", currState.SubmittedAt, events.GitHubPRReviewCommentedMetadata{
 				Author: curr.Author, AuthorIsSelf: authorIsSelf,
 				Reviewer: reviewer, ReviewerIsSelf: reviewerIsSelf,
 				ReviewID: 0, CommentCount: 0, Repo: curr.Repo, PRNumber: curr.Number,
 				IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
 			})
 		case "DISMISSED":
-			emit(domain.EventGitHubPRReviewDismissed, "", events.GitHubPRReviewDismissedMetadata{
+			emitAt(domain.EventGitHubPRReviewDismissed, "", currState.SubmittedAt, events.GitHubPRReviewDismissedMetadata{
 				Author: curr.Author, AuthorIsSelf: authorIsSelf,
 				Reviewer: reviewer, ReviewerIsSelf: reviewerIsSelf,
 				ReviewID: 0, Repo: curr.Repo, PRNumber: curr.Number,
@@ -228,7 +251,7 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, us
 
 		// Also emit review_submitted when session user posted the review.
 		if reviewerIsSelf && currState.State != prevState.State {
-			emit(domain.EventGitHubPRReviewSubmitted, "", events.GitHubPRReviewSubmittedMetadata{
+			emitAt(domain.EventGitHubPRReviewSubmitted, "", currState.SubmittedAt, events.GitHubPRReviewSubmittedMetadata{
 				Author: curr.Author, AuthorIsSelf: authorIsSelf,
 				ReviewerIsSelf: true, Reviewer: username,
 				ReviewType: stateToReviewType(currState.State),

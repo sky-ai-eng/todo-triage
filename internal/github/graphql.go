@@ -68,7 +68,7 @@ fragment PRDiscoveryFields on PullRequest {
 ` + prBaseFields + `
 	commits(last: 1) {
 		nodes {
-			commit { oid }
+			commit { oid committedDate }
 		}
 	}
 	labels(first: 10) { nodes { name } }
@@ -103,6 +103,7 @@ fragment PRFullFields on PullRequest {
 		nodes {
 			commit {
 				oid
+				committedDate
 				checkSuites(first: 20) {
 					pageInfo { hasNextPage }
 					nodes {
@@ -360,8 +361,9 @@ type gqlCommits struct {
 }
 
 type gqlCommit struct {
-	OID         string         `json:"oid"`
-	CheckSuites gqlCheckSuites `json:"checkSuites"`
+	OID           string         `json:"oid"`
+	CommittedDate string         `json:"committedDate"`
+	CheckSuites   gqlCheckSuites `json:"checkSuites"`
 }
 
 type gqlCheckSuites struct {
@@ -460,6 +462,7 @@ func (pr gqlPR) buildSnapshot(includeCheckRuns bool) domain.PRSnapshot {
 	if len(pr.Commits.Nodes) > 0 {
 		commit := pr.Commits.Nodes[0].Commit
 		snap.HeadSHA = commit.OID
+		snap.HeadCommittedAt = commit.CommittedDate
 
 		if includeCheckRuns {
 			// Initialize to non-nil empty so downstream diff sees "polled,
