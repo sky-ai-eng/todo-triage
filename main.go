@@ -233,6 +233,13 @@ func main() {
 		Handle: eventRouter.HandleEvent,
 	})
 
+	// Wire the queue drainer. Spawner calls router.DrainEntity from each
+	// auto-run terminal so queued firings progress without their own
+	// trigger event. Has to be set post-construction because router and
+	// spawner reference each other (spawner.Delegate ← router; router.
+	// DrainEntity ← spawner). Same pattern UpdateCredentials uses.
+	spawner.SetQueueDrainer(eventRouter)
+
 	// Tracks per-source "announce next poll completion as a toast". Set when
 	// a config change triggers a poller restart; cleared after the first
 	// post-restart completion fires the toast. Prevents every-minute spam
