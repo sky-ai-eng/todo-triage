@@ -343,7 +343,7 @@ CREATE TABLE IF NOT EXISTS pending_firings (
     trigger_id TEXT NOT NULL REFERENCES prompt_triggers(id) ON DELETE CASCADE,
     triggering_event_id TEXT NOT NULL REFERENCES events(id),
     status TEXT NOT NULL DEFAULT 'pending',  -- pending | fired | skipped_stale
-    skip_reason TEXT,                        -- task_closed | trigger_disabled | breaker_tripped | fire_failed
+    skip_reason TEXT,                        -- task_closed | trigger_disabled | breaker_tripped
     queued_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     drained_at DATETIME,
     fired_run_id TEXT REFERENCES runs(id)

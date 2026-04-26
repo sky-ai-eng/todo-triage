@@ -17,7 +17,7 @@ type PendingFiring struct {
 	TriggerID         string     `json:"trigger_id"`
 	TriggeringEventID string     `json:"triggering_event_id"`
 	Status            string     `json:"status"`                // pending | fired | skipped_stale
-	SkipReason        string     `json:"skip_reason,omitempty"` // task_closed | trigger_disabled | breaker_tripped | fire_failed
+	SkipReason        string     `json:"skip_reason,omitempty"` // task_closed | trigger_disabled | breaker_tripped
 	QueuedAt          time.Time  `json:"queued_at"`
 	DrainedAt         *time.Time `json:"drained_at,omitempty"`
 	FiredRunID        *string    `json:"fired_run_id,omitempty"`
@@ -30,10 +30,14 @@ const (
 	PendingFiringStatusSkippedStale = "skipped_stale"
 )
 
-// PendingFiring skip reasons (set when status='skipped_stale').
+// PendingFiring skip reasons (set when status='skipped_stale'). Reserved
+// for definitive "no longer relevant" outcomes — task closed, trigger
+// disabled, breaker tripped. Transient errors during validation or fire
+// (DB read failures, spawner.Delegate errors) leave the firing in
+// 'pending' state for retry by a future drain or the periodic sweeper;
+// they do not become a skip reason.
 const (
 	PendingFiringSkipTaskClosed      = "task_closed"
 	PendingFiringSkipTriggerDisabled = "trigger_disabled"
 	PendingFiringSkipBreakerTripped  = "breaker_tripped"
-	PendingFiringSkipFireFailed      = "fire_failed"
 )

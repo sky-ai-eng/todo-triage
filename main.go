@@ -240,6 +240,14 @@ func main() {
 	// DrainEntity ← spawner). Same pattern UpdateCredentials uses.
 	spawner.SetQueueDrainer(eventRouter)
 
+	// Periodic drain sweeper — safety net for queues stuck on transient
+	// validation/fire errors. notifyDrainer only triggers drains on
+	// auto-run terminals; if nothing's running, nothing wakes up the
+	// queue. The sweep tick re-attempts pending firings every 30s.
+	// Background context: the binary doesn't have a top-level cancel
+	// today, so the goroutine lives for the process lifetime.
+	go eventRouter.RunDrainSweeper(context.Background(), 30*time.Second)
+
 	// Tracks per-source "announce next poll completion as a toast". Set when
 	// a config change triggers a poller restart; cleared after the first
 	// post-restart completion fires the toast. Prevents every-minute spam

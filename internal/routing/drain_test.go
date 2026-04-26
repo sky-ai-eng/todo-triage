@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"sync"
@@ -295,5 +296,79 @@ func TestDrainEntity_ConcurrentDrainsDoNotDoubleFire(t *testing.T) {
 	}
 	if rows[0].FiredRunID == nil {
 		t.Error("fired_run_id should be set on the winning drain's mark")
+	}
+}
+
+// TestRunDrainSweeper_PicksUpStuckFiring verifies that the periodic
+// sweeper drains pending firings even when no notifyDrainer call ever
+// fires (the stuck-queue case: queue has pending entries, no active auto
+// runs, no incoming events). Models the safety-net scenario the sweeper
+// exists for.
+//
+// Setup: enqueue a firing without ever calling DrainEntity manually.
+// Without the sweeper this firing would sit in 'pending' forever. Start
+// the sweeper at 30ms cadence; within a few ticks it should pick up the
+// firing, validate, and fire.
+func TestRunDrainSweeper_PicksUpStuckFiring(t *testing.T) {
+	database := newTestDB(t)
+	entityID, taskID, triggerID, eventID := setupDrainScenario(t, database)
+
+	if _, err := db.EnqueuePendingFiring(database, entityID, taskID, triggerID, eventID); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	stub := &stubDelegator{db: database}
+	router := NewRouter(database, stub, noopScorer{}, websocket.NewHub())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go router.RunDrainSweeper(ctx, 30*time.Millisecond)
+
+	// Poll for completion: sweeper must drain within a generous window.
+	// 1s gives ~30 ticks; if it hasn't fired by then something's wrong.
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		if atomic.LoadInt64(&stub.calls) >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if calls := atomic.LoadInt64(&stub.calls); calls != 1 {
+		t.Fatalf("expected sweeper to fire the stuck firing exactly once, got %d calls", calls)
+	}
+
+	rows, err := db.ListPendingFiringsForEntity(database, entityID)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 firing row, got %d", len(rows))
+	}
+	if rows[0].Status != domain.PendingFiringStatusFired {
+		t.Errorf("status = %q, want fired", rows[0].Status)
+	}
+}
+
+// TestRunDrainSweeper_NoOpWhenIdle verifies the sweeper doesn't
+// gratuitously fire when there are no pending firings to drain. Stops
+// "every 30s the binary spuriously creates runs" regression.
+func TestRunDrainSweeper_NoOpWhenIdle(t *testing.T) {
+	database := newTestDB(t)
+	entityID, _, _, _ := setupDrainScenario(t, database)
+	_ = entityID
+
+	stub := &stubDelegator{db: database}
+	router := NewRouter(database, stub, noopScorer{}, websocket.NewHub())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go router.RunDrainSweeper(ctx, 20*time.Millisecond)
+
+	// Let several ticks elapse with nothing pending.
+	time.Sleep(120 * time.Millisecond)
+
+	if calls := atomic.LoadInt64(&stub.calls); calls != 0 {
+		t.Errorf("expected 0 Delegate calls with empty queue, got %d", calls)
 	}
 }

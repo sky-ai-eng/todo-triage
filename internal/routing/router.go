@@ -1,11 +1,13 @@
 package routing
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/config"
 	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
@@ -401,7 +403,17 @@ func (r *Router) DrainEntity(entityID string) {
 			return // queue empty
 		}
 
-		runID, skipReason := r.attemptDrainOne(firing)
+		runID, skipReason, transientErr := r.attemptDrainOne(firing)
+		if transientErr != nil {
+			// Transient failure (DB read, Delegate). Leave the firing in
+			// 'pending' state and bail the drain loop — marking
+			// 'skipped_stale' here would permanently drop a queued intent
+			// over a temporary problem. The periodic sweeper or the next
+			// run-terminal will retry.
+			log.Printf("[router] drain transient error on firing %d (entity %s): %v — leaving pending for retry",
+				firing.ID, entityID, transientErr)
+			return
+		}
 		if runID != "" {
 			if err := dbpkg.MarkPendingFiringFired(r.db, firing.ID, runID); err != nil {
 				// Durability race: the run was created (side-effect
@@ -409,17 +421,24 @@ func (r *Router) DrainEntity(entityID string) {
 				// that records the firing→run association failed. The
 				// firing row is still 'pending' — a later DrainEntity
 				// would pop the same row and fire again, duplicating.
-				// Cancel the run we just spawned to roll back the
-				// side-effect; the firing stays pending and a future
-				// drain will re-fire it fresh, with no concurrent run.
-				log.Printf("[router] mark firing %d fired (run %s) failed: %v — cancelling run to keep firing→run association consistent",
+				//
+				// Roll the side-effect chain back in reverse: Cancel the
+				// run we just spawned, then revert the task to 'queued'
+				// so the limbo state (task=delegated + no live run) is
+				// not externally visible. Mirrors what fireDelegate
+				// already does when spawner.Delegate itself fails. The
+				// firing stays 'pending' and the next drain re-fires
+				// fresh; until then the task reads as queued, which is
+				// honest.
+				log.Printf("[router] mark firing %d fired (run %s) failed: %v — rolling back: cancelling run + reverting task to queued",
 					firing.ID, runID, err)
 				if r.spawner != nil {
 					if cerr := r.spawner.Cancel(runID); cerr != nil {
-						log.Printf("[router] cancel run %s after mark-fired failure: %v — orphaned run + still-pending firing, manual cleanup may be needed",
+						log.Printf("[router] cancel run %s after mark-fired failure: %v — run may already be terminal, drain still triggers from its defer",
 							runID, cerr)
 					}
 				}
+				r.revertTaskStatus(firing.TaskID, "queued")
 			}
 			return // one fire per drain — the new run gates the rest
 		}
@@ -432,49 +451,94 @@ func (r *Router) DrainEntity(entityID string) {
 	}
 }
 
+// RunDrainSweeper periodically attempts to drain every entity that has at
+// least one pending firing. The sweeper is the safety net for stuck
+// queues: a firing left in 'pending' after a transient validation/fire
+// error needs *some* drain to retry it, and the natural trigger
+// (notifyDrainer from an auto-run terminal) only fires when an auto run
+// is actively terminating. If nothing's terminating — entity has no
+// active runs and no events arrive — the queue would otherwise sit
+// indefinitely.
+//
+// Cadence is 30s by default; tuneable via interval. Each tick lists
+// entities with pending firings (cheap — partial index) and calls
+// DrainEntity on each. DrainEntity's per-entity mutex makes the sweeper
+// safe to run alongside event-triggered drains: if a drain is already
+// running for an entity, the sweeper's call blocks then re-pops, which
+// is fine. Empty queues are no-ops.
+//
+// Returns when ctx is cancelled. Caller is responsible for the lifetime
+// (typically a goroutine started from main, cancelled at shutdown).
+func (r *Router) RunDrainSweeper(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			ids, err := dbpkg.ListEntitiesWithPendingFirings(r.db)
+			if err != nil {
+				log.Printf("[router] drain sweeper: list error: %v", err)
+				continue
+			}
+			for _, eid := range ids {
+				r.DrainEntity(eid)
+			}
+		}
+	}
+}
+
 // attemptDrainOne validates a popped firing against current state and
-// fires it if everything still holds. Returns (runID, "") on successful
-// fire, or ("", skipReason) if the firing should be soft-deleted.
+// fires it if everything still holds. Three outcomes:
+//
+//   - (runID, "", nil)         — fire succeeded; caller marks 'fired'.
+//   - ("", skipReason, nil)    — definitive "no longer relevant"; caller
+//     marks 'skipped_stale'. Reserved for: task_closed, trigger_disabled,
+//     breaker_tripped.
+//   - ("", "", err)            — transient failure (DB read, fire-time);
+//     caller leaves the firing in 'pending' state and bails the drain
+//     loop. The periodic sweeper or next run-terminal will retry.
 //
 // Validation reads from live tables, not from the firing row, so the
 // drainer reflects the world *now* — invalidation falls out for free
-// from the existing close cascade and trigger config: a task that was
-// closed mid-pause is already 'done' here, and a trigger the user
-// disabled while we waited is no longer enabled.
-func (r *Router) attemptDrainOne(firing *domain.PendingFiring) (runID, skipReason string) {
+// from the close cascade and trigger config.
+//
+// We classify Delegate errors as transient too: even when spawner.Delegate
+// refuses (rate-limited GitHub, missing creds, worktree race), the firing
+// intent is still valid and worth retrying. The breaker handles the
+// "actually broken, repeated failure" case via run-level failure counts —
+// but only once we've started enough runs to trip it. Until then, retry.
+func (r *Router) attemptDrainOne(firing *domain.PendingFiring) (runID, skipReason string, transientErr error) {
 	task, err := dbpkg.GetTask(r.db, firing.TaskID)
 	if err != nil {
-		log.Printf("[router] drain task lookup failed (firing %d): %v", firing.ID, err)
-		return "", domain.PendingFiringSkipFireFailed
+		return "", "", fmt.Errorf("task lookup: %w", err)
 	}
 	if task == nil || task.Status == "done" || task.Status == "dismissed" {
-		return "", domain.PendingFiringSkipTaskClosed
+		return "", domain.PendingFiringSkipTaskClosed, nil
 	}
 
 	trigger, err := dbpkg.GetPromptTrigger(r.db, firing.TriggerID)
 	if err != nil {
-		log.Printf("[router] drain trigger lookup failed (firing %d): %v", firing.ID, err)
-		return "", domain.PendingFiringSkipFireFailed
+		return "", "", fmt.Errorf("trigger lookup: %w", err)
 	}
 	if trigger == nil || !trigger.Enabled {
-		return "", domain.PendingFiringSkipTriggerDisabled
+		return "", domain.PendingFiringSkipTriggerDisabled, nil
 	}
 
 	failures, err := dbpkg.CountConsecutiveFailedRuns(r.db, firing.EntityID, trigger.PromptID)
 	if err != nil {
-		log.Printf("[router] drain breaker query failed (firing %d): %v", firing.ID, err)
-		return "", domain.PendingFiringSkipFireFailed
+		return "", "", fmt.Errorf("breaker query: %w", err)
 	}
 	if failures >= trigger.BreakerThreshold {
-		return "", domain.PendingFiringSkipBreakerTripped
+		return "", domain.PendingFiringSkipBreakerTripped, nil
 	}
 
 	id, err := r.fireDelegate(task, *trigger)
 	if err != nil {
-		log.Printf("[router] drain fire failed (firing %d, task %s): %v", firing.ID, task.ID, err)
-		return "", domain.PendingFiringSkipFireFailed
+		return "", "", fmt.Errorf("fire delegate: %w", err)
 	}
-	return id, ""
+	return id, "", nil
 }
 
 // revertTaskStatus sets a task back to the given status and broadcasts the

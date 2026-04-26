@@ -126,6 +126,31 @@ func EntityCanFireImmediately(database *sql.DB, entityID string) (bool, error) {
 	return !pending, nil
 }
 
+// ListEntitiesWithPendingFirings returns the distinct entity IDs that
+// have at least one pending_firings row in 'pending' status. Used by the
+// background drain sweeper to bound its work to entities that actually
+// need draining. Backed by the partial index on (entity_id, queued_at)
+// WHERE status='pending', so the scan stays cheap even as the firings
+// history grows.
+func ListEntitiesWithPendingFirings(database *sql.DB) ([]string, error) {
+	rows, err := database.Query(`
+		SELECT DISTINCT entity_id FROM pending_firings WHERE status = 'pending'
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 // ListPendingFiringsForEntity returns all pending_firings rows for an
 // entity in queue order (oldest first), regardless of status. Used by
 // debug/audit views to show the queue's full history for an entity.
