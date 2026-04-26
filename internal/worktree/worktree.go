@@ -559,7 +559,16 @@ func CopyForTakeover(ctx context.Context, runID, srcWorktree, baseDir string) (s
 		return "", fmt.Errorf("takeover: read current branch: %w", err)
 	}
 
-	destDir := filepath.Join(baseDir, "run-"+runID)
+	// Resolve to an absolute path before doing anything else. The
+	// returned path ends up in the resume command shown to the user;
+	// if takeover_dir is configured as a relative path, a relative
+	// destination would only work if the user pasted the command from
+	// the same cwd the binary was launched from. Make it cwd-independent.
+	absBase, err := filepath.Abs(baseDir)
+	if err != nil {
+		return "", fmt.Errorf("takeover: resolve base dir: %w", err)
+	}
+	destDir := filepath.Join(absBase, "run-"+runID)
 	if err := os.MkdirAll(filepath.Dir(destDir), 0755); err != nil {
 		return "", fmt.Errorf("takeover: mkdir base: %w", err)
 	}
@@ -604,14 +613,13 @@ func CopyForTakeover(ctx context.Context, runID, srcWorktree, baseDir string) (s
 	return destDir, nil
 }
 
-// resolveBareDirFromWorktree finds the bare repo a linked worktree
-// points at. Reads the `.git` pointer file to extract the gitdir, then
-// walks up two levels (.../worktrees/<runID> -> .../worktrees -> bare).
-//
-// Falls back to `git rev-parse --git-common-dir` when the pointer
-// resolution doesn't fit the expected layout — that command is git's
-// canonical answer to "where's the shared git directory" and works for
-// both linked worktrees and plain repos.
+// resolveBareDirFromWorktree returns the bare repo behind a linked
+// worktree by asking git directly via `rev-parse --git-common-dir` —
+// git's canonical answer to "where is the shared object/refs store"
+// for both linked worktrees and plain checkouts. Avoids parsing the
+// `.git` pointer file ourselves, which would couple us to git's on-
+// disk layout (`.git/worktrees/<name>/`) that may shift between git
+// versions.
 func resolveBareDirFromWorktree(wtDir string) (string, error) {
 	commonDir, err := gitOutput(wtDir, "rev-parse", "--git-common-dir")
 	if err != nil {
@@ -650,15 +658,17 @@ func currentBranch(ctx context.Context, wtDir string) (string, error) {
 
 // overlayWorkingTree copies every file from src onto dest, skipping the
 // `.git` directory (the destination already has its own git metadata
-// from the clone) and skipping managedExcludePatterns (those are TF
-// infrastructure dirs, not user-relevant state).
+// from the linked-worktree add) and skipping managedExcludePatterns
+// (those are TF infrastructure dirs, not user-relevant state).
 //
-// Modified files in dest are overwritten with their src counterparts —
-// the agent's working-tree state takes precedence over the bare repo's
-// HEAD content. Untracked files in src are added to dest. Files that
-// were deleted in src (present at HEAD, removed by the agent) are NOT
-// removed from dest — captured separately via `git status` so the
-// caller can recreate the deletion deterministically.
+// Because the destination was created with `git worktree add
+// --no-checkout`, its working tree starts empty. After this overlay
+// runs, the working tree contains exactly what the agent's worktree
+// contained — no more, no less. From git's POV: files modified in src
+// show as modified in dest, untracked files in src show as untracked
+// in dest, and files the agent deleted (present at HEAD but absent
+// from src) show as deleted in dest. Deletions are represented
+// implicitly because we never put them in dest in the first place.
 func overlayWorkingTree(src, dest string) error {
 	skipNames := map[string]bool{".git": true}
 	for _, pat := range managedExcludePatterns {
