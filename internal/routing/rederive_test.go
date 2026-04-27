@@ -5,11 +5,11 @@ import (
 	"encoding/json"
 	"testing"
 
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
+	_ "modernc.org/sqlite"
 )
 
 // noopScorer satisfies the Scorer interface without doing anything.
@@ -20,7 +20,7 @@ func (noopScorer) Trigger() {}
 // newTestDB sets up an in-memory SQLite with schema + seed for integration tests.
 func newTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	database, err := sql.Open("sqlite3", ":memory:?_foreign_keys=on")
+	database, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}

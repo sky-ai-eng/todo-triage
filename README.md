@@ -38,12 +38,21 @@ triagefactory
 
 ### Direct download
 
-Grab the tarball for your platform from the [latest release](https://github.com/sky-ai-eng/triage-factory/releases/latest), extract it, and put `triagefactory` on your `$PATH`.
+Grab the tarball for your platform from the [latest release](https://github.com/sky-ai-eng/triage-factory/releases/latest). The asset names follow `triagefactory_<version>_<platform>.tar.gz`, where `<platform>` is one of:
+
+- `darwin_arm64` (Apple Silicon Mac)
+- `darwin_amd64` (Intel Mac)
+- `linux_amd64`
+- `linux_arm64`
+
+To download via shell, set the version (without the leading `v`) and your platform, then:
 
 ```bash
-# Replace VERSION and PLATFORM (darwin_arm64, darwin_amd64, linux_amd64, linux_arm64).
+VERSION=0.1.0
+PLATFORM=darwin_arm64
+
 curl -L -o triagefactory.tar.gz \
-  https://github.com/sky-ai-eng/triage-factory/releases/download/vVERSION/triagefactory_VERSION_PLATFORM.tar.gz
+  "https://github.com/sky-ai-eng/triage-factory/releases/download/v${VERSION}/triagefactory_${VERSION}_${PLATFORM}.tar.gz"
 tar xzf triagefactory.tar.gz
 ./triagefactory
 ```

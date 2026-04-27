@@ -19,7 +19,10 @@ builds:
       - amd64
       - arm64
     ldflags:
-      - -s -w -X main.Version={{.Version}}
+      # {{.Tag}} keeps the leading "v" (e.g. "v0.1.0"); {{.Version}}
+      # would strip it. Matching the tag exactly makes
+      # `triagefactory --version` line up with what the user typed.
+      - -s -w -X main.Version={{.Tag}}
 
 archives:
   - id: default

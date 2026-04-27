@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	_ "modernc.org/sqlite"
 )
 
 // These tests cover the validation paths Takeover() walks BEFORE it
@@ -32,7 +32,7 @@ import (
 // connection would see an empty schema.
 func newTakeoverTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	database, err := sql.Open("sqlite3", ":memory:?_foreign_keys=on")
+	database, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}

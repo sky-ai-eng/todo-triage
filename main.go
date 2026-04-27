@@ -67,6 +67,7 @@ USER COMMANDS
   triagefactory                            start the server
   triagefactory --port N                   start on a custom port
   triagefactory --no-browser               start without opening a browser
+  triagefactory --version                  print the binary's version
   triagefactory install [--dest <path>]    symlink the binary onto PATH
   triagefactory resume [<short-id>]        resume a taken-over session
                                            (auto-resumes when there's only

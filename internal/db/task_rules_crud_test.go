@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	_ "modernc.org/sqlite"
 )
 
 // newTestDB spins up an in-memory SQLite database with the full schema + seed
@@ -14,7 +14,7 @@ import (
 // task_rules constraints). Each test gets its own isolated DB.
 func newTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	database, err := sql.Open("sqlite3", ":memory:?_foreign_keys=on")
+	database, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
 	if err != nil {
 		t.Fatalf("open sqlite memory: %v", err)
 	}

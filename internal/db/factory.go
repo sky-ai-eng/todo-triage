@@ -255,10 +255,11 @@ func ListRecentEventsByEntity(database *sql.DB, ids []string, perEntity int) (ma
 		for rows.Next() {
 			var entityID, eventType, eventAtStr string
 			// COALESCE over two DATETIME columns loses the column-type
-			// metadata mattn/go-sqlite3 needs to scan directly into
-			// time.Time (driver returns the value as a string). Scan as
-			// string and parse ourselves — cheap and consistent across
-			// whichever source column contributed the value.
+			// metadata the SQLite driver needs to scan directly into
+			// time.Time (the driver returns the value as a string in
+			// that case). Scan as string and parse ourselves — cheap
+			// and consistent across whichever source column contributed
+			// the value.
 			if err := rows.Scan(&entityID, &eventType, &eventAtStr); err != nil {
 				rows.Close()
 				return nil, err
@@ -284,11 +285,11 @@ func ListRecentEventsByEntity(database *sql.DB, ids []string, perEntity int) (ma
 
 // parseDBDatetime handles the ISO-8601 and SQLite-default datetime
 // formats we see in the events table. Direct time.Time scans work for
-// plain DATETIME columns because mattn/go-sqlite3 reads the column type
-// and parses; once COALESCE enters the picture that type metadata is
-// gone and we get back a raw string. Accept both the RFC3339 Go-side
-// writer format (from explicit time.Time inserts) and SQLite's default
-// "2006-01-02 15:04:05" CURRENT_TIMESTAMP format.
+// plain DATETIME columns because the SQLite driver reads the column
+// type and parses; once COALESCE enters the picture that type metadata
+// is gone and we get back a raw string. Accept both the RFC3339
+// Go-side writer format (from explicit time.Time inserts) and SQLite's
+// default "2006-01-02 15:04:05" CURRENT_TIMESTAMP format.
 func parseDBDatetime(s string) (time.Time, error) {
 	if s == "" {
 		return time.Time{}, nil
@@ -324,9 +325,9 @@ func ListFactoryEntities(database *sql.DB, limit int) ([]FactoryEntityRow, error
 			COALESCE(e.snapshot_json, ''), COALESCE(e.description, ''),
 			e.state, e.created_at, e.last_polled_at, e.closed_at,
 			(SELECT event_type FROM events WHERE entity_id = e.id ORDER BY created_at DESC LIMIT 1),
-			-- Direct column read (not COALESCE) so mattn/go-sqlite3 keeps the
-			-- DATETIME column-type hint and scans into sql.NullTime. The
-			-- per-event source timestamps come via ListRecentEventsByEntity,
+			-- Direct column read (not COALESCE) so the SQLite driver keeps
+			-- the DATETIME column-type hint and scans into sql.NullTime.
+			-- The per-event source timestamps come via ListRecentEventsByEntity,
 			-- which does the COALESCE + string-parse dance.
 			(SELECT created_at FROM events WHERE entity_id = e.id ORDER BY created_at DESC LIMIT 1)
 		FROM entities e
