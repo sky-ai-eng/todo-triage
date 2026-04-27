@@ -1031,21 +1031,31 @@ func TestCopyForTakeover_ExistingDest_DanglingGitPointer(t *testing.T) {
 }
 
 // TestCopyForTakeover_Validation — early-return error cases that don't
-// need a real git repo.
+// need a real git repo. baseDir is part of the table so the empty-
+// baseDir case (regression guard against filepath.Abs("") silently
+// resolving to the binary's cwd) sits alongside the other arg
+// validations rather than as a special case.
 func TestCopyForTakeover_Validation(t *testing.T) {
+	someTmp := t.TempDir()
 	cases := []struct {
-		name        string
-		runID       string
-		src         string
-		wantSubstr  string
+		name       string
+		runID      string
+		src        string
+		baseDir    string
+		wantSubstr string
 	}{
-		{"empty runID", "", "/some/path", "empty run id"},
-		{"empty source", "rid", "", "empty source"},
-		{"nonexistent source", "rid", filepath.Join(t.TempDir(), "does-not-exist"), "stat source"},
+		{"empty runID", "", "/some/path", someTmp, "empty run id"},
+		{"empty source", "rid", "", someTmp, "empty source"},
+		// Without an explicit guard, filepath.Abs("") returns the
+		// binary's current working directory and we'd quietly create
+		// takeovers there. The error message must mention the base
+		// dir so the diagnostic is obvious.
+		{"empty baseDir", "rid", "/some/path", "", "empty destination base dir"},
+		{"nonexistent source", "rid", filepath.Join(t.TempDir(), "does-not-exist"), someTmp, "stat source"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := CopyForTakeover(context.Background(), tc.runID, tc.src, t.TempDir())
+			_, err := CopyForTakeover(context.Background(), tc.runID, tc.src, tc.baseDir)
 			if err == nil {
 				t.Fatalf("expected error, got nil")
 			}

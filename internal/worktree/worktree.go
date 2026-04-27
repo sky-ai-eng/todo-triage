@@ -641,6 +641,16 @@ func CopyForTakeover(ctx context.Context, runID, srcWorktree, baseDir string) (s
 	if srcWorktree == "" {
 		return "", fmt.Errorf("takeover: empty source worktree path")
 	}
+	// Reject empty baseDir explicitly. filepath.Abs("") silently
+	// returns the binary's current working directory, so a caller
+	// that bypassed Spawner.Takeover's validation would create
+	// takeovers wherever the user launched the binary from — bad
+	// surprise for anything from /usr/local/bin to ~/Downloads.
+	// Spawner.Takeover catches this before us, but the helper
+	// shouldn't trust the upstream.
+	if baseDir == "" {
+		return "", fmt.Errorf("takeover: empty destination base dir")
+	}
 
 	// Resolve to an absolute path before doing anything else. The
 	// returned path ends up in the resume command shown to the user;
