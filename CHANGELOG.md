@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.2](https://github.com/sky-ai-eng/triage-factory/compare/v1.1.1...v1.1.2) (2026-04-27)
+
+
+### Bug Fixes
+
+* **db:** serialize writes so contention queues in Go rather than racing ([#54](https://github.com/sky-ai-eng/triage-factory/issues/54)) ([0da8941](https://github.com/sky-ai-eng/triage-factory/commit/0da894141644debcf1bb93e93cc7324d1af0256a))
+
 ## [1.1.1](https://github.com/sky-ai-eng/triage-factory/compare/v1.1.0...v1.1.1) (2026-04-27)
 
 
