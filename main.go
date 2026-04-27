@@ -164,7 +164,7 @@ func main() {
 	// One-shot PATH hint. The `triagefactory resume` subcommand only
 	// works from any terminal once the binary's on PATH; nudge the
 	// user toward `triagefactory install` if it isn't. Best-effort.
-	hintInstallIfMissing()
+	install.HintIfMissing()
 
 	if !noBrowser {
 		openBrowser(fmt.Sprintf("http://localhost%s", addr))

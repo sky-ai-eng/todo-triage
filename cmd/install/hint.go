@@ -1,11 +1,11 @@
-package main
+package install
 
 import (
 	"fmt"
 	"os/exec"
 )
 
-// hintInstallIfMissing prints a one-shot hint at server startup if the
+// HintIfMissing prints a one-shot hint at server startup if the
 // `triagefactory` binary isn't reachable via $PATH. The takeover modal
 // surfaces a `cd … && claude --resume <id>` command; users who'd
 // rather use the shorter `triagefactory resume <id>` need the binary
@@ -16,7 +16,7 @@ import (
 // Best-effort: any error (LookPath failing for non-PATH reasons,
 // terminal redirected, etc.) is silently ignored. The hint is just a
 // hint.
-func hintInstallIfMissing() {
+func HintIfMissing() {
 	if _, err := exec.LookPath("triagefactory"); err == nil {
 		return
 	}
