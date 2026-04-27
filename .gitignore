@@ -18,3 +18,4 @@ _scratch/
 .claude/*
 !.claude/settings.json
 docs/triagefactory-spec.md
+.env

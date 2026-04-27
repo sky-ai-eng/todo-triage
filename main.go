@@ -35,6 +35,12 @@ import (
 
 const defaultPort = 3000
 
+// Version is the binary's release tag, set by the linker at build time
+// (`-ldflags "-X main.Version=v0.1.0"`). Local builds without that flag
+// see the literal "dev" so anything in the wild claiming to be "dev" is
+// known to be unreleased.
+var Version = "dev"
+
 // pluralize picks the singular or plural form of a noun based on count.
 // Used for toast copy where "1 entity tracked" vs "5 entities tracked"
 // reads nicer than a naive "(s)" suffix.
@@ -61,6 +67,7 @@ USER COMMANDS
   triagefactory                            start the server
   triagefactory --port N                   start on a custom port
   triagefactory --no-browser               start without opening a browser
+  triagefactory --version                  print the binary's version
   triagefactory install [--dest <path>]    symlink the binary onto PATH
   triagefactory resume [<short-id>]        resume a taken-over session
                                            (auto-resumes when there's only
@@ -104,6 +111,9 @@ func main() {
 			return
 		case "-h", "--help", "help":
 			printTopLevelHelp()
+			return
+		case "-v", "--version", "version":
+			fmt.Println(Version)
 			return
 		}
 	}

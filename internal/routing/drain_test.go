@@ -325,10 +325,17 @@ func TestRunDrainSweeper_PicksUpStuckFiring(t *testing.T) {
 	go router.RunDrainSweeper(ctx, 30*time.Millisecond)
 
 	// Poll for completion: sweeper must drain within a generous window.
-	// 1s gives ~30 ticks; if it hasn't fired by then something's wrong.
+	// Wait for the firing's final status rather than just stub.calls,
+	// because the sweeper increments calls inside Delegate and only
+	// then runs MarkPendingFiringFired — observing calls==1 alone
+	// doesn't tell us the row has been transitioned. Under -race the
+	// gap between the two becomes large enough to flake. 1s gives
+	// ~100 ticks; if status hasn't reached 'fired' by then something
+	// is genuinely wrong.
 	deadline := time.Now().Add(1 * time.Second)
 	for time.Now().Before(deadline) {
-		if atomic.LoadInt64(&stub.calls) >= 1 {
+		rows, err := db.ListPendingFiringsForEntity(database, entityID)
+		if err == nil && len(rows) == 1 && rows[0].Status == domain.PendingFiringStatusFired {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)

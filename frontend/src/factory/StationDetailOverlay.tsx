@@ -234,8 +234,15 @@ function WaitingPill({ entity, color }: { entity: StationWaitingEntity; color: n
   // overflow-hidden + the strip's overflow-x-auto (which forces vertical
   // clipping too) can't hide the card. Fixed positioning keeps it
   // anchored while the user moves their cursor between pills.
+  //
+  // The setPos calls are synchronous within the effect; the rule
+  // (react-hooks/set-state-in-effect) flags this, but reading
+  // getBoundingClientRect() is exactly the DOM-measurement side-effect
+  // that useEffect is for. Disabling the rule for this measurement
+  // effect rather than refactoring to derived state.
   useEffect(() => {
     if (!hovered) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setPos(null)
       return
     }

@@ -41,10 +41,14 @@ export default function TaskRulesPanel({ open, onClose }: TaskRulesPanelProps) {
   // work fine without special handling despite listeners being on the whole row.
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
 
-  // Fetch rules on open or after mutations.
+  // Fetch rules on open or after mutations. The synchronous setLoading
+  // before fetch costs one extra render per panel-open — acceptable for
+  // a settings panel that opens once per session — and the alternatives
+  // (Suspense, data-fetching library) would require a broader refactor.
   useEffect(() => {
     if (!open) return
     let cancelled = false
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoading(true)
 
     fetch('/api/task-rules')

@@ -26,17 +26,53 @@ Events are **per-action signals** — one event per check completion, one per re
 
 **Repo profiling** — AI-generated profiles of your configured repos (from README, CLAUDE.md, AGENTS.md) so the scorer and delegation agents understand context without you having to explain it.
 
-## Quick start
+## Install
+
+### macOS — Homebrew (recommended)
+
+```bash
+brew tap sky-ai-eng/tap
+brew install triagefactory
+triagefactory
+```
+
+### Direct download
+
+Grab the tarball for your platform from the [latest release](https://github.com/sky-ai-eng/triage-factory/releases/latest). The asset names follow `triagefactory_<version>_<platform>.tar.gz`, where `<platform>` is one of:
+
+- `darwin_arm64` (Apple Silicon Mac)
+- `darwin_amd64` (Intel Mac)
+- `linux_amd64`
+- `linux_arm64`
+
+To download via shell, set the version (without the leading `v`) and your platform, then:
+
+```bash
+VERSION=0.1.0
+PLATFORM=darwin_arm64
+
+curl -L -o triagefactory.tar.gz \
+  "https://github.com/sky-ai-eng/triage-factory/releases/download/v${VERSION}/triagefactory_${VERSION}_${PLATFORM}.tar.gz"
+tar xzf triagefactory.tar.gz
+./triagefactory
+```
+
+On macOS, downloads from the browser pick up Apple's quarantine attribute. If running the binary surfaces "cannot be opened because the developer cannot be verified", clear the attribute once:
+
+```bash
+xattr -d com.apple.quarantine ./triagefactory
+```
+
+(Homebrew installs avoid this — `brew install` strips the attribute for you.)
+
+### Build from source
 
 ```bash
 git clone https://github.com/sky-ai-eng/triage-factory.git
 cd triage-factory
 
-# Build
 cd frontend && npm install && npm run build && cd ..
 go build -o ./triagefactory .
-
-# Run
 ./triagefactory
 ```
 

@@ -22,6 +22,8 @@ linters:
       # doesn't always match concrete types like *sql.Rows.
       exclude-functions:
         - (io.Closer).Close
+        - (*os.File).Close
+        - (*archive/zip.ReadCloser).Close
         - (*database/sql.Rows).Close
         - (*database/sql.Stmt).Close
         - (*database/sql.DB).Close

@@ -8,14 +8,14 @@
 //
 // UX:
 //
-//   triagefactory resume                — auto-resume when there's
-//                                          exactly one taken-over run;
-//                                          pick newest with a numbered
-//                                          picker if more than one.
-//   triagefactory resume <short-id>     — disambiguate by run-ID
-//                                          prefix (matches the 8-char
-//                                          shortRunID convention used
-//                                          in the modal).
+//	triagefactory resume                — auto-resume when there's
+//	                                       exactly one taken-over run;
+//	                                       pick newest with a numbered
+//	                                       picker if more than one.
+//	triagefactory resume <short-id>     — disambiguate by run-ID
+//	                                       prefix (matches the 8-char
+//	                                       shortRunID convention used
+//	                                       in the modal).
 //
 // We syscall.Exec rather than fork claude so the user gets a clean
 // interactive process without an extra pid in the tree.

@@ -7,7 +7,7 @@
 // Default destinations:
 //   - macOS:  /usr/local/bin/triagefactory     (typically requires sudo)
 //   - Linux:  ~/.local/bin/triagefactory       (XDG userland; usually
-//                                                already on PATH)
+//     already on PATH)
 //
 // Override with `--dest /full/path/to/triagefactory` if you keep
 // binaries elsewhere. We don't write to non-default locations without

@@ -82,9 +82,9 @@ func (s *Server) handleAgentTakeover(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{
-		"takeover_path":   result.TakeoverPath,
-		"session_id":      result.SessionID,
-		"resume_command":  fmt.Sprintf("cd %s && claude --resume %s", shellQuote(result.TakeoverPath), shellQuote(result.SessionID)),
+		"takeover_path":  result.TakeoverPath,
+		"session_id":     result.SessionID,
+		"resume_command": fmt.Sprintf("cd %s && claude --resume %s", shellQuote(result.TakeoverPath), shellQuote(result.SessionID)),
 	})
 }
 

@@ -433,8 +433,8 @@ func TestListTakenOverRunsForResume_NewestFirstAndFilters(t *testing.T) {
 // shouldn't appear in the picker even though its status matches.
 func TestListTakenOverRunsForResume_SkipsMissingSessionOrWorktree(t *testing.T) {
 	database := newTestDB(t)
-	takeoverFixture(t, database, "run-noSession", "taken_over", "/tmp/wt")    // session_id stays ""
-	takeoverFixture(t, database, "run-noPath", "taken_over", "")              // worktree_path stays ""
+	takeoverFixture(t, database, "run-noSession", "taken_over", "/tmp/wt") // session_id stays ""
+	takeoverFixture(t, database, "run-noPath", "taken_over", "")           // worktree_path stays ""
 	takeoverFixture(t, database, "run-good", "taken_over", "/tmp/wt-good")
 	if _, err := database.Exec(`UPDATE runs SET session_id = ? WHERE id = ?`, "sess-good", "run-good"); err != nil {
 		t.Fatalf("set session_id: %v", err)

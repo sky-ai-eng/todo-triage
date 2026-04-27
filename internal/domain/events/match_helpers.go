@@ -18,13 +18,6 @@ func strEq(pred *string, meta string) bool {
 	return *pred == meta
 }
 
-func intEq(pred *int, meta int) bool {
-	if pred == nil {
-		return true
-	}
-	return *pred == meta
-}
-
 // hasLabel returns true when the predicate is unset, or when the requested
 // label is present in the metadata snapshot.
 func hasLabel(pred *string, labels []string) bool {

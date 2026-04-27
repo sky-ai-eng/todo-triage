@@ -14,12 +14,17 @@ export default function PredicateEditor({ eventType, value, onChange }: Predicat
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
+  // Standard "fetch on prop change" pattern: kick off a network call and
+  // synchronously flip loading/error to reflect the in-flight state. The
+  // sync setState before fetch costs one cascading render per eventType
+  // change — fine for a config panel — and the clean alternatives
+  // (Suspense, data-fetching library) would be a much bigger refactor.
+  // The render guards on !eventType before reading `fields`, so we don't
+  // need to clear `fields` explicitly when eventType empties out.
   useEffect(() => {
-    if (!eventType) {
-      setFields([])
-      return
-    }
+    if (!eventType) return
     let cancelled = false
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoading(true)
     setError('')
 
