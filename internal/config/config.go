@@ -51,6 +51,30 @@ func (r JiraStatusRule) Contains(status string) bool {
 
 type ServerConfig struct {
 	Port int `yaml:"port"`
+	// TakeoverDir is where the takeover endpoint clones run worktrees so
+	// the user can resume the headless Claude Code session interactively.
+	// Lives outside $TMPDIR so the worktree-cleanup safety rail leaves it
+	// alone. A leading "~" is expanded against the user's home dir at use
+	// time. Empty means "use the default" (~/.triagefactory/takeovers).
+	TakeoverDir string `yaml:"takeover_dir,omitempty"`
+}
+
+// ResolvedTakeoverDir returns ServerConfig.TakeoverDir with a leading "~"
+// expanded and the default applied when the field is empty. Centralized
+// here so callers don't each re-implement the home-dir math.
+func (c ServerConfig) ResolvedTakeoverDir() (string, error) {
+	dir := c.TakeoverDir
+	if dir == "" {
+		dir = "~/.triagefactory/takeovers"
+	}
+	if len(dir) >= 2 && dir[:2] == "~/" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		dir = filepath.Join(home, dir[2:])
+	}
+	return dir, nil
 }
 
 type AIConfig struct {

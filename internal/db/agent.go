@@ -154,6 +154,75 @@ func SetAgentRunSession(database *sql.DB, runID, sessionID string) error {
 	return err
 }
 
+// MarkAgentRunTakenOver finalizes a run as terminal in the "user pulled it
+// out for interactive resume" sense. Distinct from cancelled because the
+// session lives on under the user's control.
+//
+// Updates worktree_path to point at the takeover destination — the
+// original /tmp worktree is removed by Spawner.Takeover, so leaving the
+// column pointing at a now-deleted path would be actively misleading.
+// Subsequent GetAgentRun calls return the live takeover dir as the
+// structured location of the run's working tree. result_summary
+// duplicates this in human-readable form for log/audit display.
+//
+// Cost/duration accounting is left blank: the headless invocation
+// didn't finish a turn and any meaningful spend belongs to whatever
+// the user does next, which we no longer track.
+//
+// Guarded against late-completion races: the UPDATE only fires when
+// the row is still in a non-terminal status. Returns ok=false (no
+// error) when the row already reached a terminal state — the caller
+// treats that as "the run finished on its own; takeover came too
+// late."
+func MarkAgentRunTakenOver(database *sql.DB, runID, takeoverPath string) (bool, error) {
+	now := time.Now()
+	res, err := database.Exec(`
+		UPDATE runs
+		SET status = 'taken_over',
+		    completed_at = ?,
+		    stop_reason = 'user_takeover',
+		    result_summary = ?,
+		    worktree_path = ?
+		WHERE id = ?
+		  AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable', 'pending_approval', 'taken_over')
+	`, now, "Taken over by user → "+takeoverPath, takeoverPath, runID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// MarkAgentRunCancelledIfActive marks a run cancelled with the given
+// stop_reason / summary, but only if the row hasn't already reached a
+// terminal state. Returns ok=false (no error) when the row is already
+// terminal — used by takeover-rollback so the rollback can recover from
+// either "we cancelled the goroutine and need to write the terminal
+// status ourselves" or "the goroutine completed naturally before our
+// takeover landed; leave its real outcome alone." Either way, the row
+// ends up in a sensible terminal state and isn't left stuck on
+// 'running'.
+func MarkAgentRunCancelledIfActive(database *sql.DB, runID, stopReason, summary string) (bool, error) {
+	now := time.Now()
+	res, err := database.Exec(`
+		UPDATE runs
+		SET status = 'cancelled', completed_at = ?, stop_reason = ?, result_summary = ?
+		WHERE id = ?
+		  AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable', 'pending_approval', 'taken_over')
+	`, now, stopReason, summary, runID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // MarkAgentRunMemoryMissing flags a run whose pre-complete memory-file gate
 // exhausted all retries without the agent producing a memory file. The run
 // still completes (we don't punish the agent for partial success by failing
@@ -172,7 +241,7 @@ func HasActiveRunForTask(database *sql.DB, taskID string) (bool, error) {
 	var count int
 	err := database.QueryRow(`
 		SELECT COUNT(*) FROM runs
-		WHERE task_id = ? AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable', 'pending_approval')
+		WHERE task_id = ? AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable', 'pending_approval', 'taken_over')
 	`, taskID).Scan(&count)
 	return count > 0, err
 }
@@ -189,7 +258,7 @@ func HasActiveRunForTask(database *sql.DB, taskID string) (bool, error) {
 func ActiveRunIDsForTask(database *sql.DB, taskID string) ([]string, error) {
 	rows, err := database.Query(`
 		SELECT id FROM runs
-		WHERE task_id = ? AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable', 'pending_approval')
+		WHERE task_id = ? AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable', 'pending_approval', 'taken_over')
 	`, taskID)
 	if err != nil {
 		return nil, err
@@ -204,6 +273,95 @@ func ActiveRunIDsForTask(database *sql.DB, taskID string) ([]string, error) {
 		ids = append(ids, id)
 	}
 	return ids, rows.Err()
+}
+
+// ListTakenOverRunIDs returns the IDs of every run whose final state was
+// taken_over. Read at startup so the worktree-cleanup sweep knows to leave
+// those runs' ~/.claude/projects entries alone — the JSONL inside is what
+// makes `claude --resume` work in the takeover destination.
+func ListTakenOverRunIDs(database *sql.DB) ([]string, error) {
+	rows, err := database.Query(`SELECT id FROM runs WHERE status = 'taken_over'`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// TakenOverRun is a slim view of a taken-over run for the
+// `triagefactory resume` CLI's picker. Carries just enough to render
+// the user's choices and exec into the right session — the path,
+// session id, and a task title for context. SourceID lets us show
+// "PR #42" or "SKY-194" so the user can tell takeovers apart.
+type TakenOverRun struct {
+	RunID        string
+	SessionID    string
+	WorktreePath string
+	TaskTitle    string
+	SourceID     string
+	CompletedAt  time.Time
+}
+
+// ListTakenOverRunsForResume returns every taken-over run in the local
+// DB, joined with its task + entity for display, ordered newest-first.
+// Used by the CLI's resume command — the bare-call default picks
+// runs[0], the picker shows the whole list. Filters out rows missing
+// the session_id or worktree_path (shouldn't happen — Spawner.Takeover
+// requires both — but defensive against historical data).
+//
+// Title and source_id live on entities, not tasks: the join chain is
+// runs.task_id → tasks.entity_id → entities. LEFT JOIN throughout so
+// a deleted task or entity doesn't drop the run from the list — the
+// user can still resume even if the upstream task got cleaned up.
+func ListTakenOverRunsForResume(database *sql.DB) ([]TakenOverRun, error) {
+	// completed_at and started_at returned as raw columns rather than
+	// COALESCE'd into one — the SQLite driver can scan a column of
+	// declared DATETIME type into sql.NullTime, but a COALESCE
+	// expression strips the type metadata and the result comes back
+	// as an unparseable string. Sort uses COALESCE because string
+	// sort over ISO-8601 happens to be correct ordering.
+	rows, err := database.Query(`
+		SELECT r.id, COALESCE(r.session_id, ''), COALESCE(r.worktree_path, ''),
+		       COALESCE(e.title, ''), COALESCE(e.source_id, ''),
+		       r.completed_at, r.started_at
+		FROM runs r
+		LEFT JOIN tasks t ON t.id = r.task_id
+		LEFT JOIN entities e ON e.id = t.entity_id
+		WHERE r.status = 'taken_over'
+		ORDER BY COALESCE(r.completed_at, r.started_at) DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []TakenOverRun
+	for rows.Next() {
+		var r TakenOverRun
+		var completedAt, startedAt sql.NullTime
+		if err := rows.Scan(&r.RunID, &r.SessionID, &r.WorktreePath, &r.TaskTitle, &r.SourceID, &completedAt, &startedAt); err != nil {
+			return nil, err
+		}
+		if r.SessionID == "" || r.WorktreePath == "" {
+			continue
+		}
+		switch {
+		case completedAt.Valid:
+			r.CompletedAt = completedAt.Time
+		case startedAt.Valid:
+			r.CompletedAt = startedAt.Time
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 // InsertAgentMessage inserts a message and returns its ID.

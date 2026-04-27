@@ -71,6 +71,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/agent/runs/{runID}", s.handleAgentStatus)
 	s.mux.HandleFunc("GET /api/agent/runs/{runID}/messages", s.handleAgentMessages)
 	s.mux.HandleFunc("POST /api/agent/runs/{runID}/cancel", s.handleAgentCancel)
+	s.mux.HandleFunc("POST /api/agent/runs/{runID}/takeover", s.handleAgentTakeover)
 	s.mux.HandleFunc("GET /api/agent/runs", s.handleAgentRuns)
 
 	// Websocket

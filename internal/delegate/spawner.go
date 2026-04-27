@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -51,21 +52,47 @@ type Spawner struct {
 	database *sql.DB
 	wsHub    *websocket.Hub
 
-	mu       sync.Mutex
-	ghClient *ghclient.Client
-	model    string
-	cancels  map[string]context.CancelFunc // runID → cancel the entire run
-	drainer  QueueDrainer                  // nil-safe; set post-construction via SetQueueDrainer
+	mu        sync.Mutex
+	ghClient  *ghclient.Client
+	model     string
+	cancels   map[string]context.CancelFunc // runID → cancel the entire run
+	drainer   QueueDrainer                  // nil-safe; set post-construction via SetQueueDrainer
+	takenOver map[string]bool               // runIDs claimed by Takeover. Sticky-on for the rest of the goroutine's lifetime even after rollback — clearing the entry would let late-firing goroutine gates race the takeover/abort lifecycle. Suppresses every cleanup path in runAgent so Takeover/abortTakeover own the row's terminal state.
 }
 
 func NewSpawner(database *sql.DB, ghClient *ghclient.Client, wsHub *websocket.Hub, model string) *Spawner {
 	return &Spawner{
-		database: database,
-		ghClient: ghClient,
-		wsHub:    wsHub,
-		model:    model,
-		cancels:  make(map[string]context.CancelFunc),
+		database:  database,
+		ghClient:  ghClient,
+		wsHub:     wsHub,
+		model:     model,
+		cancels:   make(map[string]context.CancelFunc),
+		takenOver: make(map[string]bool),
 	}
+}
+
+// wasTakenOver reports whether Takeover() has claimed this run. The
+// flag is set the moment Takeover validates state, BEFORE the worktree
+// hand-over and the DB mark — that's intentional: every cleanup path
+// in runAgent (worktree.Remove defers, RemoveClaudeProjectDir defer,
+// the natural-completion block, failRun, handleCancelled) checks this
+// and short-circuits, which is what keeps the source worktree on disk
+// while the hand-over runs and prevents a concurrent natural completion
+// from overwriting the taken_over status.
+//
+// The flag is sticky-on once set: neither successful takeovers nor
+// failed takeovers (rolled back via abortTakeover) ever clear the
+// entry. Clearing would let any late-firing gate in the runAgent
+// goroutine re-read wasTakenOver and proceed with normal cleanup,
+// racing whatever Takeover/abortTakeover is doing — the goroutine's
+// unconditional db.CompleteAgentRun would overwrite our terminal
+// stop_reason, and its RemoveClaudeProjectDir would run alongside
+// ours. Leaving the flag set keeps every gate closed and Takeover
+// /abortTakeover the sole writer of the row's terminal state.
+func (s *Spawner) wasTakenOver(runID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.takenOver[runID]
 }
 
 // SetQueueDrainer wires the firing-queue drainer into the spawner. Done
@@ -122,6 +149,253 @@ func (s *Spawner) Cancel(runID string) error {
 	return nil
 }
 
+// TakeoverResult is what Takeover returns to the HTTP handler.
+type TakeoverResult struct {
+	TakeoverPath string `json:"takeover_path"`
+	SessionID    string `json:"session_id"`
+}
+
+// Sentinel errors the takeover HTTP handler uses to pick an HTTP status
+// class. Anything NOT matching one of these is treated as a server-
+// side problem (filesystem, git subprocess, DB) and surfaced as 5xx.
+var (
+	// ErrTakeoverInvalidState — the run is not in a state that can be
+	// taken over (no active goroutine, no session id yet, no worktree).
+	// 400 Bad Request: the client asked for something that doesn't make
+	// sense given the run's state, but nothing's broken.
+	ErrTakeoverInvalidState = errors.New("takeover: run not in a takeoverable state")
+
+	// ErrTakeoverInProgress — another takeover for the same run is
+	// already running. 409 Conflict: a previous request owns the slot.
+	ErrTakeoverInProgress = errors.New("takeover: already in progress")
+
+	// ErrTakeoverRaceLost — the run reached a terminal state on its own
+	// before our takeover could finalize. 409 Conflict: the resource
+	// changed under us, the client should re-fetch.
+	ErrTakeoverRaceLost = errors.New("takeover: run finished before takeover could finalize")
+)
+
+// Takeover hands a running headless session over to the user for
+// interactive resume.
+//
+// Order of operations is load-bearing:
+//
+//  1. Atomically validate the run + flip the takenOver flag while still
+//     holding the spawner lock. Setting the flag BEFORE anything else
+//     ensures every cleanup path in runAgent (worktree.Remove,
+//     RemoveRunCwd, RemoveClaudeProjectDir, db.CompleteAgentRun, the
+//     pending_approval flip, the toasts) checks wasTakenOver() and
+//     short-circuits. Without that, the previous race-prone version
+//     could see runAgent's defers nuke the worktree mid-copy.
+//
+//  2. Cancel the agent's context. The kill-watcher goroutine wakes
+//     and SIGKILLs the headless process group within milliseconds, so
+//     the agent stops mutating files. We DON'T wait for the runAgent
+//     goroutine to finish — its defers are no-ops because of the flag,
+//     and the worktree files are stable from the moment the SIGKILL
+//     lands.
+//
+//  3. Hand over the worktree into the takeover destination via
+//     worktree.CopyForTakeover (atomic `git worktree move` on the same
+//     filesystem; add+overlay fallback otherwise).
+//
+//  4. Mark the run terminal as taken_over and broadcast the status so
+//     the frontend re-renders the card.
+//
+// Preconditions: the run must be active (registered cancel func) and
+// have produced a session_id. Without a session id `claude --resume`
+// has nothing to attach to, so we refuse early.
+//
+// Takeover does NOT take a request context. Once we set the flag and
+// SIGKILL the agent (step 2), the operation MUST complete cleanly —
+// either succeed or run abortTakeover to roll back filesystem and DB
+// state. Tying the work to an HTTP request's context would let a
+// client disconnect (closed tab, network blip, browser navigate)
+// trigger the rollback mid-takeover, irreversibly destroying the
+// agent, the worktree, and the session JSONL — for an action the user
+// didn't ask to abort. We use context.Background() for the commit-
+// phase git operations so the work is insulated from the request
+// lifecycle. Pre-commit DB lookups are fast and don't need
+// cancellation either.
+//
+// The session JSONL under ~/.claude/projects survives by virtue of:
+// (a) the gated RemoveClaudeProjectDir defer in runAgent, and
+// (b) startup Cleanup honoring ListTakenOverRunIDs.
+func (s *Spawner) Takeover(runID, baseDir string) (*TakeoverResult, error) {
+	if baseDir == "" {
+		return nil, fmt.Errorf("takeover: empty destination base dir")
+	}
+
+	// Background ctx so client disconnect during the commit can't abort
+	// us mid-rename. See the function-level comment.
+	ctx := context.Background()
+
+	run, err := db.GetAgentRun(s.database, runID)
+	if err != nil {
+		return nil, fmt.Errorf("load run: %w", err)
+	}
+	if run == nil {
+		return nil, fmt.Errorf("%w: run %s not found", ErrTakeoverInvalidState, runID)
+	}
+	if run.SessionID == "" {
+		return nil, fmt.Errorf("%w: run %s has no session id yet — wait until the agent has started", ErrTakeoverInvalidState, runID)
+	}
+	if run.WorktreePath == "" {
+		return nil, fmt.Errorf("%w: run %s has no worktree to take over (no-repo Jira run)", ErrTakeoverInvalidState, runID)
+	}
+
+	// Atomically: confirm the run is still active, confirm we haven't
+	// already taken it over, flip the flag, and grab the cancel func.
+	// Doing all four under the lock prevents a concurrent natural
+	// completion from draining cancels[runID] between our check and
+	// our set.
+	s.mu.Lock()
+	cancel, active := s.cancels[runID]
+	already := s.takenOver[runID]
+	if !active {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("%w: run %s is no longer active — it may have just finished", ErrTakeoverInvalidState, runID)
+	}
+	if already {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("%w: run %s", ErrTakeoverInProgress, runID)
+	}
+	s.takenOver[runID] = true
+	s.mu.Unlock()
+
+	// Capture the source cwd's symlink-resolved path BEFORE
+	// CopyForTakeover removes/renames it. We need this later to find
+	// the agent's session JSONL under ~/.claude/projects/<encoded-cwd>;
+	// Claude Code keys session storage by cwd-encoding, so without
+	// MaterializeSessionForTakeover the user's `claude --resume <id>`
+	// from the takeover dir fails with "No conversation found." The
+	// resolution has to happen here (path still exists) rather than
+	// after the move (path is gone).
+	resolvedOldCwd := worktree.ResolveClaudeProjectCwd(run.WorktreePath)
+
+	// Stop the agent. Fire-and-forget — the kill-watcher SIGKILLs the
+	// process group, the goroutine's gated defers skip cleanup, the
+	// worktree stays on disk for our copy.
+	if cancel != nil {
+		cancel()
+	}
+
+	destPath, err := worktree.CopyForTakeover(ctx, runID, run.WorktreePath, baseDir)
+	if err != nil {
+		// Copy failed — the agent has been cancelled but the gated
+		// defers in runAgent suppressed all the normal cleanup. Roll
+		// back: clear the flag, do the cleanup ourselves, and mark the
+		// row terminal so it doesn't sit in 'running' forever and so a
+		// retry isn't permanently blocked by a stale takenOver entry.
+		s.abortTakeover(runID, run.WorktreePath, "")
+		return nil, fmt.Errorf("copy worktree: %w", err)
+	}
+
+	// CopyForTakeover removes the source: the move path renames it out
+	// of /tmp atomically, the overlay fallback explicitly Removes after
+	// the copy. Either way no further cleanup of the original is needed.
+
+	// Materialize the session JSONL under the takeover dir's project
+	// entry so `claude --resume` finds it. Done before the DB mark so
+	// that a copy failure rolls the whole takeover back rather than
+	// leaving the row in 'taken_over' state pointing at a destination
+	// the user can't actually resume from.
+	if err := worktree.MaterializeSessionForTakeover(resolvedOldCwd, destPath, run.SessionID); err != nil {
+		s.abortTakeover(runID, run.WorktreePath, destPath)
+		return nil, fmt.Errorf("copy session jsonl: %w", err)
+	}
+
+	ok, err := db.MarkAgentRunTakenOver(s.database, runID, destPath)
+	if err != nil {
+		// Same rollback as the copy-failure path. destPath needs
+		// removing too since the row never got marked.
+		s.abortTakeover(runID, run.WorktreePath, destPath)
+		return nil, fmt.Errorf("mark taken_over: %w", err)
+	}
+	if !ok {
+		// Race-loss: the goroutine wrote a real terminal status before
+		// our flag was set. Its natural defers ran (the gates evaluated
+		// false at that point), but ours skipped because the flag was
+		// set by the time they fired — abortTakeover catches them up.
+		// abortTakeover's guarded UPDATE will no-op since the row is
+		// already terminal, so the agent's actual outcome is preserved.
+		s.abortTakeover(runID, run.WorktreePath, destPath)
+		return nil, fmt.Errorf("%w: run %s", ErrTakeoverRaceLost, runID)
+	}
+
+	s.broadcastRunUpdate(runID, "taken_over")
+	toast.Info(s.wsHub, fmt.Sprintf("Taken over: run %s — resume in your terminal", shortRunID(runID)))
+
+	return &TakeoverResult{TakeoverPath: destPath, SessionID: run.SessionID}, nil
+}
+
+// abortTakeover unwinds the in-progress takeover state when CopyForTakeover
+// or the final DB mark fails. Two things have to happen: the runAgent
+// goroutine's gated cleanup (worktree.Remove, RemoveClaudeProjectDir,
+// the natural-completion DB write) was suppressed because the
+// takenOver flag is set, so we have to do it ourselves; and the run
+// row needs to reach a terminal state so the UI and the active-run
+// gate don't see a phantom running run forever.
+//
+// Notably we DO NOT delete s.takenOver[runID]. The flag must stay
+// sticky-on for the rest of the goroutine's lifetime — its gates
+// (handleCancelled, failRun, the deferred RemoveClaudeProjectDir, the
+// natural-completion block) re-read wasTakenOver at unpredictable
+// times relative to abortTakeover. Clearing the flag would let any
+// late-firing gate proceed with normal cleanup, which races our own
+// rollback: the goroutine's unconditional db.CompleteAgentRun would
+// overwrite our 'takeover_failed' stop_reason with 'cancelled', and
+// its RemoveClaudeProjectDir would run alongside ours. Leaving the
+// flag on keeps every gate closed and abortTakeover the sole writer.
+//
+// The retry-unblocking concern that motivated the original delete is
+// moot anyway: once we've SIGKILLed the agent and reached this code
+// path, there's no live run left to take over. A user retry creates
+// a new delegated run, not a new takeover of the same run.
+//
+// destPath may be empty (copy never produced one) or may point at a
+// partial directory; either way we RemoveAll it.
+func (s *Spawner) abortTakeover(runID, claudeCwd, destPath string) {
+	if destPath != "" {
+		// Use RemoveAt rather than os.RemoveAll so the bare's
+		// worktree registration is pruned. By the time we reach
+		// abortTakeover after a successful CopyForTakeover, the
+		// bare has a worktrees/<runID>/ entry whose gitdir points at
+		// destPath; just removing the directory leaves that entry
+		// dangling and breaks the next `git worktree add` or `move`
+		// against the same runID.
+		if err := worktree.RemoveAt(destPath, runID); err != nil {
+			log.Printf("[delegate] warning: abort takeover for %s: remove dest %s: %v", runID, destPath, err)
+		}
+	}
+	if claudeCwd != "" {
+		worktree.RemoveClaudeProjectDir(claudeCwd)
+		// Remove the actual worktree path (which equals claudeCwd for
+		// runs with a worktree, the only kind takeover supports). Using
+		// claudeCwd rather than runID-derived runDir() guards against
+		// the source worktree ever living outside /tmp/triagefactory-
+		// runs/<runID> — Remove(runID) would silently target the
+		// canonical path and miss the actual one.
+		if err := worktree.RemoveAt(claudeCwd, runID); err != nil {
+			log.Printf("[delegate] warning: abort takeover for %s: remove worktree: %v", runID, err)
+		}
+	}
+
+	// If the row is still non-terminal (copy/DB-error path: the
+	// goroutine's gated handleCancelled didn't write anything), mark it
+	// cancelled so the UI and the active-run gate don't see a phantom
+	// running run forever. If the row is already terminal (race-loss
+	// path), this no-ops and we leave the agent's real outcome alone.
+	ok, err := db.MarkAgentRunCancelledIfActive(s.database, runID, "takeover_failed", "Takeover failed; run was cancelled")
+	if err != nil {
+		log.Printf("[delegate] warning: abort takeover for %s: mark cancelled: %v", runID, err)
+		return
+	}
+	if ok {
+		s.broadcastRunUpdate(runID, "cancelled")
+	}
+}
+
 // runConfig holds everything the generic agent runner needs.
 type runConfig struct {
 	scope    string // what the agent is scoped to (repo, PR, issue)
@@ -176,14 +450,19 @@ func (s *Spawner) Delegate(task domain.Task, explicitPromptID string, triggerTyp
 		defer func() {
 			s.mu.Lock()
 			delete(s.cancels, runID)
+			// takenOver is intentionally NOT deleted here — Takeover
+			// is still running its copy/finalize work in another
+			// goroutine and reads wasTakenOver() up to the very last
+			// step. Leaving the entry set forever costs a few bytes
+			// per takeover and avoids subtle TOCTOU races.
 			s.mu.Unlock()
 			cancel()
 			// Drain the per-entity firing queue. Fires after every
 			// terminal status (completed, failed, cancelled,
-			// task_unsolvable, pending_approval) since this defer
-			// runs unconditionally on goroutine exit. notifyDrainer
-			// itself filters out manual runs — manual is decoupled
-			// from the queue per SKY-189.
+			// task_unsolvable, pending_approval, taken_over) since
+			// this defer runs unconditionally on goroutine exit.
+			// notifyDrainer itself filters out manual runs — manual
+			// is decoupled from the queue per SKY-189.
 			s.notifyDrainer(triggerType, task.EntityID)
 		}()
 
@@ -202,7 +481,7 @@ func (s *Spawner) Delegate(task domain.Task, explicitPromptID string, triggerTyp
 
 		if setupErr != nil {
 			if ctx.Err() != nil {
-				s.handleCancelled(runID, startTime, cfg.hasWT)
+				s.handleCancelled(runID, startTime, cfg.wtPath)
 				return
 			}
 			s.failRun(runID, task.ID, triggerType, setupErr.Error())
@@ -346,7 +625,14 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	if cfg.hasWT {
 		// Best-effort cleanup on return; the worktree ID is unique per run
 		// so a failed remove just leaves a dangling directory under _worktrees.
-		defer func() { _ = worktree.Remove(runID) }()
+		// Skipped when the run was taken over — Takeover() needs the worktree
+		// to still exist for its copy and explicitly cleans up afterward.
+		defer func() {
+			if s.wasTakenOver(runID) {
+				return
+			}
+			_ = worktree.RemoveAt(cfg.wtPath, runID)
+		}()
 	}
 
 	// Determine the cwd for the child claude. For tasks without a repo (Jira no-match)
@@ -361,11 +647,25 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 			s.failRun(runID, task.ID, triggerType, "failed to create run cwd: "+err.Error())
 			return
 		}
-		defer worktree.RemoveRunCwd(runID)
+		// Same takeover gate as the worktree.Remove defer above — Takeover
+		// owns destruction of the no-cwd dir until after its copy runs.
+		defer func() {
+			if s.wasTakenOver(runID) {
+				return
+			}
+			worktree.RemoveRunCwd(runID)
+		}()
 	}
 	// Nuke the ghost ~/.claude/projects/<encoded-cwd> that claude auto-creates
 	// for this cwd. Safety-railed to only touch entries under $TMPDIR.
-	defer worktree.RemoveClaudeProjectDir(claudeCwd)
+	// Skipped when the run was taken over by the user — the JSONL inside
+	// is the conversation state the resumed `claude --resume` reads.
+	defer func() {
+		if s.wasTakenOver(runID) {
+			return
+		}
+		worktree.RemoveClaudeProjectDir(claudeCwd)
+	}()
 
 	// Materialize any prior task memories into ./task_memory/ so the agent
 	// sees what previous iterations on this task have already tried. The
@@ -395,7 +695,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 
 	s.updateStatus(runID, "agent_starting")
 	if ctx.Err() != nil {
-		s.handleCancelled(runID, startTime, cfg.hasWT)
+		s.handleCancelled(runID, startTime, cfg.wtPath)
 		return
 	}
 
@@ -452,6 +752,16 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	completion, streamErr := s.consumeClaudeStream(stdout, runID, stream)
 	if streamErr != nil {
 		log.Printf("[delegate] scanner error for run %s: %v", runID, streamErr)
+	}
+
+	// If Takeover() flipped the takenOver flag while we were streaming,
+	// every code path below — completion ingestion, status updates, fail
+	// paths, toasts — would step on the takeover lifecycle. Bail out
+	// silently: Takeover owns the DB row and the worktree from here on.
+	// We still drain cmd.Wait so the subprocess is reaped.
+	if s.wasTakenOver(runID) {
+		_ = cmd.Wait()
+		return
 	}
 
 	if completion != nil {
@@ -542,7 +852,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 
 	if err := cmd.Wait(); err != nil {
 		if ctx.Err() != nil {
-			s.handleCancelled(runID, startTime, cfg.hasWT)
+			s.handleCancelled(runID, startTime, cfg.wtPath)
 			return
 		}
 		stderr := stderrBuf.String()
@@ -595,6 +905,13 @@ func (s *Spawner) consumeClaudeStream(stdout io.Reader, runID string, stream *st
 					log.Printf("[delegate] warning: failed to persist session_id for run %s: %v", runID, err)
 				}
 				sessionPersisted = true
+				// Re-broadcast the running status so the frontend
+				// re-fetches the run row and picks up SessionID. The
+				// "Take over" button is gated on session id presence;
+				// without this nudge it stays hidden until the next
+				// status flip (often "running" → terminal), which is
+				// too late to be useful.
+				s.broadcastRunUpdate(runID, "running")
 			}
 		}
 
@@ -973,15 +1290,29 @@ func (s *Spawner) resolvePrompt(task domain.Task, explicitPromptID string) (stri
 	return p.ID, p.Body, nil
 }
 
-func (s *Spawner) handleCancelled(runID string, startTime time.Time, hasWT bool) {
+// handleCancelled finalizes a run that exited via context cancel. wtPath
+// is the worktree directory the run was using (empty for no-cwd Jira
+// runs); we clean it up explicitly here in addition to runAgent's
+// deferred cleanup so the bare-repo registration is pruned even if the
+// goroutine returns through one of the early paths that doesn't reach
+// the defer (e.g., setupErr before the defer is installed).
+func (s *Spawner) handleCancelled(runID string, startTime time.Time, wtPath string) {
+	if s.wasTakenOver(runID) {
+		// Takeover owns the DB row, the worktree, and the broadcast from
+		// here on — it needs the temp worktree to stay on disk until its
+		// copy completes, then will explicitly remove it. The cancel
+		// that woke us up was just the mechanism for stopping the
+		// headless process; everything else is Takeover's job.
+		return
+	}
 	elapsed := int(time.Since(startTime).Milliseconds())
 	if err := db.CompleteAgentRun(s.database, runID, "cancelled", 0, elapsed, 0, "cancelled", "Cancelled by user"); err != nil {
 		log.Printf("[delegate] warning: failed to record cancellation for run %s: %v", runID, err)
 	}
 	s.broadcastRunUpdate(runID, "cancelled")
-	if hasWT {
+	if wtPath != "" {
 		// Best-effort cleanup; same rationale as the defer in runAgent.
-		_ = worktree.Remove(runID)
+		_ = worktree.RemoveAt(wtPath, runID)
 	}
 }
 
@@ -1001,6 +1332,12 @@ func (s *Spawner) updateBreakerCounter(taskID, triggerType, status string) {
 }
 
 func (s *Spawner) failRun(runID, taskID, triggerType, errMsg string) {
+	if s.wasTakenOver(runID) {
+		// Takeover finalized this run; whatever error the goroutine
+		// observed is downstream of the SIGKILL we sent it. Don't
+		// overwrite taken_over with failed.
+		return
+	}
 	log.Printf("[delegate] run %s failed: %s", runID, errMsg)
 
 	if _, err := s.database.Exec(`UPDATE runs SET status = 'failed' WHERE id = ?`, runID); err != nil {

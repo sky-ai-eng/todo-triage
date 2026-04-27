@@ -1,0 +1,374 @@
+package delegate
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	_ "github.com/mattn/go-sqlite3"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+)
+
+// These tests cover the validation paths Takeover() walks BEFORE it
+// touches the worktree or DB row state. They don't need a real claude
+// subprocess or git repo — Takeover bails out early on any of them
+// with a typed sentinel error, and the HTTP handler maps those
+// sentinels to status codes.
+//
+// The post-validation paths (copy, mark, abortTakeover) are exercised
+// by the worktree and DB suites because they're the ones with
+// non-trivial state machines; here we just guard the early-return
+// contract the handler depends on.
+
+// newTakeoverTestDB spins up an in-memory SQLite with the full schema
+// so we can seed runs in any state Takeover validation cares about.
+// Forcing single-conn because :memory: is per-conn — a pooled second
+// connection would see an empty schema.
+func newTakeoverTestDB(t *testing.T) *sql.DB {
+	t.Helper()
+	database, err := sql.Open("sqlite3", ":memory:?_foreign_keys=on")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	database.SetMaxOpenConns(1)
+	database.SetMaxIdleConns(1)
+	t.Cleanup(func() { database.Close() })
+	if err := db.Migrate(database); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if err := db.SeedEventTypes(database); err != nil {
+		t.Fatalf("seed events: %v", err)
+	}
+	return database
+}
+
+// seedRun inserts a run with the requested fields and returns its ID.
+// We bypass the spawner's Delegate flow because the validation tests
+// don't need a real goroutine — only a row in the runs table.
+func seedRun(t *testing.T, database *sql.DB, runID, sessionID, worktreePath string) {
+	t.Helper()
+	entity, _, err := db.FindOrCreateEntity(database, "github", "owner/repo#"+runID, "pr", "T", "https://example.com/"+runID)
+	if err != nil {
+		t.Fatalf("create entity: %v", err)
+	}
+	eventID, err := db.RecordEvent(database, domain.Event{
+		EventType:    domain.EventGitHubPRCICheckFailed,
+		EntityID:     &entity.ID,
+		MetadataJSON: `{"check_name":"build"}`,
+	})
+	if err != nil {
+		t.Fatalf("record event: %v", err)
+	}
+	task, _, err := db.FindOrCreateTask(database, entity.ID, domain.EventGitHubPRCICheckFailed, runID, eventID, 0.5)
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	if existing, _ := db.GetPrompt(database, "test-prompt"); existing == nil {
+		if err := db.CreatePrompt(database, domain.Prompt{ID: "test-prompt", Name: "T", Body: "x", Source: "user"}); err != nil {
+			t.Fatalf("create prompt: %v", err)
+		}
+	}
+	if err := db.CreateAgentRun(database, domain.AgentRun{
+		ID:           runID,
+		TaskID:       task.ID,
+		PromptID:     "test-prompt",
+		Status:       "running",
+		Model:        "claude-sonnet-4-6",
+		WorktreePath: worktreePath,
+	}); err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE runs SET status = 'running', session_id = ?, worktree_path = ? WHERE id = ?`, sessionID, worktreePath, runID); err != nil {
+		t.Fatalf("update run: %v", err)
+	}
+}
+
+// newSpawnerWithActiveCancel returns a spawner with one fake "active"
+// run registered in the cancels map — Takeover's atomic active-check
+// requires this to pass before doing any other work.
+func newSpawnerWithActiveCancel(database *sql.DB, runID string) *Spawner {
+	s := NewSpawner(database, nil, nil, "claude-sonnet-4-6")
+	if runID != "" {
+		_, cancel := context.WithCancel(context.Background())
+		s.cancels[runID] = cancel
+	}
+	return s
+}
+
+// TestTakeover_EmptyBaseDir is the cheapest validation: no DB or
+// goroutine state needed. Returned error is a plain message, not a
+// sentinel — empty base dir is a server config bug, not a client
+// problem, and the handler routes uncategorized errors to 500.
+func TestTakeover_EmptyBaseDir(t *testing.T) {
+	s := NewSpawner(nil, nil, nil, "")
+	_, err := s.Takeover("any-run", "")
+	if err == nil {
+		t.Fatal("expected error on empty baseDir")
+	}
+	if errors.Is(err, ErrTakeoverInvalidState) ||
+		errors.Is(err, ErrTakeoverInProgress) ||
+		errors.Is(err, ErrTakeoverRaceLost) {
+		t.Errorf("empty baseDir should not match a takeover sentinel; got %v", err)
+	}
+}
+
+// TestTakeover_NonexistentRun: row doesn't exist → ErrTakeoverInvalidState.
+// Maps to 400 in the handler.
+func TestTakeover_NonexistentRun(t *testing.T) {
+	database := newTakeoverTestDB(t)
+	s := NewSpawner(database, nil, nil, "")
+
+	_, err := s.Takeover("no-such-run", "/tmp/dest")
+	if !errors.Is(err, ErrTakeoverInvalidState) {
+		t.Errorf("err = %v, want ErrTakeoverInvalidState", err)
+	}
+}
+
+// TestTakeover_NoSessionID: row exists but session_id is empty (the
+// agent hasn't produced its system/init event yet). Refuse — the
+// resume command would have nothing to attach to.
+func TestTakeover_NoSessionID(t *testing.T) {
+	database := newTakeoverTestDB(t)
+	seedRun(t, database, "run-no-sid", "", "/tmp/wt")
+	s := newSpawnerWithActiveCancel(database, "run-no-sid")
+
+	_, err := s.Takeover("run-no-sid", "/tmp/dest")
+	if !errors.Is(err, ErrTakeoverInvalidState) {
+		t.Errorf("err = %v, want ErrTakeoverInvalidState", err)
+	}
+}
+
+// TestTakeover_NoWorktreePath: the no-repo Jira case — there's no
+// worktree to take over, so the operation doesn't make sense.
+func TestTakeover_NoWorktreePath(t *testing.T) {
+	database := newTakeoverTestDB(t)
+	seedRun(t, database, "run-no-wt", "sess-1", "")
+	s := newSpawnerWithActiveCancel(database, "run-no-wt")
+
+	_, err := s.Takeover("run-no-wt", "/tmp/dest")
+	if !errors.Is(err, ErrTakeoverInvalidState) {
+		t.Errorf("err = %v, want ErrTakeoverInvalidState", err)
+	}
+}
+
+// TestTakeover_NoActiveRun: the row passes validation, has a session,
+// has a worktree path — but the cancels map doesn't have an entry,
+// meaning the goroutine has already exited (run finished naturally
+// just before we ran). Refuse; the handler maps this to 400.
+func TestTakeover_NoActiveRun(t *testing.T) {
+	database := newTakeoverTestDB(t)
+	seedRun(t, database, "run-not-active", "sess-1", "/tmp/wt")
+	// No cancels[runID] set.
+	s := NewSpawner(database, nil, nil, "")
+
+	_, err := s.Takeover("run-not-active", "/tmp/dest")
+	if !errors.Is(err, ErrTakeoverInvalidState) {
+		t.Errorf("err = %v, want ErrTakeoverInvalidState", err)
+	}
+}
+
+// TestTakeover_AlreadyInProgress: a second concurrent takeover for the
+// same run hits the takenOver map check and gets ErrTakeoverInProgress.
+// Maps to 409 in the handler. We pre-set the takenOver flag rather
+// than running two real Takeover calls because the second one would
+// race the first's later steps.
+func TestTakeover_AlreadyInProgress(t *testing.T) {
+	database := newTakeoverTestDB(t)
+	seedRun(t, database, "run-double", "sess-1", "/tmp/wt")
+	s := newSpawnerWithActiveCancel(database, "run-double")
+	s.takenOver["run-double"] = true
+
+	_, err := s.Takeover("run-double", "/tmp/dest")
+	if !errors.Is(err, ErrTakeoverInProgress) {
+		t.Errorf("err = %v, want ErrTakeoverInProgress", err)
+	}
+}
+
+// TestWasTakenOver verifies the small accessor used by every gated
+// cleanup path. A nil-safe read — the map is always initialized in
+// NewSpawner — but cheap to assert.
+func TestWasTakenOver(t *testing.T) {
+	s := NewSpawner(nil, nil, nil, "")
+	if s.wasTakenOver("missing") {
+		t.Error("expected false for missing entry")
+	}
+	s.takenOver["present"] = true
+	if !s.wasTakenOver("present") {
+		t.Error("expected true after set")
+	}
+}
+
+// TestAbortTakeover_KeepsFlagSticky is the regression guard for a
+// subtle race: clearing s.takenOver[runID] in abortTakeover would let
+// the runAgent goroutine's late-firing gates (handleCancelled, failRun,
+// the deferred RemoveClaudeProjectDir, the natural-completion block)
+// proceed with their normal cleanup the moment they re-read
+// wasTakenOver. The goroutine's unconditional db.CompleteAgentRun
+// would overwrite our 'takeover_failed' stop_reason with 'cancelled',
+// and its RemoveClaudeProjectDir would run alongside ours.
+//
+// Leaving the flag set keeps every gate closed and abortTakeover the
+// sole writer. This test pins that invariant down: after abortTakeover
+// runs, wasTakenOver(runID) must still return true.
+func TestAbortTakeover_KeepsFlagSticky(t *testing.T) {
+	database := newTakeoverTestDB(t)
+	seedRun(t, database, "run-abort", "sess-x", "/tmp/wt-abort")
+	s := newSpawnerWithActiveCancel(database, "run-abort")
+	s.takenOver["run-abort"] = true
+
+	s.abortTakeover("run-abort", "", "")
+
+	if !s.wasTakenOver("run-abort") {
+		t.Error("abortTakeover cleared the takenOver flag — late goroutine gates can now race the rollback")
+	}
+}
+
+// TestAbortTakeover_MarksRowTerminal: when the row is still in a
+// non-terminal status (the typical post-failure state because the
+// goroutine's gated handleCancelled didn't write anything), the
+// rollback marks it cancelled with stop_reason='takeover_failed' so
+// the UI sees a closed run instead of a phantom 'running'.
+func TestAbortTakeover_MarksRowTerminal(t *testing.T) {
+	database := newTakeoverTestDB(t)
+	seedRun(t, database, "run-mark", "sess-y", "/tmp/wt-mark")
+	s := newSpawnerWithActiveCancel(database, "run-mark")
+	s.takenOver["run-mark"] = true
+
+	s.abortTakeover("run-mark", "", "")
+
+	got, err := db.GetAgentRun(database, "run-mark")
+	if err != nil {
+		t.Fatalf("GetAgentRun: %v", err)
+	}
+	if got.Status != "cancelled" {
+		t.Errorf("Status = %q, want cancelled", got.Status)
+	}
+	if got.StopReason != "takeover_failed" {
+		t.Errorf("StopReason = %q, want takeover_failed", got.StopReason)
+	}
+}
+
+// TestAbortTakeover_PrunesStaleWorktreeRegistration is the regression
+// guard for the destPath cleanup bug: abortTakeover used to call
+// os.RemoveAll on the takeover destination, which removes the directory
+// but leaves the bare's worktrees/<runID>/ metadata entry pointing at
+// a now-missing path. Future `git worktree add` or `move` against the
+// same runID would then fail with a "stale worktree" error until the
+// next manual prune.
+//
+// Switching abortTakeover to worktree.RemoveAt fixes this — RemoveAt
+// runs `git worktree prune` across all bares after the rmdir.
+func TestAbortTakeover_PrunesStaleWorktreeRegistration(t *testing.T) {
+	root := t.TempDir()
+	// Use HOME to scope the worktree package's reposDir / pruneAll
+	// sweep to a directory we control.
+	t.Setenv("HOME", root)
+
+	bareDir := filepath.Join(root, ".triagefactory", "repos", "owner", "repo.git")
+	if err := os.MkdirAll(filepath.Dir(bareDir), 0755); err != nil {
+		t.Fatalf("mkdir reposDir parent: %v", err)
+	}
+	gitArgs := []string{"-c", "init.defaultBranch=main"}
+	if out, err := exec.Command("git", append(gitArgs, "init", "--bare", "-b", "feature", bareDir)...).CombinedOutput(); err != nil {
+		t.Fatalf("git init bare: %v\n%s", err, out)
+	}
+
+	// Seed a commit on "feature" via a scratch worktree.
+	seed := filepath.Join(root, "seed")
+	mustGit(t, root, "clone", bareDir, seed)
+	mustGit(t, seed, "config", "user.email", "t@e.com")
+	mustGit(t, seed, "config", "user.name", "T")
+	mustGit(t, seed, "checkout", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(seed, "README.md"), []byte("seed"), 0644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	mustGit(t, seed, "add", "README.md")
+	mustGit(t, seed, "commit", "-m", "seed")
+	mustGit(t, seed, "push", "origin", "feature")
+
+	// Pretend a takeover got partway through: a linked worktree exists
+	// at destPath, registered with the bare. abortTakeover must
+	// dismantle this cleanly.
+	destPath := filepath.Join(root, "takeovers", "run-orphaned")
+	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+		t.Fatalf("mkdir takeovers parent: %v", err)
+	}
+	mustGit(t, bareDir, "worktree", "add", "--no-checkout", destPath, "feature")
+
+	database := newTakeoverTestDB(t)
+	seedRun(t, database, "run-orphaned", "sess-x", "/tmp/source-not-relevant-here")
+	s := newSpawnerWithActiveCancel(database, "run-orphaned")
+	s.takenOver["run-orphaned"] = true
+
+	s.abortTakeover("run-orphaned", "", destPath)
+
+	// destPath dir is gone (was removed by RemoveAt's RemoveAll).
+	if _, err := os.Stat(destPath); !os.IsNotExist(err) {
+		t.Errorf("destPath should have been removed (err=%v)", err)
+	}
+
+	// And — the load-bearing assertion — the bare's worktree list no
+	// longer references run-orphaned. Without the prune step in
+	// RemoveAt, this would still show the dangling registration.
+	listOut, err := exec.Command("git", "-C", bareDir, "worktree", "list", "--porcelain").Output()
+	if err != nil {
+		t.Fatalf("worktree list: %v", err)
+	}
+	list := string(listOut)
+	if strings.Contains(list, "run-orphaned") {
+		t.Errorf("bare still has stale worktree registration for run-orphaned after abortTakeover; output:\n%s", list)
+	}
+}
+
+// mustGit runs a git command in the given dir, fatal-erroring with the
+// combined output included so test failures are diagnosable. Mirrors
+// the gitCmd helper in the worktree package's test file.
+func mustGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(append([]string(nil), os.Environ()...),
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CONFIG_SYSTEM=/dev/null",
+		"HOME="+t.TempDir(),
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s in %s: %v\n%s", strings.Join(args, " "), dir, err, out)
+	}
+}
+
+// TestAbortTakeover_PreservesTerminalRow: when the row already reached
+// a terminal status (race-loss path: goroutine wrote a real outcome
+// before our flag could land), the rollback must NOT overwrite it
+// with 'cancelled' — the agent's actual result has to survive.
+func TestAbortTakeover_PreservesTerminalRow(t *testing.T) {
+	database := newTakeoverTestDB(t)
+	seedRun(t, database, "run-already-done", "sess-z", "/tmp/wt-done")
+	// Simulate the goroutine winning the race: row is already
+	// 'completed' before we run abortTakeover.
+	if _, err := database.Exec(`UPDATE runs SET status = 'completed', stop_reason = 'end_turn' WHERE id = ?`, "run-already-done"); err != nil {
+		t.Fatalf("force completed status: %v", err)
+	}
+	s := newSpawnerWithActiveCancel(database, "run-already-done")
+	s.takenOver["run-already-done"] = true
+
+	s.abortTakeover("run-already-done", "", "")
+
+	got, err := db.GetAgentRun(database, "run-already-done")
+	if err != nil {
+		t.Fatalf("GetAgentRun: %v", err)
+	}
+	if got.Status != "completed" {
+		t.Errorf("Status changed from completed to %q — abortTakeover must preserve the agent's real outcome", got.Status)
+	}
+	if got.StopReason != "end_turn" {
+		t.Errorf("StopReason changed from end_turn to %q", got.StopReason)
+	}
+}

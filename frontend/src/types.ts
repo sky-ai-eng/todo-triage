@@ -40,6 +40,8 @@ export interface AgentRun {
   NumTurns?: number
   StopReason?: string
   ResultSummary: string
+  SessionID?: string
+  WorktreePath?: string
 }
 
 export interface AgentMessage {

@@ -483,7 +483,12 @@ func (r *Router) RunDrainSweeper(ctx context.Context, interval time.Duration) {
 				continue
 			}
 			for _, eid := range ids {
-				if r.HasActiveAutoRunForEntity(eid) {
+				active, err := dbpkg.HasActiveAutoRunForEntity(r.db, eid)
+				if err != nil {
+					log.Printf("[router] drain sweeper: active-check error for %s: %v", eid, err)
+					continue
+				}
+				if active {
 					continue
 				}
 				r.DrainEntity(eid)

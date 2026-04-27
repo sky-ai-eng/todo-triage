@@ -89,7 +89,7 @@ func HasActiveAutoRunForEntity(database *sql.DB, entityID string) (bool, error) 
 		JOIN tasks t ON t.id = r.task_id
 		WHERE t.entity_id = ?
 		  AND r.trigger_type = 'event'
-		  AND r.status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable', 'pending_approval')
+		  AND r.status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable', 'pending_approval', 'taken_over')
 	`, entityID).Scan(&count)
 	return count > 0, err
 }

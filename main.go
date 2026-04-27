@@ -29,6 +29,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec"
+	"github.com/sky-ai-eng/triage-factory/cmd/install"
+	"github.com/sky-ai-eng/triage-factory/cmd/resume"
 )
 
 const defaultPort = 3000
@@ -43,8 +45,49 @@ func pluralize(n int, singular, plural string) string {
 	return plural
 }
 
+// printTopLevelHelp routes the two audiences (delegated Claude Code
+// agents vs. human users) to the right surface. Agents almost always
+// reach this through autocomplete / accidental invocation when they
+// were trying to run a scoped subcommand, so the first thing they
+// should see is the `exec` pointer; humans typically want the server
+// flags and the takeover-resume shortcuts. Keep it short — anything
+// longer goes in docs/usage.md, which we link to.
+func printTopLevelHelp() {
+	fmt.Println(`triagefactory — local-first AI triage for engineering backlogs.
+
+Run with no arguments to start the server (port 3000, opens browser).
+
+USER COMMANDS
+  triagefactory                            start the server
+  triagefactory --port N                   start on a custom port
+  triagefactory --no-browser               start without opening a browser
+  triagefactory install [--dest <path>]    symlink the binary onto PATH
+  triagefactory resume [<short-id>]        resume a taken-over session
+                                           (auto-resumes when there's only
+                                           one; picker otherwise)
+
+AGENT COMMANDS
+  Used by delegated Claude Code agents inside their worktree, not
+  meant for direct invocation by humans.
+
+  triagefactory exec <subcommand> ...      scoped GitHub / Jira ops
+                                           (run "triagefactory exec --help"
+                                           for the full list)
+  triagefactory status <run-id>            check a delegated run's status
+
+For configuration, polling, and feature details, see docs/usage.md.`)
+}
+
 func main() {
-	// Dual-mode dispatch: exec/status commands are CLI-only (used by Claude Code agent)
+	// Dual-mode dispatch:
+	//   exec/status — CLI-only, used by Claude Code agent.
+	//   resume      — user-facing, hands the terminal back into a
+	//                 previously taken-over Claude Code session.
+	//   install     — user-facing, symlinks the binary onto PATH so
+	//                 `triagefactory resume` works without a full path.
+	//   -h/--help   — top-level usage; the help text routes the two
+	//                 audiences (delegated agents vs human users) to
+	//                 the right surface.
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "exec":
@@ -52,6 +95,15 @@ func main() {
 			return
 		case "status":
 			exec.HandleStatus(os.Args[2:])
+			return
+		case "resume":
+			resume.Handle(os.Args[2:])
+			return
+		case "install":
+			install.Handle(os.Args[2:])
+			return
+		case "-h", "--help", "help":
+			printTopLevelHelp()
 			return
 		}
 	}
@@ -89,6 +141,11 @@ func main() {
 	addr := fmt.Sprintf(":%d", port)
 	fmt.Printf("Triage Factory running at http://localhost%s\n", addr)
 
+	// One-shot PATH hint. The `triagefactory resume` subcommand only
+	// works from any terminal once the binary's on PATH; nudge the
+	// user toward `triagefactory install` if it isn't. Best-effort.
+	hintInstallIfMissing()
+
 	if !noBrowser {
 		openBrowser(fmt.Sprintf("http://localhost%s", addr))
 	}
@@ -101,8 +158,27 @@ func main() {
 	}
 	srv.SetStatic(distFS)
 
-	// Clean up any orphaned worktrees from crashed runs
-	worktree.Cleanup()
+	// Clean up any orphaned worktrees from crashed runs. taken_over runs
+	// are preserved at the ~/.claude/projects level so the user can still
+	// resume their takeover sessions after a binary restart.
+	//
+	// On query error we still sweep worktree dirs and prune bare repos
+	// (those leaks compound fast — each can be GBs), but skip ALL
+	// ~/.claude/projects deletions: without the preserve set we can't
+	// distinguish a taken-over run's session JSONL from a regular
+	// orphan, and silently nuking a JSONL would break the user's ability
+	// to resume.
+	preserveIDs, err := db.ListTakenOverRunIDs(database)
+	if err != nil {
+		log.Printf("[server] WARNING: failed to load taken_over run ids — sweeping worktree dirs but skipping ~/.claude/projects cleanup to avoid clobbering active takeover sessions: %v", err)
+		worktree.CleanupWithOptions(worktree.CleanupOptions{SkipClaudeProjectCleanup: true})
+	} else {
+		preserveSet := make(map[string]bool, len(preserveIDs))
+		for _, id := range preserveIDs {
+			preserveSet[id] = true
+		}
+		worktree.CleanupWithOptions(worktree.CleanupOptions{PreserveClaudeProjectFor: preserveSet})
+	}
 
 	// Seed event type catalog, task_rules defaults, and default prompts.
 	// Order matters: task_rules FK to events_catalog(id), so catalog must be

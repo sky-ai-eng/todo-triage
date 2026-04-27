@@ -14,19 +14,60 @@
 
 # Custom port, no browser
 ./triagefactory --port 8080 --no-browser
+
+# Top-level help — points humans at the user commands and agents at exec.
+./triagefactory --help
 ```
 
 ## CLI subcommands
 
-The binary exposes subcommands used internally by delegation agents. You don't need to call these directly — they're invoked by Claude Code during delegated runs.
+The binary's subcommands fall into two audiences. Run `./triagefactory --help` for a one-screen summary.
+
+### User commands
+
+These are meant for you to invoke from a terminal.
 
 ```bash
-# Execute GitHub commands in the context of a delegated run
+# Symlink the binary onto PATH so `triagefactory resume` works from
+# any directory. Defaults: /usr/local/bin on macOS, ~/.local/bin on Linux.
+# Override with --dest /full/path/to/triagefactory.
+./triagefactory install
+
+# Resume a Claude Code session you previously took over via the
+# "Take over" button on a delegated run's card.
+#
+#   bare:                auto-resumes when there's exactly one
+#                        taken-over session; picker on stdin otherwise.
+#   <short-id> arg:      disambiguate by run-ID prefix (the 8-char id
+#                        from the takeover modal).
+#
+# `triagefactory resume` cd's to the takeover working tree and execs
+# `claude --resume <session-id>`, replacing the current process so
+# your terminal becomes the interactive Claude Code session directly.
+triagefactory resume
+triagefactory resume abc12345
+```
+
+The takeover working trees live under `~/.triagefactory/takeovers/run-<id>/` and persist across server restarts. `scripts/clean-slate.sh` wipes them when resetting local state.
+
+### Agent commands
+
+These are invoked by delegated Claude Code agents inside their worktree, not by you. Documented for completeness.
+
+```bash
+# Scoped GitHub commands the agent uses instead of touching the
+# GitHub API directly — credentials stay in the OS keychain and
+# every call is logged to run_artifacts.
 ./triagefactory exec gh pr view --owner sky-ai-eng --repo myrepo --number 42
 
-# Check agent run status
+# Scoped Jira commands, same shape.
+./triagefactory exec jira issue view SKY-194
+
+# Check a delegated run's status (used by the agent's lifecycle hooks).
 ./triagefactory status <run-id>
 ```
+
+Run `./triagefactory exec --help` for the full subcommand list.
 
 ## Configuration
 
