@@ -40,9 +40,12 @@ func Open() (*sql.DB, error) {
 		return nil, err
 	}
 
-	// Single connection serializes writes at the Go-pool layer, which
-	// makes SQLITE_BUSY structurally impossible — contention queues in
-	// Go rather than racing for SQLite's file lock. WAL still allows
+	// A single connection serializes this process's DB work at the
+	// Go-pool layer, eliminating in-process races for SQLite's file
+	// lock by queueing contention in Go instead. SQLITE_BUSY can still
+	// happen from external contention, such as another process holding
+	// a write transaction or a long-running read transaction, so the
+	// busy_timeout above remains an important backstop. WAL still allows
 	// other processes (e.g. `triagefactory exec` invocations) to read
 	// concurrently against the same file. SetConnMaxLifetime(0) keeps
 	// the one connection alive for the process lifetime so we don't
