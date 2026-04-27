@@ -31,6 +31,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/cmd/exec"
 	"github.com/sky-ai-eng/triage-factory/cmd/install"
 	"github.com/sky-ai-eng/triage-factory/cmd/resume"
+	"github.com/sky-ai-eng/triage-factory/cmd/uninstall"
 )
 
 const defaultPort = 3000
@@ -69,6 +70,9 @@ USER COMMANDS
   triagefactory --no-browser               start without opening a browser
   triagefactory --version                  print the binary's version
   triagefactory install [--dest <path>]    symlink the binary onto PATH
+  triagefactory uninstall [--yes]          wipe local state (db, config,
+                                           keychain, takeovers); leaves
+                                           the binary itself in place
   triagefactory resume [<short-id>]        resume a taken-over session
                                            (auto-resumes when there's only
                                            one; picker otherwise)
@@ -92,6 +96,9 @@ func main() {
 	//                 previously taken-over Claude Code session.
 	//   install     — user-facing, symlinks the binary onto PATH so
 	//                 `triagefactory resume` works without a full path.
+	//   uninstall   — user-facing, wipes everything install + the server
+	//                 leave behind on the host (db, config, keychain,
+	//                 takeover dirs). Doesn't remove the binary itself.
 	//   -h/--help   — top-level usage; the help text routes the two
 	//                 audiences (delegated agents vs human users) to
 	//                 the right surface.
@@ -108,6 +115,9 @@ func main() {
 			return
 		case "install":
 			install.Handle(os.Args[2:])
+			return
+		case "uninstall":
+			uninstall.Handle(os.Args[2:])
 			return
 		case "-h", "--help", "help":
 			printTopLevelHelp()
