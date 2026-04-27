@@ -949,6 +949,87 @@ func TestCopyForTakeover_ExistingDest(t *testing.T) {
 	}
 }
 
+// TestCopyForTakeover_ExistingDest_NotADirectory — the previous early-
+// return treated any os.Stat success as "we're done." If a regular
+// file ended up at the destination (typo, errant touch), the endpoint
+// would return that path and the resume command would fail when the
+// user tried to `cd` into a file. Validate that case is now an
+// explicit error.
+func TestCopyForTakeover_ExistingDest_NotADirectory(t *testing.T) {
+	_, srcWorktree := setupBareWithBranch(t)
+	baseDir := t.TempDir()
+
+	// Pre-create a regular file at where the destination would land.
+	destPath := filepath.Join(baseDir, "run-conflict")
+	if err := os.WriteFile(destPath, []byte("not a directory"), 0644); err != nil {
+		t.Fatalf("write conflicting file: %v", err)
+	}
+
+	_, err := CopyForTakeover(context.Background(), "conflict", srcWorktree, baseDir)
+	if err == nil {
+		t.Fatal("expected error when destination is a regular file")
+	}
+	if !strings.Contains(err.Error(), "not a directory") {
+		t.Errorf("error %q should mention 'not a directory'", err.Error())
+	}
+	// Error message should hint at remediation so the user knows what to do.
+	if !strings.Contains(err.Error(), "remove or rename") {
+		t.Errorf("error %q should suggest remove/rename", err.Error())
+	}
+}
+
+// TestCopyForTakeover_ExistingDest_BrokenWorktree — the destination is
+// a directory but contains no git metadata (e.g., interrupted previous
+// attempt or someone manually mkdir'd it). The bare stat check would
+// previously pass and we'd hand the user a useless path. Validation
+// catches it now.
+func TestCopyForTakeover_ExistingDest_BrokenWorktree(t *testing.T) {
+	_, srcWorktree := setupBareWithBranch(t)
+	baseDir := t.TempDir()
+
+	// Pre-create an empty directory where the destination would land.
+	destPath := filepath.Join(baseDir, "run-empty")
+	if err := os.MkdirAll(destPath, 0755); err != nil {
+		t.Fatalf("mkdir empty dest: %v", err)
+	}
+
+	_, err := CopyForTakeover(context.Background(), "empty", srcWorktree, baseDir)
+	if err == nil {
+		t.Fatal("expected error when destination is an empty (non-worktree) directory")
+	}
+	if !strings.Contains(err.Error(), "not a git worktree") {
+		t.Errorf("error %q should identify the directory as not-a-worktree", err.Error())
+	}
+}
+
+// TestCopyForTakeover_ExistingDest_DanglingGitPointer — destination
+// looks like a linked worktree (has a `.git` pointer file) but the
+// gitdir it references doesn't exist. Common when the user wipes
+// ~/.triagefactory/repos. Resume in this dir would fail any git op,
+// so validation must reject.
+func TestCopyForTakeover_ExistingDest_DanglingGitPointer(t *testing.T) {
+	_, srcWorktree := setupBareWithBranch(t)
+	baseDir := t.TempDir()
+
+	destPath := filepath.Join(baseDir, "run-dangling")
+	if err := os.MkdirAll(destPath, 0755); err != nil {
+		t.Fatalf("mkdir dest: %v", err)
+	}
+	// Pointer file referencing a path that doesn't exist.
+	bogus := filepath.Join(t.TempDir(), "vanished-gitdir")
+	if err := os.WriteFile(filepath.Join(destPath, ".git"), []byte("gitdir: "+bogus+"\n"), 0644); err != nil {
+		t.Fatalf("write .git pointer: %v", err)
+	}
+
+	_, err := CopyForTakeover(context.Background(), "dangling", srcWorktree, baseDir)
+	if err == nil {
+		t.Fatal("expected error when .git pointer is dangling")
+	}
+	if !strings.Contains(err.Error(), "not a git worktree") {
+		t.Errorf("error %q should identify the dest as not-a-worktree", err.Error())
+	}
+}
+
 // TestCopyForTakeover_Validation — early-return error cases that don't
 // need a real git repo.
 func TestCopyForTakeover_Validation(t *testing.T) {

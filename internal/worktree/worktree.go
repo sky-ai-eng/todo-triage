@@ -562,10 +562,20 @@ func CopyForTakeover(ctx context.Context, runID, srcWorktree, baseDir string) (s
 	// fail validating the now-missing source even though the work is
 	// already done.
 	if _, err := os.Stat(destDir); err == nil {
-		// A previous takeover for the same run was already materialized.
-		// Returning the existing path is the right call — re-invoking
-		// the endpoint shouldn't clobber a working copy the user may
-		// already have local edits in.
+		// A previous takeover for the same run was already materialized
+		// — IF the existing path is actually a usable worktree. Validate
+		// it before returning. A regular file at this path (typo, errant
+		// `touch`), an empty directory left behind by an interrupted
+		// previous attempt, or a directory whose `.git` pointer
+		// references a gitdir that no longer exists would all "succeed"
+		// the bare stat check but be useless for resume — the user
+		// would `cd` in and find nothing works.
+		if err := validateExistingTakeoverDest(ctx, destDir); err != nil {
+			return "", fmt.Errorf("takeover: existing destination at %s is not a usable worktree (%w); remove or rename it and retry", destDir, err)
+		}
+		// Returning the existing path is the right call here — re-
+		// invoking the endpoint shouldn't clobber a working copy the
+		// user may already have local edits in.
 		return destDir, nil
 	} else if !os.IsNotExist(err) {
 		return "", fmt.Errorf("takeover: stat destination: %w", err)
@@ -633,6 +643,39 @@ func CopyForTakeover(ctx context.Context, runID, srcWorktree, baseDir string) (s
 
 	log.Printf("[worktree] takeover via overlay: %s -> %s (branch %s)", srcWorktree, destDir, branch)
 	return destDir, nil
+}
+
+// validateExistingTakeoverDest checks that a path which already exists
+// at the takeover destination is healthy enough to resume from.
+// "Healthy" means: it's a directory, and `git rev-parse --git-dir`
+// succeeds inside it. The git probe is cheap (sub-millisecond) and
+// catches the cases a bare os.Stat doesn't:
+//
+//   - Path is a regular file (returned because os.Stat doesn't care).
+//     User would `cd` into nothing.
+//   - Path is an empty directory left over from an interrupted previous
+//     takeover (stat passes but there's no git metadata).
+//   - Path has a `.git` pointer file referencing a gitdir that no
+//     longer exists (user wiped ~/.triagefactory/repos, or the bare
+//     was deleted). Pointer parses fine, but git ops fail.
+//
+// On any of these we return an error so CopyForTakeover surfaces a
+// clear message asking the user to remove or rename the existing
+// path. We deliberately don't auto-recover by deleting — the user may
+// have intentionally placed something there (e.g., manually inspected
+// a previous takeover), and silent destruction would be hostile.
+func validateExistingTakeoverDest(ctx context.Context, path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("stat: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("not a directory")
+	}
+	if _, err := gitOutputCtx(ctx, path, "rev-parse", "--git-dir"); err != nil {
+		return fmt.Errorf("not a git worktree: %w", err)
+	}
+	return nil
 }
 
 // tryMoveWorktree attempts `git worktree move <src> <dest>` and returns
