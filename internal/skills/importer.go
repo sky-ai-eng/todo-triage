@@ -74,11 +74,11 @@ func ImportAll(database *sql.DB) ImportResult {
 			seenFiles[normalizedPath] = struct{}{}
 
 			result.Scanned++
-			if err := importSkillFile(database, normalizedPath); err != nil {
+			if err := importSkillFile(database, path, normalizedPath); err != nil {
 				if err == errSkillUnchanged || err == errSkillDuplicate {
 					result.Skipped++
 				} else {
-					result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", normalizedPath, err))
+					result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", path, err))
 				}
 			} else {
 				result.Imported++
@@ -105,7 +105,7 @@ var (
 	errSkillDuplicate = fmt.Errorf("duplicate imported skill")
 )
 
-func importSkillFile(database *sql.DB, path string) error {
+func importSkillFile(database *sql.DB, path string, canonicalPath string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -114,9 +114,9 @@ func importSkillFile(database *sql.DB, path string) error {
 	content := string(data)
 	name, description, body := parseSkillFile(content, path)
 
-	// Deterministic ID from the normalized file path so re-imports are idempotent
+	// Deterministic ID from the canonical file path so re-imports are idempotent
 	// even when the same file is discovered as relative/absolute or via symlink.
-	id := promptIDForPath(path)
+	id := promptIDForPath(canonicalPath)
 
 	// Check if already exists
 	existing, err := db.GetPrompt(database, id)
@@ -258,10 +258,15 @@ func findVisibleImportedPromptByContent(database *sql.DB, name, body string) (st
 
 func hideDuplicateImportedPrompts(database *sql.DB) (int, error) {
 	rows, err := database.Query(`
-		SELECT id, name, body, hidden
-		FROM prompts
-		WHERE source = 'imported'
-		ORDER BY hidden ASC, updated_at DESC, created_at DESC, id ASC
+		SELECT p.id, p.name, p.body, p.hidden,
+		       (
+		           SELECT COUNT(*)
+		           FROM prompt_triggers t
+		           WHERE t.prompt_id = p.id
+		       ) AS trigger_count
+		FROM prompts p
+		WHERE p.source = 'imported'
+		ORDER BY p.hidden ASC, trigger_count DESC, p.updated_at DESC, p.created_at DESC, p.id ASC
 	`)
 	if err != nil {
 		return 0, err
@@ -276,8 +281,9 @@ func hideDuplicateImportedPrompts(database *sql.DB) (int, error) {
 			name   string
 			body   string
 			hidden bool
+			refs   int
 		)
-		if err := rows.Scan(&id, &name, &body, &hidden); err != nil {
+		if err := rows.Scan(&id, &name, &body, &hidden, &refs); err != nil {
 			_ = rows.Close()
 			return 0, err
 		}
@@ -288,6 +294,12 @@ func hideDuplicateImportedPrompts(database *sql.DB) (int, error) {
 			continue
 		}
 		if hidden {
+			continue
+		}
+		// Keep prompts that are still bound to triggers visible so bindings
+		// don't point at hidden prompts. Prompt cleanup stays conservative:
+		// we only hide unreferenced duplicates.
+		if refs > 0 {
 			continue
 		}
 		idsToHide = append(idsToHide, id)

@@ -27,6 +27,9 @@ func newTestDB(t *testing.T) *sql.DB {
 	if err := db.Migrate(database); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
+	if err := db.SeedEventTypes(database); err != nil {
+		t.Fatalf("seed event types: %v", err)
+	}
 	return database
 }
 
@@ -80,6 +83,30 @@ func countHiddenImportedPrompts(t *testing.T, database *sql.DB) int {
 		t.Fatalf("count hidden imported prompts: %v", err)
 	}
 	return count
+}
+
+func importedPromptName(t *testing.T, database *sql.DB) string {
+	t.Helper()
+	var name string
+	if err := database.QueryRow(`
+		SELECT name
+		FROM prompts
+		WHERE source = 'imported' AND hidden = 0
+		ORDER BY updated_at DESC
+		LIMIT 1
+	`).Scan(&name); err != nil {
+		t.Fatalf("load imported prompt name: %v", err)
+	}
+	return name
+}
+
+func promptHidden(t *testing.T, database *sql.DB, id string) bool {
+	t.Helper()
+	var hidden bool
+	if err := database.QueryRow(`SELECT hidden FROM prompts WHERE id = ?`, id).Scan(&hidden); err != nil {
+		t.Fatalf("load prompt hidden state for %s: %v", id, err)
+	}
+	return hidden
 }
 
 func TestImportAll_DedupesResolvedSearchDirs(t *testing.T) {
@@ -171,5 +198,105 @@ func TestImportAll_HidesExistingDuplicateImportedPrompts(t *testing.T) {
 	}
 	if got := countHiddenImportedPrompts(t, database); got != 1 {
 		t.Fatalf("expected 1 hidden imported prompt after dedupe, got %d", got)
+	}
+}
+
+func TestImportAll_UsesDiscoveredPathForDefaultName(t *testing.T) {
+	home := t.TempDir()
+	project := t.TempDir()
+	external := t.TempDir()
+	t.Setenv("HOME", home)
+	chdir(t, project)
+
+	targetDir := filepath.Join(external, "real-skill")
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		t.Fatalf("mkdir external skill dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(targetDir, "SKILL.md"), []byte("Keep PRs reviewable."), 0644); err != nil {
+		t.Fatalf("write external skill: %v", err)
+	}
+
+	linkDir := filepath.Join(project, ".claude", "skills", "alias-skill")
+	if err := os.MkdirAll(filepath.Dir(linkDir), 0755); err != nil {
+		t.Fatalf("mkdir project skills dir: %v", err)
+	}
+	if err := os.Symlink(targetDir, linkDir); err != nil {
+		t.Fatalf("symlink %s -> %s: %v", linkDir, targetDir, err)
+	}
+
+	database := newTestDB(t)
+	result := ImportAll(database)
+	if len(result.Errors) > 0 {
+		t.Fatalf("ImportAll errors: %v", result.Errors)
+	}
+	if result.Imported != 1 {
+		t.Fatalf("expected 1 imported skill, got %d", result.Imported)
+	}
+	if got := importedPromptName(t, database); got != "alias-skill" {
+		t.Fatalf("expected prompt name from discovered symlink dir, got %q", got)
+	}
+}
+
+func TestImportAll_DoesNotHideDuplicatePromptReferencedByTrigger(t *testing.T) {
+	home := t.TempDir()
+	project := t.TempDir()
+	t.Setenv("HOME", home)
+	chdir(t, project)
+
+	database := newTestDB(t)
+	body := "Triage and prioritize incoming work."
+	keepID := "imported-duplicate-with-trigger"
+	hideID := "imported-duplicate-no-trigger"
+
+	if err := db.CreatePrompt(database, domain.Prompt{
+		ID:     keepID,
+		Name:   "triage",
+		Body:   body,
+		Source: "imported",
+	}); err != nil {
+		t.Fatalf("create triggered duplicate prompt: %v", err)
+	}
+	if err := db.CreatePrompt(database, domain.Prompt{
+		ID:     hideID,
+		Name:   "triage",
+		Body:   body,
+		Source: "imported",
+	}); err != nil {
+		t.Fatalf("create unreferenced duplicate prompt: %v", err)
+	}
+
+	trigger := domain.PromptTrigger{
+		ID:                     "trigger-keep-imported-prompt",
+		PromptID:               keepID,
+		TriggerType:            domain.TriggerTypeEvent,
+		EventType:              domain.EventGitHubPRReviewRequested,
+		BreakerThreshold:       4,
+		MinAutonomySuitability: 0,
+		Enabled:                true,
+	}
+	if err := db.SavePromptTrigger(database, trigger); err != nil {
+		t.Fatalf("create trigger for duplicate prompt: %v", err)
+	}
+
+	result := ImportAll(database)
+	if len(result.Errors) > 0 {
+		t.Fatalf("ImportAll errors: %v", result.Errors)
+	}
+
+	storedTrigger, err := db.GetPromptTrigger(database, trigger.ID)
+	if err != nil {
+		t.Fatalf("load trigger after import: %v", err)
+	}
+	if storedTrigger == nil {
+		t.Fatal("expected trigger to remain after import")
+	}
+	if storedTrigger.PromptID != keepID {
+		t.Fatalf("expected trigger to keep prompt %q, got %q", keepID, storedTrigger.PromptID)
+	}
+	if promptHidden(t, database, keepID) {
+		t.Fatalf("prompt %q has a trigger and should not be hidden", keepID)
+	}
+	if !promptHidden(t, database, hideID) {
+		t.Fatalf("prompt %q is duplicate without trigger and should be hidden", hideID)
 	}
 }
