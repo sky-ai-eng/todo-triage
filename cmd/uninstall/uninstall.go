@@ -53,8 +53,26 @@ func Handle(args []string) {
 
 	plan := buildPlan(dataDir, linkPath)
 	if plan.empty() {
-		fmt.Println("triagefactory: nothing to uninstall — no local state found.")
-		fmt.Println("If you installed via Homebrew, run `brew uninstall triagefactory` to remove the binary.")
+		fmt.Println("triagefactory: no on-disk local state found.")
+		fmt.Println("Stored keychain credentials may still be present and can be removed.")
+		fmt.Println()
+		fmt.Println("This is irreversible. The binary itself stays — remove it with `brew uninstall triagefactory` (or by hand for source builds).")
+
+		if !*yes && !confirm("Clear stored credentials? [y/N] ") {
+			fmt.Println("aborted.")
+			os.Exit(1)
+		}
+
+		if err := auth.Clear(); err != nil {
+			fmt.Fprintf(os.Stderr, "  warn: clear keychain: %v\n", err)
+			fmt.Println()
+			fmt.Println("triagefactory uninstall: completed with warnings (see above).")
+			os.Exit(1)
+		}
+
+		fmt.Println("  cleared keychain entries")
+		fmt.Println()
+		fmt.Println("triagefactory uninstall: done. To remove the binary, run `brew uninstall triagefactory`.")
 		return
 	}
 
