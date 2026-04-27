@@ -4,6 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -247,6 +251,96 @@ func TestAbortTakeover_MarksRowTerminal(t *testing.T) {
 	}
 	if got.StopReason != "takeover_failed" {
 		t.Errorf("StopReason = %q, want takeover_failed", got.StopReason)
+	}
+}
+
+// TestAbortTakeover_PrunesStaleWorktreeRegistration is the regression
+// guard for the destPath cleanup bug: abortTakeover used to call
+// os.RemoveAll on the takeover destination, which removes the directory
+// but leaves the bare's worktrees/<runID>/ metadata entry pointing at
+// a now-missing path. Future `git worktree add` or `move` against the
+// same runID would then fail with a "stale worktree" error until the
+// next manual prune.
+//
+// Switching abortTakeover to worktree.RemoveAt fixes this — RemoveAt
+// runs `git worktree prune` across all bares after the rmdir.
+func TestAbortTakeover_PrunesStaleWorktreeRegistration(t *testing.T) {
+	root := t.TempDir()
+	// Use HOME to scope the worktree package's reposDir / pruneAll
+	// sweep to a directory we control.
+	t.Setenv("HOME", root)
+
+	bareDir := filepath.Join(root, ".triagefactory", "repos", "owner", "repo.git")
+	if err := os.MkdirAll(filepath.Dir(bareDir), 0755); err != nil {
+		t.Fatalf("mkdir reposDir parent: %v", err)
+	}
+	gitArgs := []string{"-c", "init.defaultBranch=main"}
+	if out, err := exec.Command("git", append(gitArgs, "init", "--bare", "-b", "feature", bareDir)...).CombinedOutput(); err != nil {
+		t.Fatalf("git init bare: %v\n%s", err, out)
+	}
+
+	// Seed a commit on "feature" via a scratch worktree.
+	seed := filepath.Join(root, "seed")
+	mustGit(t, root, "clone", bareDir, seed)
+	mustGit(t, seed, "config", "user.email", "t@e.com")
+	mustGit(t, seed, "config", "user.name", "T")
+	mustGit(t, seed, "checkout", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(seed, "README.md"), []byte("seed"), 0644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	mustGit(t, seed, "add", "README.md")
+	mustGit(t, seed, "commit", "-m", "seed")
+	mustGit(t, seed, "push", "origin", "feature")
+
+	// Pretend a takeover got partway through: a linked worktree exists
+	// at destPath, registered with the bare. abortTakeover must
+	// dismantle this cleanly.
+	destPath := filepath.Join(root, "takeovers", "run-orphaned")
+	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+		t.Fatalf("mkdir takeovers parent: %v", err)
+	}
+	mustGit(t, bareDir, "worktree", "add", "--no-checkout", destPath, "feature")
+
+	database := newTakeoverTestDB(t)
+	seedRun(t, database, "run-orphaned", "sess-x", "/tmp/source-not-relevant-here")
+	s := newSpawnerWithActiveCancel(database, "run-orphaned")
+	s.takenOver["run-orphaned"] = true
+
+	s.abortTakeover("run-orphaned", "", destPath)
+
+	// destPath dir is gone (was removed by RemoveAt's RemoveAll).
+	if _, err := os.Stat(destPath); !os.IsNotExist(err) {
+		t.Errorf("destPath should have been removed (err=%v)", err)
+	}
+
+	// And — the load-bearing assertion — the bare's worktree list no
+	// longer references run-orphaned. Without the prune step in
+	// RemoveAt, this would still show the dangling registration.
+	listOut, err := exec.Command("git", "-C", bareDir, "worktree", "list", "--porcelain").Output()
+	if err != nil {
+		t.Fatalf("worktree list: %v", err)
+	}
+	list := string(listOut)
+	if strings.Contains(list, "run-orphaned") {
+		t.Errorf("bare still has stale worktree registration for run-orphaned after abortTakeover; output:\n%s", list)
+	}
+}
+
+// mustGit runs a git command in the given dir, fatal-erroring with the
+// combined output included so test failures are diagnosable. Mirrors
+// the gitCmd helper in the worktree package's test file.
+func mustGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(append([]string(nil), os.Environ()...),
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CONFIG_SYSTEM=/dev/null",
+		"HOME="+t.TempDir(),
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s in %s: %v\n%s", strings.Join(args, " "), dir, err, out)
 	}
 }
 

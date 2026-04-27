@@ -337,7 +337,14 @@ func (s *Spawner) Takeover(runID, baseDir string) (*TakeoverResult, error) {
 // partial directory; either way we RemoveAll it.
 func (s *Spawner) abortTakeover(runID, claudeCwd, destPath string) {
 	if destPath != "" {
-		if err := os.RemoveAll(destPath); err != nil {
+		// Use RemoveAt rather than os.RemoveAll so the bare's
+		// worktree registration is pruned. By the time we reach
+		// abortTakeover after a successful CopyForTakeover, the
+		// bare has a worktrees/<runID>/ entry whose gitdir points at
+		// destPath; just removing the directory leaves that entry
+		// dangling and breaks the next `git worktree add` or `move`
+		// against the same runID.
+		if err := worktree.RemoveAt(destPath, runID); err != nil {
 			log.Printf("[delegate] warning: abort takeover for %s: remove dest %s: %v", runID, destPath, err)
 		}
 	}

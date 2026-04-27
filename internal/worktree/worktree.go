@@ -910,6 +910,16 @@ func overlayWorkingTree(src, dest string) error {
 	})
 }
 
+// copyFile copies a regular file from src to dst, preserving the mode.
+// Deliberately does NOT call out.Sync(): per-file fsync would serialize
+// with disk on every iteration of the overlay walk (thousands of small
+// files for a typical repo) for no durability benefit in this context.
+// The takeover destination is a "user-about-to-use-this" workspace, not
+// a crash-recovery target — a kernel crash mid-overlay would just have
+// the user re-run takeover. Normal page-cache write-back is sufficient,
+// and matches the move path which doesn't fsync either (rename(2) is
+// atomic for the metadata, but the data writes the original agent did
+// were never per-file fsync'd either).
 func copyFile(src, dst string, mode os.FileMode) error {
 	in, err := os.Open(src)
 	if err != nil {
@@ -924,10 +934,8 @@ func copyFile(src, dst string, mode os.FileMode) error {
 		return err
 	}
 	defer out.Close()
-	if _, err := io.Copy(out, in); err != nil {
-		return err
-	}
-	return out.Sync()
+	_, err = io.Copy(out, in)
+	return err
 }
 
 func gitOutput(dir string, args ...string) (string, error) {
