@@ -912,8 +912,21 @@ func TestCopyForTakeover_RelativeBaseDir(t *testing.T) {
 	if !filepath.IsAbs(dest) {
 		t.Errorf("dest %q must be absolute when baseDir is relative", dest)
 	}
-	if !strings.HasPrefix(dest, scratch) {
-		t.Errorf("dest %q should resolve under cwd %q", dest, scratch)
+	// Resolve symlinks on both sides before comparing. On macOS,
+	// t.TempDir() returns paths under /var/folders/... while filesystem
+	// operations elsewhere in CopyForTakeover canonicalize through the
+	// /var → /private/var symlink, so a literal HasPrefix would fail
+	// despite the paths being the same directory.
+	scratchResolved, err := filepath.EvalSymlinks(scratch)
+	if err != nil {
+		t.Fatalf("eval scratch: %v", err)
+	}
+	destResolved, err := filepath.EvalSymlinks(dest)
+	if err != nil {
+		t.Fatalf("eval dest: %v", err)
+	}
+	if !strings.HasPrefix(destResolved, scratchResolved) {
+		t.Errorf("dest %q should resolve under cwd %q", destResolved, scratchResolved)
 	}
 }
 
@@ -1166,9 +1179,9 @@ func TestCleanupWithOptions_PreservesProjectDirForTakenOver(t *testing.T) {
 	// no-cwd Jira run that's also taken-over (covers the -nocwd suffix
 	// trim in CleanupWithOptions).
 	runs := []struct {
-		dirName     string
-		runID       string
-		preserve    bool
+		dirName  string
+		runID    string
+		preserve bool
 	}{
 		{"run-normal", "run-normal", false},
 		{"run-taken", "run-taken", true},
