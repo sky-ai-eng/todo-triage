@@ -261,12 +261,9 @@ func (s *Spawner) Takeover(ctx context.Context, runID, baseDir string) (*Takeove
 		return nil, fmt.Errorf("copy worktree: %w", err)
 	}
 
-	// The gated defers skipped this — clean up explicitly now that the
-	// copy is done. Best-effort: a leftover dir under $TMPDIR will be
-	// swept by the next startup Cleanup().
-	if err := worktree.Remove(runID); err != nil {
-		log.Printf("[delegate] warning: failed to remove original worktree for taken-over run %s: %v", runID, err)
-	}
+	// CopyForTakeover removes the source: the move path renames it out
+	// of /tmp atomically, the overlay fallback explicitly Removes after
+	// the copy. Either way no further cleanup of the original is needed.
 
 	ok, err := db.MarkAgentRunTakenOver(s.database, runID, destPath)
 	if err != nil {

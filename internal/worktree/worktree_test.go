@@ -754,16 +754,52 @@ func TestCopyForTakeover_HappyPath_Branch(t *testing.T) {
 	}
 }
 
-// TestCopyForTakeover_ForceAllowsLiveOriginal is the explicit regression
-// guard for the bug we just fixed: without --force, `git worktree add`
-// against a branch that's already checked out elsewhere fails with
-// "branch is already checked out at <path>." The original /tmp worktree
-// is intentionally still registered when CopyForTakeover runs (the
-// agent's working files have to survive long enough for the overlay).
-// This test fails loudly if --force is ever removed from the args.
-func TestCopyForTakeover_ForceAllowsLiveOriginal(t *testing.T) {
+// TestCopyForTakeover_MovePath_SourceGone confirms the same-fs happy
+// path: after CopyForTakeover via `git worktree move`, the source
+// directory under /tmp is gone (renamed out) and the bare repo's
+// worktree list shows only the destination at the new path. This is
+// the assertion that gives us atomicity + simplicity: there's only ever
+// one worktree for the run, before and after.
+func TestCopyForTakeover_MovePath_SourceGone(t *testing.T) {
 	bareDir, srcWorktree := setupBareWithBranch(t)
 	baseDir := t.TempDir()
+
+	dest, err := CopyForTakeover(context.Background(), "moved", srcWorktree, baseDir)
+	if err != nil {
+		t.Fatalf("CopyForTakeover: %v", err)
+	}
+
+	if _, err := os.Stat(srcWorktree); !os.IsNotExist(err) {
+		t.Errorf("source worktree should have been moved away, but still exists (err=%v)", err)
+	}
+	listOut, err := exec.Command("git", "-C", bareDir, "worktree", "list").Output()
+	if err != nil {
+		t.Fatalf("worktree list: %v", err)
+	}
+	list := string(listOut)
+	if strings.Contains(list, srcWorktree) {
+		t.Errorf("worktree list still contains original src %q after move; output:\n%s", srcWorktree, list)
+	}
+	if !strings.Contains(list, dest) {
+		t.Errorf("worktree list missing dest %q; output:\n%s", dest, list)
+	}
+}
+
+// TestAddAndOverlayForTakeover_ForceAllowsLiveOriginal is the explicit
+// regression guard for the cross-filesystem fallback path: without
+// --force, `git worktree add` against a branch that's already checked
+// out elsewhere fails with "branch is already checked out at <path>."
+// The fallback runs WHILE the source worktree is still registered (the
+// caller — CopyForTakeover — needs the source files for the overlay
+// copy and only Removes the source after this returns). This test
+// fails loudly if --force is ever removed from addAndOverlayForTakeover.
+//
+// We call addAndOverlayForTakeover directly because the same-fs setup
+// in t.TempDir() takes the move path through CopyForTakeover, which
+// would skip this code entirely.
+func TestAddAndOverlayForTakeover_ForceAllowsLiveOriginal(t *testing.T) {
+	bareDir, srcWorktree := setupBareWithBranch(t)
+	destDir := filepath.Join(t.TempDir(), "run-overlay")
 
 	// Sanity check: the original worktree IS registered with the bare,
 	// so a non-force add on the same branch should fail. If this
@@ -779,15 +815,14 @@ func TestCopyForTakeover_ForceAllowsLiveOriginal(t *testing.T) {
 	}
 
 	// Now the real call — must succeed because of --force.
-	dest, err := CopyForTakeover(context.Background(), "abc123", srcWorktree, baseDir)
-	if err != nil {
-		t.Fatalf("CopyForTakeover should succeed with --force, got: %v", err)
+	if err := addAndOverlayForTakeover(context.Background(), "overlay-rid", bareDir, srcWorktree, destDir, "feature"); err != nil {
+		t.Fatalf("addAndOverlayForTakeover should succeed with --force, got: %v", err)
 	}
 
 	// Both worktrees are now registered on the same branch — confirm
-	// git sees both in `worktree list`. Spawner.Takeover removes the
-	// original right after this returns, but at this moment they
-	// coexist by design.
+	// git sees both in `worktree list`. The caller (CopyForTakeover)
+	// removes the original right after this returns, but at this
+	// moment they coexist by design.
 	listOut, err := exec.Command("git", "-C", bareDir, "worktree", "list").Output()
 	if err != nil {
 		t.Fatalf("worktree list: %v", err)
@@ -796,8 +831,38 @@ func TestCopyForTakeover_ForceAllowsLiveOriginal(t *testing.T) {
 	if !strings.Contains(list, srcWorktree) {
 		t.Errorf("worktree list missing original %q; output:\n%s", srcWorktree, list)
 	}
-	if !strings.Contains(list, dest) {
-		t.Errorf("worktree list missing takeover dest %q; output:\n%s", dest, list)
+	if !strings.Contains(list, destDir) {
+		t.Errorf("worktree list missing takeover dest %q; output:\n%s", destDir, list)
+	}
+}
+
+// TestAddAndOverlayForTakeover_OverlaySkipsManagedDirs is the fallback-
+// path equivalent of TestCopyForTakeover_ManagedDirsSkipped. The move
+// path handles managed dirs differently (they ride along then get
+// rm'd post-move); this test pins down the overlay's skip-during-walk
+// behavior since the move test wouldn't exercise it.
+func TestAddAndOverlayForTakeover_OverlaySkipsManagedDirs(t *testing.T) {
+	bareDir, srcWorktree := setupBareWithBranch(t)
+	destDir := filepath.Join(t.TempDir(), "run-overlay-mgr")
+
+	for _, name := range []string{"task_memory", "_scratch"} {
+		dir := filepath.Join(srcWorktree, name)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "secret.txt"), []byte("nope"), 0644); err != nil {
+			t.Fatalf("write secret: %v", err)
+		}
+	}
+
+	if err := addAndOverlayForTakeover(context.Background(), "overlay-mgr", bareDir, srcWorktree, destDir, "feature"); err != nil {
+		t.Fatalf("addAndOverlayForTakeover: %v", err)
+	}
+
+	for _, name := range []string{"task_memory", "_scratch"} {
+		if _, err := os.Stat(filepath.Join(destDir, name, "secret.txt")); !os.IsNotExist(err) {
+			t.Errorf("%s/ should have been skipped by overlay (err=%v)", name, err)
+		}
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -541,6 +542,35 @@ func CopyForTakeover(ctx context.Context, runID, srcWorktree, baseDir string) (s
 	if srcWorktree == "" {
 		return "", fmt.Errorf("takeover: empty source worktree path")
 	}
+
+	// Resolve to an absolute path before doing anything else. The
+	// returned path ends up in the resume command shown to the user;
+	// if takeover_dir is configured as a relative path, a relative
+	// destination would only work if the user pasted the command from
+	// the same cwd the binary was launched from. Make it cwd-independent.
+	absBase, err := filepath.Abs(baseDir)
+	if err != nil {
+		return "", fmt.Errorf("takeover: resolve base dir: %w", err)
+	}
+	destDir := filepath.Join(absBase, "run-"+runID)
+	if err := os.MkdirAll(filepath.Dir(destDir), 0755); err != nil {
+		return "", fmt.Errorf("takeover: mkdir base: %w", err)
+	}
+	// Check destination existence BEFORE touching the source. Re-takeover
+	// for the same runID must be idempotent: the move path renames the
+	// source out of /tmp on the first call, so a naive second call would
+	// fail validating the now-missing source even though the work is
+	// already done.
+	if _, err := os.Stat(destDir); err == nil {
+		// A previous takeover for the same run was already materialized.
+		// Returning the existing path is the right call — re-invoking
+		// the endpoint shouldn't clobber a working copy the user may
+		// already have local edits in.
+		return destDir, nil
+	} else if !os.IsNotExist(err) {
+		return "", fmt.Errorf("takeover: stat destination: %w", err)
+	}
+
 	srcInfo, err := os.Stat(srcWorktree)
 	if err != nil {
 		return "", fmt.Errorf("takeover: stat source worktree: %w", err)
@@ -559,29 +589,101 @@ func CopyForTakeover(ctx context.Context, runID, srcWorktree, baseDir string) (s
 		return "", fmt.Errorf("takeover: read current branch: %w", err)
 	}
 
-	// Resolve to an absolute path before doing anything else. The
-	// returned path ends up in the resume command shown to the user;
-	// if takeover_dir is configured as a relative path, a relative
-	// destination would only work if the user pasted the command from
-	// the same cwd the binary was launched from. Make it cwd-independent.
-	absBase, err := filepath.Abs(baseDir)
+	// Fast path: when source and destination are on the same filesystem,
+	// `git worktree move` is an atomic rename(2) and lets us avoid the
+	// overlay copy entirely. The branch registration moves with the
+	// worktree so there's no co-checkout situation to bypass with --force.
+	moved, err := tryMoveWorktree(ctx, bareDir, srcWorktree, destDir)
 	if err != nil {
-		return "", fmt.Errorf("takeover: resolve base dir: %w", err)
+		return "", fmt.Errorf("takeover: move worktree: %w", err)
 	}
-	destDir := filepath.Join(absBase, "run-"+runID)
-	if err := os.MkdirAll(filepath.Dir(destDir), 0755); err != nil {
-		return "", fmt.Errorf("takeover: mkdir base: %w", err)
-	}
-	if _, err := os.Stat(destDir); err == nil {
-		// A previous takeover for the same run was already materialized.
-		// Returning the existing path is the right call — re-invoking
-		// the endpoint shouldn't clobber a working copy the user may
-		// already have local edits in.
+	if moved {
+		// task_memory/ and _scratch/ traveled with the move; the overlay
+		// path skips them explicitly because they're TF infra and shouldn't
+		// land in the user's hands. Mirror that here so behavior is the
+		// same regardless of which path we took.
+		for _, name := range []string{"task_memory", "_scratch"} {
+			_ = os.RemoveAll(filepath.Join(destDir, name))
+		}
+		// Refresh the managed exclude block in case managedExcludePatterns
+		// has grown since the agent originally wrote it. Best-effort.
+		if err := writeLocalExcludes(destDir); err != nil {
+			log.Printf("[worktree] warning: takeover %s: refresh excludes after move: %v", runID, err)
+		}
+		log.Printf("[worktree] takeover via move: %s -> %s (branch %s)", srcWorktree, destDir, branch)
 		return destDir, nil
-	} else if !os.IsNotExist(err) {
-		return "", fmt.Errorf("takeover: stat destination: %w", err)
 	}
 
+	// Fallback: cross-filesystem move isn't supported by git (rename(2)
+	// returns EXDEV). Add a fresh linked worktree at the destination and
+	// overlay the agent's working tree. Slower than the rename path but
+	// correctness-equivalent for users whose $TMPDIR and takeover_dir
+	// live on different filesystems.
+	if err := addAndOverlayForTakeover(ctx, runID, bareDir, srcWorktree, destDir, branch); err != nil {
+		return "", err
+	}
+
+	// The overlay path leaves the original worktree in place because we
+	// needed its files for the copy. Now that the copy is done, remove
+	// the source worktree dir explicitly. (The move path doesn't need
+	// this — git already renamed the source out from under us.)
+	if err := Remove(runID); err != nil {
+		log.Printf("[worktree] warning: takeover %s: remove original after overlay: %v", runID, err)
+	}
+
+	log.Printf("[worktree] takeover via overlay: %s -> %s (branch %s)", srcWorktree, destDir, branch)
+	return destDir, nil
+}
+
+// tryMoveWorktree attempts `git worktree move <src> <dest>` and returns
+// (true, nil) on success, (false, nil) when the move is unsupported
+// because src and dest are on different filesystems (git uses rename(2)
+// which returns EXDEV cross-fs and refuses to fall back), and
+// (false, err) for any other failure.
+//
+// The same-filesystem check is done up front via syscall.Stat_t.Dev so
+// we don't have to parse git's stderr for "Invalid cross-device link"
+// strings that vary across platforms and locales. The check looks at
+// the parents of src and dest because dest doesn't exist yet — its
+// device id is determined by the filesystem its parent lives on.
+func tryMoveWorktree(ctx context.Context, bareDir, src, dest string) (bool, error) {
+	sameFS, err := sameFilesystem(src, filepath.Dir(dest))
+	if err != nil {
+		// Stat of either path failed (src missing, dest parent missing).
+		// Surface as a real error rather than silently falling through —
+		// the overlay path would hit the same problem.
+		return false, fmt.Errorf("same-fs check: %w", err)
+	}
+	if !sameFS {
+		return false, nil
+	}
+	if err := gitRunCtx(ctx, bareDir, "worktree", "move", src, dest); err != nil {
+		return false, fmt.Errorf("git worktree move: %w", err)
+	}
+	return true, nil
+}
+
+// sameFilesystem returns true iff a and b live on the same filesystem,
+// determined by syscall.Stat_t.Dev. Used by the takeover-move pre-flight
+// check; rename(2) refuses cross-device moves and we'd rather know up
+// front than parse a platform-specific error message.
+func sameFilesystem(a, b string) (bool, error) {
+	var sa, sb syscall.Stat_t
+	if err := syscall.Stat(a, &sa); err != nil {
+		return false, fmt.Errorf("stat %s: %w", a, err)
+	}
+	if err := syscall.Stat(b, &sb); err != nil {
+		return false, fmt.Errorf("stat %s: %w", b, err)
+	}
+	return sa.Dev == sb.Dev, nil
+}
+
+// addAndOverlayForTakeover is the cross-filesystem fallback for
+// CopyForTakeover. Adds a fresh linked worktree at destDir (with --force
+// because the source is still registered on the same branch) and
+// overlays the agent's working tree on top. Caller is responsible for
+// removing the source worktree afterward.
+func addAndOverlayForTakeover(ctx context.Context, runID, bareDir, srcWorktree, destDir, branch string) error {
 	// Linked-worktree add against the same bare. --no-checkout means git
 	// only writes the gitdir + .git pointer; the working tree starts
 	// empty and we fill it via overlayWorkingTree. Without --no-checkout
@@ -610,16 +712,16 @@ func CopyForTakeover(ctx context.Context, runID, srcWorktree, baseDir string) (s
 		// always correct: that's the commit the agent was sitting on.
 		commitOut, err := gitOutputCtx(ctx, srcWorktree, "rev-parse", "HEAD")
 		if err != nil {
-			return "", fmt.Errorf("takeover: resolve source HEAD: %w", err)
+			return fmt.Errorf("takeover: resolve source HEAD: %w", err)
 		}
 		commit := strings.TrimSpace(commitOut)
 		if commit == "" {
-			return "", fmt.Errorf("takeover: source HEAD resolved to empty commit")
+			return fmt.Errorf("takeover: source HEAD resolved to empty commit")
 		}
 		args = append(args, "--detach", destDir, commit)
 	}
 	if err := gitRunCtx(ctx, bareDir, args...); err != nil {
-		return "", fmt.Errorf("takeover: worktree add: %w", err)
+		return fmt.Errorf("takeover: worktree add: %w", err)
 	}
 
 	// Re-apply the managed exclude block (task_memory/, _scratch/) so
@@ -631,11 +733,10 @@ func CopyForTakeover(ctx context.Context, runID, srcWorktree, baseDir string) (s
 	}
 
 	if err := overlayWorkingTree(srcWorktree, destDir); err != nil {
-		return "", fmt.Errorf("takeover: overlay working tree: %w", err)
+		return fmt.Errorf("takeover: overlay working tree: %w", err)
 	}
 
-	log.Printf("[worktree] takeover linked-worktree: %s -> %s (branch %s)", srcWorktree, destDir, branch)
-	return destDir, nil
+	return nil
 }
 
 // resolveBareDirFromWorktree returns the bare repo behind a linked
