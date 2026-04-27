@@ -365,6 +365,93 @@ func TestListTakenOverRunIDs_Empty(t *testing.T) {
 	}
 }
 
+// TestListTakenOverRunsForResume_NewestFirstAndFilters verifies the
+// query the CLI's `triagefactory resume` command relies on: only
+// taken_over runs, ordered newest-first by completion time, joined
+// to entities for display title + source_id. Skips rows missing
+// session_id or worktree_path so a defective historical row can't
+// surface a runaway entry the user can't actually resume.
+func TestListTakenOverRunsForResume_NewestFirstAndFilters(t *testing.T) {
+	database := newTestDB(t)
+
+	// Three taken-over runs with descending completion times, plus
+	// one running run that should be excluded entirely.
+	takeoverFixture(t, database, "run-old", "taken_over", "/tmp/wt-old")
+	takeoverFixture(t, database, "run-mid", "taken_over", "/tmp/wt-mid")
+	takeoverFixture(t, database, "run-new", "taken_over", "/tmp/wt-new")
+	takeoverFixture(t, database, "run-running", "running", "/tmp/wt-running")
+
+	// Force completed_at so the ORDER BY result is deterministic.
+	for i, id := range []string{"run-old", "run-mid", "run-new"} {
+		// Spread completions across an hour: old at 60m ago, mid at
+		// 30m ago, new at 1m ago.
+		offset := time.Duration([]int{60, 30, 1}[i]) * -time.Minute
+		if _, err := database.Exec(`UPDATE runs SET completed_at = ? WHERE id = ?`, time.Now().Add(offset), id); err != nil {
+			t.Fatalf("set completed_at: %v", err)
+		}
+		// Set session_id too so the filter doesn't drop them.
+		if _, err := database.Exec(`UPDATE runs SET session_id = ? WHERE id = ?`, "sess-"+id, id); err != nil {
+			t.Fatalf("set session_id: %v", err)
+		}
+	}
+
+	got, err := ListTakenOverRunsForResume(database)
+	if err != nil {
+		t.Fatalf("ListTakenOverRunsForResume: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("expected 3 results, got %d: %+v", len(got), got)
+	}
+	// Newest first.
+	wantOrder := []string{"run-new", "run-mid", "run-old"}
+	for i, want := range wantOrder {
+		if got[i].RunID != want {
+			t.Errorf("position %d: got %q, want %q", i, got[i].RunID, want)
+		}
+	}
+	// Joined fields populated from entity (we set source_id via the
+	// fixture as "owner/repo#run-old" etc., title as "Test run-old").
+	for _, r := range got {
+		if r.TaskTitle == "" {
+			t.Errorf("run %s missing TaskTitle", r.RunID)
+		}
+		if r.SourceID == "" {
+			t.Errorf("run %s missing SourceID", r.RunID)
+		}
+		if r.SessionID == "" {
+			t.Errorf("run %s missing SessionID", r.RunID)
+		}
+		if r.WorktreePath == "" {
+			t.Errorf("run %s missing WorktreePath", r.RunID)
+		}
+	}
+}
+
+// TestListTakenOverRunsForResume_SkipsMissingSessionOrWorktree —
+// defensive against historical rows: a takeover marked taken_over
+// without a session_id or worktree_path is unresumable, so it
+// shouldn't appear in the picker even though its status matches.
+func TestListTakenOverRunsForResume_SkipsMissingSessionOrWorktree(t *testing.T) {
+	database := newTestDB(t)
+	takeoverFixture(t, database, "run-noSession", "taken_over", "/tmp/wt")    // session_id stays ""
+	takeoverFixture(t, database, "run-noPath", "taken_over", "")              // worktree_path stays ""
+	takeoverFixture(t, database, "run-good", "taken_over", "/tmp/wt-good")
+	if _, err := database.Exec(`UPDATE runs SET session_id = ? WHERE id = ?`, "sess-good", "run-good"); err != nil {
+		t.Fatalf("set session_id: %v", err)
+	}
+
+	got, err := ListTakenOverRunsForResume(database)
+	if err != nil {
+		t.Fatalf("ListTakenOverRunsForResume: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 result (only run-good), got %d: %+v", len(got), got)
+	}
+	if got[0].RunID != "run-good" {
+		t.Errorf("got %q, want run-good", got[0].RunID)
+	}
+}
+
 // contains is a small string-contains helper used by these tests so we
 // don't pull strings into the imports for one assertion. Faster to
 // inline than to round-trip through strings.Contains.

@@ -296,6 +296,74 @@ func ListTakenOverRunIDs(database *sql.DB) ([]string, error) {
 	return ids, rows.Err()
 }
 
+// TakenOverRun is a slim view of a taken-over run for the
+// `triagefactory resume` CLI's picker. Carries just enough to render
+// the user's choices and exec into the right session — the path,
+// session id, and a task title for context. SourceID lets us show
+// "PR #42" or "SKY-194" so the user can tell takeovers apart.
+type TakenOverRun struct {
+	RunID        string
+	SessionID    string
+	WorktreePath string
+	TaskTitle    string
+	SourceID     string
+	CompletedAt  time.Time
+}
+
+// ListTakenOverRunsForResume returns every taken-over run in the local
+// DB, joined with its task + entity for display, ordered newest-first.
+// Used by the CLI's resume command — the bare-call default picks
+// runs[0], the picker shows the whole list. Filters out rows missing
+// the session_id or worktree_path (shouldn't happen — Spawner.Takeover
+// requires both — but defensive against historical data).
+//
+// Title and source_id live on entities, not tasks: the join chain is
+// runs.task_id → tasks.entity_id → entities. LEFT JOIN throughout so
+// a deleted task or entity doesn't drop the run from the list — the
+// user can still resume even if the upstream task got cleaned up.
+func ListTakenOverRunsForResume(database *sql.DB) ([]TakenOverRun, error) {
+	// completed_at and started_at returned as raw columns rather than
+	// COALESCE'd into one — the SQLite driver can scan a column of
+	// declared DATETIME type into sql.NullTime, but a COALESCE
+	// expression strips the type metadata and the result comes back
+	// as an unparseable string. Sort uses COALESCE because string
+	// sort over ISO-8601 happens to be correct ordering.
+	rows, err := database.Query(`
+		SELECT r.id, COALESCE(r.session_id, ''), COALESCE(r.worktree_path, ''),
+		       COALESCE(e.title, ''), COALESCE(e.source_id, ''),
+		       r.completed_at, r.started_at
+		FROM runs r
+		LEFT JOIN tasks t ON t.id = r.task_id
+		LEFT JOIN entities e ON e.id = t.entity_id
+		WHERE r.status = 'taken_over'
+		ORDER BY COALESCE(r.completed_at, r.started_at) DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []TakenOverRun
+	for rows.Next() {
+		var r TakenOverRun
+		var completedAt, startedAt sql.NullTime
+		if err := rows.Scan(&r.RunID, &r.SessionID, &r.WorktreePath, &r.TaskTitle, &r.SourceID, &completedAt, &startedAt); err != nil {
+			return nil, err
+		}
+		if r.SessionID == "" || r.WorktreePath == "" {
+			continue
+		}
+		switch {
+		case completedAt.Valid:
+			r.CompletedAt = completedAt.Time
+		case startedAt.Valid:
+			r.CompletedAt = startedAt.Time
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // InsertAgentMessage inserts a message and returns its ID.
 func InsertAgentMessage(database *sql.DB, msg domain.AgentMessage) (int64, error) {
 	var toolCallsJSON, metadataJSON sql.NullString

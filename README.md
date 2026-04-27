@@ -44,6 +44,25 @@ Requires Go 1.23+ (update local `go.mod`), Node.js 20+, and the [Claude Code CLI
 
 See [docs/usage.md](docs/usage.md) for CLI flags, configuration reference, and polling details.
 
+## Taking over a delegated run
+
+When a delegated agent is running, the **Take over** button on its card stops the headless session and hands the working tree to you for interactive resume. The takeover modal shows a `cd … && claude --resume <id>` command you can paste into a terminal.
+
+For a shorter form, install the binary on your `$PATH` and use `triagefactory resume`:
+
+```bash
+# One-time setup (macOS default: /usr/local/bin/triagefactory; Linux default: ~/.local/bin/triagefactory)
+./triagefactory install
+# Override the destination if you keep binaries elsewhere:
+./triagefactory install --dest ~/bin/triagefactory
+
+# Then, after clicking "Take over" in the UI:
+triagefactory resume                # auto-resumes when there's exactly one taken-over run
+triagefactory resume <short-id>     # disambiguate by run-ID prefix (the 8-char id from the modal)
+```
+
+`triagefactory resume` `cd`s into the takeover working tree and `exec`s `claude --resume <session-id>`, replacing the current process so your terminal becomes the interactive Claude Code session directly. The takeover dirs live under `~/.triagefactory/takeovers/` and persist across server restarts; `scripts/clean-slate.sh` clears them when wiping local state.
+
 ## License
 
 [Business Source License 1.1](LICENSE) — free for internal use, converts to Apache 2.0 on 2030-03-31. See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution terms.

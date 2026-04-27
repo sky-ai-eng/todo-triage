@@ -29,6 +29,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec"
+	"github.com/sky-ai-eng/triage-factory/cmd/install"
+	"github.com/sky-ai-eng/triage-factory/cmd/resume"
 )
 
 const defaultPort = 3000
@@ -44,7 +46,12 @@ func pluralize(n int, singular, plural string) string {
 }
 
 func main() {
-	// Dual-mode dispatch: exec/status commands are CLI-only (used by Claude Code agent)
+	// Dual-mode dispatch:
+	//   exec/status — CLI-only, used by Claude Code agent.
+	//   resume      — user-facing, hands the terminal back into a
+	//                 previously taken-over Claude Code session.
+	//   install     — user-facing, symlinks the binary onto PATH so
+	//                 `triagefactory resume` works without a full path.
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "exec":
@@ -52,6 +59,12 @@ func main() {
 			return
 		case "status":
 			exec.HandleStatus(os.Args[2:])
+			return
+		case "resume":
+			resume.Handle(os.Args[2:])
+			return
+		case "install":
+			install.Handle(os.Args[2:])
 			return
 		}
 	}
@@ -88,6 +101,11 @@ func main() {
 
 	addr := fmt.Sprintf(":%d", port)
 	fmt.Printf("Triage Factory running at http://localhost%s\n", addr)
+
+	// One-shot PATH hint. The `triagefactory resume` subcommand only
+	// works from any terminal once the binary's on PATH; nudge the
+	// user toward `triagefactory install` if it isn't. Best-effort.
+	hintInstallIfMissing()
 
 	if !noBrowser {
 		openBrowser(fmt.Sprintf("http://localhost%s", addr))
