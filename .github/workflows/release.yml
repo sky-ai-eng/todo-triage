@@ -1,5 +1,12 @@
 name: release
 
+# Builds binaries + publishes the Homebrew Formula on every v* tag push.
+# Tags come from two sources:
+#   1. release-please.yml when a Release PR is merged on main (the
+#      automated path).
+#   2. A human running `git tag vX.Y.Z && git push origin vX.Y.Z` (the
+#      manual escape hatch — use only if release-please is wedged).
+
 on:
   push:
     tags:
@@ -9,7 +16,7 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  goreleaser:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -29,7 +36,7 @@ jobs:
       - uses: goreleaser/goreleaser-action@v6
         with:
           version: '~> v2'
-          args: release --clean
+          args: release --clean --config .github/goreleaser.yaml
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          RELEASES_TOKEN: ${{ secrets.RELEASES_TOKEN }}

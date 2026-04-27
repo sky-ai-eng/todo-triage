@@ -51,6 +51,11 @@ release:
   github:
     owner: sky-ai-eng
     name: triage-factory
+  # release-please creates the GitHub Release with the changelog body
+  # before goreleaser runs in the same workflow. `mode: append` tells
+  # goreleaser to upload artifacts to that existing release rather than
+  # erroring on "release already exists".
+  mode: append
   prerelease: true
   draft: false
   header: |
@@ -70,7 +75,7 @@ brews:
     repository:
       owner: sky-ai-eng
       name: homebrew-tap
-      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+      token: "{{ .Env.RELEASES_TOKEN }}"
     directory: Formula
     homepage: "https://github.com/sky-ai-eng/triage-factory"
     description: "Local-first AI triage for engineering backlogs — single Go binary"
