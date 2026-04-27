@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.1.0](https://github.com/sky-ai-eng/triage-factory/compare/v1.0.0...v1.1.0) (2026-04-27)
+
+
+### Features
+
+* **cmd:** add uninstall command ([#52](https://github.com/sky-ai-eng/triage-factory/issues/52)) ([3128709](https://github.com/sky-ai-eng/triage-factory/commit/3128709a7ccc180ec5319c4606551d27976e6114))
+
+
+### Bug Fixes
+
+* **ci:** drop component prefix from release-please tags ([#49](https://github.com/sky-ai-eng/triage-factory/issues/49)) ([2ac3bf9](https://github.com/sky-ai-eng/triage-factory/commit/2ac3bf95970a41193c5a6ccc4846fa864fb54af9))
+* **prompts:** deduplicate skill search dirs and skills themselves ([#51](https://github.com/sky-ai-eng/triage-factory/issues/51)) ([2832b92](https://github.com/sky-ai-eng/triage-factory/commit/2832b9294c012e1b5da4192ab0d5ea55cfc611bc))
+
 ## 1.0.0 (2026-04-27)
 
 
