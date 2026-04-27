@@ -1,0 +1,39 @@
+name: test
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # frontend/dist must exist before any `go build` because the root
+      # package embeds it via go:embed; without it, package main fails
+      # to compile and `go test ./...` blows up before reaching any test.
+      - name: Build frontend
+        run: cd frontend && npm ci && npm run build
+
+      - name: Go build
+        run: go build ./...
+
+      - name: Go test
+        run: go test -race ./...
