@@ -200,6 +200,13 @@ type Issue struct {
 			Total int `json:"total"`
 		} `json:"comment,omitempty"`
 		Created string `json:"created,omitempty"`
+		// Updated is Jira's last-modified timestamp on the issue. Bumped
+		// every time any field changes (status, assignee, priority, comment
+		// added). Used by the diff layer as a fallback source time for
+		// events that don't have their own per-action timestamp on the
+		// snapshot — better than "we noticed it now" without firing a
+		// separate changelog API call.
+		Updated string `json:"updated,omitempty"`
 		// Subtasks inlined in the search response. Each element has its own
 		// minimal fields block with a Status; we only need .Fields.Status.Name
 		// to decide whether the subtask is still open. If Jira returns
@@ -303,7 +310,7 @@ func (c *Client) GetChildIssues(parentKey string) ([]Issue, error) {
 }
 
 // DefaultSearchFields is the default set of fields returned by SearchIssues.
-var DefaultSearchFields = []string{"summary", "description", "status", "issuetype", "priority", "assignee", "parent", "labels", "created"}
+var DefaultSearchFields = []string{"summary", "description", "status", "issuetype", "priority", "assignee", "parent", "labels", "created", "updated"}
 
 // ExtractDescriptionText flattens a Jira issue description to plain text.
 // Server/DC returns description as a JSON string; Cloud returns an ADF

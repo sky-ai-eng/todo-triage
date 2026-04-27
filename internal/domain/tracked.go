@@ -57,6 +57,35 @@ type PRSnapshot struct {
 	UpdatedAt    string   `json:"updated_at"`
 	MergedAt     string   `json:"merged_at,omitempty"`
 	ClosedAt     string   `json:"closed_at,omitempty"`
+
+	// Timeline carries a tail of PR-side events (label add/remove, review
+	// request, ready-for-review) with their per-action createdAt
+	// timestamps, pulled from GraphQL timelineItems on the same PR query
+	// (no extra HTTP request). Used by the diff layer to attach honest
+	// source times to events that have no per-field timestamp on the
+	// snapshot itself.
+	//
+	// json:"-" so the timeline doesn't bloat snapshot_json — it's a
+	// transient metadata channel, not state we diff against. Each poll
+	// brings fresh timeline data; we just need it during the diff that
+	// consumes the same wire response.
+	Timeline []TimelineEvent `json:"-"`
+}
+
+// TimelineEvent is one entry from GitHub's PullRequest.timelineItems.
+// Kind discriminates which fields are populated. Only the event types we
+// actually use for source-time enrichment are modeled here — adding a new
+// kind means extending both the GraphQL fragment and this type.
+type TimelineEvent struct {
+	Kind      string `json:"kind"`       // labeled | unlabeled | review_requested | ready_for_review
+	CreatedAt string `json:"created_at"` // RFC3339 from GraphQL
+	// Label is the label name for kind ∈ {labeled, unlabeled}.
+	Label string `json:"label,omitempty"`
+	// Reviewer is "login" for User reviewers or "org/slug" for Team
+	// reviewers; populated for kind = review_requested. Mirrors the
+	// shape used by PRSnapshot.ReviewRequests so diff lookups can
+	// match on equality.
+	Reviewer string `json:"reviewer,omitempty"`
 }
 
 // ReviewState captures one reviewer's latest review.
@@ -196,6 +225,13 @@ type JiraSnapshot struct {
 	// on snapshots that predate this field — callers should fall back to the
 	// entity's TF-side created_at when sort-critical.
 	CreatedAt string `json:"created_at,omitempty"`
+	// UpdatedAt is Jira's last-modified timestamp on the issue (fields.updated).
+	// Used by the diff layer as a fallback source time for events without a
+	// per-action timestamp on the snapshot (status changes, assignment
+	// changes, priority changes, new comments). Better than detection time
+	// without firing a separate changelog API call. Empty on snapshots that
+	// predate this field — diff falls back to detection time.
+	UpdatedAt string `json:"updated_at,omitempty"`
 	// OpenSubtaskCount is the number of this issue's child subtasks whose
 	// status is NOT in the configured Done.Members set. Used to suppress
 	// task creation for parent-of-subtasks tickets (the decomposition

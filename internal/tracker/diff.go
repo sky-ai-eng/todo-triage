@@ -24,26 +24,28 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, us
 	authorIsSelf := curr.Author == username
 	var evts []domain.Event
 
-	// emit records an event without a source timestamp — occurred_at stays
-	// zero-valued. Chronological consumers fall back to created_at.
+	// emit records an event with no specific source timestamp. Falls back
+	// to the entity's PR-level updatedAt when available (covers events
+	// like ready_for_review, label_added/removed, review_requested whose
+	// triggering action bumps the PR's updatedAt). Without a usable
+	// fallback, occurred_at stays zero-valued and chronological consumers
+	// degrade to created_at.
 	emit := func(eventType, dedupKey string, metadata any) {
-		metaJSON, _ := json.Marshal(metadata)
-		evts = append(evts, domain.Event{
-			EventType:    eventType,
-			EntityID:     eid,
-			DedupKey:     dedupKey,
-			MetadataJSON: string(metaJSON),
-			CreatedAt:    now,
-		})
+		emitWithFallback(eventType, dedupKey, curr.UpdatedAt, metadata, eid, now, &evts)
 	}
 
-	// emitAt records an event with a source timestamp parsed from the
-	// GitHub ISO-8601 string on the snapshot. Blank/unparseable values
-	// degrade to the plain emit() path — an event with an unknown source
-	// time is still better than dropping the signal entirely.
+	// emitAt records an event with a specific source timestamp parsed
+	// from the GitHub ISO-8601 string on the snapshot (commit
+	// committedAt, check-run completedAt, review submittedAt) or a
+	// timeline lookup. Blank or unparseable values degrade to the
+	// entity-level updatedAt fallback via emit().
+	//
+	// Goes through the shared external-time parser so a fractional-
+	// seconds shape (RFC3339Nano) doesn't silently miss the way it
+	// would with a single-layout time.Parse(time.RFC3339).
 	emitAt := func(eventType, dedupKey, sourceAt string, metadata any) {
-		t, err := time.Parse(time.RFC3339, sourceAt)
-		if sourceAt == "" || err != nil {
+		t, ok := domain.ParseExternalTime(sourceAt)
+		if !ok {
 			emit(eventType, dedupKey, metadata)
 			return
 		}
@@ -54,6 +56,21 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, us
 			DedupKey:     dedupKey,
 			MetadataJSON: string(metaJSON),
 			OccurredAt:   t,
+			CreatedAt:    now,
+		})
+	}
+
+	// emitNoSource records an event we know has no honest source time
+	// (e.g., pr:conflicts, where GitHub computes mergeable async and
+	// exposes no transition timestamp). occurred_at stays zero so callers
+	// don't mistake the entity's last-edit time for the conflict moment.
+	emitNoSource := func(eventType, dedupKey string, metadata any) {
+		metaJSON, _ := json.Marshal(metadata)
+		evts = append(evts, domain.Event{
+			EventType:    eventType,
+			EntityID:     eid,
+			DedupKey:     dedupKey,
+			MetadataJSON: string(metaJSON),
 			CreatedAt:    now,
 		})
 	}
@@ -102,9 +119,12 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, us
 	}
 
 	// --- Draft → Ready for review ------------------------------------------
+	// Source time: ReadyForReviewEvent.createdAt from timelineItems when
+	// present. emitAt falls back through updatedAt → detection time when
+	// the timeline tail doesn't reach far enough back.
 
 	if prev.IsDraft && !curr.IsDraft {
-		emit(domain.EventGitHubPRReadyForReview, "", events.GitHubPRReadyForReviewMetadata{
+		emitAt(domain.EventGitHubPRReadyForReview, "", lookupReadyForReviewTime(curr.Timeline), events.GitHubPRReadyForReviewMetadata{
 			Author: curr.Author, AuthorIsSelf: authorIsSelf,
 			Repo: curr.Repo, PRNumber: curr.Number,
 			HeadSHA: curr.HeadSHA, Labels: curr.Labels,
@@ -173,7 +193,11 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, us
 	// --- Merge conflicts ---------------------------------------------------
 
 	if prev.Mergeable != "CONFLICTING" && curr.Mergeable == "CONFLICTING" {
-		emit(domain.EventGitHubPRConflicts, "", events.GitHubPRConflictsMetadata{
+		// pr:conflicts has no honest source time — GitHub computes
+		// mergeable asynchronously and exposes no transition timestamp.
+		// updatedAt would be a misleading proxy because base-branch
+		// advances that flip mergeable don't always bump it.
+		emitNoSource(domain.EventGitHubPRConflicts, "", events.GitHubPRConflictsMetadata{
 			Author: curr.Author, AuthorIsSelf: authorIsSelf,
 			Repo: curr.Repo, PRNumber: curr.Number,
 			IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
@@ -197,7 +221,11 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, us
 		prevMatched := matchesAny(prev.ReviewRequests, username, userTeams)
 		currMatched := matchesAny(curr.ReviewRequests, username, userTeams)
 		if currMatched && !prevMatched {
-			emit(domain.EventGitHubPRReviewRequested, "", events.GitHubPRReviewRequestedMetadata{
+			// Source time: ReviewRequestedEvent.createdAt for the most
+			// recent request matching one of the user's identities (login
+			// or any team). Falls back through updatedAt → detection time.
+			sourceAt := lookupReviewRequestedTime(curr.Timeline, username, userTeams)
+			emitAt(domain.EventGitHubPRReviewRequested, "", sourceAt, events.GitHubPRReviewRequestedMetadata{
 				Author: curr.Author, AuthorIsSelf: authorIsSelf,
 				Repo: curr.Repo, PRNumber: curr.Number,
 				IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA,
@@ -269,7 +297,7 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, us
 
 	for label := range currLabels {
 		if !prevLabels[label] {
-			emit(domain.EventGitHubPRLabelAdded, label, events.GitHubPRLabelAddedMetadata{
+			emitAt(domain.EventGitHubPRLabelAdded, label, lookupLabelTime(curr.Timeline, "labeled", label), events.GitHubPRLabelAddedMetadata{
 				Author: curr.Author, AuthorIsSelf: authorIsSelf,
 				LabelName: label, Repo: curr.Repo, PRNumber: curr.Number,
 				IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
@@ -278,7 +306,7 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, us
 	}
 	for label := range prevLabels {
 		if !currLabels[label] {
-			emit(domain.EventGitHubPRLabelRemoved, label, events.GitHubPRLabelRemovedMetadata{
+			emitAt(domain.EventGitHubPRLabelRemoved, label, lookupLabelTime(curr.Timeline, "unlabeled", label), events.GitHubPRLabelRemovedMetadata{
 				Author: curr.Author, AuthorIsSelf: authorIsSelf,
 				LabelName: label, Repo: curr.Repo, PRNumber: curr.Number,
 				IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
@@ -306,15 +334,13 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID, username string
 	eid := &entityID
 	var evts []domain.Event
 
+	// All Jira events emitted from this diff correspond to field changes
+	// that bump fields.updated. Use it as the source time so the factory's
+	// chain animation orders by the actual change moment rather than when
+	// the poller noticed. Falls back to detection time when updated is
+	// blank (older snapshots that predate the field).
 	emit := func(eventType, dedupKey string, metadata any) {
-		metaJSON, _ := json.Marshal(metadata)
-		evts = append(evts, domain.Event{
-			EventType:    eventType,
-			EntityID:     eid,
-			DedupKey:     dedupKey,
-			MetadataJSON: string(metaJSON),
-			CreatedAt:    now,
-		})
+		emitWithFallback(eventType, dedupKey, curr.UpdatedAt, metadata, eid, now, &evts)
 	}
 
 	assigneeIsSelf := curr.Assignee != "" && curr.Assignee == username
@@ -435,6 +461,93 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID, username string
 }
 
 // --- helpers ---------------------------------------------------------------
+
+// lookupLabelTime returns the createdAt of the most recent timeline item
+// matching (kind, label name). Empty when the timeline tail (last 20
+// items) doesn't include the matching event — the caller's emitAt path
+// degrades to updatedAt → detection time, which is the right behavior:
+// we'd rather be slightly off than wrong, and a label change far enough
+// back that it slipped past the 20-item window is rarely the user's
+// most-pressing signal.
+//
+// kind ∈ {"labeled", "unlabeled"}. Walk in reverse because GraphQL's
+// timelineItems(last: N) returns chronological-ascending; the most
+// recent matching event is the right answer (a label can be added then
+// removed then added again — the diff fires because the LATEST state is
+// "added," so the latest LabeledEvent is the moment we care about).
+func lookupLabelTime(timeline []domain.TimelineEvent, kind, label string) string {
+	for i := len(timeline) - 1; i >= 0; i-- {
+		t := timeline[i]
+		if t.Kind == kind && t.Label == label {
+			return t.CreatedAt
+		}
+	}
+	return ""
+}
+
+// lookupReviewRequestedTime returns the createdAt of the most recent
+// ReviewRequestedEvent matching one of the session user's identities
+// (login or any of their team identifiers in "org/slug" form). Mirrors
+// the matching logic in matchesAny so the emitted event's timestamp
+// lines up with the request that actually triggered it.
+func lookupReviewRequestedTime(timeline []domain.TimelineEvent, username string, userTeams []string) string {
+	identities := make(map[string]bool, 1+len(userTeams))
+	if username != "" {
+		identities[username] = true
+	}
+	for _, team := range userTeams {
+		if team != "" {
+			identities[team] = true
+		}
+	}
+	for i := len(timeline) - 1; i >= 0; i-- {
+		t := timeline[i]
+		if t.Kind == "review_requested" && identities[t.Reviewer] {
+			return t.CreatedAt
+		}
+	}
+	return ""
+}
+
+// lookupReadyForReviewTime returns the createdAt of the most recent
+// ReadyForReviewEvent on the timeline. Typically only one fires per PR
+// lifecycle (you mark ready once), but if a PR was converted back to
+// draft and then re-readied, the most recent transition is the one
+// matching the diff — same walk-in-reverse logic as the label lookup.
+func lookupReadyForReviewTime(timeline []domain.TimelineEvent) string {
+	for i := len(timeline) - 1; i >= 0; i-- {
+		if timeline[i].Kind == "ready_for_review" {
+			return timeline[i].CreatedAt
+		}
+	}
+	return ""
+}
+
+// emitWithFallback appends an event using fallbackAt as occurred_at when it
+// parses, otherwise leaves occurred_at zero so chronological consumers
+// degrade to created_at. Shared between the PR and Jira diffs since both
+// use a "no specific timestamp on the snapshot, but the entity-level
+// updatedAt is a fair approximation" pattern.
+//
+// fallbackAt may be a GitHub RFC3339 timestamp ("2026-04-25T18:30:00Z")
+// or a Jira-flavored one ("2026-04-25T18:30:00.123+0000" — note the
+// missing colon in the offset). domain.ParseExternalTime tries the full
+// known layout set so a less-common Jira shape doesn't silently drop
+// occurred_at and degrade to created_at ordering.
+func emitWithFallback(eventType, dedupKey, fallbackAt string, metadata any, entityID *string, now time.Time, evts *[]domain.Event) {
+	metaJSON, _ := json.Marshal(metadata)
+	evt := domain.Event{
+		EventType:    eventType,
+		EntityID:     entityID,
+		DedupKey:     dedupKey,
+		MetadataJSON: string(metaJSON),
+		CreatedAt:    now,
+	}
+	if t, ok := domain.ParseExternalTime(fallbackAt); ok {
+		evt.OccurredAt = t
+	}
+	*evts = append(*evts, evt)
+}
 
 func toSet(items []string) map[string]bool {
 	m := make(map[string]bool, len(items))

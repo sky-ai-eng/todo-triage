@@ -530,7 +530,12 @@ func (t *Tracker) discoverJira(client *jiraclient.Client, baseURL string, projec
 	seen := map[string]bool{}
 	var all []jiraIssueState
 
-	fields := []string{"summary", "description", "status", "assignee", "priority", "labels", "issuetype", "parent", "comment", "subtasks", "created"}
+	// "updated" is required for the diff layer's source-time fallback —
+	// without it, JiraSnapshot.UpdatedAt is empty and emit() degrades all
+	// the way to detection time. Added explicitly here because this
+	// callsite passes a custom field list rather than relying on
+	// DefaultSearchFields.
+	fields := []string{"summary", "description", "status", "assignee", "priority", "labels", "issuetype", "parent", "comment", "subtasks", "created", "updated"}
 
 	for _, jql := range queries {
 		issues, err := client.SearchIssues(jql, fields, 100)
@@ -559,7 +564,9 @@ func (t *Tracker) discoverJira(client *jiraclient.Client, baseURL string, projec
 // drops fast once a ticket is off the user's plate.
 func (t *Tracker) batchFetchJira(client *jiraclient.Client, baseURL string, keys []string, doneStatuses []string) (map[string]jiraIssueState, error) {
 	results := make(map[string]jiraIssueState, len(keys))
-	fields := []string{"summary", "status", "assignee", "priority", "labels", "issuetype", "parent", "comment", "subtasks", "created"}
+	// "updated" is required for the diff layer's source-time fallback.
+	// See the comment on the discovery field list for context.
+	fields := []string{"summary", "status", "assignee", "priority", "labels", "issuetype", "parent", "comment", "subtasks", "created", "updated"}
 
 	for i := 0; i < len(keys); i += jiraBatchSize {
 		end := i + jiraBatchSize
@@ -623,6 +630,9 @@ func issueToState(issue jiraclient.Issue, baseURL string, doneStatuses []string)
 	snap.Labels = issue.Fields.Labels
 	if issue.Fields.Created != "" {
 		snap.CreatedAt = issue.Fields.Created
+	}
+	if issue.Fields.Updated != "" {
+		snap.UpdatedAt = issue.Fields.Updated
 	}
 	snap.OpenSubtaskCount = countOpenSubtasks(issue, doneStatuses)
 	return jiraIssueState{

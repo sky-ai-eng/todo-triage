@@ -130,6 +130,38 @@ fragment PRFullFields on PullRequest {
 	updatedAt
 	mergedAt
 	closedAt
+	# Timeline tail for source-time enrichment of label / review-request /
+	# ready-for-review events. The diff layer needs the per-action
+	# createdAt for each transition; the PR's top-level updatedAt is the
+	# last activity on the PR which clusters wrong when multiple actions
+	# happen between polls. last:20 covers the typical poll window
+	# comfortably; older timeline items fall through to the diff's
+	# updatedAt fallback. ~5 nodes per item × 20 = ~100 nodes per PR,
+	# additive to the existing ~1,060-node budget — a modest bump well
+	# within the 500k ceiling per the prFullFragment math above.
+	timelineItems(last: 20, itemTypes: [LABELED_EVENT, UNLABELED_EVENT, REVIEW_REQUESTED_EVENT, READY_FOR_REVIEW_EVENT]) {
+		nodes {
+			__typename
+			... on LabeledEvent {
+				createdAt
+				label { name }
+			}
+			... on UnlabeledEvent {
+				createdAt
+				label { name }
+			}
+			... on ReviewRequestedEvent {
+				createdAt
+				requestedReviewer {
+					... on User { login }
+					... on Team { slug organization { login } }
+				}
+			}
+			... on ReadyForReviewEvent {
+				createdAt
+			}
+		}
+	}
 }
 `
 
@@ -311,6 +343,33 @@ type gqlPR struct {
 	UpdatedAt      string        `json:"updatedAt"`
 	MergedAt       string        `json:"mergedAt"`
 	ClosedAt       string        `json:"closedAt"`
+	TimelineItems  gqlTimeline   `json:"timelineItems"`
+}
+
+// gqlTimeline is the heterogeneous PullRequest.timelineItems connection,
+// scoped (via the GraphQL query) to the four event types we use for
+// source-time enrichment. Nodes is decoded into the union struct
+// gqlTimelineNode; non-requested fields stay zero-valued for items
+// whose __typename doesn't carry them.
+type gqlTimeline struct {
+	Nodes []gqlTimelineNode `json:"nodes"`
+}
+
+// gqlTimelineNode flattens the four timeline event types we request into
+// a single struct. The discriminator is __typename — buildSnapshot reads
+// it to know which fields are populated. Adding a new timeline kind here
+// requires extending both the GraphQL query (prFullFragment) and the
+// switch in buildSnapshot that maps these into domain.TimelineEvent.
+type gqlTimelineNode struct {
+	Typename  string `json:"__typename"`
+	CreatedAt string `json:"createdAt"`
+	// Label is populated for LabeledEvent and UnlabeledEvent.
+	Label struct {
+		Name string `json:"name"`
+	} `json:"label"`
+	// RequestedReviewer is populated for ReviewRequestedEvent. Reuses
+	// gqlReviewer's User/Team union.
+	RequestedReviewer gqlReviewer `json:"requestedReviewer"`
 }
 
 type gqlRepo struct {
@@ -543,6 +602,41 @@ func (pr gqlPR) buildSnapshot(includeCheckRuns bool) domain.PRSnapshot {
 	// Labels
 	for _, l := range pr.Labels.Nodes {
 		snap.Labels = append(snap.Labels, l.Name)
+	}
+
+	// Timeline items — only populated on the full fragment. The discovery
+	// fragment doesn't request timelineItems (saves node budget on a path
+	// that doesn't need source-time enrichment), so pr.TimelineItems.Nodes
+	// is empty there and the loop is a no-op.
+	for _, item := range pr.TimelineItems.Nodes {
+		te := domain.TimelineEvent{CreatedAt: item.CreatedAt}
+		switch item.Typename {
+		case "LabeledEvent":
+			te.Kind = "labeled"
+			te.Label = item.Label.Name
+		case "UnlabeledEvent":
+			te.Kind = "unlabeled"
+			te.Label = item.Label.Name
+		case "ReviewRequestedEvent":
+			te.Kind = "review_requested"
+			// Mirror the "login" or "org/slug" formatting used for
+			// snap.ReviewRequests so diff lookups can match by string
+			// equality without re-deriving the team identifier.
+			if login := item.RequestedReviewer.Login; login != "" {
+				te.Reviewer = login
+			} else if slug := item.RequestedReviewer.Slug; slug != "" {
+				if org := item.RequestedReviewer.Organization.Login; org != "" {
+					te.Reviewer = org + "/" + slug
+				} else {
+					te.Reviewer = slug
+				}
+			}
+		case "ReadyForReviewEvent":
+			te.Kind = "ready_for_review"
+		default:
+			continue // unknown type from the union — skip rather than guess
+		}
+		snap.Timeline = append(snap.Timeline, te)
 	}
 
 	return snap

@@ -287,9 +287,17 @@ func ListRecentEventsByEntity(database *sql.DB, ids []string, perEntity int) (ma
 // formats we see in the events table. Direct time.Time scans work for
 // plain DATETIME columns because the SQLite driver reads the column
 // type and parses; once COALESCE enters the picture that type metadata
-// is gone and we get back a raw string. Accept both the RFC3339
-// Go-side writer format (from explicit time.Time inserts) and SQLite's
-// default "2006-01-02 15:04:05" CURRENT_TIMESTAMP format.
+// is gone and we get back a raw string.
+//
+// Accepted shapes, in order:
+//   - RFC3339 ("2006-01-02T15:04:05Z07:00")
+//   - modernc with _time_format=sqlite ("2006-01-02 15:04:05.999999999-07:00")
+//   - SQLite default ("2006-01-02 15:04:05" — CURRENT_TIMESTAMP, naive UTC)
+//   - RFC3339 with fractional seconds and 'T' separator
+//   - Legacy Go time.String() ("2006-01-02 15:04:05.999999999 -0700 MST"),
+//     produced by older modernc-driver writes that bound time.Time as its
+//     default String() form. The monotonic-clock suffix " m=+..." is
+//     stripped before parsing because time.Parse can't consume it.
 func parseDBDatetime(s string) (time.Time, error) {
 	if s == "" {
 		return time.Time{}, nil
@@ -303,7 +311,16 @@ func parseDBDatetime(s string) (time.Time, error) {
 	if t, err := time.Parse("2006-01-02 15:04:05", s); err == nil {
 		return t, nil
 	}
-	return time.Parse("2006-01-02T15:04:05.999999999Z07:00", s)
+	if t, err := time.Parse("2006-01-02T15:04:05.999999999Z07:00", s); err == nil {
+		return t, nil
+	}
+	cleaned := s
+	if i := strings.Index(cleaned, " m=+"); i >= 0 {
+		cleaned = cleaned[:i]
+	} else if i := strings.Index(cleaned, " m=-"); i >= 0 {
+		cleaned = cleaned[:i]
+	}
+	return time.Parse("2006-01-02 15:04:05.999999999 -0700 MST", cleaned)
 }
 
 // ListFactoryEntities returns up to `limit` active entities with their

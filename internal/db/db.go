@@ -32,10 +32,20 @@ func Open() (*sql.DB, error) {
 	// unlike mattn/go-sqlite3 which had implicit driver-level retries.
 	// 5s gives any rare contention plenty of room to resolve before
 	// surfacing an error.
+	//
+	// _time_format=sqlite forces modernc to serialize time.Time bind
+	// parameters as "2006-01-02 15:04:05.999999999-07:00" instead of
+	// the default Go time.String() form ("2006-01-02 15:04:05 -0700
+	// MST [m=+...]"), which is unparseable by SQLite date functions
+	// and by anyone reading the column as TEXT (e.g. via COALESCE in
+	// factory queries). Direct time.Time scans against legacy rows
+	// already in the old format still succeed — modernc's reader is
+	// permissive — so no data migration is needed.
 	db, err := sql.Open("sqlite", dbPath+
 		"?_pragma=journal_mode(WAL)"+
 		"&_pragma=foreign_keys(on)"+
-		"&_pragma=busy_timeout(5000)")
+		"&_pragma=busy_timeout(5000)"+
+		"&_time_format=sqlite")
 	if err != nil {
 		return nil, err
 	}
