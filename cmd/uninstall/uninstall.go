@@ -101,11 +101,47 @@ func Handle(args []string) {
 	}
 
 	if plan.hasInstallLink {
-		if err := os.Remove(linkPath); err != nil {
-			fmt.Fprintf(os.Stderr, "  warn: remove %s: %v (try: sudo rm %q)\n", linkPath, err, linkPath)
+		info, err := os.Lstat(linkPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  warn: inspect %s: %v\n", linkPath, err)
 			failed = true
+		} else if info.Mode()&os.ModeSymlink == 0 {
+			fmt.Fprintf(os.Stderr, "  warn: skip removing %s: path exists but is not a symlink\n", linkPath)
 		} else {
-			fmt.Printf("  removed install symlink %s\n", linkPath)
+			target, err := os.Readlink(linkPath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "  warn: inspect symlink target %s: %v\n", linkPath, err)
+				failed = true
+			} else {
+				if !filepath.IsAbs(target) {
+					target = filepath.Join(filepath.Dir(linkPath), target)
+				}
+
+				exePath, err := os.Executable()
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "  warn: resolve current executable: %v\n", err)
+					failed = true
+				} else {
+					resolvedTarget := target
+					if p, err := filepath.EvalSymlinks(target); err == nil {
+						resolvedTarget = p
+					}
+
+					resolvedExe := exePath
+					if p, err := filepath.EvalSymlinks(exePath); err == nil {
+						resolvedExe = p
+					}
+
+					if filepath.Clean(resolvedTarget) != filepath.Clean(resolvedExe) {
+						fmt.Fprintf(os.Stderr, "  warn: skip removing %s: symlink points to %q, not the current executable %q\n", linkPath, target, exePath)
+					} else if err := os.Remove(linkPath); err != nil {
+						fmt.Fprintf(os.Stderr, "  warn: remove %s: %v (try: sudo rm %q)\n", linkPath, err, linkPath)
+						failed = true
+					} else {
+						fmt.Printf("  removed install symlink %s\n", linkPath)
+					}
+				}
+			}
 		}
 	}
 
