@@ -1,10 +1,18 @@
 # Triage Factory
 
-![Factory](docs/imgs/factory-page.png)
+<p align="center">
+  <img src="docs/imgs/factory-page.png" alt="Factory" width="90%" />
+</p>
 
 <p align="center">An AI-powered software factory where humans decide what gets automated—and can take over anytime.</p>
 
-Triage Factory tracks everything that needs your attention across GitHub and Jira, scores it with AI, and routes it through an automation engine visualized as a factory floor. In Triage view, swipe to claim, dismiss, or delegate tasks to Claude. You decide exactly what gets automated, and you can take over any agent's run when needed. The things you delegate get done how you want them done using prompts you write or skills imported from Claude Code. PR reviews, Jira implementations, CI failures, and merge conflict resolution are all handled automatically in isolated worktrees, streaming results to a centralized dashboard in real time.
+<p align="center">
+  <a href="https://github.com/sky-ai-eng/triage-factory/releases">
+    <img src="https://img.shields.io/github/v/release/sky-ai-eng/triage-factory?include_prereleases&sort=semver&label=latest%20pre-release" alt="Latest pre-release" />
+  </a>
+</p>
+
+Triage Factory tracks everything that needs your attention across GitHub and Jira, scores it with AI, and routes it through an automation engine visualized as a factory floor. In Triage view, swipe to claim, dismiss, snooze, or delegate tasks to Claude. You decide exactly what gets automated, and you can take over any agent's run when needed. The things you delegate get done how you want them done using prompts you write or skills imported from Claude Code. PR reviews, Jira implementations, CI failures, and merge conflict resolution are all handled automatically in isolated worktrees, streaming results to a centralized dashboard in real time.
 
 It runs as a single Go binary on your machine. No hosted service, no team rollout, no DevOps. Credentials live in the OS keychain, and the only things that leave your machine are API calls to GitHub, Jira, and Claude.
 
@@ -18,13 +26,17 @@ It runs as a single Go binary on your machine. No hosted service, no team rollou
 
 **Prompt routing** — A visual graph editor maps event types to delegation prompts. "Review requested" routes to your PR review prompt, "Jira assigned" routes to your implementation prompt. Drag event types onto prompt nodes to wire them up.
 
-![Prompt routing graph](docs/imgs/prompts-page.png)
+<p align="center">
+  <img src="docs/imgs/prompts-page.png" alt="Prompt routing graph" width="90%" />
+</p>
 
 > Events are **per-action signals** — one event per check completion, one per review submission, one per push. Routing dedups those into one active card per `(entity_id, event_type, dedup_key)` so repeated churn bumps the same work item instead of spawning duplicates. For the current tracked event taxonomy, see [docs/tracked-events.md](docs/tracked-events.md).
 
 **PR dashboard** — Status donut, merge timeline, review balance, and 30-day totals. All your open, merged, and closed PRs in one place. Drag between "Ready for review" and "Drafts" to convert, all while keeping an eye on build status and merge conflicts.
 
-![Pull Requests dashboard](docs/imgs/prs-page.png)
+<p align="center">
+  <img src="docs/imgs/prs-page.png" alt="Pull Requests dashboard" width="90%" />
+</p>
 
 **Repo profiling** — AI-generated profiles of your configured repos (from README, CLAUDE.md, AGENTS.md) so the scorer and delegation agents understand context without you having to explain it.
 
