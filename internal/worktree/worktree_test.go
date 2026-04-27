@@ -915,8 +915,11 @@ func TestCopyForTakeover_RelativeBaseDir(t *testing.T) {
 	// Resolve symlinks on both sides before comparing. On macOS,
 	// t.TempDir() returns paths under /var/folders/... while filesystem
 	// operations elsewhere in CopyForTakeover canonicalize through the
-	// /var → /private/var symlink, so a literal HasPrefix would fail
-	// despite the paths being the same directory.
+	// /var → /private/var symlink, so a literal comparison would fail
+	// despite the paths being the same directory. Use filepath.Rel
+	// rather than strings.HasPrefix so /tmp/a doesn't falsely match
+	// /tmp/abc — Rel returns a path starting with ".." when dest is
+	// not actually under scratch.
 	scratchResolved, err := filepath.EvalSymlinks(scratch)
 	if err != nil {
 		t.Fatalf("eval scratch: %v", err)
@@ -925,8 +928,9 @@ func TestCopyForTakeover_RelativeBaseDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("eval dest: %v", err)
 	}
-	if !strings.HasPrefix(destResolved, scratchResolved) {
-		t.Errorf("dest %q should resolve under cwd %q", destResolved, scratchResolved)
+	rel, err := filepath.Rel(scratchResolved, destResolved)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		t.Errorf("dest %q should resolve under cwd %q (rel=%q, err=%v)", destResolved, scratchResolved, rel, err)
 	}
 }
 
