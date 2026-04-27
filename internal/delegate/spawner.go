@@ -71,10 +71,17 @@ func NewSpawner(database *sql.DB, ghClient *ghclient.Client, wsHub *websocket.Hu
 	}
 }
 
-// wasTakenOver reports whether Takeover() finalized this run. Read by
-// runAgent's deferred cleanup (skip ~/.claude/projects deletion) and by
-// handleCancelled (skip the status overwrite that would clobber
-// taken_over with cancelled).
+// wasTakenOver reports whether Takeover() has claimed this run. The
+// flag is set the moment Takeover validates state, BEFORE the worktree
+// copy and the DB mark — that's intentional: every cleanup path in
+// runAgent (worktree.Remove defers, RemoveClaudeProjectDir defer, the
+// natural-completion block, failRun, handleCancelled) checks this and
+// short-circuits, which is what keeps the source worktree on disk
+// while the copy runs and prevents a concurrent natural completion
+// from overwriting the taken_over status. So this flag means "takeover
+// is in progress or has finalized" — not strictly "finalized." On any
+// failure path Takeover calls abortTakeover which clears the flag and
+// runs the cleanup the gates skipped.
 func (s *Spawner) wasTakenOver(runID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
