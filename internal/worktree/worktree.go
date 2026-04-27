@@ -578,6 +578,8 @@ func CopyForTakeover(ctx context.Context, runID, srcWorktree, baseDir string) (s
 		// the endpoint shouldn't clobber a working copy the user may
 		// already have local edits in.
 		return destDir, nil
+	} else if !os.IsNotExist(err) {
+		return "", fmt.Errorf("takeover: stat destination: %w", err)
 	}
 
 	// Linked-worktree add against the same bare. --no-checkout means git
