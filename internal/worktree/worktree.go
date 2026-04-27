@@ -635,9 +635,13 @@ func CopyForTakeover(ctx context.Context, runID, srcWorktree, baseDir string) (s
 
 	// The overlay path leaves the original worktree in place because we
 	// needed its files for the copy. Now that the copy is done, remove
-	// the source worktree dir explicitly. (The move path doesn't need
-	// this — git already renamed the source out from under us.)
-	if err := Remove(runID); err != nil {
+	// the source worktree dir explicitly using its actual path —
+	// callers can pass an arbitrary srcWorktree, so deriving the path
+	// from runID via Remove() would risk removing the wrong directory
+	// if the source ever differs from runDir(runID). (The move path
+	// doesn't need this — git already renamed the source out from
+	// under us.)
+	if err := RemoveAt(srcWorktree, runID); err != nil {
 		log.Printf("[worktree] warning: takeover %s: remove original after overlay: %v", runID, err)
 	}
 
@@ -949,11 +953,30 @@ func gitOutputCtx(ctx context.Context, dir string, args ...string) (string, erro
 	return string(out), nil
 }
 
-// Remove cleans up a worktree after a run completes or fails.
+// Remove cleans up a run's worktree at the canonical /tmp location.
+// Used by the normal runAgent lifecycle where the worktree path is
+// always runDir(runID). For takeover (which has an explicit srcWorktree
+// path that may diverge from runDir(runID)) use RemoveAt instead —
+// that function takes the path directly so it can't mistakenly
+// remove a different runID's canonical dir.
 func Remove(runID string) error {
-	wtDir := runDir(runID)
-	if err := os.RemoveAll(wtDir); err != nil {
-		return fmt.Errorf("remove worktree dir: %w", err)
+	return RemoveAt(runDir(runID), runID)
+}
+
+// RemoveAt removes a specific worktree directory by path and prunes
+// the bare's stale registration. Caller passes the actual path rather
+// than deriving it from a runID so callers like CopyForTakeover
+// (which holds the source path explicitly) and abortTakeover (which
+// has the worktree path in its claudeCwd argument) operate on the
+// correct directory even if it's not at runDir(runID).
+//
+// runID is used only for the log line; pass "" if not available.
+func RemoveAt(path, runID string) error {
+	if path == "" {
+		return nil
+	}
+	if err := os.RemoveAll(path); err != nil {
+		return fmt.Errorf("remove worktree dir %s: %w", path, err)
 	}
 
 	// Prune stale worktree refs from all bare repos
@@ -963,7 +986,11 @@ func Remove(runID string) error {
 	}
 	pruneAll(filepath.Join(home, reposDir))
 
-	log.Printf("[worktree] removed %s", runID)
+	if runID != "" {
+		log.Printf("[worktree] removed %s (%s)", runID, path)
+	} else {
+		log.Printf("[worktree] removed %s", path)
+	}
 	return nil
 }
 
@@ -982,8 +1009,18 @@ type CleanupOptions struct {
 	// holding the conversation state that needs to survive.
 	//
 	// Keys are run IDs. Both wt-style (<runID>) and no-cwd (<runID>-nocwd)
-	// directory names are matched.
+	// directory names are matched. Ignored when SkipClaudeProjectCleanup
+	// is true.
 	PreserveClaudeProjectFor map[string]bool
+
+	// SkipClaudeProjectCleanup turns OFF deletion of every
+	// ~/.claude/projects entry, regardless of the preserve set. Used at
+	// startup when the caller can't reliably determine the preserve set
+	// (e.g., the DB query for taken-over run IDs failed): rather than
+	// risk wiping a session JSONL we should have kept, skip ALL project-
+	// dir cleanup for this sweep. The worktree dir removal and bare-repo
+	// pruning still run, so we don't leak large temp directories.
+	SkipClaudeProjectCleanup bool
 }
 
 // CleanupWithOptions is the parameterized Cleanup the takeover flow uses
@@ -1001,7 +1038,12 @@ func CleanupWithOptions(opts CleanupOptions) {
 		if e.IsDir() {
 			fullPath := filepath.Join(runsBase, e.Name())
 			runID := strings.TrimSuffix(e.Name(), "-nocwd")
-			if !opts.PreserveClaudeProjectFor[runID] {
+			// Project-dir deletion has two opt-outs: a global SkipAll
+			// (caller couldn't determine the preserve set) and a per-
+			// runID preserve (this run is in taken_over state). Either
+			// keeps the JSONL intact while we still remove the worktree
+			// dir below.
+			if !opts.SkipClaudeProjectCleanup && !opts.PreserveClaudeProjectFor[runID] {
 				// Each entry here was a live claude cwd at some point — nuke its
 				// ghost ~/.claude/projects entry before removing the dir itself
 				// (EvalSymlinks needs the dir to still exist to resolve).

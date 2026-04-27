@@ -343,9 +343,15 @@ func (s *Spawner) abortTakeover(runID, claudeCwd, destPath string) {
 	}
 	if claudeCwd != "" {
 		worktree.RemoveClaudeProjectDir(claudeCwd)
-	}
-	if err := worktree.Remove(runID); err != nil {
-		log.Printf("[delegate] warning: abort takeover for %s: remove worktree: %v", runID, err)
+		// Remove the actual worktree path (which equals claudeCwd for
+		// runs with a worktree, the only kind takeover supports). Using
+		// claudeCwd rather than runID-derived runDir() guards against
+		// the source worktree ever living outside /tmp/triagefactory-
+		// runs/<runID> — Remove(runID) would silently target the
+		// canonical path and miss the actual one.
+		if err := worktree.RemoveAt(claudeCwd, runID); err != nil {
+			log.Printf("[delegate] warning: abort takeover for %s: remove worktree: %v", runID, err)
+		}
 	}
 
 	// If the row is still non-terminal (copy/DB-error path: the

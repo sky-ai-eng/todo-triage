@@ -52,6 +52,10 @@ export default function TakeoverModal({ info, onClose }: Props) {
             transition={{ type: 'spring', damping: 28, stiffness: 320 }}
           >
             <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="takeover-modal-title"
+              aria-describedby="takeover-modal-desc"
               className="w-full max-w-lg pointer-events-auto bg-surface-raised border border-border-glass rounded-2xl shadow-xl shadow-black/10 overflow-hidden"
               onClick={(e) => e.stopPropagation()}
             >
@@ -60,7 +64,10 @@ export default function TakeoverModal({ info, onClose }: Props) {
                   <div className="text-[11px] font-semibold uppercase tracking-wider text-text-tertiary">
                     Run taken over
                   </div>
-                  <div className="text-[15px] font-semibold text-text-primary mt-0.5">
+                  <div
+                    id="takeover-modal-title"
+                    className="text-[15px] font-semibold text-text-primary mt-0.5"
+                  >
                     Resume in your terminal
                   </div>
                 </div>
@@ -74,7 +81,10 @@ export default function TakeoverModal({ info, onClose }: Props) {
               </div>
 
               <div className="px-5 py-4 flex flex-col gap-4">
-                <p className="text-[12px] text-text-secondary leading-relaxed">
+                <p
+                  id="takeover-modal-desc"
+                  className="text-[12px] text-text-secondary leading-relaxed"
+                >
                   The headless run has been stopped and a working copy was cloned to your takeover
                   directory. Paste the command below into a terminal to resume the Claude Code
                   session interactively.

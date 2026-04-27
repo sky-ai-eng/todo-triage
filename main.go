@@ -105,14 +105,16 @@ func main() {
 	// are preserved at the ~/.claude/projects level so the user can still
 	// resume their takeover sessions after a binary restart.
 	//
-	// Fail closed on a query error: skip the entire sweep rather than
-	// proceed with an empty preserve set, which would silently delete
-	// every taken_over run's session JSONL and break their resumes.
-	// Leaking a few orphan worktrees on disk until the next successful
-	// startup is a much milder failure than that.
+	// On query error we still sweep worktree dirs and prune bare repos
+	// (those leaks compound fast — each can be GBs), but skip ALL
+	// ~/.claude/projects deletions: without the preserve set we can't
+	// distinguish a taken-over run's session JSONL from a regular
+	// orphan, and silently nuking a JSONL would break the user's ability
+	// to resume.
 	preserveIDs, err := db.ListTakenOverRunIDs(database)
 	if err != nil {
-		log.Printf("[server] WARNING: failed to load taken_over run ids — skipping worktree cleanup to avoid clobbering active takeover sessions: %v", err)
+		log.Printf("[server] WARNING: failed to load taken_over run ids — sweeping worktree dirs but skipping ~/.claude/projects cleanup to avoid clobbering active takeover sessions: %v", err)
+		worktree.CleanupWithOptions(worktree.CleanupOptions{SkipClaudeProjectCleanup: true})
 	} else {
 		preserveSet := make(map[string]bool, len(preserveIDs))
 		for _, id := range preserveIDs {
