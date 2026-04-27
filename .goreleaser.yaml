@@ -1,0 +1,90 @@
+version: 2
+
+project_name: triagefactory
+
+before:
+  hooks:
+    - sh -c "cd frontend && npm ci && npm run build"
+
+builds:
+  - id: triagefactory
+    main: .
+    binary: triagefactory
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.Version={{.Version}}
+
+archives:
+  - id: default
+    formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^chore:"
+      - "^test:"
+      - Merge pull request
+      - Merge branch
+
+release:
+  github:
+    owner: sky-ai-eng
+    name: triage-factory
+  prerelease: true
+  draft: false
+  header: |
+    ## triagefactory {{ .Tag }}
+
+    Local-first AI triage for engineering backlogs.
+
+    ### Install
+    ```
+    brew tap sky-ai-eng/tap
+    brew install triagefactory
+    ```
+    Or download the appropriate tarball below.
+
+brews:
+  - name: triagefactory
+    repository:
+      owner: sky-ai-eng
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/sky-ai-eng/triage-factory"
+    description: "Local-first AI triage for engineering backlogs — single Go binary"
+    license: "BUSL-1.1"
+    install: |
+      bin.install "triagefactory"
+    test: |
+      system "#{bin}/triagefactory", "--version"
+    # commit_author.email shows up as the author of every Formula commit.
+    # Using a generic address keeps releases out of any specific human's
+    # GitHub contribution graph; switch to your own noreply email
+    # (`<id>+<user>@users.noreply.github.com`) if you'd rather attribute
+    # them.
+    commit_author:
+      name: triagefactory-release-bot
+      email: triagefactory-release-bot@users.noreply.github.com
+    commit_msg_template: "triagefactory {{ .Tag }}"
