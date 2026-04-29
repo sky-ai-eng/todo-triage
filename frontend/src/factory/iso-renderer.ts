@@ -45,15 +45,17 @@ import {
   Vector3,
 } from '@babylonjs/core'
 
+import { buildBelt, type BeltBuild } from './iso-belt'
+import { buildPoleMesh, type Pole, type PoleBuild } from './iso-pole'
+import type { PortHandle } from './iso-port'
 import {
   buildStationMesh,
   createStationMaterials,
   type Station,
   type StationMaterials,
 } from './iso-station'
-import type { PortHandle } from './iso-port'
 
-const DEFAULT_FLOOR_SIZE = 1200
+const DEFAULT_FLOOR_SIZE = 2400
 // Closest the camera can get before its near plane starts clipping
 // objects in the scene. Expressed as a max zoom multiplier so the
 // physical limit derives from the initial view (radius_min =
@@ -232,10 +234,8 @@ export class IsoScene {
   }
 
   addStation(spec: Station): { root: TransformNode; ports: PortHandle[] } {
-    if (!this.materials) {
-      this.materials = createStationMaterials(this.scene)
-    }
-    const built = buildStationMesh(this.scene, spec, this.materials)
+    const materials = this.getMaterials()
+    const built = buildStationMesh(this.scene, spec, materials)
 
     // Register sub-meshes with the shadow generator. Opaque body
     // pieces both cast and receive; transparent shells cast only
@@ -251,8 +251,7 @@ export class IsoScene {
         } else if (
           m.name.startsWith('queued-shell-') ||
           m.name.startsWith('wip-shell-') ||
-          m.name.startsWith('heatsink-') ||
-          m.name.startsWith('port-stub-')
+          m.name.startsWith('heatsink-')
         ) {
           this.shadowGenerator.addShadowCaster(m)
         }
@@ -260,6 +259,38 @@ export class IsoScene {
     }
 
     return built
+  }
+
+  addPole(spec: Pole, cellSize: number, pathOffset: number = 0): PoleBuild {
+    const materials = this.getMaterials()
+    return buildPoleMesh(this.scene, spec, cellSize, materials.beltSurface, pathOffset)
+  }
+
+  /** Build a connecting belt between two ports. Drops the snap point's
+   *  z to floor level (BeltSpec expects floor-z; the snap's z is the
+   *  conveyor centerline). */
+  addBelt(
+    start: PortHandle,
+    end: PortHandle,
+    pathOffset: number,
+    capStart = false,
+    capEnd = false,
+  ): BeltBuild {
+    const materials = this.getMaterials()
+    const startPos = new Vector3(start.worldPos.x, start.worldPos.y, 0)
+    const endPos = new Vector3(end.worldPos.x, end.worldPos.y, 0)
+    return buildBelt(
+      this.scene,
+      { start: startPos, end: endPos, pathOffset, capStart, capEnd },
+      materials.beltSurface,
+    )
+  }
+
+  private getMaterials(): StationMaterials {
+    if (!this.materials) {
+      this.materials = createStationMaterials(this.scene)
+    }
+    return this.materials
   }
 
   destroy(): void {

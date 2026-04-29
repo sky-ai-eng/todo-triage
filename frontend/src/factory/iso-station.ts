@@ -25,6 +25,7 @@
 import {
   Color3,
   CSG,
+  DynamicTexture,
   Material,
   Mesh,
   MeshBuilder,
@@ -34,6 +35,7 @@ import {
   Vector3,
 } from '@babylonjs/core'
 
+import { buildBelt, createBeltMaterial, type BeltBuild } from './iso-belt'
 import {
   CONVEYOR_HEIGHT,
   CONVEYOR_WIDTH,
@@ -164,6 +166,8 @@ export interface StationMaterials {
   ventGlow: PBRMaterial
   heatsinkFin: PBRMaterial
   screen: PBRMaterial
+  beltSurface: PBRMaterial
+  recessInterior: PBRMaterial
   queuedShell: PBRMaterial
   queuedCore: PBRMaterial
   wipShell: PBRMaterial
@@ -256,6 +260,31 @@ export function createStationMaterials(scene: Scene): StationMaterials {
   screen.clearCoat.intensity = 0.7
   screen.clearCoat.roughness = 0.05
 
+  // Belt surface — chevron-textured PBR material shared across all
+  // belts in the scene. Animation observer is registered inside
+  // createBeltMaterial; per-belt UVs are baked at construction time
+  // in iso-belt.ts.
+  const beltSurface = createBeltMaterial(scene)
+
+  // Recess interior — vertical gradient texture. Painted light at the
+  // top of the canvas, dark at the bottom. Mapping to each wall face
+  // depends on Babylon's box face UV layout, but the result is a
+  // subtle directional shading that breaks up the otherwise-flat
+  // dark interior.
+  const recessTex = new DynamicTexture('recess-gradient', { width: 64, height: 256 }, scene, false)
+  const recessCtx = recessTex.getContext()
+  const recessGrad = recessCtx.createLinearGradient(0, 0, 0, 256)
+  recessGrad.addColorStop(0, '#322a22')
+  recessGrad.addColorStop(1, '#0a0807')
+  recessCtx.fillStyle = recessGrad
+  recessCtx.fillRect(0, 0, 64, 256)
+  recessTex.update()
+
+  const recessInterior = new PBRMaterial('recess-interior', scene)
+  recessInterior.albedoTexture = recessTex
+  recessInterior.metallic = 0.25
+  recessInterior.roughness = 0.7
+
   // Queued chip shell — amber glass token. More opaque than the
   // canopy so the inner core reads as "suggested" rather than fully
   // exposed.
@@ -302,6 +331,8 @@ export function createStationMaterials(scene: Scene): StationMaterials {
     ventGlow,
     heatsinkFin,
     screen,
+    beltSurface,
+    recessInterior,
     queuedShell,
     queuedCore,
     wipShell,
@@ -318,8 +349,13 @@ interface PortBuild {
   /** LED frame bars (top + two sides) sitting on the wall surface
    *  around the recess opening. Caller parents to the station root. */
   frameMeshes: Mesh[]
-  /** Dark internal belt stub inside the recess. */
-  stub: Mesh
+  /** Recess interior walls — back, top, and two sides. Cover the
+   *  body's CSG-cut surfaces with darker material. */
+  recessWalls: Mesh[]
+  /** The belt itself — top plane plus visible end cap at the wall.
+   *  The cap on the back-of-recess side is suppressed (would clip
+   *  through the recess back wall). */
+  belt: BeltBuild
   /** Snap point + outward direction in world space. */
   handle: PortHandle
 }
@@ -327,7 +363,13 @@ interface PortBuild {
 const FRAME_THICKNESS = 2
 const FRAME_PROTRUSION = 0.6
 const STUB_BACK_GAP = 2
-const STUB_FLOOR_LIFT = 0.1
+
+// ─── Recess interior walls ──────────────────────────────────────────────
+// Thin slabs covering the body's CSG-cut walls inside the recess.
+// Inset by the larger of these so the slabs sit closer to the camera
+// than the body wall and win the depth test cleanly.
+const RECESS_WALL_THICKNESS = 0.2
+const RECESS_WALL_INSET = 0.1
 
 function buildPortMeshes(
   scene: Scene,
@@ -445,22 +487,116 @@ function buildPortMeshes(
     frameMeshes.push(bar)
   }
 
-  // ─── Internal belt stub ───
-  // Outer face flush with the wall plane; back face stops short of the
-  // recess back wall so a small dark gap reads as depth. Lifted off
-  // the floor by a hair to avoid z-fighting with the ground plane.
-  const stubLength = port.recessDepth - STUB_BACK_GAP
-  const stubAlongOffset = -stubLength / 2
-  const stubSize = isXAxis
-    ? { width: stubLength, height: CONVEYOR_WIDTH, depth: CONVEYOR_HEIGHT }
-    : { width: CONVEYOR_WIDTH, height: stubLength, depth: CONVEYOR_HEIGHT }
-  const stub = MeshBuilder.CreateBox(`port-stub-${index}`, stubSize, scene)
-  stub.position.set(
-    faceX + outwardX * stubAlongOffset + acrossX * acrossDelta,
-    faceY + outwardY * stubAlongOffset + acrossY * acrossDelta,
-    station.z + CONVEYOR_HEIGHT / 2 + STUB_FLOOR_LIFT,
+  // ─── Recess interior walls ───
+  // Thin slabs covering the body's CSG-cut surfaces so the interior
+  // doesn't read as warm cream where the recess meets the body.
+  // Inset slightly so the slabs sit closer to the camera than the
+  // body wall and win the depth test cleanly.
+  const inX = -outwardX
+  const inY = -outwardY
+  const wallT = RECESS_WALL_THICKNESS
+  const wallInset = RECESS_WALL_INSET
+  const recessWalls: Mesh[] = []
+
+  const placeWall = (
+    name: string,
+    alongCenter: number,
+    acrossOffset: number,
+    zCenter: number,
+    alongExtent: number,
+    acrossExtent: number,
+    zExtent: number,
+  ): Mesh => {
+    const w = isXAxis ? alongExtent : acrossExtent
+    const h = isXAxis ? acrossExtent : alongExtent
+    const slab = MeshBuilder.CreateBox(name, { width: w, height: h, depth: zExtent }, scene)
+    slab.position.set(
+      faceX + inX * alongCenter + acrossX * (acrossDelta + acrossOffset),
+      faceY + inY * alongCenter + acrossY * (acrossDelta + acrossOffset),
+      zCenter,
+    )
+    slab.material = materials.recessInterior
+    return slab
+  }
+
+  // Back wall — at along = recessDepth - inset - t/2.
+  recessWalls.push(
+    placeWall(
+      `port-recess-back-${index}`,
+      port.recessDepth - wallInset - wallT / 2,
+      0,
+      station.z + recessOpenH / 2,
+      wallT,
+      recessOpenW,
+      recessOpenH,
+    ),
   )
-  stub.material = materials.chamberFloor
+
+  // Top wall — at z = recessOpenH - inset - t/2, spans the inner
+  // length of the recess (less side insets so it doesn't poke out
+  // past the side walls).
+  recessWalls.push(
+    placeWall(
+      `port-recess-top-${index}`,
+      port.recessDepth / 2,
+      0,
+      station.z + recessOpenH - wallInset - wallT / 2,
+      port.recessDepth - 2 * wallInset,
+      recessOpenW,
+      wallT,
+    ),
+  )
+
+  // Side walls (low + high across).
+  for (const sign of [-1, 1] as const) {
+    recessWalls.push(
+      placeWall(
+        `port-recess-side-${index}-${sign < 0 ? 'l' : 'r'}`,
+        port.recessDepth / 2,
+        sign * (recessOpenW / 2 - wallInset - wallT / 2),
+        station.z + recessOpenH / 2,
+        port.recessDepth - 2 * wallInset,
+        wallT,
+        recessOpenH,
+      ),
+    )
+  }
+
+  // ─── Port-stub belt ───
+  // The stub IS a belt — same primitive used for connecting
+  // conveyors. Flow direction depends on port kind: output ports
+  // push items outward (back-of-recess → wall plane), input ports
+  // pull them inward (wall plane → back-of-recess).
+  //
+  // No caps on the stub: the back-of-recess cap would clip through
+  // the recess back-wall slab, and the wall-plane cap's bottom half
+  // would extend below the belt surface inside the LED frame —
+  // visually awkward where the connecting belt approaches. With
+  // both ends flat the connecting belt butts up cleanly and the
+  // chevron pattern flows continuously through the wall plane.
+  const stubLength = port.recessDepth - STUB_BACK_GAP
+  const wallEnd = new Vector3(
+    faceX + acrossX * acrossDelta,
+    faceY + acrossY * acrossDelta,
+    station.z,
+  )
+  const recessEnd = new Vector3(
+    faceX + inX * stubLength + acrossX * acrossDelta,
+    faceY + inY * stubLength + acrossY * acrossDelta,
+    station.z,
+  )
+  const isOutput = port.kind === 'output'
+  const belt = buildBelt(
+    scene,
+    {
+      start: isOutput ? recessEnd : wallEnd,
+      end: isOutput ? wallEnd : recessEnd,
+      pathOffset: 0,
+      capStart: false,
+      capEnd: false,
+    },
+    materials.beltSurface,
+  )
 
   const handle: PortHandle = {
     port,
@@ -468,7 +604,7 @@ function buildPortMeshes(
     outward: new Vector3(outwardX, outwardY, 0),
   }
 
-  return { cutout, frameMeshes, stub, handle }
+  return { cutout, frameMeshes, recessWalls, belt, handle }
 }
 
 // ─── Builder ───────────────────────────────────────────────────────────────
@@ -629,7 +765,8 @@ export function buildStationMesh(
   for (const pb of portBuilds) {
     pb.cutout.dispose()
     for (const f of pb.frameMeshes) f.parent = root
-    pb.stub.parent = root
+    for (const w of pb.recessWalls) w.parent = root
+    pb.belt.root.parent = root
   }
 
   // Status screen — dark "tablet face" inset into the panel recess.
