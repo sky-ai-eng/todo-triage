@@ -602,6 +602,12 @@ function buildPortMeshes(
     port,
     worldPos: new Vector3(snapX, snapY, snapZ),
     outward: new Vector3(outwardX, outwardY, 0),
+    // Stub belt's segment doubles as the port's internal path. For
+    // input ports the segment runs wall → recess back (item enters
+    // here, despawns at recess back unless a station-processing
+    // layer claims it); for output ports it runs recess back →
+    // wall (item emerges from box, exits onto a connecting belt).
+    segment: belt.segment,
   }
 
   return { cutout, frameMeshes, recessWalls, belt, handle }

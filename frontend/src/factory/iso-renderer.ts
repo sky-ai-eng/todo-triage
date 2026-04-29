@@ -46,6 +46,8 @@ import {
 } from '@babylonjs/core'
 
 import { buildBelt, type BeltBuild } from './iso-belt'
+import { ItemSimulator } from './iso-items'
+import type { PathSegment } from './iso-path'
 import { buildPoleMesh, type Pole, type PoleBuild } from './iso-pole'
 import type { PortDirection, PortHandle } from './iso-port'
 import { buildRouterMesh, type Router, type RouterBuild } from './iso-router'
@@ -73,6 +75,7 @@ export class IsoScene {
   private groundMat: PBRMaterial | null = null
   private shadowGenerator: ShadowGenerator | null = null
   private glowLayer: GlowLayer | null = null
+  private itemSim: ItemSimulator | null = null
 
   constructor(canvas: HTMLCanvasElement) {
     this.engine = new Engine(canvas, true, {
@@ -328,7 +331,26 @@ export class IsoScene {
     return this.materials
   }
 
+  private getItemSimulator(): ItemSimulator {
+    if (!this.itemSim) {
+      const m = this.getMaterials()
+      // Reuse the queued-chip materials so on-belt items read as the
+      // same kind of token that's stacked on the station's pad. We
+      // can specialize materials later (per entity category, hotter
+      // glow for in-flight, etc.) without changing the simulator.
+      this.itemSim = new ItemSimulator(this.scene, m.queuedShell, m.queuedCore)
+    }
+    return this.itemSim
+  }
+
+  /** Register a periodic spawner on a path segment. The first item
+   *  appears one interval after this call. */
+  startItemSpawner(segment: PathSegment, intervalSeconds: number, speed?: number): void {
+    this.getItemSimulator().startSpawner(segment, intervalSeconds, speed)
+  }
+
   destroy(): void {
+    this.itemSim?.destroy()
     this.gridMesh?.dispose()
     this.ground?.dispose()
     this.groundMat?.dispose()

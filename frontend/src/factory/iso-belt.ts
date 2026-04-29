@@ -32,6 +32,7 @@ import {
   VertexData,
 } from '@babylonjs/core'
 
+import { PathSegment } from './iso-path'
 import { CONVEYOR_HEIGHT, CONVEYOR_WIDTH } from './iso-port'
 
 /** World units between adjacent chevrons along the belt path. Shared
@@ -39,9 +40,17 @@ import { CONVEYOR_HEIGHT, CONVEYOR_WIDTH } from './iso-port'
  *  matter of pathOffset arithmetic. */
 export const CHEVRON_SPACING_WORLD = 54
 
+/** Speed at which the belt's top surface moves, in world units per
+ *  second. This is the canonical "factory speed" — items default to
+ *  riding at this speed (see iso-items.ts), and the chevron texture
+ *  scroll is derived from it so a marker on the belt and a chip on
+ *  the belt move at the same rate. */
+export const BELT_WORLD_SPEED = 60
+
 /** Texture U units per second. With CHEVRON_SPACING_WORLD baked into
- *  UVs, 1 unit of uOffset == one chevron's worth of scroll. */
-const BELT_SCROLL_SPEED = 5
+ *  UVs, 1 unit of uOffset == one chevron's worth of scroll, so this
+ *  is just BELT_WORLD_SPEED scaled into U-space. */
+const BELT_SCROLL_SPEED = BELT_WORLD_SPEED / CHEVRON_SPACING_WORLD
 
 /** Radius of the rounded end caps. Half the belt's vertical extent so
  *  each cap fills the belt-height envelope exactly. */
@@ -76,6 +85,10 @@ export interface BeltBuild {
    *  rendered caps. Add to the next segment's pathOffset to keep
    *  chevrons continuous. */
   pathLength: number
+  /** Path segment for the item simulator — polyline along the belt's
+   *  top centerline, in world coordinates with z = belt-top surface.
+   *  Items sample this to position themselves on the belt. */
+  segment: PathSegment
 }
 
 /** Build a belt segment as a single ribbon mesh tracing the outer
@@ -196,7 +209,15 @@ export function buildBelt(scene: Scene, spec: BeltSpec, material: PBRMaterial): 
   root.rotation.z = flowAngle
   mesh.parent = root
 
-  return { root, meshes: [mesh], pathLength: pathLen }
+  // Item-simulator path: just the top centerline, start → end, in
+  // world coordinates with z lifted to the belt's top surface. Caps
+  // are visual flourish (the rounded roller at a free end); items
+  // never traverse them — they live on the flat top edge only.
+  const segStart = new Vector3(spec.start.x, spec.start.y, spec.start.z + CONVEYOR_HEIGHT)
+  const segEnd = new Vector3(spec.end.x, spec.end.y, spec.end.z + CONVEYOR_HEIGHT)
+  const segment = new PathSegment([segStart, segEnd], 'belt')
+
+  return { root, meshes: [mesh], pathLength: pathLen, segment }
 }
 
 /** Build a flat belt mesh that follows an arbitrary 2D path in the
@@ -298,7 +319,13 @@ export function buildCurvedBelt(
   const root = new TransformNode('curved-belt-root', scene)
   mesh.parent = root
 
-  return { root, meshes: [mesh], pathLength: pathLen }
+  // Item-simulator path: same waypoints as the visible mesh, lifted
+  // to the belt's top surface. Items follow the arc exactly because
+  // they sample the same polyline that built the geometry.
+  const segPoints = pathPoints.map((p) => new Vector3(p.x, p.y, p.z + CONVEYOR_HEIGHT))
+  const segment = new PathSegment(segPoints, 'curved-belt')
+
+  return { root, meshes: [mesh], pathLength: pathLen, segment }
 }
 
 /** Create the shared belt PBR material. Call once per scene; this
@@ -313,13 +340,14 @@ export function createBeltMaterial(scene: Scene): PBRMaterial {
   const ctx = tex.getContext()
   ctx.fillStyle = '#050506'
   ctx.fillRect(0, 0, 256, 64)
-  ctx.strokeStyle = '#7cf7ec'
-  ctx.lineWidth = 18
-  // One large chevron per texture, centered. The texture's 256px width
-  // maps to one chevron-spacing in world units, so going from 4
-  // chevrons-per-texture to 1 puts chevrons 4x farther apart in U
-  // space — combined with the 3x bump in CHEVRON_SPACING_WORLD this
-  // gives the "3x apart, 2x bigger" the user asked for.
+  // Muted cyan, drawn thinner. The chevrons exist to convey direction
+  // and motion, but with chips actually riding the belts now they
+  // shouldn't compete for attention — they're background motion, not
+  // headline visual energy. Pulled saturation and value way down from
+  // the original LED-trim cyan so the trim still pops while belts
+  // recede.
+  ctx.strokeStyle = '#4d8a82'
+  ctx.lineWidth = 10
   ctx.beginPath()
   ctx.moveTo(64, 6)
   ctx.lineTo(192, 32)
@@ -333,7 +361,10 @@ export function createBeltMaterial(scene: Scene): PBRMaterial {
   mat.roughness = 0.6
   mat.emissiveTexture = tex
   mat.emissiveColor = new Color3(1, 1, 1)
-  mat.emissiveIntensity = 1.0
+  // Down from 1.0 — chevrons no longer need to glow brightly to
+  // signal "this is the active belt surface" because items on the
+  // belt do that job now.
+  mat.emissiveIntensity = 0.4
   mat.backFaceCulling = false
 
   // Babylon adds uOffset when sampling, so decrementing makes the

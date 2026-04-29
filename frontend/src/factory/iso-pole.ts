@@ -26,6 +26,7 @@
 import { type Mesh, type PBRMaterial, type Scene, TransformNode, Vector3 } from '@babylonjs/core'
 
 import { buildBelt, buildCurvedBelt } from './iso-belt'
+import type { PathSegment } from './iso-path'
 import { CONVEYOR_HEIGHT } from './iso-port'
 import type { PortDirection, PortHandle } from './iso-port'
 
@@ -58,6 +59,12 @@ export interface PoleBuild {
   /** Snap point for each port direction. The connecting belt's
    *  spec endpoint goes here (with z dropped to floor level). */
   ports: Map<PortDirection, PortHandle>
+  /** The pole's single internal belt segment. For 1-port poles its
+   *  direction depends on kind (output: center→edge, input: edge→
+   *  center); for 2-port poles it goes input edge → output edge.
+   *  Both port handles' `segment` fields point to this same instance,
+   *  so item-graph wiring at either port reads the same object. */
+  internalSegment: PathSegment
 }
 
 const OUTWARD: Record<PortDirection, Vector3> = {
@@ -125,18 +132,24 @@ export function buildPoleMesh(
     return belt
   }
 
+  let internalSegment: PathSegment
+
   if (spec.ports.length === 1) {
     // Dead-end. Belt orientation depends on kind so the chevron flow
     // matches the connecting belt at the cell edge:
     //   output (source): cap at center, belt flows center → edge.
     //   input  (sink):   cap at center, belt flows edge → center.
     const p = spec.ports[0]
+    let belt
     if (p.kind === 'output') {
-      attachBelt(center, edgePoint(p.direction), pathOffset, true, false)
+      belt = attachBelt(center, edgePoint(p.direction), pathOffset, true, false)
     } else {
-      attachBelt(edgePoint(p.direction), center, pathOffset, false, true)
+      belt = attachBelt(edgePoint(p.direction), center, pathOffset, false, true)
     }
-    ports.set(p.direction, handle(p.direction))
+    internalSegment = belt.segment
+    const h = handle(p.direction)
+    h.segment = internalSegment
+    ports.set(p.direction, h)
   } else if (spec.ports.length === 2) {
     const input = spec.ports.find((p) => p.kind === 'input')
     const output = spec.ports.find((p) => p.kind === 'output')
@@ -149,7 +162,14 @@ export function buildPoleMesh(
     if (isOpposite(input.direction, output.direction)) {
       // Straight pass-through: one belt running input edge → output
       // edge, no caps (both ends are belt junctions).
-      attachBelt(edgePoint(input.direction), edgePoint(output.direction), pathOffset, false, false)
+      const belt = attachBelt(
+        edgePoint(input.direction),
+        edgePoint(output.direction),
+        pathOffset,
+        false,
+        false,
+      )
+      internalSegment = belt.segment
     } else {
       // 90° turn: a single curved belt that smoothly arcs from the
       // input edge to the output edge. The arc is a quarter-circle
@@ -193,9 +213,18 @@ export function buildPoleMesh(
       const belt = buildCurvedBelt(scene, arcPath, pathOffset, beltMaterial)
       belt.root.parent = root
       meshes.push(...belt.meshes)
+      internalSegment = belt.segment
     }
-    ports.set(input.direction, handle(input.direction))
-    ports.set(output.direction, handle(output.direction))
+    // Both port handles share the same internal segment — items
+    // entering at the input port traverse it and exit at the output
+    // port. The segment's start corresponds to the input port's
+    // wall plane; its end corresponds to the output port's.
+    const inH = handle(input.direction)
+    inH.segment = internalSegment
+    ports.set(input.direction, inH)
+    const outH = handle(output.direction)
+    outH.segment = internalSegment
+    ports.set(output.direction, outH)
   } else {
     throw new Error(
       `Pole at (${spec.col}, ${spec.row}) needs 1 or 2 ports; got ${spec.ports.length}. ` +
@@ -203,5 +232,5 @@ export function buildPoleMesh(
     )
   }
 
-  return { root, meshes, ports }
+  return { root, meshes, ports, internalSegment }
 }

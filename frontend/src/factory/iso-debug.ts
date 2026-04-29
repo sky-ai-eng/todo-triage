@@ -183,20 +183,32 @@ export async function createIsoDebugScene(container: HTMLDivElement): Promise<Is
   // West chain: source → north belt → turn pole (curved) → east belt → station.
   const sourcePole = renderer.addPole(SOURCE_POLE, FLOOR_CELL, SOURCE_POLE_PATH_OFFSET)
   const turnPole = renderer.addPole(TURN_POLE, FLOOR_CELL, TURN_POLE_PATH_OFFSET)
-  renderer.addBelt(
+  const westBelt1 = renderer.addBelt(
     sourcePole.ports.get('north')!,
     turnPole.ports.get('south')!,
     WEST_BELT1_PATH_OFFSET,
     false,
     false,
   )
-  renderer.addBelt(
+  const westBelt2 = renderer.addBelt(
     turnPole.ports.get('east')!,
     station.ports[0], // station west input
     WEST_BELT2_PATH_OFFSET,
     false,
     false,
   )
+
+  // ─── Item path graph: chain west-chain segments ─────────────────
+  // Items spawn at the source pole's center, ride out to its north
+  // edge (sourcePole.internalSegment), continue along westBelt1 to
+  // the turn pole, traverse the quarter-arc inside the turn pole,
+  // continue along westBelt2 to the station's west input port stub,
+  // and despawn at the back of the recess (station port stub has no
+  // `next` until station processing is wired up).
+  sourcePole.internalSegment.next = [westBelt1.segment]
+  westBelt1.segment.next = [turnPole.internalSegment]
+  turnPole.internalSegment.next = [westBelt2.segment]
+  westBelt2.segment.next = [station.ports[0].segment!]
 
   // East chain: station → belt → splitter → 2 sink dead-end poles.
   const splitter = renderer.addRouter(SPLITTER, FLOOR_CELL, {
@@ -227,6 +239,12 @@ export async function createIsoDebugScene(container: HTMLDivElement): Promise<Is
     false,
     false,
   )
+
+  // Dummy spawner — emit one item every 1.5s at the source pole's
+  // center. They flow source → turn → station west input and despawn
+  // at the back of the recess. East chain stays empty until station
+  // processing is wired in.
+  renderer.startItemSpawner(sourcePole.internalSegment, 1.5)
 
   const ro = new ResizeObserver(() => {
     renderer.resize()

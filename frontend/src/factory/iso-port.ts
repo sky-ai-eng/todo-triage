@@ -11,6 +11,8 @@
 
 import { Vector3 } from '@babylonjs/core'
 
+import type { PathSegment } from './iso-path'
+
 export type PortDirection = 'north' | 'south' | 'east' | 'west'
 export type PortKind = 'input' | 'output'
 
@@ -35,6 +37,14 @@ export interface PortHandle {
   worldPos: Vector3
   /** Unit vector pointing outward through the port. */
   outward: Vector3
+  /** Internal path segment associated with this port. For input
+   *  ports the segment STARTS at the wall plane (items entering go
+   *  inward); for output ports the segment ENDS at the wall plane
+   *  (items emerging exit here). For 2-port poles both port handles
+   *  share the same internal segment; the simulator only needs to
+   *  know which end of the segment a given port refers to via its
+   *  kind. Set by the entity builder when wiring permits. */
+  segment?: PathSegment
 }
 
 // ─── Conveyor cross-section ───────────────────────────────────────────────

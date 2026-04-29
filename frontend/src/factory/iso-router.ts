@@ -428,6 +428,11 @@ function buildRouterPort(
     port: { kind: port.kind, direction: port.direction, offset: 0.5, recessDepth },
     worldPos: new Vector3(faceX, faceY, CONVEYOR_HEIGHT / 2),
     outward: new Vector3(outwardX, outwardY, 0),
+    // Stub belt's segment doubles as the port's internal path. Input
+    // stubs end inside the box (item despawns at recess back unless
+    // routing logic claims it); output stubs are entered by routing
+    // logic from inside and exit at the wall plane onto a belt.
+    segment: belt.segment,
   }
 
   return { cutout, frameMeshes, recessWalls, belt, handle }
