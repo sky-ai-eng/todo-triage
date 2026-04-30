@@ -340,13 +340,12 @@ export function createBeltMaterial(scene: Scene): PBRMaterial {
   const ctx = tex.getContext()
   ctx.fillStyle = '#050506'
   ctx.fillRect(0, 0, 256, 64)
-  // Muted cyan, drawn thinner. The chevrons exist to convey direction
-  // and motion, but with chips actually riding the belts now they
-  // shouldn't compete for attention — they're background motion, not
-  // headline visual energy. Pulled saturation and value way down from
-  // the original LED-trim cyan so the trim still pops while belts
-  // recede.
-  ctx.strokeStyle = '#4d8a82'
+  // Muted terracotta — same hue family as the project accent
+  // (#c47a5a), pulled in saturation and value so the chevrons read
+  // as background motion, not headline energy. Items riding the
+  // belts and the cyan LED trim still own the eye; the belts are
+  // ambient flow.
+  ctx.strokeStyle = '#9a6850'
   ctx.lineWidth = 10
   ctx.beginPath()
   ctx.moveTo(64, 6)

@@ -755,33 +755,62 @@ const BELT_S1_NORTH_TO_NC_LOOP_MERGER = mod(S1_NORTH_OFFSET + ROUTER_STUB_LEN)
 
 // ─── Station specs ────────────────────────────────────────────────
 
-const stationSpec = (col: number, row: number, queued: number, wip: number): Station => ({
+const stationSpec = (
+  col: number,
+  row: number,
+  queued: number,
+  runs: number,
+  label: string,
+): Station => ({
   x: col * FLOOR_CELL,
   y: row * FLOOR_CELL,
   z: 0,
   w: STATION_W * FLOOR_CELL,
   d: STATION_D * FLOOR_CELL,
   h: STATION_H,
+  // Slug the label as the station's stable id. Click hit-testing
+  // routes through this; the bottom drawer uses it to look up
+  // station metadata (label, etc.) when the user picks one.
+  id: label.toLowerCase().replace(/\s+/g, '-'),
   queuedCount: queued,
-  wipCount: wip,
+  runCount: runs,
+  label,
   ports: [
     { kind: 'input', direction: 'west', offset: 0.5, recessDepth: DEFAULT_PORT_RECESS_DEPTH },
     { kind: 'output', direction: 'east', offset: 0.5, recessDepth: DEFAULT_PORT_RECESS_DEPTH },
   ],
 })
 
-const PR_OPENED = stationSpec(PR_OPENED_COL, PR_OPENED_ROW, 1, 0)
-const READY_FOR_REVIEW = stationSpec(READY_FOR_REVIEW_COL, READY_FOR_REVIEW_ROW, 2, 1)
-const NEW_COMMITS = stationSpec(NC_COL, NC_ROW, 4, 2)
-const MERGE_CONFLICTS = stationSpec(DEST_COL, MC_ROW, 1, 0)
-const CI_PASSED = stationSpec(DEST_COL, CI_PASSED_ROW, 0, 0)
-const CI_FAILED = stationSpec(DEST_COL, CI_FAILED_ROW, 2, 1)
-const REVIEW_REQUESTED = stationSpec(RR_COL, RR_ROW, 3, 1)
-const REVIEW_APPROVED = stationSpec(REVIEW_DEST_COL, REVIEW_APPROVED_ROW, 0, 0)
-const REVIEW_COMMENTED = stationSpec(REVIEW_DEST_COL, REVIEW_COMMENTED_ROW, 1, 0)
-const CHANGES_REQUESTED = stationSpec(REVIEW_DEST_COL, CHANGES_REQUESTED_ROW, 2, 0)
-const CLOSED = stationSpec(CLOSED_COL, CLOSED_ROW, 2, 0)
-const MERGED = stationSpec(MERGED_COL, MERGED_ROW, 1, 0)
+const PR_OPENED = stationSpec(PR_OPENED_COL, PR_OPENED_ROW, 1, 0, 'PR Opened')
+const READY_FOR_REVIEW = stationSpec(
+  READY_FOR_REVIEW_COL,
+  READY_FOR_REVIEW_ROW,
+  2,
+  1,
+  'Ready for Review',
+)
+const NEW_COMMITS = stationSpec(NC_COL, NC_ROW, 4, 2, 'New Commits')
+const MERGE_CONFLICTS = stationSpec(DEST_COL, MC_ROW, 1, 0, 'Merge Conflicts')
+const CI_PASSED = stationSpec(DEST_COL, CI_PASSED_ROW, 0, 0, 'CI Passed')
+const CI_FAILED = stationSpec(DEST_COL, CI_FAILED_ROW, 2, 1, 'CI Failed')
+const REVIEW_REQUESTED = stationSpec(RR_COL, RR_ROW, 3, 1, 'Review Requested')
+const REVIEW_APPROVED = stationSpec(REVIEW_DEST_COL, REVIEW_APPROVED_ROW, 0, 0, 'Review Approved')
+const REVIEW_COMMENTED = stationSpec(
+  REVIEW_DEST_COL,
+  REVIEW_COMMENTED_ROW,
+  1,
+  0,
+  'Review Commented',
+)
+const CHANGES_REQUESTED = stationSpec(
+  REVIEW_DEST_COL,
+  CHANGES_REQUESTED_ROW,
+  2,
+  0,
+  'Changes Requested',
+)
+const CLOSED = stationSpec(CLOSED_COL, CLOSED_ROW, 2, 0, 'Closed')
+const MERGED = stationSpec(MERGED_COL, MERGED_ROW, 1, 0, 'Merged')
 
 // ─── Mergers / Splitters ──────────────────────────────────────────
 
@@ -1265,12 +1294,22 @@ export interface CameraStateForHUD {
   zoom: number
 }
 
+export interface ClickedStationInfo {
+  id: string
+  label: string
+  queuedCount: number
+  runCount: number
+}
+
 export interface IsoDebugSceneHandle {
   destroy: () => void
   resetView: () => void
   /** Subscribe to camera state changes. The HUD uses this to render
    * pitch/yaw/zoom live. Returns an unsubscribe function. */
   onCameraChange: (cb: (s: CameraStateForHUD) => void) => () => void
+  /** Subscribe to station clicks. Fires once per tap on a station's
+   *  body / tray / chips. Returns an unsubscribe function. */
+  onStationClick: (cb: (info: ClickedStationInfo) => void) => () => void
 }
 
 export async function createIsoDebugScene(container: HTMLDivElement): Promise<IsoDebugSceneHandle> {
@@ -2297,6 +2336,34 @@ export async function createIsoDebugScene(container: HTMLDivElement): Promise<Is
     namespaces: ['triage-factory', 'claude-code', 'SKY', 'ENG'],
   })
 
+  // Build a lookup keyed by id so onStationClick can hand the React
+  // drawer rich metadata (label + counts) without it having to
+  // re-derive from the renderer's internal state.
+  const stationMetaById = new Map<string, ClickedStationInfo>()
+  for (const s of [
+    PR_OPENED,
+    READY_FOR_REVIEW,
+    NEW_COMMITS,
+    MERGE_CONFLICTS,
+    CI_PASSED,
+    CI_FAILED,
+    REVIEW_REQUESTED,
+    REVIEW_APPROVED,
+    REVIEW_COMMENTED,
+    CHANGES_REQUESTED,
+    CLOSED,
+    MERGED,
+  ]) {
+    if (s.id && s.label) {
+      stationMetaById.set(s.id, {
+        id: s.id,
+        label: s.label,
+        queuedCount: s.queuedCount ?? 0,
+        runCount: s.runCount ?? 0,
+      })
+    }
+  }
+
   const ro = new ResizeObserver(() => {
     renderer.resize()
   })
@@ -2332,6 +2399,13 @@ export async function createIsoDebugScene(container: HTMLDivElement): Promise<Is
         if (raf != null) cancelAnimationFrame(raf)
         renderer.camera.onViewMatrixChangedObservable.remove(observer)
       }
+    },
+    onStationClick: (cb) => {
+      return renderer.onStationClick((stationId) => {
+        const meta = stationMetaById.get(stationId)
+        if (!meta) return
+        cb(meta)
+      })
     },
   }
 }

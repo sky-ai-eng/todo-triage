@@ -26,6 +26,7 @@
 //     scene's view+projection matrices.
 
 import {
+  AbstractMesh,
   ArcRotateCamera,
   Camera,
   Color3,
@@ -39,9 +40,9 @@ import {
   Mesh,
   MeshBuilder,
   PBRMaterial,
+  PointerEventTypes,
   Scene,
   ShadowGenerator,
-  TransformNode,
   Vector3,
 } from '@babylonjs/core'
 
@@ -55,6 +56,7 @@ import {
   buildStationMesh,
   createStationMaterials,
   type Station,
+  type StationHandle,
   type StationMaterials,
 } from './iso-station'
 
@@ -72,6 +74,21 @@ const INITIAL_ZOOM = 1.75
 // fills more of the lower half of the screen by default. ~10 cells
 // at the debug scene's 80-wu cell size.
 const INITIAL_TARGET_Y_OFFSET = -800
+
+/** Walk up the parent chain from a picked mesh looking for the
+ *  `metadata.stationId` we tagged on the station's body and tray
+ *  meshes. Picking a chip / scanner / port-stub on a station still
+ *  routes to the same station id because the parent TransformNode
+ *  also carries the metadata. */
+function findStationId(mesh: AbstractMesh): string | undefined {
+  let cur: AbstractMesh | { parent: unknown; metadata?: { stationId?: string } } | null = mesh
+  while (cur) {
+    const m = (cur as { metadata?: { stationId?: string } }).metadata
+    if (m?.stationId) return m.stationId
+    cur = (cur as { parent: AbstractMesh | null }).parent ?? null
+  }
+  return undefined
+}
 
 export class IsoScene {
   readonly engine: Engine
@@ -188,6 +205,36 @@ export class IsoScene {
 
     this.setupLighting()
 
+    // Station-click picking. Distinguish a tap from a drag by
+    // tracking pointer-down position and only firing the click when
+    // the pointer hasn't moved past a small threshold by the time it
+    // lifts. Without this, every camera-orbit gesture would also
+    // trigger a station click on whatever mesh sat under the
+    // initial press.
+    let downX = 0
+    let downY = 0
+    let downTime = 0
+    const DRAG_PX = 4
+    const TAP_MAX_MS = 600
+    this.scene.onPointerObservable.add((info) => {
+      if (info.type === PointerEventTypes.POINTERDOWN) {
+        downX = info.event.clientX
+        downY = info.event.clientY
+        downTime = performance.now()
+      } else if (info.type === PointerEventTypes.POINTERUP) {
+        const dx = info.event.clientX - downX
+        const dy = info.event.clientY - downY
+        const dt = performance.now() - downTime
+        if (Math.hypot(dx, dy) > DRAG_PX || dt > TAP_MAX_MS) return
+        const pick = this.scene.pick(this.scene.pointerX, this.scene.pointerY)
+        if (!pick?.hit || !pick.pickedMesh) return
+        const stationId = findStationId(pick.pickedMesh)
+        if (stationId) {
+          for (const cb of this.stationClickListeners) cb(stationId)
+        }
+      }
+    })
+
     this.engine.runRenderLoop(() => {
       this.scene.render()
     })
@@ -255,24 +302,27 @@ export class IsoScene {
     this.ground = ground
   }
 
-  addStation(spec: Station): { root: TransformNode; ports: PortHandle[] } {
+  addStation(spec: Station): StationHandle {
     const materials = this.getMaterials()
     const built = buildStationMesh(this.scene, spec, materials)
 
     // Register sub-meshes with the shadow generator. Opaque body
     // pieces both cast and receive; transparent shells cast only
-    // (so chips drop a soft shadow into the chamber); port stubs
-    // cast (dark surfaces inside the recess); emissive trims/frames
-    // and the glass canopy are skipped — their shadows would be
-    // either invisible or noisy.
+    // (so chips drop a soft shadow onto the tray); port stubs cast
+    // (dark surfaces inside the recess); emissive trims/frames are
+    // skipped — their shadows would be either invisible or noisy.
     if (this.shadowGenerator) {
       for (const m of built.root.getChildMeshes()) {
-        if (m.name === 'station-body' || m.name === 'chamber-floor' || m.name === 'landing-pad') {
+        if (
+          m.name === 'station-body' ||
+          m.name === 'main-tray-floor' ||
+          m.name === 'intake-tray-floor'
+        ) {
           m.receiveShadows = true
           this.shadowGenerator.addShadowCaster(m)
         } else if (
           m.name.startsWith('queued-shell-') ||
-          m.name.startsWith('wip-shell-') ||
+          m.name.startsWith('run-shell-') ||
           m.name.startsWith('heatsink-')
         ) {
           this.shadowGenerator.addShadowCaster(m)
@@ -280,8 +330,24 @@ export class IsoScene {
       }
     }
 
+    if (spec.id) {
+      this.stationHandles.set(spec.id, built)
+    }
     return built
   }
+
+  /** Subscribe to station-click events. Returns an unsubscribe
+   *  function. Click hit-testing uses Babylon's pointer pick + a
+   *  walk up the parent chain looking for a `metadata.stationId`. */
+  onStationClick(cb: (stationId: string) => void): () => void {
+    this.stationClickListeners.add(cb)
+    return () => {
+      this.stationClickListeners.delete(cb)
+    }
+  }
+
+  private stationHandles = new Map<string, StationHandle>()
+  private stationClickListeners = new Set<(stationId: string) => void>()
 
   addPole(spec: Pole, cellSize: number, pathOffset: number = 0): PoleBuild {
     const materials = this.getMaterials()
