@@ -30,8 +30,8 @@ type Bus struct {
 type subscriberEntry struct {
 	sub     Subscriber
 	ch      chan domain.Event
-	closed  bool             // true once the channel has been closed
-	dropped *atomic.Int64    // number of events dropped due to full buffer
+	closed  bool          // true once the channel has been closed
+	dropped *atomic.Int64 // number of events dropped due to full buffer
 }
 
 // New creates a new event bus.
