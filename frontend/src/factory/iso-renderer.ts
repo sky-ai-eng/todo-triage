@@ -58,7 +58,7 @@ import {
   type StationMaterials,
 } from './iso-station'
 
-const DEFAULT_FLOOR_SIZE = 2400
+const DEFAULT_FLOOR_SIZE = 4800
 // Closest the camera can get before its near plane starts clipping
 // objects in the scene. Expressed as a max zoom multiplier so the
 // physical limit derives from the initial view (radius_min =
@@ -114,8 +114,8 @@ export class IsoScene {
     const initialTarget = new Vector3(DEFAULT_FLOOR_SIZE / 2, DEFAULT_FLOOR_SIZE / 2, 0)
     this.camera = new ArcRotateCamera(
       'iso-camera',
-      -Math.PI / 2, // alpha — initial azimuth
-      0.001, // beta — tiny offset from top-down to avoid lookAt degeneracy
+      Math.PI / 2, // alpha — initial azimuth (items flow left → right on screen)
+      Math.PI / 6, // beta — 30° tilt from top-down for a hint of perspective
       DEFAULT_FLOOR_SIZE / 2, // radius — initial half-height of visible ortho bounds
       initialTarget,
       this.scene,
@@ -186,8 +186,8 @@ export class IsoScene {
   }
 
   resetView(): void {
-    this.camera.alpha = -Math.PI / 2
-    this.camera.beta = 0.001
+    this.camera.alpha = Math.PI / 2
+    this.camera.beta = Math.PI / 6
     this.camera.radius = DEFAULT_FLOOR_SIZE / 2
     this.camera.target = new Vector3(DEFAULT_FLOOR_SIZE / 2, DEFAULT_FLOOR_SIZE / 2, 0)
   }
