@@ -15,6 +15,24 @@ import (
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 )
 
+// getDiffLines fetches commentable line numbers for a PR. It tries the full
+// diff first; if GitHub rejects it as too large (HTTP 406) it falls back to
+// per-file patches from the PR files endpoint.
+func getDiffLines(client *ghclient.Client, owner, repo string, number int) (map[string]map[int]bool, error) {
+	diff, err := client.GetPRDiff(owner, repo, number, "")
+	if err != nil {
+		if ghclient.IsHTTP406(err) {
+			files, filesErr := client.GetPRFiles(owner, repo, number)
+			if filesErr != nil {
+				return nil, filesErr
+			}
+			return ghclient.DiffLinesFromPatches(files), nil
+		}
+		return nil, err
+	}
+	return ghclient.DiffLines(diff), nil
+}
+
 func handlePR(client *ghclient.Client, database *db.DB, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: triagefactory exec gh pr <action> [flags]")
@@ -146,11 +164,10 @@ func prStartReview(client *ghclient.Client, database *db.DB, args []string) {
 	pr, err := client.GetPR(owner, repo, number, false)
 	exitOnErr(err)
 
-	// Fetch and parse diff to know which lines are valid comment targets
-	diff, err := client.GetPRDiff(owner, repo, number, "")
+	// Fetch commentable lines; falls back to per-file patches on HTTP 406.
+	diffLinesMap, err := getDiffLines(client, owner, repo, number)
 	exitOnErr(err)
 
-	diffLinesMap := ghclient.DiffLines(diff)
 	// Convert to JSON: {"file": [1,2,3,...], ...}
 	compactMap := make(map[string][]int)
 	for file, lines := range diffLinesMap {

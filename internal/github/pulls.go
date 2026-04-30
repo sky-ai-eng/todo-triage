@@ -166,9 +166,10 @@ type PRFile struct {
 	Status    string `json:"status"` // added, modified, removed, renamed
 	Additions int    `json:"additions"`
 	Deletions int    `json:"deletions"`
+	Patch     string `json:"patch,omitempty"` // unified diff hunks; absent for binary files
 }
 
-// GetPRFiles lists files changed in a PR.
+// GetPRFiles lists files changed in a PR, including per-file patch content.
 func (c *Client) GetPRFiles(owner, repo string, number int) ([]PRFile, error) {
 	data, err := c.Get(fmt.Sprintf("/repos/%s/%s/pulls/%d/files?per_page=100", owner, repo, number))
 	if err != nil {
@@ -187,6 +188,7 @@ func (c *Client) GetPRFiles(owner, repo string, number int) ([]PRFile, error) {
 			Status:    strVal(f, "status"),
 			Additions: intVal(f, "additions"),
 			Deletions: intVal(f, "deletions"),
+			Patch:     strVal(f, "patch"),
 		}
 	}
 	return files, nil
