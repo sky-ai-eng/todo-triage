@@ -33,15 +33,15 @@ func DiffLines(diff string) map[string]map[int]bool {
 			continue
 		}
 
-		if strings.HasPrefix(line, "-") {
-			// Deleted line — not commentable on the new side, don't increment
-			continue
-		}
-
-		if strings.HasPrefix(line, "+") || !strings.HasPrefix(line, "\\") {
-			// Added line or context line — commentable
+		switch {
+		case strings.HasPrefix(line, "-"):
+			// Deletion — not on the new side; don't advance line counter.
+		case strings.HasPrefix(line, "+"), strings.HasPrefix(line, " "):
+			// Added or context line — commentable on the new side.
 			result[currentFile][lineNum] = true
 			lineNum++
+		// "\ No newline at end of file" markers and the trailing empty string
+		// produced by strings.Split on a diff that ends with \n are silently skipped.
 		}
 	}
 
@@ -72,12 +72,13 @@ func parsePatchLines(patch string) map[int]bool {
 		if lineNum == 0 {
 			continue
 		}
-		if strings.HasPrefix(line, "-") {
-			continue
-		}
-		if strings.HasPrefix(line, "+") || !strings.HasPrefix(line, "\\") {
+		switch {
+		case strings.HasPrefix(line, "-"):
+			// Deletion — not on new side; don't advance.
+		case strings.HasPrefix(line, "+"), strings.HasPrefix(line, " "):
 			result[lineNum] = true
 			lineNum++
+		// "\ No newline" markers and trailing empty strings are silently skipped.
 		}
 	}
 	return result
