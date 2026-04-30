@@ -4,12 +4,29 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"time"
 )
+
+// HTTPError is returned by GetRaw when the server responds with a non-2xx
+// status. Callers can use errors.As to inspect the status code.
+type HTTPError struct {
+	StatusCode int
+	Body       string
+	msg        string
+}
+
+func (e *HTTPError) Error() string { return e.msg }
+
+// IsHTTP406 reports whether err is an HTTP 406 Not Acceptable response.
+func IsHTTP406(err error) bool {
+	var he *HTTPError
+	return errors.As(err, &he) && he.StatusCode == 406
+}
 
 // downloadTimeout is the cap for streaming artifact downloads (log archives
 // and similar large blobs). Deliberately way longer than the 30s shared-client
@@ -158,7 +175,12 @@ func (c *Client) GetRaw(path, accept string) ([]byte, error) {
 		return nil, fmt.Errorf("read response body: %w", err)
 	}
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("GET %s returned %d: %s", path, resp.StatusCode, string(data))
+		body := string(data)
+		return nil, &HTTPError{
+			StatusCode: resp.StatusCode,
+			Body:       body,
+			msg:        fmt.Sprintf("GET %s returned %d: %s", path, resp.StatusCode, body),
+		}
 	}
 	return data, nil
 }

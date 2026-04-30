@@ -166,27 +166,39 @@ type PRFile struct {
 	Status    string `json:"status"` // added, modified, removed, renamed
 	Additions int    `json:"additions"`
 	Deletions int    `json:"deletions"`
+	Patch     string `json:"patch,omitempty"` // unified diff hunks; absent for binary files
 }
 
-// GetPRFiles lists files changed in a PR.
+// maxPRFiles caps the total number of files fetched by GetPRFiles across all pages.
+const maxPRFiles = 1000
+
+// GetPRFiles lists files changed in a PR, including per-file patch content.
+// Paginates up to maxPRFiles total results.
 func (c *Client) GetPRFiles(owner, repo string, number int) ([]PRFile, error) {
-	data, err := c.Get(fmt.Sprintf("/repos/%s/%s/pulls/%d/files?per_page=100", owner, repo, number))
-	if err != nil {
-		return nil, err
-	}
+	var files []PRFile
+	for page := 1; ; page++ {
+		data, err := c.Get(fmt.Sprintf("/repos/%s/%s/pulls/%d/files?per_page=100&page=%d", owner, repo, number, page))
+		if err != nil {
+			return nil, err
+		}
 
-	var rawFiles []map[string]any
-	if err := json.Unmarshal(data, &rawFiles); err != nil {
-		return nil, err
-	}
+		var rawFiles []map[string]any
+		if err := json.Unmarshal(data, &rawFiles); err != nil {
+			return nil, err
+		}
 
-	files := make([]PRFile, len(rawFiles))
-	for i, f := range rawFiles {
-		files[i] = PRFile{
-			Filename:  strVal(f, "filename"),
-			Status:    strVal(f, "status"),
-			Additions: intVal(f, "additions"),
-			Deletions: intVal(f, "deletions"),
+		for _, f := range rawFiles {
+			files = append(files, PRFile{
+				Filename:  strVal(f, "filename"),
+				Status:    strVal(f, "status"),
+				Additions: intVal(f, "additions"),
+				Deletions: intVal(f, "deletions"),
+				Patch:     strVal(f, "patch"),
+			})
+		}
+
+		if len(rawFiles) < 100 || len(files) >= maxPRFiles {
+			break
 		}
 	}
 	return files, nil

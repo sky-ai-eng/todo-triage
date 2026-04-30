@@ -33,18 +33,55 @@ func DiffLines(diff string) map[string]map[int]bool {
 			continue
 		}
 
-		if strings.HasPrefix(line, "-") {
-			// Deleted line — not commentable on the new side, don't increment
-			continue
-		}
-
-		if strings.HasPrefix(line, "+") || !strings.HasPrefix(line, "\\") {
-			// Added line or context line — commentable
+		switch {
+		case strings.HasPrefix(line, "-"):
+			// Deletion — not on the new side; don't advance line counter.
+		case strings.HasPrefix(line, "+"), strings.HasPrefix(line, " "):
+			// Added or context line — commentable on the new side.
 			result[currentFile][lineNum] = true
 			lineNum++
+		default:
+			// Skip "\ No newline at end of file" markers and trailing empty strings.
 		}
 	}
 
+	return result
+}
+
+// DiffLinesFromPatches builds the same file → commentable-line-set map as
+// DiffLines, but from the per-file patch strings returned by GetPRFiles.
+// Used as a fallback when the full PR diff is too large (HTTP 406).
+func DiffLinesFromPatches(files []PRFile) map[string]map[int]bool {
+	result := make(map[string]map[int]bool)
+	for _, f := range files {
+		result[f.Filename] = parsePatchLines(f.Patch)
+	}
+	return result
+}
+
+// parsePatchLines extracts commentable new-side line numbers from a single
+// file's patch string (as returned by GitHub's PR files API).
+func parsePatchLines(patch string) map[int]bool {
+	result := make(map[int]bool)
+	var lineNum int
+	for _, line := range strings.Split(patch, "\n") {
+		if strings.HasPrefix(line, "@@") {
+			lineNum = parseHunkNewStart(line)
+			continue
+		}
+		if lineNum == 0 {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(line, "-"):
+			// Deletion — not on new side; don't advance.
+		case strings.HasPrefix(line, "+"), strings.HasPrefix(line, " "):
+			result[lineNum] = true
+			lineNum++
+		default:
+			// Skip "\ No newline at end of file" markers and trailing empty strings.
+		}
+	}
 	return result
 }
 
