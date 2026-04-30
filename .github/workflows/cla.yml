@@ -107,6 +107,15 @@ jobs:
           echo "exit=$?"
           echo "::endgroup::"
 
+      # NOTE: contributor-assistant/github-action only uses
+      # PERSONAL_ACCESS_TOKEN for signature file writes when
+      # remote-organization-name OR remote-repository-name is set
+      # (see src/persistence/persistence.ts in the action source).
+      # We point those at the *current* repo to force the PAT code
+      # path so the App token (which has Contents: write) is used
+      # instead of GITHUB_TOKEN (which only has contents: read here).
+      # The action was archived on 2026-03-23; longer term we should
+      # migrate to a maintained alternative.
       - uses: contributor-assistant/github-action@v2.6.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -115,4 +124,6 @@ jobs:
           path-to-document: "https://github.com/sky-ai-eng/triage-factory/blob/main/docs/CLA.md"
           path-to-signatures: "signatures/cla.json"
           branch: "cla-signatures"
+          remote-organization-name: "sky-ai-eng"
+          remote-repository-name: "triage-factory"
           allowlist: "sky-ai-bot,dependabot[bot],github-actions[bot],claude[bot]"
