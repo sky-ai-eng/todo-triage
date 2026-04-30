@@ -170,6 +170,7 @@ type settingsUpdateRequest struct {
 
 func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 	var req settingsUpdateRequest
+	limitBody(w, r)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
@@ -381,6 +382,7 @@ func (s *Server) handleJiraConnect(w http.ResponseWriter, r *http.Request) {
 		URL string `json:"url"`
 		PAT string `json:"pat"`
 	}
+	limitBody(w, r)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return

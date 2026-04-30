@@ -7,27 +7,53 @@ import (
 )
 
 // MarkScoring sets scoring_status = 'in_progress' for the given task IDs.
+// Runs in a transaction so either all tasks are marked or none — prevents
+// partial updates that leave some tasks stuck in 'in_progress' on error.
 func MarkScoring(database *sql.DB, taskIDs []string) error {
+	tx, err := database.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(`UPDATE tasks SET scoring_status = 'in_progress' WHERE id = ?`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
 	for _, id := range taskIDs {
-		if _, err := database.Exec(`UPDATE tasks SET scoring_status = 'in_progress' WHERE id = ?`, id); err != nil {
+		if _, err := stmt.Exec(id); err != nil {
 			return err
 		}
 	}
-	return nil
+	return tx.Commit()
 }
 
 // ResetScoringToPending flips scoring_status back to 'pending' for the given
 // task IDs. Used when a scoring batch failed so the tasks are retried on the
 // next cycle — without this, MarkScoring would have left them stuck in
 // 'in_progress' (UnscoredTasks only picks up 'pending') and they'd never
-// be rescored.
+// be rescored. Runs in a transaction for atomicity.
 func ResetScoringToPending(database *sql.DB, taskIDs []string) error {
+	tx, err := database.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(`UPDATE tasks SET scoring_status = 'pending' WHERE id = ?`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
 	for _, id := range taskIDs {
-		if _, err := database.Exec(`UPDATE tasks SET scoring_status = 'pending' WHERE id = ?`, id); err != nil {
+		if _, err := stmt.Exec(id); err != nil {
 			return err
 		}
 	}
-	return nil
+	return tx.Commit()
 }
 
 // UpdateTaskScores applies AI-generated scores and summaries to tasks,

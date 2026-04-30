@@ -99,6 +99,7 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		BaseBranch json.RawMessage `json:"base_branch,omitempty"`
 	}
+	limitBody(w, r)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 		return
@@ -155,6 +156,7 @@ func (s *Server) handleReposSave(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Repos []string `json:"repos"`
 	}
+	limitBody(w, r)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 		return

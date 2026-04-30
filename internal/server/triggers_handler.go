@@ -31,6 +31,7 @@ func (s *Server) handleTriggerCreate(w http.ResponseWriter, r *http.Request) {
 		BreakerThreshold       int      `json:"breaker_threshold"`
 		MinAutonomySuitability *float64 `json:"min_autonomy_suitability"` // pointer: absent → default 0.0
 	}
+	limitBody(w, r)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
@@ -133,6 +134,7 @@ func (s *Server) handleTriggerUpdate(w http.ResponseWriter, r *http.Request) {
 		BreakerThreshold       int     `json:"breaker_threshold"`
 		MinAutonomySuitability float64 `json:"min_autonomy_suitability"`
 	}
+	limitBody(w, r)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
@@ -204,6 +206,7 @@ func (s *Server) handleTriggerToggle(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Enabled bool `json:"enabled"`
 	}
+	limitBody(w, r)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return

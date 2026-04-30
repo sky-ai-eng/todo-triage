@@ -49,9 +49,18 @@ func New(db *sql.DB) *Server {
 	return s
 }
 
+// NewHTTPServer creates the underlying *http.Server so the caller can
+// manage its lifecycle (ListenAndServe + Shutdown).
+func (s *Server) NewHTTPServer(addr string) *http.Server {
+	return &http.Server{
+		Addr:    addr,
+		Handler: s.mux,
+	}
+}
+
 // ListenAndServe starts the HTTP server on the given address.
 func (s *Server) ListenAndServe(addr string) error {
-	return http.ListenAndServe(addr, s.mux)
+	return s.NewHTTPServer(addr).ListenAndServe()
 }
 
 func (s *Server) routes() {
@@ -253,6 +262,16 @@ func (s *Server) handlePreferences(w http.ResponseWriter, r *http.Request) {
 
 // Prompt handlers are in prompts_handler.go
 // Skill import handler is in skills_handler.go
+
+// maxRequestBody is the maximum size of a request body we'll accept (1 MB).
+// Prevents OOM from accidentally or maliciously large payloads.
+const maxRequestBody = 1 << 20
+
+// limitBody wraps the request body with a size limit. Returns 413 and closes
+// the body automatically if exceeded.
+func limitBody(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+}
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")

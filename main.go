@@ -3,11 +3,15 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
@@ -336,13 +340,15 @@ func main() {
 	// DrainEntity ← spawner). Same pattern UpdateCredentials uses.
 	spawner.SetQueueDrainer(eventRouter)
 
+	// Root context for the server lifetime — cancelled on SIGINT/SIGTERM.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	// Periodic drain sweeper — safety net for queues stuck on transient
 	// validation/fire errors. notifyDrainer only triggers drains on
 	// auto-run terminals; if nothing's running, nothing wakes up the
 	// queue. The sweep tick re-attempts pending firings every 30s.
-	// Background context: the binary doesn't have a top-level cancel
-	// today, so the goroutine lives for the process lifetime.
-	go eventRouter.RunDrainSweeper(context.Background(), 30*time.Second)
+	go eventRouter.RunDrainSweeper(ctx, 30*time.Second)
 
 	// Tracks per-source "announce next poll completion as a toast". Set when
 	// a config change triggers a poller restart; cleared after the first
@@ -389,7 +395,7 @@ func main() {
 			go func() {
 				profiler := repoprofile.NewProfiler(ghClient, database, wsHub)
 				repos, _ := db.GetConfiguredRepoNames(database)
-				if err := profiler.Run(context.Background(), repos, true); err != nil {
+				if err := profiler.Run(ctx, repos, true); err != nil {
 					log.Printf("[repoprofile] profiling failed: %v", err)
 				}
 				profileGate.Signal()
@@ -488,7 +494,7 @@ func main() {
 		go func() {
 			profiler := repoprofile.NewProfiler(ghClient, database, wsHub)
 			repos, _ := db.GetConfiguredRepoNames(database)
-			if err := profiler.Run(context.Background(), repos, false); err != nil {
+			if err := profiler.Run(ctx, repos, false); err != nil {
 				log.Printf("[repoprofile] initial profiling failed: %v", err)
 			}
 			profileGate.Signal()
@@ -504,7 +510,42 @@ func main() {
 		srv.SetJiraClient(jira.NewClient(creds.JiraURL, creds.JiraPAT), cfg.Jira.InProgress)
 	}
 
-	if err := srv.ListenAndServe(addr); err != nil {
-		log.Fatalf("server error: %v", err)
+	httpSrv := srv.NewHTTPServer(addr)
+
+	// Start HTTP server in background.
+	go func() {
+		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("server error: %v", err)
+		}
+	}()
+
+	// Block until shutdown signal.
+	<-ctx.Done()
+	log.Println("[server] shutting down...")
+
+	// Ordered shutdown with a 15-second hard deadline.
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer shutdownCancel()
+
+	// 1. Stop accepting new HTTP connections and drain in-flight requests.
+	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("[server] HTTP shutdown error: %v", err)
 	}
+
+	// 2. Stop pollers (waits for current poll cycle to finish).
+	pollerMgr.StopAll()
+
+	// 3. Stop scorer (waits for current scoring cycle to finish).
+	scorer.Stop()
+
+	// 4. Close event bus (drains subscriber channels).
+	bus.Close()
+
+	// 5. Close websocket connections.
+	wsHub.Shutdown()
+
+	// 6. Close database.
+	database.Close()
+
+	log.Println("[server] shutdown complete")
 }

@@ -41,6 +41,7 @@ type createTaskRuleRequest struct {
 
 func (s *Server) handleTaskRuleCreate(w http.ResponseWriter, r *http.Request) {
 	var req createTaskRuleRequest
+	limitBody(w, r)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
@@ -132,6 +133,7 @@ func (s *Server) handleTaskRuleUpdate(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
 	var req patchTaskRuleRequest
+	limitBody(w, r)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
@@ -264,6 +266,7 @@ func (s *Server) handleTaskRuleDelete(w http.ResponseWriter, r *http.Request) {
 // its index in the array. IDs not in the list keep their current order.
 func (s *Server) handleTaskRuleReorder(w http.ResponseWriter, r *http.Request) {
 	var ids []string
+	limitBody(w, r)
 	if err := json.NewDecoder(r.Body).Decode(&ids); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "expected array of rule IDs"})
 		return

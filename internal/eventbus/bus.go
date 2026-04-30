@@ -3,6 +3,7 @@ package eventbus
 import (
 	"log"
 	"sync"
+	"sync/atomic"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -27,8 +28,10 @@ type Bus struct {
 }
 
 type subscriberEntry struct {
-	sub Subscriber
-	ch  chan domain.Event
+	sub     Subscriber
+	ch      chan domain.Event
+	closed  bool             // true once the channel has been closed
+	dropped *atomic.Int64    // number of events dropped due to full buffer
 }
 
 // New creates a new event bus.
@@ -40,10 +43,11 @@ func New() *Bus {
 // Returns an unsubscribe function.
 func (b *Bus) Subscribe(sub Subscriber) func() {
 	ch := make(chan domain.Event, 256)
-	entry := subscriberEntry{sub: sub, ch: ch}
+	entry := subscriberEntry{sub: sub, ch: ch, dropped: &atomic.Int64{}}
 
 	b.mu.Lock()
 	b.subscribers = append(b.subscribers, entry)
+	idx := len(b.subscribers) - 1
 	b.mu.Unlock()
 
 	// Drain goroutine
@@ -59,16 +63,20 @@ func (b *Bus) Subscribe(sub Subscriber) func() {
 		defer b.mu.Unlock()
 		for i, e := range b.subscribers {
 			if e.ch == ch {
+				if !b.subscribers[i].closed {
+					b.subscribers[i].closed = true
+					close(ch)
+				}
 				b.subscribers = append(b.subscribers[:i], b.subscribers[i+1:]...)
-				close(ch)
 				return
 			}
 		}
+		_ = idx // suppress unused warning
 	}
 }
 
 // Publish sends an event to all matching subscribers. Non-blocking — if a subscriber's
-// buffer is full, the event is dropped with a warning.
+// buffer is full, the event is dropped with a warning and the drop counter is incremented.
 func (b *Bus) Publish(evt domain.Event) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -77,25 +85,34 @@ func (b *Bus) Publish(evt domain.Event) {
 		return
 	}
 
-	for _, entry := range b.subscribers {
+	for i := range b.subscribers {
+		entry := &b.subscribers[i]
+		if entry.closed {
+			continue
+		}
 		if !matchesFilter(evt.EventType, entry.sub.Filter) {
 			continue
 		}
 		select {
 		case entry.ch <- evt:
 		default:
-			log.Printf("[eventbus] dropping event %s for slow subscriber %s", evt.EventType, entry.sub.Name)
+			entry.dropped.Add(1)
+			log.Printf("[eventbus] dropping event %s for slow subscriber %s (total dropped: %d)",
+				evt.EventType, entry.sub.Name, entry.dropped.Load())
 		}
 	}
 }
 
-// Close shuts down all subscriber channels.
+// Close shuts down all subscriber channels. Safe to call after individual unsubscribes.
 func (b *Bus) Close() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.closed = true
-	for _, entry := range b.subscribers {
-		close(entry.ch)
+	for i := range b.subscribers {
+		if !b.subscribers[i].closed {
+			b.subscribers[i].closed = true
+			close(b.subscribers[i].ch)
+		}
 	}
 	b.subscribers = nil
 }

@@ -215,6 +215,7 @@ func (s *Server) handleReviewUpdate(w http.ResponseWriter, r *http.Request) {
 		ReviewBody  *string `json:"review_body"`
 		ReviewEvent *string `json:"review_event"`
 	}
+	limitBody(w, r)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 		return
@@ -254,6 +255,7 @@ func (s *Server) handleReviewCommentUpdate(w http.ResponseWriter, r *http.Reques
 	var req struct {
 		Body string `json:"body"`
 	}
+	limitBody(w, r)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 		return
