@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.2.1](https://github.com/sky-ai-eng/triage-factory/compare/v1.2.0...v1.2.1) (2026-04-30)
+
+
+### Bug Fixes
+
+* **ci:** set CLA bot required inputs ([489ac92](https://github.com/sky-ai-eng/triage-factory/commit/489ac9247d5742584b2d65e0b4f23be752f24c11))
+* **github:** intercept 406 on large PR diffs in start-review ([#64](https://github.com/sky-ai-eng/triage-factory/issues/64)) ([92807ff](https://github.com/sky-ai-eng/triage-factory/commit/92807ff2bcb911a3280a3261084268665a94ec33))
+* **tracker:** strip trailing slash from Jira base URL ([#59](https://github.com/sky-ai-eng/triage-factory/issues/59)) ([21394ae](https://github.com/sky-ai-eng/triage-factory/commit/21394ae4ff0ee2be19ed5999ab0fee0a63f30228))
+
 ## [1.2.0](https://github.com/sky-ai-eng/triage-factory/compare/v1.1.2...v1.2.0) (2026-04-27)
 
 
