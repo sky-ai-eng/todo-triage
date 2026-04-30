@@ -64,6 +64,13 @@ const DEFAULT_FLOOR_SIZE = 4800
 // physical limit derives from the initial view (radius_min =
 // initial_radius / max_zoom).
 const MAX_ZOOM = 6
+// Initial zoom level relative to the floor's full-extent ortho
+// bounds. >1 is zoomed in (smaller visible area).
+const INITIAL_ZOOM = 1.75
+// Camera target's y offset below the floor center, so the action
+// fills more of the lower half of the screen by default. ~10 cells
+// at the debug scene's 80-wu cell size.
+const INITIAL_TARGET_Y_OFFSET = -800
 
 export class IsoScene {
   readonly engine: Engine
@@ -111,12 +118,16 @@ export class IsoScene {
     // azimuth and `beta` as polar angle from +z (so beta=0 is
     // top-down looking down). `radius` would be camera distance in
     // perspective; in ortho we use it as the zoom control.
-    const initialTarget = new Vector3(DEFAULT_FLOOR_SIZE / 2, DEFAULT_FLOOR_SIZE / 2, 0)
+    const initialTarget = new Vector3(
+      DEFAULT_FLOOR_SIZE / 2,
+      DEFAULT_FLOOR_SIZE / 2 + INITIAL_TARGET_Y_OFFSET,
+      0,
+    )
     this.camera = new ArcRotateCamera(
       'iso-camera',
       Math.PI / 2, // alpha — initial azimuth (items flow left → right on screen)
       Math.PI / 6, // beta — 30° tilt from top-down for a hint of perspective
-      DEFAULT_FLOOR_SIZE / 2, // radius — initial half-height of visible ortho bounds
+      DEFAULT_FLOOR_SIZE / 2 / INITIAL_ZOOM, // radius — half-height of visible ortho bounds
       initialTarget,
       this.scene,
     )
@@ -188,11 +199,15 @@ export class IsoScene {
   resetView(): void {
     this.camera.alpha = Math.PI / 2
     this.camera.beta = Math.PI / 6
-    this.camera.radius = DEFAULT_FLOOR_SIZE / 2
-    this.camera.target = new Vector3(DEFAULT_FLOOR_SIZE / 2, DEFAULT_FLOOR_SIZE / 2, 0)
+    this.camera.radius = DEFAULT_FLOOR_SIZE / 2 / INITIAL_ZOOM
+    this.camera.target = new Vector3(
+      DEFAULT_FLOOR_SIZE / 2,
+      DEFAULT_FLOOR_SIZE / 2 + INITIAL_TARGET_Y_OFFSET,
+      0,
+    )
   }
 
-  buildFloor(size: number, cell: number): void {
+  buildFloor(size: number, cell: number, showGrid: boolean = true): void {
     if (this.gridMesh) {
       this.gridMesh.dispose()
       this.gridMesh = null
@@ -204,16 +219,18 @@ export class IsoScene {
 
     // Grid lines, drawn just above the ground plane so they're
     // visible against it.
-    const lines: Vector3[][] = []
-    for (let i = 0; i <= size; i += cell) {
-      lines.push([new Vector3(0, i, 0), new Vector3(size, i, 0)])
-      lines.push([new Vector3(i, 0, 0), new Vector3(i, size, 0)])
+    if (showGrid) {
+      const lines: Vector3[][] = []
+      for (let i = 0; i <= size; i += cell) {
+        lines.push([new Vector3(0, i, 0), new Vector3(size, i, 0)])
+        lines.push([new Vector3(i, 0, 0), new Vector3(i, size, 0)])
+      }
+      const grid = MeshBuilder.CreateLineSystem('iso-grid', { lines }, this.scene)
+      grid.color = new Color3(0.1, 0.1, 0.1)
+      grid.alpha = 0.1
+      grid.alwaysSelectAsActiveMesh = true
+      this.gridMesh = grid
     }
-    const grid = MeshBuilder.CreateLineSystem('iso-grid', { lines }, this.scene)
-    grid.color = new Color3(0.1, 0.1, 0.1)
-    grid.alpha = 0.1
-    grid.alwaysSelectAsActiveMesh = true
-    this.gridMesh = grid
 
     // Ground plane — receives shadows from stations and chips so the
     // scene gets soft contact-shadow grounding. Sized larger than
@@ -304,45 +321,50 @@ export class IsoScene {
     return built
   }
 
-  /** Build a vertical bridge that arches over perpendicular belts
-   *  beneath. The z-profile is piecewise: 1 cell smooth ramp up
-   *  (sin²(πs/2), s ∈ [0,1]) → (cellCount−2) cells flat at peak →
-   *  1 cell smooth ramp down. sin² ramps have zero slope at both
-   *  endpoints, so the path tangents into the floor and into the
-   *  flat top without a visible kink. Stilt cylinders sit at the
-   *  ramp/peak boundaries — two per boundary (left + right of the
-   *  belt edges) so the underside of the flat span stays clear of
-   *  clutter and items below remain visible.
+  /** Build a bridge that arches between two floor-level points. The
+   *  z-profile is piecewise: 1 cell smooth ramp up (sin²(πs/2),
+   *  s ∈ [0,1]) → (cellCount−2) cells flat at peak → 1 cell smooth
+   *  ramp down. sin² ramps have zero slope at both endpoints, so the
+   *  path tangents into the floor and into the flat top without a
+   *  visible kink. Stilt cylinders sit at the ramp/peak boundaries —
+   *  two per boundary (left + right of the belt edges) so the
+   *  underside of the flat span stays clear of clutter and items
+   *  below remain visible.
    *
-   *  Direction is north-to-south (high y → low y) at the given column.
-   *  No ports — the bridge is a freestanding chain; the caller wires
+   *  Direction is implicit in `start` → `end`. The straight-line
+   *  distance between them should equal cellCount × cellSize. No
+   *  ports — the bridge is a freestanding chain; the caller wires
    *  its returned segment manually if items should ride it.
    *
    *  cellCount must be ≥ 3: 1 ramp up + (cellCount-2) peak cells +
    *  1 ramp down. */
-  addBridge(
-    spec: {
-      col: number
-      /** Northmost row of the bridge span (high y). */
-      northRow: number
-      /** Total cells the bridge spans, ≥ 3. */
-      cellCount: number
-      /** Apex floor-z; the rendered top surface sits CONVEYOR_HEIGHT
-       *  above this. */
-      peakHeight: number
-      /** Chevron continuity offset at the north (start) end. */
-      pathOffset: number
-    },
-    cellSize: number,
-  ): BeltBuild {
+  addBridge(spec: {
+    /** Bridge entry point at floor-z (z=0). */
+    start: Vector3
+    /** Bridge exit point at floor-z (z=0). */
+    end: Vector3
+    /** Total cells the bridge spans, ≥ 3. */
+    cellCount: number
+    /** Apex floor-z; the rendered top surface sits CONVEYOR_HEIGHT
+     *  above this. */
+    peakHeight: number
+    /** Chevron continuity offset at the start end. */
+    pathOffset: number
+  }): BeltBuild {
     if (spec.cellCount < 3) {
       throw new Error(`addBridge: cellCount must be ≥ 3, got ${spec.cellCount}`)
     }
     const materials = this.getMaterials()
 
-    const xCenter = (spec.col + 0.5) * cellSize
-    const yNorth = (spec.northRow + 1) * cellSize
-    const totalLen = spec.cellCount * cellSize
+    const dx = spec.end.x - spec.start.x
+    const dy = spec.end.y - spec.start.y
+    const totalLen = Math.sqrt(dx * dx + dy * dy)
+    // Tangent unit vector in xy, and the 90° CCW perpendicular for
+    // placing stilts at the belt's two edges. (tx, ty) → (-ty, tx).
+    const tx = dx / totalLen
+    const ty = dy / totalLen
+    const px = -ty
+    const py = tx
 
     // Piecewise z-profile: smooth sin² ramp up over the first cell,
     // flat at peakHeight across the middle cells, smooth ramp down
@@ -354,7 +376,8 @@ export class IsoScene {
     const points: Vector3[] = []
     for (let i = 0; i <= tess; i++) {
       const t = i / tess
-      const y = yNorth - totalLen * t
+      const x = spec.start.x + dx * t
+      const y = spec.start.y + dy * t
       let z: number
       if (t <= rampFrac) {
         const s = t / rampFrac // [0, 1] across the up-ramp
@@ -365,7 +388,7 @@ export class IsoScene {
       } else {
         z = spec.peakHeight
       }
-      points.push(new Vector3(xCenter, y, z))
+      points.push(new Vector3(x, y, z))
     }
 
     const built = buildCurvedBelt(this.scene, points, spec.pathOffset, materials.beltSurface)
@@ -385,8 +408,11 @@ export class IsoScene {
     // is the same on both ends regardless of cellCount.
     const stiltHeight = spec.peakHeight + CONVEYOR_HEIGHT
     for (const t of [1 / spec.cellCount, (spec.cellCount - 1) / spec.cellCount]) {
-      const y = yNorth - totalLen * t
-      for (const dx of [-STILT_OFFSET, STILT_OFFSET]) {
+      const x = spec.start.x + dx * t
+      const y = spec.start.y + dy * t
+      for (const sign of [-1, 1]) {
+        const ox = sign * STILT_OFFSET * px
+        const oy = sign * STILT_OFFSET * py
         const stilt = MeshBuilder.CreateCylinder(
           'bridge-stilt',
           { diameter: STILT_DIAMETER, height: stiltHeight, tessellation: 12 },
@@ -394,10 +420,11 @@ export class IsoScene {
         )
         // Babylon cylinders are y-axis aligned by default; stand them
         // up in our z-up world by rotating around x. Position is the
-        // cylinder's center: x offset to either belt edge, z at half-
-        // height so the base sits on the floor.
+        // cylinder's center: shifted along the path-perpendicular to
+        // either belt edge, z at half-height so the base sits on the
+        // floor.
         stilt.rotation.x = Math.PI / 2
-        stilt.position.set(xCenter + dx, y, stiltHeight / 2)
+        stilt.position.set(x + ox, y + oy, stiltHeight / 2)
         stilt.material = stiltMat
         stilt.parent = built.root
         if (this.shadowGenerator) {

@@ -45,7 +45,7 @@ export const CHEVRON_SPACING_WORLD = 54
  *  riding at this speed (see iso-items.ts), and the chevron texture
  *  scroll is derived from it so a marker on the belt and a chip on
  *  the belt move at the same rate. */
-export const BELT_WORLD_SPEED = 120
+export const BELT_WORLD_SPEED = 180
 
 /** Texture U units per second. With CHEVRON_SPACING_WORLD baked into
  *  UVs, 1 unit of uOffset == one chevron's worth of scroll, so this
