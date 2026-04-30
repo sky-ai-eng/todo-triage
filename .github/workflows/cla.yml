@@ -28,93 +28,15 @@ jobs:
           app-id: 3333449
           private-key: ${{ secrets.CLA_APP_PRIVATE_KEY }}
 
-      # Diagnostic: prove what the App token can actually do against the
-      # cla-signatures branch. The contributor-assistant failure message
-      # ("Resource not accessible by integration") doesn't tell us which
-      # token failed or which API call. These checks isolate it.
-      - name: Diagnose App token access
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          REPO: ${{ github.repository }}
-          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
-          INSTALLATION_ID: ${{ steps.app-token.outputs.installation-id }}
-        run: |
-          set +e
-          echo "::group::App identity (which App + installation)"
-          echo "app-slug=$APP_SLUG"
-          echo "installation-id=$INSTALLATION_ID"
-          echo "::endgroup::"
-
-          echo "::group::App installation accessible repos"
-          gh api /installation/repositories --jq '.repositories[].full_name'
-          echo "::endgroup::"
-
-          echo "::group::Read cla-signatures branch metadata"
-          gh api "/repos/$REPO/branches/cla-signatures" --jq '{name, protected}'
-          echo "exit=$?"
-          echo "::endgroup::"
-
-          echo "::group::Read signatures/cla.json on cla-signatures"
-          gh api "/repos/$REPO/contents/signatures/cla.json?ref=cla-signatures" --jq '{path, sha, size}'
-          echo "exit=$?"
-          echo "::endgroup::"
-
-          echo "::group::Rate limit (confirms token is an installation token)"
-          gh api /rate_limit --jq '.resources.core'
-          echo "::endgroup::"
-
-          echo "::group::DIRECT WRITE TEST 1 — App token PUT to signatures/.diagnostic"
-          # Independent test: try to create/update a small file on
-          # cla-signatures using ONLY the App token. If this works,
-          # the App can write and any failure later is in the action's
-          # wiring. If it fails with the same 403, the App token itself
-          # cannot write — proving it's a perms problem, not action wiring.
-          EXISTING_SHA=$(gh api "/repos/$REPO/contents/signatures/.diagnostic?ref=cla-signatures" --jq '.sha' 2>/dev/null)
-          CONTENT_B64=$(printf "diagnostic write test %s" "$(date -u +%s)" | base64 -w0)
-          if [ -n "$EXISTING_SHA" ] && [ "$EXISTING_SHA" != "null" ]; then
-            echo "Updating existing .diagnostic (sha=$EXISTING_SHA)"
-            gh api -X PUT "/repos/$REPO/contents/signatures/.diagnostic" \
-              -f message="diagnostic: app token write test" \
-              -f content="$CONTENT_B64" \
-              -f branch="cla-signatures" \
-              -f sha="$EXISTING_SHA" \
-              -i
-          else
-            echo "Creating new .diagnostic"
-            gh api -X PUT "/repos/$REPO/contents/signatures/.diagnostic" \
-              -f message="diagnostic: app token write test" \
-              -f content="$CONTENT_B64" \
-              -f branch="cla-signatures" \
-              -i
-          fi
-          echo "exit=$?"
-          echo "::endgroup::"
-
-          echo "::group::DIRECT WRITE TEST 2 — App token no-op PUT to signatures/cla.json"
-          # Same write but to the actual file the action targets. If
-          # .diagnostic succeeds and cla.json fails, there's a path-level
-          # rule on cla.json. Both same outcome → blanket perms.
-          # Re-write the file with its current content (no real change).
-          CLA_JSON_SHA=$(gh api "/repos/$REPO/contents/signatures/cla.json?ref=cla-signatures" --jq '.sha')
-          CLA_JSON_CONTENT=$(gh api "/repos/$REPO/contents/signatures/cla.json?ref=cla-signatures" --jq '.content')
-          echo "Updating signatures/cla.json with same content (sha=$CLA_JSON_SHA)"
-          gh api -X PUT "/repos/$REPO/contents/signatures/cla.json" \
-            -f message="diagnostic: app token write test (cla.json no-op)" \
-            -f content="$CLA_JSON_CONTENT" \
-            -f branch="cla-signatures" \
-            -f sha="$CLA_JSON_SHA" \
-            -i
-          echo "exit=$?"
-          echo "::endgroup::"
-
-      # NOTE: contributor-assistant/github-action only uses
-      # PERSONAL_ACCESS_TOKEN for signature file writes when
-      # remote-organization-name OR remote-repository-name is set
-      # (see src/persistence/persistence.ts in the action source).
-      # We point those at the *current* repo to force the PAT code
-      # path so the App token (which has Contents: write) is used
-      # instead of GITHUB_TOKEN (which only has contents: read here).
-      # The action was archived on 2026-03-23; longer term we should
+      # contributor-assistant/github-action only routes signature
+      # file writes through PERSONAL_ACCESS_TOKEN when one of
+      # remote-organization-name / remote-repository-name is set
+      # (see src/persistence/persistence.ts). Without those, it
+      # writes via GITHUB_TOKEN, which we deliberately keep at
+      # contents: read. We point the "remote" inputs at this repo
+      # to force the PAT path so the App token is used.
+      #
+      # Heads up: this action was archived 2026-03-23. We should
       # migrate to a maintained alternative.
       - uses: contributor-assistant/github-action@v2.6.1
         env:
@@ -126,4 +48,4 @@ jobs:
           branch: "cla-signatures"
           remote-organization-name: "sky-ai-eng"
           remote-repository-name: "triage-factory"
-          allowlist: "sky-ai-bot,dependabot[bot],github-actions[bot],claude[bot]"
+          allowlist: "AidanAllchin,sky-ai-bot,dependabot[bot],github-actions[bot],claude[bot]"
