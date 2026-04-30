@@ -1,1 +1,12 @@
-{"signedContributors":[]}
+{
+  "signedContributors": [
+    {
+      "name": "AidanAllchin",
+      "id": 4251088,
+      "comment_id": 4349747105,
+      "created_at": "2026-04-30T04:45:18Z",
+      "repoId": 1200062271,
+      "pullRequestNo": 58
+    }
+  ]
+}
