@@ -32,6 +32,7 @@ import {
   Color3,
   Color4,
   DirectionalLight,
+  DynamicTexture,
   Engine,
   GlowLayer,
   HemisphericLight,
@@ -43,6 +44,8 @@ import {
   PointerEventTypes,
   Scene,
   ShadowGenerator,
+  StandardMaterial,
+  Texture,
   Vector3,
 } from '@babylonjs/core'
 
@@ -109,11 +112,11 @@ export class IsoScene {
     })
 
     this.scene = new Scene(this.engine)
-    // Warm off-white background. Pulled noticeably below pure white so
-    // the negative space doesn't dominate the eye — combined with the
-    // ACES tonemap below, this reads as a soft studio cream rather
-    // than a blown-out canvas.
-    this.scene.clearColor = new Color4(0.91, 0.895, 0.875, 1)
+    // Warm off-white background, tuned to match the floor's albedo
+    // (#f0ece3) so the rendered ground blends seamlessly into the
+    // canvas chrome. ACES tonemap (below) gives a filmic rolloff so
+    // the whites stay warm rather than clipping toward pure white.
+    this.scene.clearColor = new Color4(0.941, 0.925, 0.89, 1)
     // Right-handed coordinates so our world (+x right, +y forward,
     // +z up) is what Babylon expects for cross products and culling.
     this.scene.useRightHandedSystem = true
@@ -269,7 +272,11 @@ export class IsoScene {
     }
 
     // Grid lines, drawn just above the ground plane so they're
-    // visible against it.
+    // visible against it. Tinted with the project accent terracotta
+    // (--color-accent #c47a5a) at very low alpha so the grid carries
+    // the same warm hue as the rest of the app and station footprint
+    // pads — and stays barely-there at normal zoom, only resolving
+    // into faint blueprint structure when the camera leans in.
     if (showGrid) {
       const lines: Vector3[][] = []
       for (let i = 0; i <= size; i += cell) {
@@ -277,8 +284,8 @@ export class IsoScene {
         lines.push([new Vector3(i, 0, 0), new Vector3(i, size, 0)])
       }
       const grid = MeshBuilder.CreateLineSystem('iso-grid', { lines }, this.scene)
-      grid.color = new Color3(0.1, 0.1, 0.1)
-      grid.alpha = 0.1
+      grid.color = Color3.FromHexString('#c47a5a')
+      grid.alpha = 0.06
       grid.alwaysSelectAsActiveMesh = true
       this.gridMesh = grid
     }
@@ -288,11 +295,18 @@ export class IsoScene {
     // the grid so shadows don't clip at the edge of the visible
     // floor when the camera pans. CreatePlane is xy with normal +z,
     // matching our z-up world without needing rotation.
+    //
+    // Albedo lifted toward the app's --color-surface (#f7f5f2) for
+    // cohesion with the rest of the UI. Roughness dropped to 0.72 so
+    // the floor picks up a faint sheen from the warm key + cool rim
+    // lights — reads as polished concrete / warm stone, not matte
+    // cardboard. Stays 0% metallic so the reflection is a soft
+    // diffuse bounce, not chrome.
     if (!this.groundMat) {
       this.groundMat = new PBRMaterial('ground-mat', this.scene)
-      this.groundMat.albedoColor = Color3.FromHexString('#e3ddd0')
+      this.groundMat.albedoColor = Color3.FromHexString('#f0ece3')
       this.groundMat.metallic = 0
-      this.groundMat.roughness = 0.95
+      this.groundMat.roughness = 0.72
     }
     const ground = MeshBuilder.CreatePlane(
       'ground',
@@ -337,6 +351,48 @@ export class IsoScene {
       this.stationHandles.set(spec.id, built)
     }
     return built
+  }
+
+  private floorGlowMat: StandardMaterial | null = null
+  /** Lazily-built shared material for floor underglow planes (used by
+   *  the bridge underglow). Procedural radial-gradient texture: warm
+   *  terracotta at the center, fading to fully transparent at the
+   *  edge. Stretching the plane elongates the radial into an ellipse,
+   *  which reads as warm spotlight on the floor under the bridge. */
+  private getFloorGlowMaterial(): StandardMaterial {
+    if (this.floorGlowMat) return this.floorGlowMat
+    const SIZE = 256
+    const tex = new DynamicTexture(
+      'floor-glow-radial',
+      { width: SIZE, height: SIZE },
+      this.scene,
+      false,
+    )
+    tex.hasAlpha = true
+    const ctx = tex.getContext() as CanvasRenderingContext2D
+    ctx.clearRect(0, 0, SIZE, SIZE)
+    const cx = SIZE / 2
+    const cy = SIZE / 2
+    const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, SIZE / 2)
+    grad.addColorStop(0, 'rgba(196, 122, 90, 0.34)')
+    grad.addColorStop(0.55, 'rgba(196, 122, 90, 0.14)')
+    grad.addColorStop(1, 'rgba(196, 122, 90, 0)')
+    ctx.fillStyle = grad
+    ctx.fillRect(0, 0, SIZE, SIZE)
+    tex.update()
+    tex.wrapU = Texture.CLAMP_ADDRESSMODE
+    tex.wrapV = Texture.CLAMP_ADDRESSMODE
+
+    const m = new StandardMaterial('floor-glow-mat', this.scene)
+    m.diffuseTexture = tex
+    m.diffuseTexture.hasAlpha = true
+    m.useAlphaFromDiffuseTexture = true
+    m.emissiveTexture = tex
+    m.emissiveColor = new Color3(0.6, 0.6, 0.6)
+    m.disableLighting = true
+    m.backFaceCulling = false
+    this.floorGlowMat = m
+    return m
   }
 
   /** Subscribe to station-click events. Returns an unsubscribe
@@ -510,6 +566,27 @@ export class IsoScene {
       }
     }
 
+    // Soft terracotta underglow on the floor beneath the bridge.
+    // Reads as warm spotlight bouncing off the floor under the
+    // elevated span — a single, distinctive moment of accent color
+    // that says "this is where traffic lifts off." Uses the radial-
+    // gradient material; an elongated plane stretches the radial into
+    // an ellipse along the bridge's direction.
+    const GLOW_HALO = 40
+    const glowLen = totalLen + GLOW_HALO * 2
+    const glowWidth = CONVEYOR_WIDTH + GLOW_HALO * 2
+    const glow = MeshBuilder.CreatePlane(
+      'bridge-floor-glow',
+      { width: glowLen, height: glowWidth, sideOrientation: Mesh.DOUBLESIDE },
+      this.scene,
+    )
+    glow.position.set((spec.start.x + spec.end.x) / 2, (spec.start.y + spec.end.y) / 2, 0.3)
+    glow.rotation.z = Math.atan2(dy, dx)
+    glow.material = this.getFloorGlowMaterial()
+    glow.isPickable = false
+    glow.parent = built.root
+    built.meshes.push(glow)
+
     return built
   }
 
@@ -610,6 +687,7 @@ export class IsoScene {
     this.gridMesh?.dispose()
     this.ground?.dispose()
     this.groundMat?.dispose()
+    this.floorGlowMat?.dispose()
     this.glowLayer?.dispose()
     this.shadowGenerator?.dispose()
     this.bridgeStiltMat?.dispose()
