@@ -221,16 +221,18 @@ func main() {
 
 	// Lifetime distinct-entity counter for the factory snapshot. Hydrate
 	// once from the events table so we don't pay a full-table scan per
-	// /api/factory/snapshot request, then keep it warm via the eventbus
-	// subscriber below. The Hydrate→SetLifetimeCounter→Subscribe order
-	// matters: subscribing before Hydrate finishes would risk a fresh
-	// event landing in the dedupe set first and then being re-counted by
-	// the historical scan.
+	// /api/factory/snapshot request, then keep it warm via the
+	// db.SetOnEventRecorded hook — which fires inside RecordEvent itself
+	// so direct callers (tracker backfill, Jira carry-over) that skip
+	// the eventbus still update the cache. Hydrate must complete before
+	// the hook is wired so a fresh event can't land in the dedupe set
+	// ahead of the historical scan.
 	lifetimeCounter := db.NewLifetimeDistinctCounter()
 	if err := lifetimeCounter.Hydrate(database); err != nil {
 		log.Fatalf("hydrate lifetime counter: %v", err)
 	}
 	srv.SetLifetimeCounter(lifetimeCounter)
+	db.SetOnEventRecorded(lifetimeCounter.Record)
 
 	// Subscriber: WS broadcaster — forwards ALL events to the frontend
 	bus.Subscribe(eventbus.Subscriber{
@@ -248,14 +250,6 @@ func main() {
 				})
 			}
 		},
-	})
-
-	// Subscriber: lifetime counter — folds each event into the in-memory
-	// distinct-entity aggregate. Filter is empty so it sees every event
-	// type; the counter itself filters out events with no entity_id.
-	bus.Subscribe(eventbus.Subscriber{
-		Name:   "lifetime-counter",
-		Handle: lifetimeCounter.Record,
 	})
 
 	// Start AI scoring runner

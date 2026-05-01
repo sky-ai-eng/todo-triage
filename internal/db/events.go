@@ -41,6 +41,23 @@ func SeedEventTypes(db *sql.DB) error {
 	return nil
 }
 
+// onEventRecorded fires after every successful INSERT into the events
+// table. Used by LifetimeDistinctCounter so the in-memory cache stays
+// in sync with the DB regardless of which code path wrote the row —
+// including direct callers (tracker backfill, Jira carry-over) that
+// deliberately skip the eventbus to avoid downstream routing.
+//
+// One global hook because there's one counter per process; promote to
+// a slice if a second consumer ever needs the same signal. Set at
+// startup, never reset; tests that don't wire it in see nil and skip.
+var onEventRecorded func(domain.Event)
+
+// SetOnEventRecorded registers a hook called after each successful
+// RecordEvent insert. Pass nil to unregister.
+func SetOnEventRecorded(fn func(domain.Event)) {
+	onEventRecorded = fn
+}
+
 // RecordEvent inserts an event into the audit log and returns its UUID.
 // If evt.ID is empty, a v4 UUID is generated; otherwise the caller's ID is
 // used (useful for pinning IDs in tests). The INSERT has no ON CONFLICT
@@ -71,6 +88,10 @@ func RecordEvent(db *sql.DB, evt domain.Event) (string, error) {
 	`, id, evt.EntityID, evt.EventType, evt.DedupKey, evt.MetadataJSON, occurredAt)
 	if err != nil {
 		return "", err
+	}
+	if onEventRecorded != nil {
+		evt.ID = id
+		onEventRecorded(evt)
 	}
 	return id, nil
 }

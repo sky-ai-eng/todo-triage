@@ -41,21 +41,25 @@ func NewLifetimeDistinctCounter() *LifetimeDistinctCounter {
 }
 
 // Hydrate populates the counter from the events table. Reads the
-// individual (event_type, entity_id) pairs (rather than the SQL
+// distinct (event_type, entity_id) pairs (rather than the SQL
 // aggregate's pre-counted form) so the dedupe set ends up populated
 // for subsequent Record calls.
 //
-// Backed by the partial index `idx_events_type_entity (event_type,
-// entity_id) WHERE entity_id IS NOT NULL`: the index covers both
-// SELECT columns and the WHERE filter, so this is an index-only scan
-// — no table touch, even at large event volumes.
+// SELECT DISTINCT pushes deduplication into SQLite, so a station with
+// many re-entries (e.g. a flaky CI check failing 50 times on one PR)
+// returns a single row at the DB level instead of being read 50 times
+// and dropped 49 times in Go. The partial index
+// `idx_events_type_entity (event_type, entity_id) WHERE entity_id IS
+// NOT NULL` covers both SELECT columns and the WHERE filter, so the
+// query is an index-only scan with adjacency-based DISTINCT — no temp
+// B-tree, no table touch.
 //
-// Should be called once at startup, before the eventbus subscriber
-// that calls Record is wired — otherwise a brand-new event could land
-// in `seen` first and then get re-counted by the hydrating scan.
+// Should be called once at startup, before SetOnEventRecorded wires
+// the hook — otherwise a brand-new event could land in `seen` first
+// and then get re-counted by the hydrating scan.
 func (c *LifetimeDistinctCounter) Hydrate(database *sql.DB) error {
 	rows, err := database.Query(`
-		SELECT event_type, entity_id
+		SELECT DISTINCT event_type, entity_id
 		FROM events
 		WHERE entity_id IS NOT NULL
 	`)
@@ -71,11 +75,10 @@ func (c *LifetimeDistinctCounter) Hydrate(database *sql.DB) error {
 		if err := rows.Scan(&eventType, &entityID); err != nil {
 			return err
 		}
-		key := eventType + "|" + entityID
-		if _, dup := c.seen[key]; dup {
-			continue
-		}
-		c.seen[key] = struct{}{}
+		// SELECT DISTINCT guarantees no duplicates, but the dedupe set
+		// still needs every pair populated so post-hydrate Record calls
+		// can recognize re-entries.
+		c.seen[eventType+"|"+entityID] = struct{}{}
 		c.counts[eventType]++
 	}
 	return rows.Err()

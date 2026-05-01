@@ -108,6 +108,30 @@ func TestLifetimeDistinctCounter_RecordIgnoresSystemEvents(t *testing.T) {
 	}
 }
 
+// TestLifetimeDistinctCounter_HookCatchesDirectRecordEvent confirms
+// the SetOnEventRecorded hook fires for direct RecordEvent callers
+// (tracker backfill, Jira carry-over) that bypass the eventbus —
+// the regression for the original bus-only-subscriber design where
+// those callers silently drifted the cache from the DB until restart.
+func TestLifetimeDistinctCounter_HookCatchesDirectRecordEvent(t *testing.T) {
+	database := newTestDB(t)
+	counter := NewLifetimeDistinctCounter()
+	if err := counter.Hydrate(database); err != nil {
+		t.Fatalf("Hydrate: %v", err)
+	}
+	SetOnEventRecorded(counter.Record)
+	t.Cleanup(func() { SetOnEventRecorded(nil) })
+
+	a := makeEntity(t, database, 1)
+	// Direct RecordEvent — no bus involvement at all. The hook is the
+	// only path that gets the counter updated.
+	recordEvent(t, database, a.ID, domain.EventGitHubPROpened)
+
+	if got := counter.Snapshot()[domain.EventGitHubPROpened]; got != 1 {
+		t.Errorf("counter[opened] = %d, want 1 (hook missed direct RecordEvent)", got)
+	}
+}
+
 // TestLifetimeDistinctCounter_ConcurrentRecord exercises the mutex
 // guarding the dedupe set + counter map. With N goroutines each
 // calling Record for distinct entities, the final count must be N —
