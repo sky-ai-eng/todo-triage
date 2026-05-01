@@ -57,15 +57,19 @@ func EventCountsByTypeSince(database *sql.DB, since time.Time) (map[string]int, 
 
 // DistinctEntityCountsByEventTypeLifetime counts the distinct entities
 // that have ever produced an event of each event_type, from catalog
-// start (no time cutoff). Drives the per-station lifetime counter on
-// the factory view: "Ready for Review · 47" reads as "47 distinct PRs
-// have reached this station," not "47 events fired" — re-entries from
-// the same entity (e.g. a flaky CI check failing twice on one PR) don't
-// double-count.
+// start (no time cutoff). Production reads of this number go through
+// LifetimeDistinctCounter, which folds events incrementally off the
+// bus and avoids the per-request scan; this function survives as the
+// canonical SQL aggregate behind that counter — pinned by tests, and
+// available for one-shot reconciliation if cache drift is ever
+// suspected.
 //
+// "Ready for Review · 47" reads as "47 distinct PRs have reached this
+// station," not "47 events fired" — re-entries from the same entity
+// (e.g. a flaky CI check failing twice on one PR) don't double-count.
 // For terminal event types (PR merged/closed) the answer matches a
 // plain COUNT(*) since each entity contributes exactly one terminal
-// event. Cheap: idx_events_entity_created covers the scan.
+// event.
 func DistinctEntityCountsByEventTypeLifetime(database *sql.DB) (map[string]int, error) {
 	rows, err := database.Query(`
 		SELECT event_type, COUNT(DISTINCT entity_id)

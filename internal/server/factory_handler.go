@@ -175,10 +175,12 @@ func (s *Server) handleFactorySnapshot(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	lifetimeCounts, err := db.DistinctEntityCountsByEventTypeLifetime(s.db)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
+	// Lifetime distinct-entity counts come from the in-memory aggregate
+	// (hydrated once at startup, maintained off the event bus) so this
+	// path stays O(1) regardless of total events table size.
+	var lifetimeCounts map[string]int
+	if s.lifetimeCounter != nil {
+		lifetimeCounts = s.lifetimeCounter.Snapshot()
 	}
 
 	// --- Active runs --------------------------------------------------------

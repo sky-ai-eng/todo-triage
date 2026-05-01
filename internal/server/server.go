@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/config"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
@@ -29,6 +30,7 @@ type Server struct {
 	onGitHubChanged    func()                // GitHub creds/repos changed — full restart + re-profile
 	onJiraChanged      func()                // Jira config changed — restart Jira poller only
 	scorerTrigger      func()                // invoked after non-poll task creation (e.g. carry-over) to kick scoring immediately
+	lifetimeCounter    *db.LifetimeDistinctCounter
 
 	// Jira poll readiness — used by /api/jira/stock to decide whether the
 	// poller has completed its first cycle after a restart. Carry-over reads
@@ -186,6 +188,14 @@ func (s *Server) SetOnJiraChanged(fn func()) {
 // next poll cycle.
 func (s *Server) SetScorerTrigger(fn func()) {
 	s.scorerTrigger = fn
+}
+
+// SetLifetimeCounter wires the in-memory distinct-entity counter the
+// factory snapshot reads. Hydrated once at startup and maintained by an
+// eventbus subscriber; replaces the per-request COUNT(DISTINCT entity_id)
+// scan that grew with the events table.
+func (s *Server) SetLifetimeCounter(c *db.LifetimeDistinctCounter) {
+	s.lifetimeCounter = c
 }
 
 // SetGitHubClient sets the GitHub client for review approval submissions.
