@@ -116,7 +116,17 @@ type factoryEntityJSON struct {
 
 type factoryRecentEventJSON struct {
 	EventType string `json:"event_type"`
-	At        string `json:"at"`
+	// At is the event's source-time when known (commit committed_at,
+	// check-run completed_at, review submitted_at), falling back to
+	// detection time. Used for chain ORDER.
+	At string `json:"at"`
+	// DetectedAt is the row's insert time — when the poller actually
+	// recorded the event. Used by the factory animation reconciler
+	// for chain CLUSTERING: events from one poll insert within
+	// milliseconds of each other, so a small gap test on this field
+	// cleanly separates one poll's burst from another regardless of
+	// how the upstream timestamps line up.
+	DetectedAt string `json:"detected_at"`
 }
 
 // factoryRecentEventsPerEntity caps how many events we ship per entity for
@@ -248,8 +258,9 @@ func (s *Server) handleFactorySnapshot(w http.ResponseWriter, r *http.Request) {
 			ej.RecentEvents = make([]factoryRecentEventJSON, len(recent))
 			for i, r := range recent {
 				ej.RecentEvents[i] = factoryRecentEventJSON{
-					EventType: r.EventType,
-					At:        r.CreatedAt.Format(time.RFC3339),
+					EventType:  r.EventType,
+					At:         r.CreatedAt.Format(time.RFC3339),
+					DetectedAt: r.DetectedAt.Format(time.RFC3339),
 				}
 			}
 		}

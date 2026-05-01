@@ -185,9 +185,21 @@ type FactoryEntityRow struct {
 
 // FactoryRecentEvent is a single entry in an entity's recent event history.
 // Ordered chronologically ascending by caller (ListRecentEventsByEntity).
+//
+// Two timestamps because we need both for the factory animation:
+//   - CreatedAt is the "event time" used for chain ordering: occurred_at
+//     when the upstream system reported it, falling back to detection
+//     time. So two events from one poll order by their upstream times,
+//     not their insert order.
+//   - DetectedAt is purely the row's insert time (events.created_at).
+//     Used for clustering events into "this poll's burst" — events from
+//     a single poll cycle insert within milliseconds, so a small gap
+//     test on this field cleanly separates one poll's chain from another.
+//     Independent of upstream timestamps, which can be arbitrarily lagged.
 type FactoryRecentEvent struct {
-	EventType string
-	CreatedAt time.Time
+	EventType  string
+	CreatedAt  time.Time
+	DetectedAt time.Time
 }
 
 // ListRecentEventsByEntity returns the last `perEntity` events per
@@ -233,10 +245,11 @@ func ListRecentEventsByEntity(database *sql.DB, ids []string, perEntity int) (ma
 		// "most recent" per entity is stable regardless of which column is
 		// populated.
 		query := `
-			SELECT entity_id, event_type, event_at
+			SELECT entity_id, event_type, event_at, detected_at
 			FROM (
 				SELECT entity_id, event_type,
 					COALESCE(occurred_at, created_at) AS event_at,
+					created_at AS detected_at,
 					rowid AS row_id,
 					ROW_NUMBER() OVER (
 						PARTITION BY entity_id
@@ -253,14 +266,15 @@ func ListRecentEventsByEntity(database *sql.DB, ids []string, perEntity int) (ma
 			return nil, err
 		}
 		for rows.Next() {
-			var entityID, eventType, eventAtStr string
+			var entityID, eventType, eventAtStr, detectedAtStr string
 			// COALESCE over two DATETIME columns loses the column-type
 			// metadata the SQLite driver needs to scan directly into
 			// time.Time (the driver returns the value as a string in
 			// that case). Scan as string and parse ourselves — cheap
 			// and consistent across whichever source column contributed
-			// the value.
-			if err := rows.Scan(&entityID, &eventType, &eventAtStr); err != nil {
+			// the value. detected_at is plain `created_at` but we scan
+			// it as a string too for symmetry with the COALESCEd column.
+			if err := rows.Scan(&entityID, &eventType, &eventAtStr, &detectedAtStr); err != nil {
 				rows.Close()
 				return nil, err
 			}
@@ -269,9 +283,15 @@ func ListRecentEventsByEntity(database *sql.DB, ids []string, perEntity int) (ma
 				rows.Close()
 				return nil, err
 			}
+			detectedAt, err := parseDBDatetime(detectedAtStr)
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
 			out[entityID] = append(out[entityID], FactoryRecentEvent{
-				EventType: eventType,
-				CreatedAt: eventAt,
+				EventType:  eventType,
+				CreatedAt:  eventAt,
+				DetectedAt: detectedAt,
 			})
 		}
 		if err := rows.Err(); err != nil {

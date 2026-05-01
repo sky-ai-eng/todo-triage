@@ -156,7 +156,16 @@ export interface ToastPayload {
 
 export interface FactoryRecentEvent {
   event_type: string
+  /** Source-time when known (commit committed_at, check completed_at,
+   *  review submitted_at), falling back to detection time. Drives
+   *  chain ORDERING — two events from one poll order by their
+   *  upstream timestamps, not their insert order. */
   at: string
+  /** Row insert time. Drives chain CLUSTERING — events from a single
+   *  poll cycle insert within milliseconds, so a small gap test on
+   *  this field separates one poll's burst from the next regardless
+   *  of how the upstream timestamps line up. */
+  detected_at: string
 }
 
 export interface FactoryEntity {

@@ -9,11 +9,41 @@
 //
 // Tray counts and chip placement read this same function so the two
 // can never drift. Reload-stable rendering falls out for free —
-// recent_events + last_event_at on the snapshot encode exactly enough
-// state to resume mid-animation after a refresh, with no client-side
-// cache.
+// `recent_events[]` (with both source-time `at` and insert-time
+// `detected_at`) on the snapshot encodes exactly enough state to
+// resume mid-animation after a refresh, with no client-side cache.
+//
+// ─── Chain handling ────────────────────────────────────────────────
+//
+// When a single poll cycle detects multiple events for the same
+// entity (`new_commits` then `ci_check_passed` is the canonical
+// pair), the chip should animate through the FULL chain rather than
+// teleporting to the final hop. We detect the chain by clustering
+// the tail of `recent_events` by `detected_at` gap — events from one
+// poll insert within milliseconds; pollers run every 30s+, so any
+// small threshold (we use 2s) cleanly separates bursts.
+//
+// Within the chain, hops play sequentially anchored at the chain's
+// first detection time:
+//
+//   anchor    = chain[0].detected_at
+//   hop K     = (chain[K-1] → chain[K])  for K in [1..chain.len-1]
+//   hop 0     = (source → chain[0])      where source is the
+//               station-mapped event immediately *before* the chain
+//               in `recent_events` (the entity's prior position)
+//   elapsed   = now - anchor
+//   bucket K  = sum of durations(hop[0..K-1]) ≤ elapsed < bucket K+1
+//
+// Past the total chain duration → parked at chain[last]. Pre-anchor
+// (clock skew, future timestamps) → parked at the source. Single-
+// event chains reduce to today's behavior automatically.
 
 import type { FactoryEntity } from '../types'
+
+// Detection gap above which two adjacent events are considered to
+// belong to *different* chains. Pollers separate runs by ~30s; events
+// in one poll insert within ~ms. 2s is a comfortable threshold.
+const CHAIN_DETECTION_GAP_MS = 2000
 
 export type EntityPlacement =
   | { kind: 'parked'; station: string }
@@ -21,76 +51,119 @@ export type EntityPlacement =
 
 /** Project an entity to its current factory position.
  *
- *  The most recent station-mapped event in `recent_events` (or
- *  `current_event_type` as a fallback) determines the destination.
- *  If a *different* station-mapped event appears earlier in the tail
- *  AND `last_event_at` is within the configured animation window,
- *  the entity is in transit; otherwise it's parked at the destination.
- *
- *  Returns null when the entity has no station-mapped event at all
- *  (e.g., a Jira ticket on a GitHub-only floor) so the caller can
+ *  Returns null when the entity has no station-mapped event to anchor
+ *  on (e.g., a Jira ticket on a GitHub-only floor) so the caller can
  *  filter it out cleanly. */
 export function placeEntity(
   entity: FactoryEntity,
   knownStations: Set<string>,
   /** ms duration for the from→to chip ride. Backed by the routing
    *  table (sum of segment lengths / belt speed) so chip travel time
-   *  matches the visual length of the bridges. Returns a fallback
-   *  for unknown pairs — those animate the default duration and then
-   *  snap to parked. */
+   *  matches the visual length of the bridges. */
   getDuration: (from: string, to: string) => number,
   now: number,
 ): EntityPlacement | null {
-  const recent = entity.recent_events ?? []
-
-  // Walk the tail for the most recent station-mapped event.
-  let toIdx = -1
-  for (let i = recent.length - 1; i >= 0; i--) {
-    if (knownStations.has(recent[i].event_type)) {
-      toIdx = i
-      break
+  // Filter to station-mapped events only, preserving order. Non-
+  // station events (system pollers, ignored kinds) shouldn't appear
+  // in the chain or as the source — they don't move the chip.
+  const station = (entity.recent_events ?? []).filter((e) => knownStations.has(e.event_type))
+  if (station.length === 0) {
+    if (entity.current_event_type && knownStations.has(entity.current_event_type)) {
+      // Snapshot has the entity at a known station but no station
+      // event in recent history (truncated, very fresh, or weird
+      // ordering edge case). Park there with no animation.
+      return { kind: 'parked', station: entity.current_event_type }
     }
-  }
-
-  let to: string | undefined
-  let toAtMs: number | undefined
-  if (toIdx >= 0) {
-    to = recent[toIdx].event_type
-    const t = Date.parse(recent[toIdx].at)
-    if (!Number.isNaN(t)) toAtMs = t
-  } else if (entity.current_event_type && knownStations.has(entity.current_event_type)) {
-    to = entity.current_event_type
-    if (entity.last_event_at) {
-      const t = Date.parse(entity.last_event_at)
-      if (!Number.isNaN(t)) toAtMs = t
-    }
-  } else {
     return null
   }
 
-  // Search earlier in the tail for a different station-mapped event —
-  // that's the source of an in-flight transit. Self-loops (same
-  // station as `to`) are skipped: there's nothing to traverse.
-  let from: string | undefined
-  for (let i = toIdx - 1; i >= 0; i--) {
-    const ev = recent[i].event_type
-    if (knownStations.has(ev) && ev !== to) {
-      from = ev
-      break
-    }
+  // Cluster the tail by detected_at gap. Walk backwards from the
+  // newest entry; include each step in the chain while its predecessor
+  // is within the threshold. The first index that fails the test (or
+  // index 0 if we walk all the way back) is `chainStart`.
+  let chainStart = station.length - 1
+  while (chainStart > 0) {
+    const cur = parseTimestamp(station[chainStart].detected_at)
+    const prev = parseTimestamp(station[chainStart - 1].detected_at)
+    if (cur == null || prev == null) break
+    if (cur - prev > CHAIN_DETECTION_GAP_MS) break
+    chainStart--
   }
 
-  if (from && toAtMs != null) {
-    const age = now - toAtMs
-    // Guard against client clock skew producing a future timestamp.
-    // Negative age would otherwise yield negative progress and pose
-    // chips outside their itinerary.
-    if (age >= 0) {
-      const dur = getDuration(from, to)
-      if (dur > 0 && age < dur) {
-        return { kind: 'transit', from, to, progress: age / dur }
+  const chain = station.slice(chainStart)
+  // Anchor: when this chain was discovered. For a single-event chain,
+  // that's the event itself. For a multi-event chain, the earliest
+  // detection in the burst (typically all within a few ms of each
+  // other anyway).
+  const anchorMs = parseTimestamp(chain[0].detected_at)
+  if (anchorMs == null) {
+    // Missing detection timestamp — fall back to parked at the chain's
+    // last station. Shouldn't happen with the new backend, but the
+    // contract is "render something reasonable" not "blow up."
+    return { kind: 'parked', station: chain[chain.length - 1].event_type }
+  }
+
+  // Source = station-mapped event immediately before the chain.
+  // Determines the *first* hop (source → chain[0]). When absent
+  // (chain begins at index 0 of station-mapped history), the chip
+  // has no prior known location to fly in from, so the first hop is
+  // dropped and animation starts at chain[0] → chain[1].
+  const source = chainStart > 0 ? station[chainStart - 1].event_type : null
+
+  // Build hop list. Self-loop hops (same from and to, e.g., a
+  // duplicate event somehow squeezed past dedup) are skipped — the
+  // chip would have nothing to traverse and `progress / dur` would
+  // be undefined.
+  const hops: { from: string; to: string; dur: number }[] = []
+  if (source && source !== chain[0].event_type) {
+    hops.push({
+      from: source,
+      to: chain[0].event_type,
+      dur: getDuration(source, chain[0].event_type),
+    })
+  }
+  for (let i = 1; i < chain.length; i++) {
+    const from = chain[i - 1].event_type
+    const to = chain[i].event_type
+    if (from === to) continue
+    hops.push({ from, to, dur: getDuration(from, to) })
+  }
+
+  // Degenerate: nothing to animate (single-event chain with no source,
+  // or an all-self-loop chain). Park at the chain's last station.
+  if (hops.length === 0) {
+    return { kind: 'parked', station: chain[chain.length - 1].event_type }
+  }
+
+  const elapsed = now - anchorMs
+  if (elapsed < 0) {
+    // Future timestamp / clock skew. Park at the source if we have
+    // one (chip "hasn't moved yet"), otherwise at chain[0].
+    return { kind: 'parked', station: source ?? chain[0].event_type }
+  }
+
+  // Time-slice. Find which hop the chip is in by walking the hop
+  // list and accumulating durations.
+  let acc = 0
+  for (const hop of hops) {
+    if (hop.dur <= 0) continue // routing-table fallback shouldn't bite, but guard
+    if (elapsed < acc + hop.dur) {
+      return {
+        kind: 'transit',
+        from: hop.from,
+        to: hop.to,
+        progress: (elapsed - acc) / hop.dur,
       }
     }
+    acc += hop.dur
   }
-  return { kind: 'parked', station: to }
+
+  // Past the end of the chain — parked at the destination.
+  return { kind: 'parked', station: chain[chain.length - 1].event_type }
+}
+
+function parseTimestamp(s: string | undefined): number | null {
+  if (!s) return null
+  const t = Date.parse(s)
+  return Number.isNaN(t) ? null : t
 }
