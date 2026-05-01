@@ -1,9 +1,51 @@
 package db
 
 import (
+	"database/sql"
+	"fmt"
 	"testing"
 	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
+
+// recordEvent inserts a real entity-attached event for tests. Returns the
+// event's UUID. Wraps RecordEvent to centralize the t.Fatalf on errors.
+func recordEvent(t *testing.T, database *sql.DB, entityID, eventType string) string {
+	t.Helper()
+	id, err := RecordEvent(database, domain.Event{EntityID: &entityID, EventType: eventType})
+	if err != nil {
+		t.Fatalf("RecordEvent(%s, %s): %v", entityID, eventType, err)
+	}
+	return id
+}
+
+// makeEntity inserts a fresh active GitHub PR entity for tests. The
+// (source, source_id) pair must be unique per test run; the i argument
+// gives a stable per-test-row discriminator.
+func makeEntity(t *testing.T, database *sql.DB, i int) *domain.Entity {
+	t.Helper()
+	e, _, err := FindOrCreateEntity(
+		database, "github", fmt.Sprintf("owner/repo#%d", i), "pr",
+		fmt.Sprintf("PR %d", i), fmt.Sprintf("https://github.com/owner/repo/pull/%d", i),
+	)
+	if err != nil {
+		t.Fatalf("FindOrCreateEntity %d: %v", i, err)
+	}
+	return e
+}
+
+// closeEntityAt sets state='closed' and closed_at to the supplied moment,
+// bypassing CloseEntity so tests can backdate the closure to land inside
+// or outside the FactoryClosedGracePeriod window.
+func closeEntityAt(t *testing.T, database *sql.DB, entityID string, at time.Time) {
+	t.Helper()
+	if _, err := database.Exec(
+		`UPDATE entities SET state = 'closed', closed_at = ? WHERE id = ?`, at, entityID,
+	); err != nil {
+		t.Fatalf("close entity %s at %v: %v", entityID, at, err)
+	}
+}
 
 // TestParseDBDatetime locks in the format coverage parseDBDatetime needs to
 // handle without raising errors. The factory snapshot endpoint surfaces any
@@ -108,5 +150,190 @@ func TestParseDBDatetime(t *testing.T) {
 				t.Errorf("parseDBDatetime(%q) = %v, want %v (equal-instant)", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestDistinctEntityCountsByEventTypeLifetime pins the distinct-entity
+// semantic on the factory's lifetime counter: re-entries by the same
+// entity to the same station (e.g., a flaky CI check failing twice on
+// one PR) collapse to a single count, while distinct entities at the
+// same station accumulate. Without this contract the non-terminal
+// stations' "PRs that ever reached this station" reading would inflate
+// to "events fired here," which the front-screen counter is explicitly
+// not measuring.
+func TestDistinctEntityCountsByEventTypeLifetime(t *testing.T) {
+	database := newTestDB(t)
+
+	a := makeEntity(t, database, 1)
+	b := makeEntity(t, database, 2)
+	c := makeEntity(t, database, 3)
+
+	// A: opened, ci_passed, merged — three distinct types, one entity each.
+	recordEvent(t, database, a.ID, domain.EventGitHubPROpened)
+	recordEvent(t, database, a.ID, domain.EventGitHubPRCICheckPassed)
+	recordEvent(t, database, a.ID, domain.EventGitHubPRMerged)
+
+	// B: opened, then ci_failed twice — re-entry must NOT double-count.
+	recordEvent(t, database, b.ID, domain.EventGitHubPROpened)
+	recordEvent(t, database, b.ID, domain.EventGitHubPRCICheckFailed)
+	recordEvent(t, database, b.ID, domain.EventGitHubPRCICheckFailed)
+
+	// C: opened, merged.
+	recordEvent(t, database, c.ID, domain.EventGitHubPROpened)
+	recordEvent(t, database, c.ID, domain.EventGitHubPRMerged)
+
+	counts, err := DistinctEntityCountsByEventTypeLifetime(database)
+	if err != nil {
+		t.Fatalf("DistinctEntityCountsByEventTypeLifetime: %v", err)
+	}
+
+	want := map[string]int{
+		domain.EventGitHubPROpened:        3, // A, B, C
+		domain.EventGitHubPRCICheckPassed: 1, // A only
+		domain.EventGitHubPRCICheckFailed: 1, // B only — twin re-entry collapses
+		domain.EventGitHubPRMerged:        2, // A, C
+	}
+	for et, n := range want {
+		if counts[et] != n {
+			t.Errorf("counts[%q] = %d, want %d", et, counts[et], n)
+		}
+	}
+}
+
+// TestDistinctEntityCountsByEventTypeLifetime_IgnoresNullEntity confirms
+// system events (entity_id IS NULL — poll markers, scoring sentinels)
+// don't contribute to a station's distinct-entity count. The query's
+// `WHERE entity_id IS NOT NULL` clause carries this contract; without
+// it, every system-tagged event would inflate every station the system
+// happens to tag.
+func TestDistinctEntityCountsByEventTypeLifetime_IgnoresNullEntity(t *testing.T) {
+	database := newTestDB(t)
+
+	a := makeEntity(t, database, 1)
+	recordEvent(t, database, a.ID, domain.EventGitHubPROpened)
+
+	// System-style event: entity_id is NULL. Bypass RecordEvent because
+	// its API takes a string EntityID — the call below talks to the
+	// schema directly, which is the same path system emitters use.
+	if _, err := database.Exec(`
+		INSERT INTO events (id, entity_id, event_type, dedup_key, metadata_json)
+		VALUES (?, NULL, ?, '', '')
+	`, "test-system-event", domain.EventGitHubPROpened); err != nil {
+		t.Fatalf("insert null-entity event: %v", err)
+	}
+
+	counts, err := DistinctEntityCountsByEventTypeLifetime(database)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if counts[domain.EventGitHubPROpened] != 1 {
+		t.Errorf("counts[opened] = %d, want 1 (NULL entity_id row must not count)",
+			counts[domain.EventGitHubPROpened])
+	}
+}
+
+// TestListFactoryEntities_GraceWindow asserts the soft-close behavior:
+// entities closed within FactoryClosedGracePeriod ride the snapshot
+// alongside active entities (so the chip can finish its terminal
+// animation), while entities closed earlier are excluded.
+func TestListFactoryEntities_GraceWindow(t *testing.T) {
+	database := newTestDB(t)
+
+	active := makeEntity(t, database, 1)
+	fresh := makeEntity(t, database, 2)
+	stale := makeEntity(t, database, 3)
+
+	// Inside the grace window — should appear.
+	closeEntityAt(t, database, fresh.ID, time.Now().Add(-10*time.Second))
+	// Past the grace window — should not appear.
+	closeEntityAt(t, database, stale.ID, time.Now().Add(-FactoryClosedGracePeriod-30*time.Second))
+
+	rows, err := ListFactoryEntities(database, 100)
+	if err != nil {
+		t.Fatalf("ListFactoryEntities: %v", err)
+	}
+	got := map[string]bool{}
+	for _, r := range rows {
+		got[r.Entity.ID] = true
+	}
+	if !got[active.ID] {
+		t.Errorf("active entity %s missing from snapshot", active.ID)
+	}
+	if !got[fresh.ID] {
+		t.Errorf("fresh-closed entity %s missing — should ride grace window", fresh.ID)
+	}
+	if got[stale.ID] {
+		t.Errorf("stale-closed entity %s leaked through — outside grace window", stale.ID)
+	}
+}
+
+// TestListFactoryEntities_ActiveLimitIsolatedFromClosureBurst is the
+// regression for the "burst of closures crowds active out" issue. With
+// the split-query design, the caller-supplied `limit` should always
+// yield exactly that many active entities (when at least that many
+// exist), regardless of how many entities recently closed.
+func TestListFactoryEntities_ActiveLimitIsolatedFromClosureBurst(t *testing.T) {
+	database := newTestDB(t)
+
+	// Two active entities — the test's "always present" baseline.
+	a1 := makeEntity(t, database, 1)
+	a2 := makeEntity(t, database, 2)
+
+	// 50 freshly-closed entities, all inside the grace window. Far more
+	// than the active limit (2) but inside FactoryClosedGraceLimit (64).
+	closedAt := time.Now().Add(-5 * time.Second)
+	closedIDs := make(map[string]bool, 50)
+	for i := 0; i < 50; i++ {
+		e := makeEntity(t, database, 100+i)
+		closeEntityAt(t, database, e.ID, closedAt)
+		closedIDs[e.ID] = true
+	}
+
+	// Pass limit=2 — same as the active count. Pre-fix, the closure
+	// burst would push at least one active entity out of the snapshot.
+	rows, err := ListFactoryEntities(database, 2)
+	if err != nil {
+		t.Fatalf("ListFactoryEntities: %v", err)
+	}
+
+	activeFound := map[string]bool{}
+	closedFound := 0
+	for _, r := range rows {
+		if r.Entity.State == "active" {
+			activeFound[r.Entity.ID] = true
+		} else if closedIDs[r.Entity.ID] {
+			closedFound++
+		}
+	}
+	if !activeFound[a1.ID] || !activeFound[a2.ID] {
+		t.Errorf("active limit not isolated: got active set %v, want both %s and %s",
+			activeFound, a1.ID, a2.ID)
+	}
+	if closedFound != 50 {
+		t.Errorf("expected 50 closed-grace entities in snapshot, got %d", closedFound)
+	}
+}
+
+// TestListFactoryEntities_ClosedGraceLimitCapsBurst checks the upper
+// bound on the closed-side fan-in: even a pathological mass-close
+// (more closures in the grace window than FactoryClosedGraceLimit)
+// can't make the snapshot grow without bound.
+func TestListFactoryEntities_ClosedGraceLimitCapsBurst(t *testing.T) {
+	database := newTestDB(t)
+
+	closedAt := time.Now().Add(-5 * time.Second)
+	burst := FactoryClosedGraceLimit + 20
+	for i := 0; i < burst; i++ {
+		e := makeEntity(t, database, i)
+		closeEntityAt(t, database, e.ID, closedAt)
+	}
+
+	rows, err := ListFactoryEntities(database, 100)
+	if err != nil {
+		t.Fatalf("ListFactoryEntities: %v", err)
+	}
+	if len(rows) != FactoryClosedGraceLimit {
+		t.Errorf("len(rows) = %d, want %d (closed-grace cap binding)",
+			len(rows), FactoryClosedGraceLimit)
 	}
 }

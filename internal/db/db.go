@@ -132,6 +132,12 @@ CREATE TABLE IF NOT EXISTS entities (
 
 CREATE INDEX IF NOT EXISTS idx_entities_state ON entities(state);
 CREATE INDEX IF NOT EXISTS idx_entities_source_polled ON entities(source, last_polled_at);
+-- Partial index on closed_at: skips the active rows (NULL closed_at) so
+-- the index footprint stays proportional to closed-entity volume rather
+-- than the full table. Drives the factory snapshot's grace-window
+-- query (closed_at > ?).
+CREATE INDEX IF NOT EXISTS idx_entities_closed_at ON entities(closed_at)
+    WHERE closed_at IS NOT NULL;
 
 -- === Entity links =========================================================
 -- Cross-source or within-source relationships. Directional; memory and
@@ -172,6 +178,14 @@ CREATE INDEX IF NOT EXISTS idx_events_type_created ON events(event_type, created
 -- Index on the entity/occurred_at axis so the factory's per-entity tail
 -- reads remain a plain index scan rather than a sort.
 CREATE INDEX IF NOT EXISTS idx_events_entity_occurred ON events(entity_id, occurred_at DESC);
+-- Covering partial index for the lifetime distinct-entity aggregate +
+-- the in-memory counter's startup hydrate. Both filter entity_id IS
+-- NOT NULL and read only (event_type, entity_id); a partial index
+-- limited to non-null entity_ids lets either query satisfy itself
+-- entirely from the index and gives the aggregate's GROUP BY +
+-- COUNT(DISTINCT) clean per-group dedupe runs (no temp B-tree).
+CREATE INDEX IF NOT EXISTS idx_events_type_entity ON events(event_type, entity_id)
+    WHERE entity_id IS NOT NULL;
 
 -- === Task rules (declarative task creation) ===============================
 -- Independent of automation. A user who just wants surfacing (no auto-fire)

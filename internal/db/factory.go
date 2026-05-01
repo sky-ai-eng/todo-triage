@@ -55,6 +55,52 @@ func EventCountsByTypeSince(database *sql.DB, since time.Time) (map[string]int, 
 	return out, rows.Err()
 }
 
+// DistinctEntityCountsByEventTypeLifetime counts the distinct entities
+// that have ever produced an event of each event_type, from catalog
+// start (no time cutoff). Production reads of this number go through
+// LifetimeDistinctCounter, which folds events incrementally off the
+// bus and avoids the per-request scan; this function survives as the
+// canonical SQL aggregate behind that counter — pinned by tests, and
+// available for one-shot reconciliation if cache drift is ever
+// suspected.
+//
+// "Ready for Review · 47" reads as "47 distinct PRs have reached this
+// station," not "47 events fired" — re-entries from the same entity
+// (e.g. a flaky CI check failing twice on one PR) don't double-count.
+// For terminal event types (PR merged/closed) the answer matches a
+// plain COUNT(*) since each entity contributes exactly one terminal
+// event.
+//
+// Covered by the partial index `idx_events_type_entity (event_type,
+// entity_id) WHERE entity_id IS NOT NULL`: SQLite walks the index in
+// (event_type, entity_id) order, so each event_type group's distinct
+// entity_ids are contiguous and DISTINCT collapses to a per-group
+// adjacency dedupe — no temp B-tree, no table touch. Without that
+// index this query degrades to a full scan with a hash dedupe per
+// group, which is why we don't run it on the hot path.
+func DistinctEntityCountsByEventTypeLifetime(database *sql.DB) (map[string]int, error) {
+	rows, err := database.Query(`
+		SELECT event_type, COUNT(DISTINCT entity_id)
+		FROM events
+		WHERE entity_id IS NOT NULL
+		GROUP BY event_type
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var eventType string
+		var count int
+		if err := rows.Scan(&eventType, &count); err != nil {
+			return nil, err
+		}
+		out[eventType] = count
+	}
+	return out, rows.Err()
+}
+
 // TaskCountsByEventTypeSince counts tasks per event_type created after
 // `since`. Used alongside EventCountsByTypeSince to compute the "triggered
 // / seen" ratio displayed in the station overlay.
@@ -343,35 +389,86 @@ func parseDBDatetime(s string) (time.Time, error) {
 	return time.Parse("2006-01-02 15:04:05.999999999 -0700 MST", cleaned)
 }
 
-// ListFactoryEntities returns up to `limit` active entities with their
-// most-recent-event context. Ordered by entities.created_at DESC — a
-// stable key that doesn't move as pollers run, so the displayed set
-// doesn't churn when GitHub and Jira pollers alternate (which bumps
-// last_polled_at on whichever side just finished and would shove the
-// other source out of the capped window).
+// FactoryClosedGracePeriod is the window during which a freshly-closed
+// entity remains in the factory snapshot so the chip can ride the final
+// bridge into its terminal station before disposal. One full poll cycle
+// (~30s baseline) plus headroom — generous enough to cover any chain
+// animation duration without being load-bearing.
+const FactoryClosedGracePeriod = 60 * time.Second
+
+// FactoryClosedGraceLimit caps how many recently-closed entities ride
+// alongside the active set in a snapshot. Bounded separately from
+// `factoryEntityLimit` so a burst of closures can't crowd active
+// entities out of the displayed set — the active limit keeps its
+// original meaning regardless of close pressure. 64 is generous: even
+// a worst-case mass-merge of half a sprint's PRs in one poll cycle
+// fits within it without overflow.
+const FactoryClosedGraceLimit = 64
+
+const factoryEntitySelectColumns = `
+	e.id, e.source, e.source_id, e.kind,
+	COALESCE(e.title, ''), COALESCE(e.url, ''),
+	COALESCE(e.snapshot_json, ''), COALESCE(e.description, ''),
+	e.state, e.created_at, e.last_polled_at, e.closed_at,
+	(SELECT event_type FROM events WHERE entity_id = e.id ORDER BY created_at DESC LIMIT 1),
+	-- Direct column read (not COALESCE) so the SQLite driver keeps
+	-- the DATETIME column-type hint and scans into sql.NullTime.
+	-- The per-event source timestamps come via ListRecentEventsByEntity,
+	-- which does the COALESCE + string-parse dance.
+	(SELECT created_at FROM events WHERE entity_id = e.id ORDER BY created_at DESC LIMIT 1)
+`
+
+// ListFactoryEntities returns the active set of entities (up to `limit`)
+// plus any entity closed within FactoryClosedGracePeriod (up to
+// FactoryClosedGraceLimit) so the chip can finish animating to its
+// terminal station before disappearing.
 //
-// The latest-event subqueries use idx_events_entity_created, and the
-// source-time lookup additionally pulls occurred_at via COALESCE so the
-// factory chain animation orders by actual event time rather than
-// insertion time when the poller captured it.
+// Implemented as two separate queries instead of a single OR'd WHERE:
+//
+//   - The OR (`state='active' OR closed_at > ?`) spans two columns and
+//     prevents SQLite from choosing a single-index plan, forcing a
+//     filtered table scan on big entity tables.
+//   - A combined LIMIT also lets a burst of closures crowd the active
+//     set out of the snapshot, silently shrinking the meaning of
+//     `limit` — the active half should always get its full budget.
+//
+// Active side uses idx_entities_state and falls back to a small in-
+// memory sort by created_at; closed side uses idx_entities_closed_at
+// (partial, defined in db.go) and is bounded by both the time window
+// and the small grace limit, so the lookup is near-free even on
+// large entity tables.
 func ListFactoryEntities(database *sql.DB, limit int) ([]FactoryEntityRow, error) {
-	rows, err := database.Query(`
-		SELECT
-			e.id, e.source, e.source_id, e.kind,
-			COALESCE(e.title, ''), COALESCE(e.url, ''),
-			COALESCE(e.snapshot_json, ''), COALESCE(e.description, ''),
-			e.state, e.created_at, e.last_polled_at, e.closed_at,
-			(SELECT event_type FROM events WHERE entity_id = e.id ORDER BY created_at DESC LIMIT 1),
-			-- Direct column read (not COALESCE) so the SQLite driver keeps
-			-- the DATETIME column-type hint and scans into sql.NullTime.
-			-- The per-event source timestamps come via ListRecentEventsByEntity,
-			-- which does the COALESCE + string-parse dance.
-			(SELECT created_at FROM events WHERE entity_id = e.id ORDER BY created_at DESC LIMIT 1)
+	active, err := queryFactoryEntities(database, `
+		SELECT `+factoryEntitySelectColumns+`
 		FROM entities e
 		WHERE e.state = 'active'
 		ORDER BY e.created_at DESC
 		LIMIT ?
 	`, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	graceCutoff := time.Now().Add(-FactoryClosedGracePeriod)
+	closed, err := queryFactoryEntities(database, `
+		SELECT `+factoryEntitySelectColumns+`
+		FROM entities e
+		WHERE e.closed_at IS NOT NULL AND e.closed_at > ?
+		ORDER BY e.closed_at DESC
+		LIMIT ?
+	`, graceCutoff, FactoryClosedGraceLimit)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(closed) == 0 {
+		return active, nil
+	}
+	return append(active, closed...), nil
+}
+
+func queryFactoryEntities(database *sql.DB, query string, args ...any) ([]FactoryEntityRow, error) {
+	rows, err := database.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}

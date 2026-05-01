@@ -219,6 +219,21 @@ func main() {
 
 	wsHub := srv.WSHub()
 
+	// Lifetime distinct-entity counter for the factory snapshot. Hydrate
+	// once from the events table so we don't pay a full-table scan per
+	// /api/factory/snapshot request, then keep it warm via the
+	// db.SetOnEventRecorded hook — which fires inside RecordEvent itself
+	// so direct callers (tracker backfill, Jira carry-over) that skip
+	// the eventbus still update the cache. Hydrate must complete before
+	// the hook is wired so a fresh event can't land in the dedupe set
+	// ahead of the historical scan.
+	lifetimeCounter := db.NewLifetimeDistinctCounter()
+	if err := lifetimeCounter.Hydrate(database); err != nil {
+		log.Fatalf("hydrate lifetime counter: %v", err)
+	}
+	srv.SetLifetimeCounter(lifetimeCounter)
+	db.SetOnEventRecorded(lifetimeCounter.Record)
+
 	// Subscriber: WS broadcaster — forwards ALL events to the frontend
 	bus.Subscribe(eventbus.Subscriber{
 		Name: "ws-broadcast",

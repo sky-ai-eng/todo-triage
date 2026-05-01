@@ -23,11 +23,25 @@ const factoryEntityLimit = 500
 // The frontend keys StationDetailOverlay data off event_type; any event
 // type with zero activity in the window is omitted.
 type factoryStationJSON struct {
-	EventType    string           `json:"event_type"`
-	Items24h     int              `json:"items_24h"`
-	Triggered24h int              `json:"triggered_24h"`
-	ActiveRuns   int              `json:"active_runs"`
-	Runs         []factoryRunJSON `json:"runs"`
+	EventType    string `json:"event_type"`
+	Items24h     int    `json:"items_24h"`
+	Triggered24h int    `json:"triggered_24h"`
+	ActiveRuns   int    `json:"active_runs"`
+	// ItemsLifetime is the from-catalog-start distinct-entity count for
+	// this event_type — "PRs that ever reached this station," not
+	// "events fired here." Drives the always-on numeric readout on the
+	// station's front-face screen.
+	//
+	// The lifetime merge can introduce stations into the snapshot that
+	// have no 24h activity and no active runs (a Merged station weeks
+	// after the last release still has a lifetime count). That's
+	// intentional: those stations need to render their counter even
+	// when otherwise quiet. The frontend ignores any event_type it
+	// doesn't have a station for, so the wider keyset is harmless;
+	// system events stay out because the lifetime counter never
+	// records nil-entity rows in the first place.
+	ItemsLifetime int              `json:"items_lifetime"`
+	Runs          []factoryRunJSON `json:"runs"`
 }
 
 type factoryRunJSON struct {
@@ -167,6 +181,14 @@ func (s *Server) handleFactorySnapshot(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	// Lifetime distinct-entity counts come from the in-memory aggregate
+	// (hydrated once at startup, kept warm by the SetOnEventRecorded
+	// hook inside RecordEvent itself) so this path stays O(1) regardless
+	// of total events table size.
+	var lifetimeCounts map[string]int
+	if s.lifetimeCounter != nil {
+		lifetimeCounts = s.lifetimeCounter.Snapshot()
+	}
 
 	// --- Active runs --------------------------------------------------------
 	activeRuns, err := db.ListFactoryActiveRuns(s.db)
@@ -194,6 +216,11 @@ func (s *Server) handleFactorySnapshot(w http.ResponseWriter, r *http.Request) {
 	for eventType, count := range taskCounts {
 		st := ensureStation(eventType)
 		st.Triggered24h = count
+		stations[eventType] = st
+	}
+	for eventType, count := range lifetimeCounts {
+		st := ensureStation(eventType)
+		st.ItemsLifetime = count
 		stations[eventType] = st
 	}
 

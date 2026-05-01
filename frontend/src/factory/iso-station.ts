@@ -36,6 +36,7 @@ import {
   MeshBuilder,
   PBRMaterial,
   Scene,
+  Texture,
   TransformNode,
   Vector3,
 } from '@babylonjs/core'
@@ -95,6 +96,11 @@ export interface StationHandle {
   setQueuedCount(n: number): void
   /** Show n run chips. n clamped to MAX_RUNS. */
   setRunCount(n: number): void
+  /** Update the lifetime counter rendered on the station's front-face
+   *  status screen. Diff-gated internally — calling with the same
+   *  value as last call is a no-op, so per-frame reconcilers can call
+   *  it cheaply. */
+  setLifetimeCount(n: number): void
 }
 
 // ─── Tray fractions ─────────────────────────────────────────────────────────
@@ -785,7 +791,100 @@ export function buildStationMesh(
     station.y + STATUS_PANEL_DEPTH - STATUS_SCREEN_THICKNESS / 2 - 0.05,
     panelCz,
   )
-  statusScreen.material = materials.screen
+  // Per-station screen material. Carries a DynamicTexture rendered
+  // with the lifetime counter on its albedo + emissive channels.
+  // Babylon's default Box UV mapping gives each face the full 0–1 UV
+  // range, so whichever face of the thin screen plate is camera-facing
+  // will display the text — no per-face UV gymnastics required.
+  //
+  // 4× resolution vs the screen face's effective pixel budget keeps
+  // the numerals crisp under the camera's iso zoom. Mipmaps are off
+  // (LINEAR_LINEAR sampling); anisotropic filtering at level 16
+  // handles the oblique viewing angle without adding blur.
+  const screenTexW = 1024
+  const screenTexH = 512
+  const screenTex = new DynamicTexture(
+    `status-screen-tex-${station.x}_${station.y}`,
+    { width: screenTexW, height: screenTexH },
+    scene,
+    false,
+    Texture.BILINEAR_SAMPLINGMODE,
+  )
+  screenTex.anisotropicFilteringLevel = 16
+  const screenCtx = screenTex.getContext() as CanvasRenderingContext2D
+  screenCtx.imageSmoothingEnabled = true
+  screenCtx.imageSmoothingQuality = 'high'
+
+  // Approximate the shared `materials.screen` look (dark blue glass
+  // with low emissive lift) so the text sits on the same backdrop the
+  // station already shows. Filled into the canvas itself rather than
+  // layered as a second material — keeps a single PBRMaterial per
+  // station and avoids a transparent plane that drops out at certain
+  // angles.
+  const screenBgFill = '#15171c'
+  const screenTextFill = '#a4f8ff'
+  // Monospaced stack to give the lifetime counter an LCD/scoreboard
+  // feel matching the rest of the factory's emissive readouts. SF Mono
+  // ships on macOS, Cascadia/Consolas on Windows, plus JetBrains Mono
+  // and Fira Code as common dev installs. 500 weight reads as a thin
+  // refined digital display rather than a heavy print numeral.
+  const screenFontFamily =
+    "'SF Mono', 'JetBrains Mono', 'Fira Code', 'Cascadia Mono', Menlo, Consolas, monospace"
+
+  const renderScreenText = (n: number) => {
+    screenCtx.fillStyle = screenBgFill
+    screenCtx.fillRect(0, 0, screenTexW, screenTexH)
+    const text = formatLifetimeCount(n)
+    // Babylon's default Box UV mapping puts the canvas U axis along
+    // the visible face's *vertical* edge, not its horizontal one — so
+    // text drawn upright on the canvas ends up rotated 90° CW on the
+    // screen. We pre-rotate the drawing 90° CCW to compensate. After
+    // rotation the text's natural width is laid out along canvas Y,
+    // so the shrink-to-fit budget compares against canvas height.
+    //
+    // Sizing: a 4-char monospace string ("999k", "1.2M") at ~0.6 char
+    // aspect needs roughly 2.4 × fontPx of width; with a 412 px budget
+    // that caps fontPx at ~170. Starting at 320 leaves room for the
+    // common shorter strings ("47", "1.2k") to render larger.
+    const widthBudget = screenTexH - 100
+    let fontPx = 320
+    screenCtx.font = `500 ${fontPx}px ${screenFontFamily}`
+    while (screenCtx.measureText(text).width > widthBudget && fontPx > 140) {
+      fontPx -= 10
+      screenCtx.font = `500 ${fontPx}px ${screenFontFamily}`
+    }
+    screenCtx.fillStyle = screenTextFill
+    screenCtx.textAlign = 'center'
+    screenCtx.textBaseline = 'middle'
+    screenCtx.save()
+    screenCtx.translate(screenTexW / 2, screenTexH / 2)
+    screenCtx.rotate(Math.PI / 2)
+    // The visible face of the screen Box is back-faced relative to
+    // Babylon's default UV winding, so the rotation alone leaves
+    // glyphs mirrored along the screen's horizontal axis. scale(-1, 1)
+    // in the rotated frame flips them back.
+    screenCtx.scale(-1, 1)
+    screenCtx.fillText(text, 0, 0)
+    screenCtx.restore()
+    screenTex.update(true)
+  }
+  let lifetimeValue = 0
+  renderScreenText(0)
+
+  const screenMat = new PBRMaterial(`status-screen-mat-${station.x}_${station.y}`, scene)
+  screenMat.albedoColor = Color3.White()
+  screenMat.albedoTexture = screenTex
+  screenMat.emissiveTexture = screenTex
+  screenMat.emissiveColor = Color3.White()
+  screenMat.emissiveIntensity = 1.1
+  screenMat.metallic = 0.1
+  screenMat.roughness = 0.35
+  screenMat.clearCoat.isEnabled = true
+  screenMat.clearCoat.intensity = 0.7
+  screenMat.clearCoat.roughness = 0.05
+  ;(screenMat.albedoTexture as Texture).wrapU = Texture.CLAMP_ADDRESSMODE
+  ;(screenMat.albedoTexture as Texture).wrapV = Texture.CLAMP_ADDRESSMODE
+  statusScreen.material = screenMat
   statusScreen.parent = root
 
   // ─── Vent glow slabs ─────────────────────────────────────────────────
@@ -1092,6 +1191,12 @@ export function buildStationMesh(
     scanner.setEnabled(target > 0)
   }
 
+  const setLifetimeCount = (n: number) => {
+    if (lifetimeValue === n) return
+    lifetimeValue = n
+    renderScreenText(n)
+  }
+
   setQueuedCount(station.queuedCount ?? 0)
   setRunCount(station.runCount ?? 0)
 
@@ -1122,7 +1227,21 @@ export function buildStationMesh(
     id: station.id,
     setQueuedCount,
     setRunCount,
+    setLifetimeCount,
   }
+}
+
+// formatLifetimeCount renders integers compactly so the inline label
+// stays legible past four digits. 0–999 verbatim, ≥1k formatted as
+// "1.2k" / "12k", ≥1m as "1.2M". Drops trailing ".0" for round numbers.
+function formatLifetimeCount(n: number): string {
+  if (n < 1000) return String(n)
+  if (n < 10_000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k'
+  if (n < 1_000_000) {
+    const thousands = Math.floor(n / 1000)
+    return thousands + 'k'
+  }
+  return (n / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M'
 }
 
 // ─── Chip grid layout ─────────────────────────────────────────────────────

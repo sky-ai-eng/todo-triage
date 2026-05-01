@@ -200,6 +200,10 @@ export interface FactoryStation {
   items_24h: number
   triggered_24h: number
   active_runs: number
+  /** From-catalog-start event count for this station's event_type.
+   *  This value may be populated for both terminal and non-terminal
+   *  stations, depending on the backend snapshot data. */
+  items_lifetime: number
   runs: Array<{
     run: AgentRun
     task: Task
