@@ -119,18 +119,18 @@ func GetRunMemory(database *sql.DB, runID string) (*domain.TaskMemory, error) {
 }
 
 func materializeMemory(agentContent, humanContent string) string {
-	agent := strings.TrimSpace(agentContent)
-	human := strings.TrimSpace(humanContent)
+	hasAgent := strings.TrimSpace(agentContent) != ""
+	hasHuman := strings.TrimSpace(humanContent) != ""
 	switch {
-	case agent != "" && human != "":
-		return agent + humanFeedbackSeparator + human
-	case human != "":
+	case hasAgent && hasHuman:
+		return agentContent + humanFeedbackSeparator + humanContent
+	case hasHuman:
 		// Agent-empty + human-set: render just the header + body, no
 		// leading HR. The HR only makes sense as a divider between
 		// two blocks; without an agent block it would just be visual
 		// noise that the next agent has to skip past.
-		return humanFeedbackHeader + human
+		return humanFeedbackHeader + humanContent
 	default:
-		return agent
+		return agentContent
 	}
 }
