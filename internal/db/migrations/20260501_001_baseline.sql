@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS events_catalog (
 );
 
 -- === Entities =============================================================
--- Long-lived source entities (PRs, issues, eventually Slack threads). Replaces
+-- Long-lived source entities (PRs, issues, eventually Slack threads).
 -- Replaces tracked_items (now deleted). Lives from first-poll until closed/merged.
 CREATE TABLE IF NOT EXISTS entities (
     id TEXT PRIMARY KEY,
