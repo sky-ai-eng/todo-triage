@@ -158,11 +158,6 @@ export default function ReviewOverlay({ runID, open, onClose }: Props) {
     }
   }, [reviewId, onClose])
 
-  // Discard — just close for now (review stays in DB, can re-open)
-  const handleDiscard = useCallback(() => {
-    onClose()
-  }, [onClose])
-
   // Group comments by file path
   const commentsByFile = (review?.comments ?? []).reduce<Record<string, FileComment[]>>(
     (acc, c) => {
@@ -265,7 +260,7 @@ export default function ReviewOverlay({ runID, open, onClose }: Props) {
                     onUpdateBody={handleUpdateBody}
                     onUpdateEvent={handleUpdateEvent}
                     onSubmit={handleSubmit}
-                    onDiscard={handleDiscard}
+                    onClose={onClose}
                     submitting={submitting}
                   />
 
