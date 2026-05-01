@@ -32,8 +32,12 @@ func TestFormatHumanFeedback_NoEditsVerdictUnchanged(t *testing.T) {
 			{Path: "foo.go", Line: 10, Status: CommentDiffUnchanged, Original: "nit", Final: "nit"},
 		},
 	})
-	want := "## Human feedback (post-run)\n\n" +
-		"**Outcome:** Human submitted the review as drafted, no edits.\n" +
+	// Stored shape carries no leading "## Human feedback (post-run)"
+	// heading; the materialization layer (db.materializeMemory)
+	// prepends it via the separator when reading alongside
+	// agent_content. Baking it in here would double-head the
+	// agent-readable file. See FormatHumanFeedback's note.
+	want := "**Outcome:** Human submitted the review as drafted, no edits.\n" +
 		"**Verdict:** APPROVE (unchanged from agent's draft).\n"
 	if got != want {
 		t.Errorf("formatter output mismatch\n--- got ---\n%s\n--- want ---\n%s", got, want)

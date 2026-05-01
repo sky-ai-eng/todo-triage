@@ -70,14 +70,6 @@ const (
 	CommentDiffAdded     = "added"
 )
 
-// humanFeedbackHeading is the literal first line of the produced
-// block. Matches db.humanFeedbackHeader byte-for-byte (modulo the
-// trailing newlines the constant carries) so the per-entity memory
-// materialization can render either path identically. If you change
-// one side, change the other — there's a doc comment on
-// db.humanFeedbackHeader pointing here.
-const humanFeedbackHeading = "## Human feedback (post-run)"
-
 // FormatHumanFeedback produces the markdown block written to
 // run_memory.human_content when a delegated review is submitted. The
 // shape is fixed — the agent briefing teaches future agents to scan
@@ -95,9 +87,13 @@ func FormatHumanFeedback(in HumanFeedbackInput) string {
 	verdictEdited := verdictChanged(in)
 	commentEdited := anyCommentEdits(in.Comments)
 
+	// No leading "## Human feedback (post-run)" heading: the
+	// materialization layer (db.materializeMemory) prepends it via
+	// humanFeedbackSeparator when joining agent_content +
+	// human_content, so baking it in here would render the heading
+	// twice in the agent-readable file. Mirror buildDiscardHumanContent
+	// in tasks.go.
 	var sb strings.Builder
-	sb.WriteString(humanFeedbackHeading)
-	sb.WriteString("\n\n")
 
 	if bodyEdited || verdictEdited || commentEdited {
 		sb.WriteString("**Outcome:** Human submitted the review with edits.\n")

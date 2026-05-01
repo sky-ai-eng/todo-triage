@@ -130,11 +130,32 @@ func assertPendingApprovalCleanedUp(
 	if !agentContent.Valid || agentContent.String != "agent self-report" {
 		t.Errorf("agent_content = %v, want preserved %q", agentContent, "agent self-report")
 	}
-	if !humanContent.Valid || !strings.HasPrefix(humanContent.String, "## Human feedback (post-run)") {
-		t.Errorf("human_content missing canonical header: %v", humanContent)
-	}
 	if !humanContent.Valid || !strings.Contains(humanContent.String, wantHumanContentMarker) {
 		t.Errorf("human_content missing %q marker; got %q", wantHumanContentMarker, humanContent.String)
+	}
+	// Stored value MUST NOT carry the "## Human feedback (post-run)"
+	// heading — materialization owns that, and a writer that bakes it
+	// into the stored body double-heads the agent-readable file. The
+	// canonical heading should appear only after materializeMemory
+	// joins agent_content + human_content via humanFeedbackSeparator.
+	if humanContent.Valid && strings.Contains(humanContent.String, "## Human feedback (post-run)") {
+		t.Errorf("stored human_content includes the canonical heading; materialization layer should own it: %q", humanContent.String)
+	}
+
+	// Read-side check: GetRunMemory's materialization must produce
+	// the heading exactly once, anchoring the boundary the next
+	// agent's prompt parser scans for.
+	mem, err := db.GetRunMemory(database, runID)
+	if err != nil {
+		t.Fatalf("GetRunMemory: %v", err)
+	}
+	if mem == nil {
+		t.Fatalf("GetRunMemory returned nil after cleanup")
+	}
+	headingCount := strings.Count(mem.Content, "## Human feedback (post-run)")
+	if headingCount != 1 {
+		t.Errorf("materialized content has %d occurrences of canonical heading; want exactly 1\n--- materialized ---\n%s",
+			headingCount, mem.Content)
 	}
 }
 
@@ -317,6 +338,68 @@ func TestCleanupPendingApprovalRun_Idempotent(t *testing.T) {
 		!completedAtAfter.Time.Equal(completedAtBefore.Time) {
 		t.Errorf("completed_at shifted on idempotent re-call: before=%v after=%v",
 			completedAtBefore, completedAtAfter)
+	}
+}
+
+// TestCleanupPendingApprovalRun_DeleteFailureHoldsRunForRetry is
+// the regression for the ordering bug: if DeletePendingReviewByRunID
+// fails transiently, the cleanup must NOT flip the run off
+// status='pending_approval'. PendingApprovalRunIDForTask filters on
+// that status, so cancelling the run too eagerly would strand the
+// review with no path back to retry.
+//
+// We force a delete failure by temporarily renaming the
+// pending_review_comments table — the DELETE inside the
+// transactional helper sees a missing dependency and rolls back. After
+// restoring the table, a second cleanup call must find the run
+// still in pending_approval, succeed, and leave the expected
+// terminal state.
+func TestCleanupPendingApprovalRun_DeleteFailureHoldsRunForRetry(t *testing.T) {
+	s := newTestServer(t)
+	taskID, runID, _ := pendingApprovalFixture(t, s.db)
+
+	// Sabotage: rename the comments table so the DELETE inside
+	// DeletePendingReviewByRunID fails. SQLite's foreign-key
+	// validation isn't what trips here — the transactional helper's
+	// first DELETE references pending_review_comments by name and
+	// fails with "no such table".
+	if _, err := s.db.Exec(`ALTER TABLE pending_review_comments RENAME TO pending_review_comments_temp`); err != nil {
+		t.Fatalf("rename comments table: %v", err)
+	}
+
+	s.cleanupPendingApprovalRun(taskID, discardOutcomeRequeued)
+
+	// Run must still be pending_approval — the delete failed and
+	// MarkAgentRunDiscarded must have been skipped.
+	var runStatus string
+	if err := s.db.QueryRow(`SELECT status FROM runs WHERE id = ?`, runID).Scan(&runStatus); err != nil {
+		t.Fatalf("scan run after sabotaged cleanup: %v", err)
+	}
+	if runStatus != "pending_approval" {
+		t.Fatalf("run.status = %q after delete failure; want %q (cleanup must hold for retry)",
+			runStatus, "pending_approval")
+	}
+
+	// Heal the table; the next cleanup call must rediscover the
+	// run via PendingApprovalRunIDForTask and complete the work.
+	if _, err := s.db.Exec(`ALTER TABLE pending_review_comments_temp RENAME TO pending_review_comments`); err != nil {
+		t.Fatalf("restore comments table: %v", err)
+	}
+
+	s.cleanupPendingApprovalRun(taskID, discardOutcomeRequeued)
+
+	if err := s.db.QueryRow(`SELECT status FROM runs WHERE id = ?`, runID).Scan(&runStatus); err != nil {
+		t.Fatalf("scan run after retry: %v", err)
+	}
+	if runStatus != "cancelled" {
+		t.Errorf("run.status = %q after successful retry; want %q", runStatus, "cancelled")
+	}
+	var revCount int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM pending_reviews WHERE run_id = ?`, runID).Scan(&revCount); err != nil {
+		t.Fatalf("scan pending_reviews after retry: %v", err)
+	}
+	if revCount != 0 {
+		t.Errorf("pending_reviews count = %d after retry; want 0 (review should be torn down)", revCount)
 	}
 }
 

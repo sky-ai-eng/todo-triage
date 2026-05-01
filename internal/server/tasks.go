@@ -403,8 +403,21 @@ func (s *Server) cleanupPendingApprovalRun(taskID string, outcome discardOutcome
 	// path is meant to fix. The DELETE-by-run-id helper is
 	// transactional across comments + review and is a no-op when
 	// no review exists.
+	//
+	// On delete failure (transient SQLite lock, etc.) bail BEFORE
+	// MarkAgentRunDiscarded. The flip off status='pending_approval'
+	// is the cleanup's only hand-off back to the entry-point
+	// query: PendingApprovalRunIDForTask filters on it, so once the
+	// run is cancelled no subsequent user action can rediscover
+	// this run for retry. Holding the run in pending_approval when
+	// the delete fails keeps the next /undo, /requeue, or dismiss
+	// on this task able to re-enter here and retry the delete +
+	// mark together. UpdateRunMemoryHumanContent above is
+	// idempotent on re-entry (UPDATE overwrites with the same or
+	// refined verdict).
 	if err := db.DeletePendingReviewByRunID(s.db, runID); err != nil {
-		log.Printf("[review-discard] DeletePendingReviewByRunID for run %s failed: %v", runID, err)
+		log.Printf("[review-discard] DeletePendingReviewByRunID for run %s failed (run held in pending_approval for retry): %v", runID, err)
+		return
 	}
 
 	// Flip the run row terminal. ok=false here means the row was
