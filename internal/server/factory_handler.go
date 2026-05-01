@@ -126,6 +126,30 @@ type factoryEntityJSON struct {
 	Status   string `json:"status,omitempty"`
 	Priority string `json:"priority,omitempty"`
 	Assignee string `json:"assignee,omitempty"`
+
+	// PendingTasks groups active tasks for this entity by event_type.
+	// Drives the station drawer's drag-to-delegate flow: the frontend
+	// reads the dropped station's first entry and forwards its
+	// dedup_key (with entity_id + event_type) to /api/factory/delegate,
+	// which find-or-creates via the unique index on (entity_id,
+	// event_type, dedup_key). If pending_tasks has no entry for the
+	// dropped station's event_type yet, that means there is no existing
+	// task for that event_type; the request still carries event_type and
+	// the handler creates the task. For a dedup-discriminated event type
+	// (label_added, status_changed), the inner slice can have multiple
+	// entries; v1 frontend uses the first.
+	PendingTasks map[string][]pendingTaskRef `json:"pending_tasks,omitempty"`
+}
+
+// pendingTaskRef is the minimal task reference shipped per queued
+// entity for the drag-to-delegate flow. dedup_key is what the request
+// to /api/factory/delegate carries (the handler keys find-or-create
+// on entity_id + event_type + dedup_key). task_id is informational —
+// not consumed by the request today — and is kept available for
+// future UI hints like "this chip already has a task here."
+type pendingTaskRef struct {
+	TaskID   string `json:"task_id"`
+	DedupKey string `json:"dedup_key"`
 }
 
 type factoryRecentEventJSON struct {
@@ -267,6 +291,30 @@ func (s *Server) handleFactorySnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Pending tasks per entity, grouped by event_type. Drives the
+	// drawer's drag-to-delegate flow. Uses the minimal
+	// ListActiveTaskRefsForEntities projection (id + entity_id +
+	// event_type + dedup_key) rather than the full Task struct so
+	// /api/factory/snapshot doesn't pay for the entity JOIN and the
+	// snapshot_json json_extract on every poll.
+	pendingTasks, err := db.ListActiveTaskRefsForEntities(s.db, entityIDs)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	pendingByEntity := map[string]map[string][]pendingTaskRef{}
+	for _, t := range pendingTasks {
+		byType, ok := pendingByEntity[t.EntityID]
+		if !ok {
+			byType = map[string][]pendingTaskRef{}
+			pendingByEntity[t.EntityID] = byType
+		}
+		byType[t.EventType] = append(byType[t.EventType], pendingTaskRef{
+			TaskID:   t.ID,
+			DedupKey: t.DedupKey,
+		})
+	}
+
 	entities := make([]factoryEntityJSON, 0, len(entityRows))
 	for _, row := range entityRows {
 		ej := factoryEntityJSON{
@@ -290,6 +338,9 @@ func (s *Server) handleFactorySnapshot(w http.ResponseWriter, r *http.Request) {
 					DetectedAt: r.DetectedAt.Format(time.RFC3339),
 				}
 			}
+		}
+		if pending, ok := pendingByEntity[row.Entity.ID]; ok {
+			ej.PendingTasks = pending
 		}
 		switch row.Entity.Source {
 		case "github":

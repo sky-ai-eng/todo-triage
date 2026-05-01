@@ -337,3 +337,144 @@ func TestListFactoryEntities_ClosedGraceLimitCapsBurst(t *testing.T) {
 			len(rows), FactoryClosedGraceLimit)
 	}
 }
+
+// TestLatestEventForEntityTypeAndDedupKey_ReturnsMostRecentMatch pins
+// the drag-to-delegate handler's anchor: synthesized tasks need a real
+// event row to set primary_event_id, and the most recent matching
+// event is the right choice (older events for the same key may have
+// already been resolved). dedup_key="" matches non-discriminator
+// events (the common case).
+func TestLatestEventForEntityTypeAndDedupKey_ReturnsMostRecentMatch(t *testing.T) {
+	database := newTestDB(t)
+	a := makeEntity(t, database, 1)
+	b := makeEntity(t, database, 2)
+
+	// Older matching event for entity A.
+	olderID := recordEvent(t, database, a.ID, domain.EventGitHubPRCICheckPassed)
+	// Different type for entity A — must not be returned.
+	recordEvent(t, database, a.ID, domain.EventGitHubPRReviewApproved)
+	// Latest matching event for entity A.
+	latestID := recordEvent(t, database, a.ID, domain.EventGitHubPRCICheckPassed)
+	// Same type for entity B — must not be returned.
+	recordEvent(t, database, b.ID, domain.EventGitHubPRCICheckPassed)
+
+	got, err := LatestEventForEntityTypeAndDedupKey(database, a.ID, domain.EventGitHubPRCICheckPassed, "")
+	if err != nil {
+		t.Fatalf("LatestEventForEntityTypeAndDedupKey: %v", err)
+	}
+	if got == nil {
+		t.Fatal("got nil, want event")
+	}
+	if got.ID != latestID {
+		t.Errorf("ID = %s, want %s (latest match), older match was %s", got.ID, latestID, olderID)
+	}
+}
+
+// TestLatestEventForEntityTypeAndDedupKey_NoMatchReturnsNil —
+// defensive: the handler refuses to synthesize a task when the
+// entity has never had an event of that type. Confirm nil rather
+// than an error.
+func TestLatestEventForEntityTypeAndDedupKey_NoMatchReturnsNil(t *testing.T) {
+	database := newTestDB(t)
+	a := makeEntity(t, database, 1)
+	recordEvent(t, database, a.ID, domain.EventGitHubPROpened)
+
+	got, err := LatestEventForEntityTypeAndDedupKey(database, a.ID, domain.EventGitHubPRMerged, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != nil {
+		t.Errorf("got %+v, want nil (no matching event)", got)
+	}
+}
+
+// TestLatestEventForEntityTypeAndDedupKey_DistinguishesDedupKey is the
+// regression for the "label_added bug then label_added help-wanted"
+// case: filtering on event_type alone and rejecting a dedup_key
+// mismatch after the fact would 400 the dragged "bug" chip whenever
+// "help wanted" fired more recently. Pushing dedup_key into the WHERE
+// clause picks the right anchor regardless of sibling order.
+func TestLatestEventForEntityTypeAndDedupKey_DistinguishesDedupKey(t *testing.T) {
+	database := newTestDB(t)
+	a := makeEntity(t, database, 1)
+
+	// "bug" label added first, "help wanted" added second. The
+	// type-only helper would return the "help wanted" event; the
+	// dedup-aware helper must return the older "bug" event when
+	// asked for it specifically.
+	bugID, err := RecordEvent(database, domain.Event{
+		EntityID: &a.ID, EventType: domain.EventGitHubPRLabelAdded, DedupKey: "bug",
+	})
+	if err != nil {
+		t.Fatalf("record bug event: %v", err)
+	}
+	if _, err := RecordEvent(database, domain.Event{
+		EntityID: &a.ID, EventType: domain.EventGitHubPRLabelAdded, DedupKey: "help wanted",
+	}); err != nil {
+		t.Fatalf("record help-wanted event: %v", err)
+	}
+
+	got, err := LatestEventForEntityTypeAndDedupKey(database, a.ID, domain.EventGitHubPRLabelAdded, "bug")
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if got == nil || got.ID != bugID {
+		t.Errorf("got %v, want event %s (bug match) — dedup_key filter must not return the more-recent help-wanted event", got, bugID)
+	}
+}
+
+// TestListActiveTaskRefsForEntities_FiltersTerminalStatuses pins the
+// snapshot's pending_tasks contract: only non-terminal tasks ride
+// (otherwise the drawer would offer to delegate already-resolved
+// tasks). Active = NOT IN ('done', 'dismissed').
+func TestListActiveTaskRefsForEntities_FiltersTerminalStatuses(t *testing.T) {
+	database := newTestDB(t)
+	a := makeEntity(t, database, 1)
+	b := makeEntity(t, database, 2)
+	evtA := recordEvent(t, database, a.ID, domain.EventGitHubPRCICheckPassed)
+	evtB := recordEvent(t, database, b.ID, domain.EventGitHubPRCICheckPassed)
+
+	// Active task on A — should be returned.
+	activeTask, _, err := FindOrCreateTask(database, a.ID, domain.EventGitHubPRCICheckPassed, "", evtA, 0.5)
+	if err != nil {
+		t.Fatalf("create active task: %v", err)
+	}
+	// Done task on B — must be filtered out.
+	doneTask, _, err := FindOrCreateTask(database, b.ID, domain.EventGitHubPRCICheckPassed, "", evtB, 0.5)
+	if err != nil {
+		t.Fatalf("create done task: %v", err)
+	}
+	if _, err := database.Exec(
+		`UPDATE tasks SET status = 'done', closed_at = ?, close_reason = 'manual' WHERE id = ?`,
+		time.Now(), doneTask.ID,
+	); err != nil {
+		t.Fatalf("close task: %v", err)
+	}
+
+	tasks, err := ListActiveTaskRefsForEntities(database, []string{a.ID, b.ID})
+	if err != nil {
+		t.Fatalf("ListActiveTaskRefsForEntities: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("len(tasks) = %d, want 1 (only active)", len(tasks))
+	}
+	if tasks[0].ID != activeTask.ID {
+		t.Errorf("returned task ID = %s, want %s (active)", tasks[0].ID, activeTask.ID)
+	}
+}
+
+// TestListActiveTaskRefsForEntities_EmptyInput — defensive: empty slice
+// returns no rows without hitting the DB. The factory snapshot's
+// entity list can legitimately be empty (fresh install, no
+// integrations configured), and a "WHERE id IN ()" query is invalid
+// in SQLite.
+func TestListActiveTaskRefsForEntities_EmptyInput(t *testing.T) {
+	database := newTestDB(t)
+	tasks, err := ListActiveTaskRefsForEntities(database, nil)
+	if err != nil {
+		t.Fatalf("nil entityIDs: %v", err)
+	}
+	if len(tasks) != 0 {
+		t.Errorf("got %d tasks, want 0", len(tasks))
+	}
+}

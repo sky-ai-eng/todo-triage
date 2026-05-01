@@ -102,6 +102,54 @@ func SetTaskEventType(db *sql.DB, taskID, eventType string) error {
 	return err
 }
 
+// LatestEventForEntityTypeAndDedupKey returns the most recent event
+// row matching all three of (entityID, eventType, dedupKey), or
+// (nil, nil) if none exists. Used by the factory drag-to-delegate
+// handler to anchor a synthesized task's primary_event_id on a real
+// event row that already drove the chip to that station.
+//
+// dedupKey is filtered, not just matched after the fact, so a
+// discriminator event type (label_added, status_changed) that has
+// multiple recent events with different dedup_keys still resolves to
+// the right one — picking by event_type alone and rejecting a
+// mismatch would incorrectly 400 whenever a sibling discriminator
+// fired more recently. dedupKey="" filters to non-discriminator
+// events (the common case); the column is empty by contract for
+// those types.
+//
+// Covered by idx_events_entity_created (entity_id, created_at DESC).
+// rowid DESC breaks ties on same-second inserts so the result is
+// stable when two events with the same dedup_key land in one poll
+// burst — matches the tiebreaker pattern in ListRecentEventsByEntity.
+func LatestEventForEntityTypeAndDedupKey(database *sql.DB, entityID, eventType, dedupKey string) (*domain.Event, error) {
+	row := database.QueryRow(`
+		SELECT id, entity_id, event_type, dedup_key,
+		       COALESCE(metadata_json, ''), occurred_at, created_at
+		FROM events
+		WHERE entity_id = ? AND event_type = ? AND dedup_key = ?
+		ORDER BY created_at DESC, rowid DESC
+		LIMIT 1
+	`, entityID, eventType, dedupKey)
+	var evt domain.Event
+	var entID sql.NullString
+	var occurredAt sql.NullTime
+	if err := row.Scan(&evt.ID, &entID, &evt.EventType, &evt.DedupKey,
+		&evt.MetadataJSON, &occurredAt, &evt.CreatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if entID.Valid {
+		s := entID.String
+		evt.EntityID = &s
+	}
+	if occurredAt.Valid {
+		evt.OccurredAt = occurredAt.Time
+	}
+	return &evt, nil
+}
+
 // GetPollerState returns the last-known state JSON for a source item, or "" if none.
 func GetPollerState(db *sql.DB, source, sourceID string) (string, error) {
 	var stateJSON string

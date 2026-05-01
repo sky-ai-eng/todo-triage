@@ -1,5 +1,18 @@
 import * as Tooltip from '@radix-ui/react-tooltip'
-import { useEffect, useRef, useState } from 'react'
+import {
+  DndContext,
+  DragOverlay,
+  PointerSensor,
+  useDraggable,
+  useDroppable,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+  type DragStartEvent,
+} from '@dnd-kit/core'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import PromptPicker from '../components/PromptPicker'
+import { toast } from '../components/Toast/toastStore'
 import { createIsoScene, type ClickedStationInfo, type IsoSceneHandle } from '../factory/iso-scene'
 import { useWebSocket } from '../hooks/useWebSocket'
 import type { AgentRun, FactoryEntity, FactorySnapshot, Task } from '../types'
@@ -25,10 +38,26 @@ import type { AgentRun, FactoryEntity, FactorySnapshot, Task } from '../types'
 // debounce delays that.
 const REFETCH_DEBOUNCE_MS = 250
 
+// Drop target ID for the runs tray inside the station drawer. A
+// constant string is fine — the drawer only renders one station at a
+// time, so there's never more than one runs-drop target on the page.
+const RUNS_DROP_ID = 'factory-runs-drop'
+
+// In-flight delegate request: dropping a queued entity onto the runs
+// tray populates this; the prompt picker reads it; on prompt selection
+// it's POSTed to /api/factory/delegate. Cleared on close/cancel.
+interface PendingDelegate {
+  entity: FactoryEntity
+  eventType: string
+  dedupKey: string
+}
+
 export default function Factory() {
   const containerRef = useRef<HTMLDivElement>(null)
   const sceneRef = useRef<IsoSceneHandle | null>(null)
   const [picked, setPicked] = useState<ClickedStationInfo | null>(null)
+  const [pendingDelegate, setPendingDelegate] = useState<PendingDelegate | null>(null)
+  const [draggingEntity, setDraggingEntity] = useState<FactoryEntity | null>(null)
 
   useEffect(() => {
     const container = containerRef.current
@@ -130,22 +159,126 @@ export default function Factory() {
     })
   }, [pickedId])
 
+  // 8px activation distance keeps click-to-open-PR (single click on a
+  // queued row's anchor) distinct from a drag — same threshold pattern
+  // Board.tsx uses for its task-card sortable.
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }))
+
+  const stationEventType = picked?.id ?? null
+  // Stable identity across renders so the useCallback dependency lists
+  // below don't churn — the reconciler hands us a fresh ClickedStationInfo
+  // on every change but the derived array shouldn't trigger re-creation
+  // of the drag callbacks unless `picked` itself changed.
+  const queuedEntities = useMemo(() => picked?.queued ?? [], [picked])
+
+  const onDragStart = useCallback(
+    (evt: DragStartEvent) => {
+      const id = String(evt.active.id)
+      const entity = queuedEntities.find((e) => e.id === id) ?? null
+      setDraggingEntity(entity)
+    },
+    [queuedEntities],
+  )
+
+  const onDragEnd = useCallback(
+    (evt: DragEndEvent) => {
+      setDraggingEntity(null)
+      if (!evt.over || evt.over.id !== RUNS_DROP_ID) return
+      if (!stationEventType) return
+      const entity = queuedEntities.find((e) => e.id === String(evt.active.id))
+      if (!entity) return
+      const dedupKey = entity.pending_tasks?.[stationEventType]?.[0]?.dedup_key ?? ''
+      setPendingDelegate({ entity, eventType: stationEventType, dedupKey })
+    },
+    [queuedEntities, stationEventType],
+  )
+
+  const handlePromptSelected = useCallback(
+    async (promptId: string) => {
+      const pd = pendingDelegate
+      setPendingDelegate(null)
+      if (!pd) return
+      // Two failure modes to surface, both as a toast:
+      //   - Network error (fetch throws) — caught below.
+      //   - Non-2xx HTTP — checked via res.ok. The handler returns
+      //     400/404/503 + `{error: "..."}`, which we forward verbatim.
+      // Refetch only fires on success so a 503 doesn't visually
+      // "succeed" by triggering an unrelated snapshot refresh.
+      const label = entityLabel(pd.entity)
+      try {
+        const res = await fetch('/api/factory/delegate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            entity_id: pd.entity.id,
+            event_type: pd.eventType,
+            dedup_key: pd.dedupKey,
+            prompt_id: promptId,
+          }),
+        })
+        if (!res.ok) {
+          let detail = `HTTP ${res.status}`
+          try {
+            const body = (await res.json()) as { error?: string }
+            if (body.error) detail = body.error
+          } catch {
+            // Body wasn't JSON; stick with the status code.
+          }
+          toast.error(`Delegate ${label}: ${detail}`, 'Delegation failed')
+          return
+        }
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err)
+        toast.error(`Delegate ${label}: ${detail}`, 'Delegation failed')
+        return
+      }
+      const refetch = (window as unknown as { __factoryRefetch?: () => void }).__factoryRefetch
+      refetch?.()
+    },
+    [pendingDelegate],
+  )
+
   return (
-    <div className="relative -mx-8 -my-8 overflow-hidden">
-      <div
-        ref={containerRef}
-        className="relative w-full overflow-hidden"
-        style={{ height: 'calc(100vh - 69px)' }}
+    <DndContext sensors={sensors} onDragStart={onDragStart} onDragEnd={onDragEnd}>
+      <div className="relative -mx-8 -my-8 overflow-hidden">
+        <div
+          ref={containerRef}
+          className="relative w-full overflow-hidden"
+          style={{ height: 'calc(100vh - 69px)' }}
+        />
+        <button
+          type="button"
+          onClick={() => sceneRef.current?.resetView()}
+          className="absolute bottom-4 right-4 rounded-md bg-white/92 px-3 py-2 text-[11px] font-semibold text-text-primary shadow transition hover:bg-white"
+        >
+          Reset view
+        </button>
+        <StationDrawer info={picked} />
+      </div>
+      <DragOverlay dropAnimation={null}>
+        {draggingEntity ? (
+          <div
+            className="rounded-md px-2.5 py-1.5"
+            style={{
+              background: 'rgba(255,255,255,0.95)',
+              boxShadow: '0 8px 24px rgba(0,0,0,0.18), inset 0 0 0 1px rgba(255,255,255,0.85)',
+              opacity: 0.92,
+            }}
+          >
+            <QueuedEntityRow entity={draggingEntity} />
+          </div>
+        ) : null}
+      </DragOverlay>
+      <PromptPicker
+        open={pendingDelegate != null}
+        onSelect={handlePromptSelected}
+        onClose={() => setPendingDelegate(null)}
+        onEditPrompts={() => {
+          setPendingDelegate(null)
+          window.location.href = '/prompts'
+        }}
       />
-      <button
-        type="button"
-        onClick={() => sceneRef.current?.resetView()}
-        className="absolute bottom-4 right-4 rounded-md bg-white/92 px-3 py-2 text-[11px] font-semibold text-text-primary shadow transition hover:bg-white"
-      >
-        Reset view
-      </button>
-      <StationDrawer info={picked} />
-    </div>
+    </DndContext>
   )
 }
 
@@ -182,8 +315,24 @@ function StationDrawer({ info }: { info: ClickedStationInfo | null }) {
 // drawer reads as the project's warm/light palette rather than a
 // dark gaming HUD.
 function StationChassis({ info }: { info: ClickedStationInfo | null }) {
-  const queued = info?.queued ?? []
   const runs = info?.runs ?? []
+  // Memoized so the per-render TrayItem identities don't churn
+  // useDraggable's data prop on every parent render.
+  const queueItems: TrayItem[] = useMemo(
+    () =>
+      (info?.queued ?? []).map((e) => ({
+        key: e.id,
+        dot: '#c47a5a',
+        body: <QueuedEntityRow entity={e} />,
+        href: e.url || undefined,
+        tooltip: <EntityTooltip entity={e} />,
+        // dragId enables the drag-to-delegate flow — see DndContext in
+        // Factory.tsx's top-level component. The runs-tray drop target
+        // reads this back from active.id to resolve the entity.
+        dragId: e.id,
+      })),
+    [info],
+  )
   return (
     <div
       className="relative flex w-full gap-4 rounded-2xl p-4"
@@ -198,13 +347,7 @@ function StationChassis({ info }: { info: ClickedStationInfo | null }) {
         accent="#c47a5a"
         widthClass="w-[28%]"
         emptyMessage="Idle — no entities waiting"
-        items={queued.map((e) => ({
-          key: e.id,
-          dot: '#c47a5a',
-          body: <QueuedEntityRow entity={e} />,
-          href: e.url || undefined,
-          tooltip: <EntityTooltip entity={e} />,
-        }))}
+        items={queueItems}
       />
       <Tray
         label={info?.label ?? '—'}
@@ -216,6 +359,7 @@ function StationChassis({ info }: { info: ClickedStationInfo | null }) {
           dot: runStatusColor(r.run.Status),
           body: <RunRow run={r.run} task={r.task} />,
         }))}
+        dropId={RUNS_DROP_ID}
       />
     </div>
   )
@@ -234,6 +378,10 @@ interface TrayItem {
   href?: string
   /** When set, hovering the row reveals this content in a Radix tooltip. */
   tooltip?: React.ReactNode
+  /** When set, the row registers as a draggable with this id under the
+   *  enclosing DndContext. Used by the station drawer to drag queued
+   *  entities onto the runs tray. */
+  dragId?: string
 }
 
 function Tray({
@@ -242,22 +390,36 @@ function Tray({
   widthClass,
   items,
   emptyMessage,
+  dropId,
 }: {
   label: string
   accent: string
   widthClass: string
   items: TrayItem[]
   emptyMessage: string
+  /** When set, the tray's outer container registers as a drop target
+   *  under the enclosing DndContext. The runs tray uses this to accept
+   *  drags from the queue (drag-to-delegate). */
+  dropId?: string
 }) {
+  // Always call useDroppable so the hook count is stable; `disabled`
+  // makes it a no-op when the tray isn't a drop target.
+  const { setNodeRef, isOver } = useDroppable({ id: dropId ?? 'tray-noop', disabled: !dropId })
   return (
     <div
-      className={`relative flex flex-col overflow-hidden rounded-xl ${widthClass}`}
+      ref={dropId ? setNodeRef : undefined}
+      className={`relative flex flex-col overflow-hidden rounded-xl transition-shadow ${widthClass}`}
       style={{
         background:
           'linear-gradient(180deg, rgba(255,255,255,0.85) 0%, rgba(255,255,255,0.6) 100%)',
         boxShadow: [
           'inset 0 1px 0 rgba(255,255,255,0.9)',
-          'inset 0 0 0 1px rgba(255,255,255,0.7)',
+          // When a drag is over this drop target, replace the inset
+          // hairline with a thicker accent ring matching the runs
+          // tray's sage palette so the drop affordance reads cleanly.
+          isOver && dropId
+            ? `inset 0 0 0 2px ${hexToRgba(accent, 0.85)}`
+            : 'inset 0 0 0 1px rgba(255,255,255,0.7)',
           '0 1px 2px rgba(0,0,0,0.04)',
           '0 6px 18px rgba(0,0,0,0.06)',
         ].join(', '),
@@ -298,6 +460,11 @@ function Tray({
 // which keeps Run rows untouched.
 function TrayRow({ item }: { item: TrayItem }) {
   const interactive = !!item.href
+  // useDraggable's disabled flag keeps the hook call stable across
+  // drag-capable and non-drag-capable rows. Without dragId, the hook
+  // returns sensors that never fire, so the row behaves exactly as
+  // before.
+  const drag = useDraggable({ id: item.dragId ?? `row-${item.key}`, disabled: !item.dragId })
   const innerClasses = 'flex flex-1 min-w-0 items-center gap-2.5'
   const inner = (
     <>
@@ -325,10 +492,16 @@ function TrayRow({ item }: { item: TrayItem }) {
   ) : (
     <div className={innerClasses}>{inner}</div>
   )
+  const draggable = !!item.dragId
   const li = (
     <li
+      ref={draggable ? drag.setNodeRef : undefined}
+      {...(draggable ? drag.attributes : {})}
+      {...(draggable ? drag.listeners : {})}
       className={`flex items-center gap-2.5 rounded-md px-2.5 py-1.5 transition-all ${
         interactive ? 'hover:-translate-y-px hover:bg-white' : ''
+      } ${draggable ? 'cursor-grab active:cursor-grabbing' : ''} ${
+        drag.isDragging ? 'opacity-40' : ''
       }`}
       style={{
         background: 'rgba(255,255,255,0.55)',

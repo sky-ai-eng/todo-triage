@@ -173,6 +173,17 @@ var (
 	// before our takeover could finalize. 409 Conflict: the resource
 	// changed under us, the client should re-fetch.
 	ErrTakeoverRaceLost = errors.New("takeover: run finished before takeover could finalize")
+
+	// ErrPromptNotFound — Delegate's caller passed a prompt id that
+	// doesn't resolve to any row. Race-correctable (the prompt was
+	// deleted between snapshot fetch and drop, or the id was simply
+	// wrong) — 400 Bad Request, not 5xx.
+	ErrPromptNotFound = errors.New("delegate: prompt not found")
+
+	// ErrPromptUnspecified — Delegate's caller passed an empty prompt
+	// id. The picker should have prevented this; 400 Bad Request when
+	// the contract is violated.
+	ErrPromptUnspecified = errors.New("delegate: no prompt specified")
 )
 
 // Takeover hands a running headless session over to the user for
@@ -1277,7 +1288,7 @@ func materializePriorMemories(database *sql.DB, cwd, entityID string) {
 // supplies the prompt_id from the trigger row.
 func (s *Spawner) resolvePrompt(task domain.Task, explicitPromptID string) (string, string, error) {
 	if explicitPromptID == "" {
-		return "", "", fmt.Errorf("no prompt specified — select one from the prompt picker")
+		return "", "", fmt.Errorf("%w — select one from the prompt picker", ErrPromptUnspecified)
 	}
 
 	p, err := db.GetPrompt(s.database, explicitPromptID)
@@ -1285,7 +1296,7 @@ func (s *Spawner) resolvePrompt(task domain.Task, explicitPromptID string) (stri
 		return "", "", fmt.Errorf("failed to load prompt %s: %w", explicitPromptID, err)
 	}
 	if p == nil {
-		return "", "", fmt.Errorf("prompt %s not found", explicitPromptID)
+		return "", "", fmt.Errorf("%w: %s", ErrPromptNotFound, explicitPromptID)
 	}
 	return p.ID, p.Body, nil
 }

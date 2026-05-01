@@ -109,6 +109,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/agent/runs/{runID}/review", s.handleRunReview)
 
 	s.mux.HandleFunc("GET /api/factory/snapshot", s.handleFactorySnapshot)
+	s.mux.HandleFunc("POST /api/factory/delegate", s.handleFactoryDelegate)
 
 	s.mux.HandleFunc("GET /api/event-types", s.handleEventTypes)
 	s.mux.HandleFunc("GET /api/event-schemas", s.handleEventSchemasList)

@@ -193,6 +193,15 @@ export interface FactoryEntity {
   status?: string
   priority?: string
   assignee?: string
+  /** Active tasks for this entity, grouped by event_type. Drives the
+   *  station drawer's drag-to-delegate flow: dropping on the runs tray
+   *  reads the matching event_type's first dedup_key and forwards it
+   *  (along with entity_id + event_type) to POST /api/factory/delegate,
+   *  which then find-or-creates via the unique index on
+   *  (entity_id, event_type, dedup_key). task_id is informational —
+   *  not currently sent on the request — and is kept available for
+   *  future UI hints (e.g., "this queued chip already has a task"). */
+  pending_tasks?: Record<string, Array<{ task_id: string; dedup_key: string }>>
 }
 
 export interface FactoryStation {
