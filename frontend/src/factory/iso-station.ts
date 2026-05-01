@@ -838,6 +838,11 @@ export function buildStationMesh(
     screenCtx.save()
     screenCtx.translate(screenTexW / 2, screenTexH / 2)
     screenCtx.rotate(Math.PI / 2)
+    // The visible face of the screen Box is back-faced relative to
+    // Babylon's default UV winding, so the rotation alone leaves
+    // glyphs mirrored along the screen's horizontal axis. scale(-1, 1)
+    // in the rotated frame flips them back.
+    screenCtx.scale(-1, 1)
     screenCtx.fillText(text, 0, 0)
     screenCtx.restore()
     screenTex.update(true)
