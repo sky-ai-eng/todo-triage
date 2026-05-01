@@ -70,6 +70,14 @@ func EventCountsByTypeSince(database *sql.DB, since time.Time) (map[string]int, 
 // For terminal event types (PR merged/closed) the answer matches a
 // plain COUNT(*) since each entity contributes exactly one terminal
 // event.
+//
+// Covered by the partial index `idx_events_type_entity (event_type,
+// entity_id) WHERE entity_id IS NOT NULL`: SQLite walks the index in
+// (event_type, entity_id) order, so each event_type group's distinct
+// entity_ids are contiguous and DISTINCT collapses to a per-group
+// adjacency dedupe — no temp B-tree, no table touch. Without that
+// index this query degrades to a full scan with a hash dedupe per
+// group, which is why we don't run it on the hot path.
 func DistinctEntityCountsByEventTypeLifetime(database *sql.DB) (map[string]int, error) {
 	rows, err := database.Query(`
 		SELECT event_type, COUNT(DISTINCT entity_id)

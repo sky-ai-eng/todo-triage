@@ -40,10 +40,15 @@ func NewLifetimeDistinctCounter() *LifetimeDistinctCounter {
 	}
 }
 
-// Hydrate populates the counter from the events table. Runs the same
-// query DistinctEntityCountsByEventTypeLifetime would, but stores the
-// individual (event_type, entity_id) pairs in the dedupe set so
-// subsequent Record calls can extend the count without rescanning.
+// Hydrate populates the counter from the events table. Reads the
+// individual (event_type, entity_id) pairs (rather than the SQL
+// aggregate's pre-counted form) so the dedupe set ends up populated
+// for subsequent Record calls.
+//
+// Backed by the partial index `idx_events_type_entity (event_type,
+// entity_id) WHERE entity_id IS NOT NULL`: the index covers both
+// SELECT columns and the WHERE filter, so this is an index-only scan
+// — no table touch, even at large event volumes.
 //
 // Should be called once at startup, before the eventbus subscriber
 // that calls Record is wired — otherwise a brand-new event could land
