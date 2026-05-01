@@ -17,7 +17,7 @@ import (
 //  1. Run with no run_memory row → memory_missing=true (the agent
 //     hasn't passed through the gate yet).
 //  2. Run with row but agent_content NULL → memory_missing=true (the
-//     agent termitted but didn't comply with the gate).
+//     agent terminated but didn't comply with the gate).
 //  3. Run with row + non-empty agent_content → memory_missing=false.
 //
 // Without this regression, a future writer that bypasses
