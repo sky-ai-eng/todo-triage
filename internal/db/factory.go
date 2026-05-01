@@ -55,34 +55,29 @@ func EventCountsByTypeSince(database *sql.DB, since time.Time) (map[string]int, 
 	return out, rows.Err()
 }
 
-// EventCountsByTypesLifetime counts events per event_type for the given
-// types, from catalog start (no time cutoff). Used by the factory to
-// surface persistent throughput on terminal stations like Merged and
-// Closed where a 24h window would obscure the long-run total. Cheap:
-// idx_events_type_created handles the filter; types is small (terminal
-// stations only).
-func EventCountsByTypesLifetime(database *sql.DB, types []string) (map[string]int, error) {
-	out := map[string]int{}
-	if len(types) == 0 {
-		return out, nil
-	}
-	placeholders := "?"
-	args := make([]any, 0, len(types))
-	args = append(args, types[0])
-	for i := 1; i < len(types); i++ {
-		placeholders += ", ?"
-		args = append(args, types[i])
-	}
+// DistinctEntityCountsByEventTypeLifetime counts the distinct entities
+// that have ever produced an event of each event_type, from catalog
+// start (no time cutoff). Drives the per-station lifetime counter on
+// the factory view: "Ready for Review · 47" reads as "47 distinct PRs
+// have reached this station," not "47 events fired" — re-entries from
+// the same entity (e.g. a flaky CI check failing twice on one PR) don't
+// double-count.
+//
+// For terminal event types (PR merged/closed) the answer matches a
+// plain COUNT(*) since each entity contributes exactly one terminal
+// event. Cheap: idx_events_entity_created covers the scan.
+func DistinctEntityCountsByEventTypeLifetime(database *sql.DB) (map[string]int, error) {
 	rows, err := database.Query(`
-		SELECT event_type, COUNT(*)
+		SELECT event_type, COUNT(DISTINCT entity_id)
 		FROM events
-		WHERE event_type IN (`+placeholders+`)
+		WHERE entity_id IS NOT NULL
 		GROUP BY event_type
-	`, args...)
+	`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
+	out := map[string]int{}
 	for rows.Next() {
 		var eventType string
 		var count int

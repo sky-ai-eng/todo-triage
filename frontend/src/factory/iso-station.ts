@@ -36,6 +36,8 @@ import {
   MeshBuilder,
   PBRMaterial,
   Scene,
+  StandardMaterial,
+  Texture,
   TransformNode,
   Vector3,
 } from '@babylonjs/core'
@@ -73,11 +75,6 @@ export interface Station {
   /** Etched identity label rendered along the back of the main tray
    *  floor. Empty/undefined → no label plate. */
   label?: string
-  /** Initial lifetime counter, rendered inline with the label (e.g.
-   *  "Merged · 247"). Undefined → no counter, label stays solo. The
-   *  handle's setLifetimeCount can update it later; passing 0 is a
-   *  valid initial value (renders "Label · 0"). */
-  lifetimeCount?: number
   /** Conveyor attach points on the station's walls. Each produces a
    *  recess + LED frame + internal belt stub. */
   ports?: Port[]
@@ -100,9 +97,10 @@ export interface StationHandle {
   setQueuedCount(n: number): void
   /** Show n run chips. n clamped to MAX_RUNS. */
   setRunCount(n: number): void
-  /** Update the inline lifetime counter on the label. No-op for
-   *  stations whose spec didn't request one (i.e., lifetimeCount was
-   *  undefined at build). Re-uses the existing label DynamicTexture. */
+  /** Update the lifetime counter rendered on the station's front-face
+   *  status screen. Diff-gated internally — calling with the same
+   *  value as last call is a no-op, so per-frame reconcilers can call
+   *  it cheaply. */
   setLifetimeCount(n: number): void
 }
 
@@ -797,6 +795,78 @@ export function buildStationMesh(
   statusScreen.material = materials.screen
   statusScreen.parent = root
 
+  // ─── Status screen text overlay ──────────────────────────────────────
+  // Thin Plane sitting just in front of the screen Box, displaying the
+  // lifetime entity-throughput counter for this station. Per-station
+  // DynamicTexture so each can update independently; the alpha-blended
+  // emissive material lets the dark blue screen show through behind
+  // the cyan numerals (the screen Box stays as the bezel/glow).
+  const screenTexW = 512
+  const screenTexH = 256
+  const screenTex = new DynamicTexture(
+    `status-screen-tex-${station.x}_${station.y}`,
+    { width: screenTexW, height: screenTexH },
+    scene,
+    false,
+  )
+  screenTex.hasAlpha = true
+  const screenCtx = screenTex.getContext() as CanvasRenderingContext2D
+
+  const renderScreenText = (n: number) => {
+    screenCtx.clearRect(0, 0, screenTexW, screenTexH)
+    const text = formatLifetimeCount(n)
+    let fontPx = 200
+    screenCtx.font = `700 ${fontPx}px ui-sans-serif, system-ui, -apple-system, sans-serif`
+    while (screenCtx.measureText(text).width > screenTexW - 40 && fontPx > 80) {
+      fontPx -= 6
+      screenCtx.font = `700 ${fontPx}px ui-sans-serif, system-ui, -apple-system, sans-serif`
+    }
+    screenCtx.fillStyle = '#a4f8ff'
+    screenCtx.textAlign = 'center'
+    screenCtx.textBaseline = 'middle'
+    // V-flip so the canvas's top-down coords land right-side up after
+    // the plane's X-axis rotation maps canvas-V onto world-Z.
+    screenCtx.save()
+    screenCtx.translate(0, screenTexH)
+    screenCtx.scale(1, -1)
+    screenCtx.fillText(text, screenTexW / 2, screenTexH / 2)
+    screenCtx.restore()
+    screenTex.update(true)
+  }
+  let lifetimeValue = 0
+  renderScreenText(0)
+
+  const screenTextMat = new StandardMaterial(
+    `status-screen-text-mat-${station.x}_${station.y}`,
+    scene,
+  )
+  screenTextMat.diffuseTexture = screenTex
+  screenTextMat.useAlphaFromDiffuseTexture = true
+  screenTextMat.emissiveTexture = screenTex
+  screenTextMat.emissiveColor = Color3.White()
+  screenTextMat.disableLighting = true
+  ;(screenTextMat.diffuseTexture as Texture).wrapU = Texture.CLAMP_ADDRESSMODE
+  ;(screenTextMat.diffuseTexture as Texture).wrapV = Texture.CLAMP_ADDRESSMODE
+
+  const screenTextW = STATUS_PANEL_W - STATUS_SCREEN_INSET * 2
+  const screenTextH = STATUS_PANEL_H - STATUS_SCREEN_INSET * 2
+  const screenTextPlane = MeshBuilder.CreatePlane(
+    'status-screen-text',
+    { width: screenTextW, height: screenTextH },
+    scene,
+  )
+  // Plane is built in the XY plane (normal +Z); rotating +π/2 around
+  // X aligns the normal with -Y so the visible face looks toward the
+  // camera (which sits on the -Y side of the factory).
+  screenTextPlane.rotation.x = Math.PI / 2
+  screenTextPlane.position.set(
+    panelCx,
+    station.y + STATUS_PANEL_DEPTH - STATUS_SCREEN_THICKNESS - 0.15,
+    panelCz,
+  )
+  screenTextPlane.material = screenTextMat
+  screenTextPlane.parent = root
+
   // ─── Vent glow slabs ─────────────────────────────────────────────────
   const ventGlowBackY = station.y + station.d - VENT_DEPTH + VENT_GLOW_THICKNESS / 2 + 0.05
   const ventGlowW = ventW - VENT_GLOW_INSET * 2
@@ -841,13 +911,6 @@ export function buildStationMesh(
   const labelBackEdge = mainTray.y1 - LABEL_PLATE_BACK_INSET
   const labelFrontEdge = labelBackEdge - labelDepth
   const trayCx = (mainTray.x0 + mainTray.x1) / 2
-
-  // Closure-scoped so setLifetimeCount can call back into a redraw
-  // after the plate is built. No-op when the station has no label
-  // (no plate exists to update).
-  let renderLabelTexture: ((lifetime: number | undefined) => void) | null = null
-  let lifetimeValue = station.lifetimeCount
-
   if (station.label && station.label.length > 0) {
     const plateW = trayW - 2 * (trayFloorInset + LABEL_PLATE_SIDE_MARGIN)
     const plateThickness = 0.6
@@ -867,31 +930,24 @@ export function buildStationMesh(
       false,
     )
     const ctx = tex.getContext() as CanvasRenderingContext2D
-    const labelText = station.label
-
-    renderLabelTexture = (lifetime: number | undefined) => {
-      const text =
-        lifetime !== undefined ? `${labelText} · ${formatLifetimeCount(lifetime)}` : labelText
-      ctx.clearRect(0, 0, LABEL_TEX_W, LABEL_TEX_H)
-      let fontPx = 56
+    ctx.clearRect(0, 0, LABEL_TEX_W, LABEL_TEX_H)
+    let fontPx = 56
+    ctx.font = `600 ${fontPx}px Inter, system-ui, sans-serif`
+    while (ctx.measureText(station.label).width > LABEL_TEX_W - 60 && fontPx > 24) {
+      fontPx -= 2
       ctx.font = `600 ${fontPx}px Inter, system-ui, sans-serif`
-      while (ctx.measureText(text).width > LABEL_TEX_W - 60 && fontPx > 24) {
-        fontPx -= 2
-        ctx.font = `600 ${fontPx}px Inter, system-ui, sans-serif`
-      }
-      ctx.fillStyle = '#ffffff'
-      ctx.textAlign = 'center'
-      ctx.textBaseline = 'middle'
-      // Babylon's right-handed CreateBox flips V on the +z face's UVs,
-      // so we pre-flip the canvas's Y axis to compensate.
-      ctx.save()
-      ctx.translate(0, LABEL_TEX_H)
-      ctx.scale(1, -1)
-      ctx.fillText(text, LABEL_TEX_W / 2, LABEL_TEX_H / 2 + 2)
-      ctx.restore()
-      tex.update(true)
     }
-    renderLabelTexture(lifetimeValue)
+    ctx.fillStyle = '#ffffff'
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    // Babylon's right-handed CreateBox flips V on the +z face's UVs,
+    // so we pre-flip the canvas's Y axis to compensate.
+    ctx.save()
+    ctx.translate(0, LABEL_TEX_H)
+    ctx.scale(1, -1)
+    ctx.fillText(station.label, LABEL_TEX_W / 2, LABEL_TEX_H / 2 + 2)
+    ctx.restore()
+    tex.update(true)
     tex.hasAlpha = true
     tex.getAlphaFromRGB = false
 
@@ -1116,10 +1172,9 @@ export function buildStationMesh(
   }
 
   const setLifetimeCount = (n: number) => {
-    if (!renderLabelTexture) return
     if (lifetimeValue === n) return
     lifetimeValue = n
-    renderLabelTexture(n)
+    renderScreenText(n)
   }
 
   setQueuedCount(station.queuedCount ?? 0)

@@ -856,18 +856,8 @@ const CHANGES_REQUESTED = stationSpec(
   'Changes Requested',
   'github:pr:review_changes_requested',
 )
-// Terminal stations carry an inline lifetime counter on their label
-// plate ("Closed · 247"). Initial 0 keeps the rendering pass identical
-// to the other stations until the first snapshot arrives; the
-// reconciler updates via setLifetimeCount as items_lifetime changes.
-const CLOSED: Station = {
-  ...stationSpec(CLOSED_COL, CLOSED_ROW, 2, 0, 'Closed', 'github:pr:closed'),
-  lifetimeCount: 0,
-}
-const MERGED: Station = {
-  ...stationSpec(MERGED_COL, MERGED_ROW, 1, 0, 'Merged', 'github:pr:merged'),
-  lifetimeCount: 0,
-}
+const CLOSED = stationSpec(CLOSED_COL, CLOSED_ROW, 2, 0, 'Closed', 'github:pr:closed')
+const MERGED = stationSpec(MERGED_COL, MERGED_ROW, 1, 0, 'Merged', 'github:pr:merged')
 
 // ─── Mergers / Splitters ──────────────────────────────────────────
 
