@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -105,10 +106,28 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	task, _, err := db.FindOrCreateTask(s.db, req.EntityID, req.EventType, req.DedupKey, primaryEvent.ID, defaultPriority)
+	task, created, err := db.FindOrCreateTask(s.db, req.EntityID, req.EventType, req.DedupKey, primaryEvent.ID, defaultPriority)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
+	}
+
+	// Mirror the router's audit linkage: when a brand-new task is
+	// synthesized, record a task_events row linking it to the event
+	// it was anchored on. Same kind="spawned" the router uses at
+	// internal/routing/router.go:223-227, so a future timeline UI
+	// reading task_events sees a uniform shape regardless of which
+	// path created the task. Non-fatal — audit gap is preferable to
+	// failing the delegate after the row is already in tasks.
+	//
+	// We don't record kind="bumped" on the find branch: the drag is
+	// the user's gesture (already captured in swipe_events via
+	// RecordSwipe), not a fresh event landing — there's nothing new
+	// to link the existing task to.
+	if created {
+		if err := db.RecordTaskEvent(s.db, task.ID, primaryEvent.ID, "spawned"); err != nil {
+			log.Printf("[factory] failed to record spawned task_event for %s: %v", task.ID, err)
+		}
 	}
 
 	// Flip task.status to 'delegated' and emit a swipe_events audit
