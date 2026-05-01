@@ -823,11 +823,13 @@ export function buildStationMesh(
   // angles.
   const screenBgFill = '#15171c'
   const screenTextFill = '#a4f8ff'
-  // Inter to match the etched label plates. 600 weight reads cleaner
-  // than 700 at the texture scale we're rendering at — the lighter
-  // weight gives more whitespace inside each glyph, which the iso
-  // camera's projection compresses less than thick strokes do.
-  const screenFontFamily = 'Inter, system-ui, -apple-system, sans-serif'
+  // Monospaced stack to give the lifetime counter an LCD/scoreboard
+  // feel matching the rest of the factory's emissive readouts. SF Mono
+  // ships on macOS, Cascadia/Consolas on Windows, plus JetBrains Mono
+  // and Fira Code as common dev installs. 500 weight reads as a thin
+  // refined digital display rather than a heavy print numeral.
+  const screenFontFamily =
+    "'SF Mono', 'JetBrains Mono', 'Fira Code', 'Cascadia Mono', Menlo, Consolas, monospace"
 
   const renderScreenText = (n: number) => {
     screenCtx.fillStyle = screenBgFill
@@ -839,12 +841,17 @@ export function buildStationMesh(
     // screen. We pre-rotate the drawing 90° CCW to compensate. After
     // rotation the text's natural width is laid out along canvas Y,
     // so the shrink-to-fit budget compares against canvas height.
-    const widthBudget = screenTexH - 80
-    let fontPx = 380
-    screenCtx.font = `600 ${fontPx}px ${screenFontFamily}`
-    while (screenCtx.measureText(text).width > widthBudget && fontPx > 160) {
-      fontPx -= 12
-      screenCtx.font = `600 ${fontPx}px ${screenFontFamily}`
+    //
+    // Sizing: a 4-char monospace string ("999k", "1.2M") at ~0.6 char
+    // aspect needs roughly 2.4 × fontPx of width; with a 412 px budget
+    // that caps fontPx at ~170. Starting at 320 leaves room for the
+    // common shorter strings ("47", "1.2k") to render larger.
+    const widthBudget = screenTexH - 100
+    let fontPx = 320
+    screenCtx.font = `500 ${fontPx}px ${screenFontFamily}`
+    while (screenCtx.measureText(text).width > widthBudget && fontPx > 140) {
+      fontPx -= 10
+      screenCtx.font = `500 ${fontPx}px ${screenFontFamily}`
     }
     screenCtx.fillStyle = screenTextFill
     screenCtx.textAlign = 'center'
