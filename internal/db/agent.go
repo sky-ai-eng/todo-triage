@@ -50,7 +50,7 @@ func GetAgentRun(database *sql.DB, runID string) (*domain.AgentRun, error) {
 		SELECT r.id, r.task_id, r.status, r.model, r.started_at, r.completed_at,
 		       r.total_cost_usd, r.duration_ms, r.num_turns, r.stop_reason, r.worktree_path,
 		       r.result_summary, r.session_id,
-		       (rm.agent_content IS NULL) AS memory_missing
+		       (NULLIF(TRIM(rm.agent_content), '') IS NULL) AS memory_missing
 		FROM runs r
 		LEFT JOIN run_memory rm ON rm.run_id = r.id
 		WHERE r.id = ?
