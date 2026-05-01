@@ -157,7 +157,7 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 	//     is still needed). SKY-206 closed the gap that left
 	//     pending_reviews + a phantom run on a dismissed task.
 	if req.Action == "dismiss" {
-		s.cleanupPendingApprovalRun(id)
+		s.cleanupPendingApprovalRun(id, discardOutcomeDismissed)
 		if s.spawner != nil {
 			ids, err := db.ActiveRunIDsForTask(s.db, id)
 			if err != nil {
@@ -275,7 +275,7 @@ func (s *Server) handleUndo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.finalizeRequeue(task)
+	s.finalizeRequeue(id, task)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "queued"})
 }
@@ -297,10 +297,24 @@ func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.finalizeRequeue(task)
+	s.finalizeRequeue(id, task)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "queued"})
 }
+
+// discardOutcome describes how the task ended up after the user
+// rejected the agent's prepared review. The cleanup path is
+// identical for both, but the human_content note baked into
+// run_memory differs — the next agent reading prior memory needs
+// to know whether the human re-queued the task (still on the
+// docket) or dismissed it outright (the entity is done with). The
+// distinction is the load-bearing signal in the post-run memory.
+type discardOutcome int
+
+const (
+	discardOutcomeRequeued discardOutcome = iota
+	discardOutcomeDismissed
+)
 
 // finalizeRequeue runs the side-effect cleanup that both /undo and
 // /requeue need after the task status flips back to queued:
@@ -323,35 +337,48 @@ func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
 // Both halves are best-effort and logged-not-failed: the task is
 // already queued by the time we get here; failing the response would
 // confuse callers about what actually changed.
-func (s *Server) finalizeRequeue(task *domain.Task) {
-	if task == nil {
-		return
-	}
-	s.cleanupPendingApprovalRun(task.ID)
+//
+// taskID is taken separately from task because the pending_approval
+// cleanup only needs the id — running it under a nil-task short-
+// circuit (e.g. when db.GetTask transiently fails or the task row was
+// deleted concurrently) would silently strand the very state this
+// helper is meant to clean up. Jira reversal needs the loaded row so
+// it nil-guards internally.
+func (s *Server) finalizeRequeue(taskID string, task *domain.Task) {
+	s.cleanupPendingApprovalRun(taskID, discardOutcomeRequeued)
 	s.revertJiraStateIfApplicable(task)
 }
 
 // cleanupPendingApprovalRun handles the SKY-206 case: the user
-// returned a task to the queue while it had a pending_approval
-// agent run (i.e. the agent prepared a PR review and the user threw
-// it away rather than submitting). The agent process has long since
-// exited (pending_approval is reached after the spawner's runAgent
-// defer ran), so there's nothing to cancel at the process level —
-// this is purely a DB cleanup: write the discard outcome to
-// human_content, delete the pending_reviews + comments,  flip the
-// run row to cancelled with a discriminating stop_reason.
+// returned a task to the queue (or dismissed it) while it had a
+// pending_approval agent run — i.e. the agent prepared a PR review
+// and the user threw it away rather than submitting. The agent
+// process has long since exited (pending_approval is reached after
+// the spawner's runAgent defer ran), so there's nothing to cancel
+// at the process level — this is purely a DB cleanup: write the
+// discard outcome to human_content, delete the pending_reviews +
+// comments, flip the run row to cancelled with a discriminating
+// stop_reason.
+//
+// outcome shapes the human_content note baked into run_memory so
+// the next agent reading memory can distinguish "still on the
+// docket, the human just didn't like this verdict" (requeued) from
+// "the entity is done with — the human chose to walk away from it
+// entirely" (dismissed). Same on-disk DB cleanup either way.
 //
 // Run-status broadcast lets the AgentCard collapse and the
-// requeued TaskCard appear without a manual refetch.
+// requeued/dismissed TaskCard reflect the new state without a
+// manual refetch.
 //
 // All failures here are logged, not fatal: the calling handler has
-// already flipped the task back to queued and the response should
+// already flipped the task to its new state and the response should
 // reflect that. Idempotent — a repeat call against an already-
-// cancelled run finds no pending_approval row and exits silently.
-func (s *Server) cleanupPendingApprovalRun(taskID string) {
+// cancelled run finds no pending_approval row (the lookup filters on
+// status='pending_approval') and exits silently.
+func (s *Server) cleanupPendingApprovalRun(taskID string, outcome discardOutcome) {
 	runID, err := db.PendingApprovalRunIDForTask(s.db, taskID)
 	if err != nil {
-		log.Printf("[requeue] pending_approval lookup for task %s failed: %v", taskID, err)
+		log.Printf("[review-discard] pending_approval lookup for task %s failed: %v", taskID, err)
 		return
 	}
 	if runID == "" {
@@ -359,25 +386,25 @@ func (s *Server) cleanupPendingApprovalRun(taskID string) {
 	}
 
 	// Write the discard outcome to run_memory.human_content BEFORE
-	// deleting the pending_reviews row. The next agent reading
-	// memory on this entity should see "the human discarded my
-	// review without submitting it" as the authoritative human
-	// signal — alongside the existing agent_content (the agent's
-	// self-report) — so it can recalibrate. Format mirrors the
-	// SKY-205 submit-time block so the parsing contract is uniform.
-	humanContent := "## Human feedback (post-run)\n\n" +
-		"**Outcome:** Human discarded the prepared review without submitting it; task returned to the triage queue.\n" +
-		"**Implication:** The verdict you proposed was not accepted. Reconsider whether this entity warrants any review at all, or whether a different framing is needed."
+	// the row teardown. The next agent reading memory on this
+	// entity should see the human's verdict as authoritative —
+	// alongside the existing agent_content (the agent's self-
+	// report) — so it can recalibrate. Format mirrors the SKY-205
+	// submit-time block so the parsing contract is uniform.
+	humanContent := buildDiscardHumanContent(outcome)
 	if err := db.UpdateRunMemoryHumanContent(s.db, runID, humanContent); err != nil {
-		log.Printf("[requeue] human_content write for run %s failed: %v", runID, err)
+		log.Printf("[review-discard] human_content write for run %s failed: %v", runID, err)
 	}
 
-	// Tear down the pending review (transactional: deletes
-	// comments and the review row together).
-	if review, _ := db.PendingReviewByRunID(s.db, runID); review != nil {
-		if err := db.DeletePendingReview(s.db, review.ID); err != nil {
-			log.Printf("[requeue] DeletePendingReview %s for run %s failed: %v", review.ID, runID, err)
-		}
+	// Tear down the pending review by run_id directly. Older shape
+	// did a separate PendingReviewByRunID + DeletePendingReview
+	// two-step, which left the review row stranded if the lookup
+	// failed transiently — exactly the stale-state bug this whole
+	// path is meant to fix. The DELETE-by-run-id helper is
+	// transactional across comments + review and is a no-op when
+	// no review exists.
+	if err := db.DeletePendingReviewByRunID(s.db, runID); err != nil {
+		log.Printf("[review-discard] DeletePendingReviewByRunID for run %s failed: %v", runID, err)
 	}
 
 	// Flip the run row terminal. ok=false here means the row was
@@ -386,7 +413,7 @@ func (s *Server) cleanupPendingApprovalRun(taskID string) {
 	// double-fire.
 	ok, err := db.MarkAgentRunDiscarded(s.db, runID, "review_discarded_by_user")
 	if err != nil {
-		log.Printf("[requeue] MarkAgentRunDiscarded %s failed: %v", runID, err)
+		log.Printf("[review-discard] MarkAgentRunDiscarded %s failed: %v", runID, err)
 		return
 	}
 	if !ok {
@@ -398,6 +425,26 @@ func (s *Server) cleanupPendingApprovalRun(taskID string) {
 		RunID: runID,
 		Data:  map[string]string{"status": "cancelled"},
 	})
+}
+
+// buildDiscardHumanContent renders the post-run human verdict
+// recorded when the user rejects an agent-prepared review. The two
+// shapes — requeued vs. dismissed — give the next agent on this
+// entity different recalibration signals: requeued says "try
+// again, but not like that," dismissed says "this entity wasn't
+// worth pursuing."
+func buildDiscardHumanContent(outcome discardOutcome) string {
+	const header = "## Human feedback (post-run)\n\n"
+	switch outcome {
+	case discardOutcomeDismissed:
+		return header +
+			"**Outcome:** Human discarded the prepared review and dismissed the task entirely.\n" +
+			"**Implication:** The verdict you proposed was not accepted, and the human chose to walk away from this entity rather than re-queue it. Future runs on similar entities should reconsider whether the situation warrants action at all."
+	default: // discardOutcomeRequeued
+		return header +
+			"**Outcome:** Human discarded the prepared review without submitting it; task returned to the triage queue.\n" +
+			"**Implication:** The verdict you proposed was not accepted. Reconsider whether this entity warrants any review at all, or whether a different framing is needed."
+	}
 }
 
 // revertJiraStateIfApplicable was the body of handleUndo's Jira

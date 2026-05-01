@@ -61,14 +61,20 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, runID, revi
 }
 
 // assertPendingApprovalCleanedUp checks every post-condition the
-// SKY-206 cleanup is meant to deliver: task back to queue, run
-// cancelled with the discriminator stop_reason, pending_reviews +
-// comments gone, human_content recording the discard, agent_content
-// preserved (the whole point of SKY-204 was keeping both halves).
+// SKY-206 cleanup is meant to deliver: task at the expected
+// post-state, run cancelled with the discriminator stop_reason,
+// pending_reviews + comments gone, human_content recording the
+// discard with a marker phrase that distinguishes the requeue
+// from the dismiss flavor, agent_content preserved (the whole
+// point of SKY-204 was keeping both halves). wantTaskStatus and
+// wantHumanContentMarker let callers vary the assertion across
+// the requeue (`queued` + "returned to the triage queue") and
+// dismiss (`dismissed` + "dismissed the task entirely") paths.
 func assertPendingApprovalCleanedUp(
 	t *testing.T,
 	database *sql.DB,
 	taskID, runID, reviewID string,
+	wantTaskStatus, wantHumanContentMarker string,
 ) {
 	t.Helper()
 
@@ -76,8 +82,8 @@ func assertPendingApprovalCleanedUp(
 	if err := database.QueryRow(`SELECT status FROM tasks WHERE id = ?`, taskID).Scan(&taskStatus); err != nil {
 		t.Fatalf("scan task: %v", err)
 	}
-	if taskStatus != "queued" {
-		t.Errorf("task.status = %q, want %q", taskStatus, "queued")
+	if taskStatus != wantTaskStatus {
+		t.Errorf("task.status = %q, want %q", taskStatus, wantTaskStatus)
 	}
 
 	var runStatus, stopReason string
@@ -124,11 +130,11 @@ func assertPendingApprovalCleanedUp(
 	if !agentContent.Valid || agentContent.String != "agent self-report" {
 		t.Errorf("agent_content = %v, want preserved %q", agentContent, "agent self-report")
 	}
-	if !humanContent.Valid || !strings.Contains(humanContent.String, "Human discarded the prepared review") {
-		t.Errorf("human_content missing discard note: %v", humanContent)
-	}
 	if !humanContent.Valid || !strings.HasPrefix(humanContent.String, "## Human feedback (post-run)") {
 		t.Errorf("human_content missing canonical header: %v", humanContent)
+	}
+	if !humanContent.Valid || !strings.Contains(humanContent.String, wantHumanContentMarker) {
+		t.Errorf("human_content missing %q marker; got %q", wantHumanContentMarker, humanContent.String)
 	}
 }
 
@@ -146,7 +152,8 @@ func TestHandleUndo_CleansUpPendingApprovalRun(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
-	assertPendingApprovalCleanedUp(t, s.db, taskID, runID, reviewID)
+	assertPendingApprovalCleanedUp(t, s.db, taskID, runID, reviewID,
+		"queued", "returned to the triage queue")
 
 	// /undo must record an 'undo' swipe_events row — that's the
 	// audit signal for swipe-card analytics that distinguishes it
@@ -175,7 +182,8 @@ func TestHandleRequeue_CleansUpPendingApprovalRun(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
-	assertPendingApprovalCleanedUp(t, s.db, taskID, runID, reviewID)
+	assertPendingApprovalCleanedUp(t, s.db, taskID, runID, reviewID,
+		"queued", "returned to the triage queue")
 
 	// /requeue must NOT record a swipe_events row — this is a
 	// deliberate state change, not a swipe undo. Recording it
@@ -197,6 +205,12 @@ func TestHandleRequeue_CleansUpPendingApprovalRun(t *testing.T) {
 // agent already produced a pending_approval review. Today this
 // orphans the review and leaves the run as a phantom
 // pending_approval against a dismissed task — SKY-206's other half.
+//
+// The dismiss-flavored human_content note carries a different
+// implication marker ("dismissed the task entirely") than the
+// requeue paths so a future agent reading prior memory can
+// distinguish "the human shelved this verdict but kept the entity
+// on the docket" from "the human walked away from this entity".
 func TestHandleSwipe_DismissCleansUpPendingApprovalRun(t *testing.T) {
 	s := newTestServer(t)
 	taskID, runID, reviewID := pendingApprovalFixture(t, s.db)
@@ -207,50 +221,8 @@ func TestHandleSwipe_DismissCleansUpPendingApprovalRun(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
-	// Dismiss leaves the task at status='dismissed', not 'queued',
-	// so the shared assertion can't run as-is. Inline the
-	// run/review/memory checks here; the task-status assertion is
-	// inverted.
-	var taskStatus string
-	if err := s.db.QueryRow(`SELECT status FROM tasks WHERE id = ?`, taskID).Scan(&taskStatus); err != nil {
-		t.Fatalf("scan task: %v", err)
-	}
-	if taskStatus != "dismissed" {
-		t.Errorf("task.status = %q, want %q", taskStatus, "dismissed")
-	}
-
-	var runStatus, stopReason string
-	if err := s.db.QueryRow(
-		`SELECT status, COALESCE(stop_reason, '') FROM runs WHERE id = ?`, runID,
-	).Scan(&runStatus, &stopReason); err != nil {
-		t.Fatalf("scan run: %v", err)
-	}
-	if runStatus != "cancelled" {
-		t.Errorf("run.status = %q, want %q", runStatus, "cancelled")
-	}
-	if stopReason != "review_discarded_by_user" {
-		t.Errorf("run.stop_reason = %q, want %q", stopReason, "review_discarded_by_user")
-	}
-
-	var revCount int
-	if err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM pending_reviews WHERE id = ?`, reviewID,
-	).Scan(&revCount); err != nil {
-		t.Fatalf("scan pending_reviews: %v", err)
-	}
-	if revCount != 0 {
-		t.Errorf("pending_reviews not cleaned up on dismiss")
-	}
-
-	var humanContent sql.NullString
-	if err := s.db.QueryRow(
-		`SELECT human_content FROM run_memory WHERE run_id = ?`, runID,
-	).Scan(&humanContent); err != nil {
-		t.Fatalf("scan run_memory: %v", err)
-	}
-	if !humanContent.Valid || !strings.Contains(humanContent.String, "Human discarded") {
-		t.Errorf("human_content missing discard note on dismiss: %v", humanContent)
-	}
+	assertPendingApprovalCleanedUp(t, s.db, taskID, runID, reviewID,
+		"dismissed", "dismissed the task entirely")
 }
 
 // TestHandleUndo_NoPendingApprovalIsNoOp guards the common case:
@@ -288,37 +260,63 @@ func TestHandleUndo_NoPendingApprovalIsNoOp(t *testing.T) {
 }
 
 // TestCleanupPendingApprovalRun_Idempotent calls the cleanup twice
-// against the same task. Second call must find the run already
-// cancelled (MarkAgentRunDiscarded's status='pending_approval'
-// guard returns ok=false) and skip both the DB writes and the
-// websocket broadcast — otherwise repeated cleanup paths (e.g. a
-// dismiss followed by an undo) would double-fire on the frontend.
+// against the same task with a different outcome the second time.
+// The second call must find the run already cancelled (the
+// PendingApprovalRunIDForTask filter returns "" once status flips
+// off pending_approval) and exit silently — otherwise:
+//
+//   - human_content would be overwritten with the second outcome's
+//     text, erasing the first verdict from memory
+//   - the websocket would double-fire agent_run_update
+//   - the audit row's stop_reason / completed_at would shift
+//
+// We pick discardOutcomeDismissed for the second call so that if
+// the early-out broke, the human_content marker would visibly
+// flip from "returned to the triage queue" to "dismissed the task
+// entirely" — making the test failure mode loud rather than silent.
 func TestCleanupPendingApprovalRun_Idempotent(t *testing.T) {
 	s := newTestServer(t)
 	taskID, runID, _ := pendingApprovalFixture(t, s.db)
 
-	s.cleanupPendingApprovalRun(taskID)
-	// Snapshot human_content after first call so we can verify
-	// the second call doesn't overwrite it (it would be the same
-	// content, but the contract is "no-op when run is already
-	// cancelled" — checking the row-affected count is the cleanest
-	// proxy without injecting a counting websocket hub).
+	s.cleanupPendingApprovalRun(taskID, discardOutcomeRequeued)
+
 	var humanContentBefore sql.NullString
+	var completedAtBefore sql.NullTime
 	if err := s.db.QueryRow(
-		`SELECT human_content FROM run_memory WHERE run_id = ?`, runID,
-	).Scan(&humanContentBefore); err != nil {
+		`SELECT rm.human_content, r.completed_at
+		 FROM run_memory rm JOIN runs r ON r.id = rm.run_id
+		 WHERE rm.run_id = ?`, runID,
+	).Scan(&humanContentBefore, &completedAtBefore); err != nil {
 		t.Fatalf("scan after first call: %v", err)
 	}
-
-	// Second call: must not error, must not change observable state.
-	s.cleanupPendingApprovalRun(taskID)
-
-	var runStatus string
-	if err := s.db.QueryRow(`SELECT status FROM runs WHERE id = ?`, runID).Scan(&runStatus); err != nil {
-		t.Fatalf("scan run after second call: %v", err)
+	if !strings.Contains(humanContentBefore.String, "returned to the triage queue") {
+		t.Fatalf("first call didn't write requeue marker; got %q", humanContentBefore.String)
 	}
-	if runStatus != "cancelled" {
-		t.Errorf("run.status drifted after second call: %q", runStatus)
+
+	// Second call: different outcome, must not take effect.
+	s.cleanupPendingApprovalRun(taskID, discardOutcomeDismissed)
+
+	var humanContentAfter sql.NullString
+	var completedAtAfter sql.NullTime
+	var runStatusAfter string
+	if err := s.db.QueryRow(
+		`SELECT rm.human_content, r.completed_at, r.status
+		 FROM run_memory rm JOIN runs r ON r.id = rm.run_id
+		 WHERE rm.run_id = ?`, runID,
+	).Scan(&humanContentAfter, &completedAtAfter, &runStatusAfter); err != nil {
+		t.Fatalf("scan after second call: %v", err)
+	}
+	if runStatusAfter != "cancelled" {
+		t.Errorf("run.status drifted after second call: %q", runStatusAfter)
+	}
+	if humanContentAfter.String != humanContentBefore.String {
+		t.Errorf("human_content overwritten by second call:\n  before: %q\n  after:  %q",
+			humanContentBefore.String, humanContentAfter.String)
+	}
+	if !completedAtBefore.Valid || !completedAtAfter.Valid ||
+		!completedAtAfter.Time.Equal(completedAtBefore.Time) {
+		t.Errorf("completed_at shifted on idempotent re-call: before=%v after=%v",
+			completedAtBefore, completedAtAfter)
 	}
 }
 
@@ -341,7 +339,7 @@ func TestCleanupPendingApprovalRun_AgentContentNullSurvives(t *testing.T) {
 		t.Fatalf("force null agent_content: %v", err)
 	}
 
-	s.cleanupPendingApprovalRun(taskID)
+	s.cleanupPendingApprovalRun(taskID, discardOutcomeRequeued)
 
 	var agentContent, humanContent sql.NullString
 	if err := s.db.QueryRow(
