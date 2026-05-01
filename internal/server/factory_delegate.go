@@ -74,15 +74,18 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Anchor the (possibly synthesized) task on the most recent event
-	// of this type for the entity. If none exists, the entity isn't
-	// actually at this station — refuse rather than fabricate an
+	// of this type for the entity. For discriminator/open-set event
+	// types, a non-empty dedup_key must also match the selected event;
+	// otherwise we could create a task whose dedup_key does not match
+	// its primary_event_id. If no matching event exists, the entity
+	// isn't actually at this station — refuse rather than fabricate an
 	// event row.
 	primaryEvent, err := db.LatestEventForEntityAndType(s.db, req.EntityID, req.EventType)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	if primaryEvent == nil {
+	if primaryEvent == nil || (req.DedupKey != "" && primaryEvent.DedupKey != req.DedupKey) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no matching event for entity at this station"})
 		return
 	}
