@@ -51,6 +51,7 @@ import {
 
 import { buildBelt, buildCurvedBelt, type BeltBuild } from './iso-belt'
 import { ItemSimulator, type SpawnerOptions, type SpawnOptions } from './iso-items'
+import { SnapshotChipController } from './snapshot-chips'
 import type { PathSegment } from './iso-path'
 import { buildPoleMesh, type Pole, type PoleBuild } from './iso-pole'
 import { CONVEYOR_HEIGHT, CONVEYOR_WIDTH, type PortDirection, type PortHandle } from './iso-port'
@@ -104,6 +105,7 @@ export class IsoScene {
   private shadowGenerator: ShadowGenerator | null = null
   private glowLayer: GlowLayer | null = null
   private itemSim: ItemSimulator | null = null
+  private snapshotChips: SnapshotChipController | null = null
 
   constructor(canvas: HTMLCanvasElement) {
     this.engine = new Engine(canvas, true, {
@@ -682,8 +684,23 @@ export class IsoScene {
     this.getItemSimulator().spawnItem(itinerary, options)
   }
 
+  /** Snapshot-driven chip controller. The scene reconciler in
+   *  iso-debug calls reconcile() every frame with the live transit
+   *  set; this controller owns those meshes and poses them from
+   *  externally-supplied progress values. Lazily constructed so the
+   *  PBR materials it shares with the queued-pad don't get built
+   *  until the first chip needs to render. */
+  getSnapshotChipController(): SnapshotChipController {
+    if (!this.snapshotChips) {
+      const m = this.getMaterials()
+      this.snapshotChips = new SnapshotChipController(this.scene, m.queuedShell, m.queuedCore)
+    }
+    return this.snapshotChips
+  }
+
   destroy(): void {
     this.itemSim?.destroy()
+    this.snapshotChips?.destroy()
     this.gridMesh?.dispose()
     this.ground?.dispose()
     this.groundMat?.dispose()

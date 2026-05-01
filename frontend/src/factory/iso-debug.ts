@@ -41,14 +41,17 @@
 
 import { Vector3 } from '@babylonjs/core'
 
+import { BELT_WORLD_SPEED } from './iso-belt'
 import { hashHue } from './iso-items'
+import { placeEntity } from './place-entity'
 import { DEFAULT_PORT_RECESS_DEPTH } from './iso-port'
 import type { Pole } from './iso-pole'
 import { IsoScene } from './iso-renderer'
 import { buildRoutingTable, type RoutingTable } from './iso-routing'
 import type { Router } from './iso-router'
 import type { Station } from './iso-station'
-import type { FactoryEntity, FactoryStation } from '../types'
+import type { TransitPlacement } from './snapshot-chips'
+import type { FactoryEntity, FactorySnapshot, FactoryStation } from '../types'
 
 const FLOOR_CELL = 80
 const FLOOR_SIZE = 4800 // 60 cells — extra room for downstream additions
@@ -772,11 +775,11 @@ const stationSpec = (
   w: STATION_W * FLOOR_CELL,
   d: STATION_D * FLOOR_CELL,
   h: STATION_H,
-  // The station's stable id IS its event_type. Click hit-testing
-  // routes through this; setStationData / spawnChip / drawer lookup
-  // all key off it. Using the event_type directly means the
-  // /api/factory/snapshot's `stations[event_type]` map lines up 1:1
-  // with our 12 stations without an intermediate slug layer.
+  // The station's stable id IS its event_type. Click hit-testing,
+  // the snapshot reconciler, and the routing table all key off this
+  // value, so /api/factory/snapshot's `stations[event_type]` map
+  // lines up 1:1 with our 12 stations without an intermediate slug
+  // layer.
   id: eventType,
   queuedCount: queued,
   runCount: runs,
@@ -1353,30 +1356,6 @@ export interface ClickedStationInfo {
   runs: FactoryStation['runs']
 }
 
-export interface StationDataUpdate {
-  queuedCount: number
-  runCount: number
-  queued: FactoryEntity[]
-  runs: FactoryStation['runs']
-}
-
-export interface SpawnChipArgs {
-  /** Source station's event_type. Must match a station id. */
-  fromEvent: string
-  /** Destination station's event_type. */
-  toEvent: string
-  /** Optional 1–8 char label rendered on the chip's top face. PR
-   *  number, Jira key, etc. */
-  label?: string
-  /** Optional hue [0, 360) for the chip's core. The pipeline derives
-   *  this from the entity's repo (GitHub) or project (Jira). */
-  hue?: number
-  /** Fired when the chip arrives at the destination station's
-   *  recess. The pipeline uses this to schedule a snapshot refetch
-   *  so tray counts catch up. */
-  onArrive?: () => void
-}
-
 export interface IsoSceneHandle {
   destroy: () => void
   resetView: () => void
@@ -1389,16 +1368,11 @@ export interface IsoSceneHandle {
    *  landed off-station. Drawers use the null signal to close.
    *  Returns an unsubscribe function. */
   onStationClick: (cb: (info: ClickedStationInfo | null) => void) => () => void
-  /** Push the latest tray data for a station. Updates mesh counts
-   *  and stores the queued/runs arrays for the next click. Unknown
-   *  event_types are silently ignored — the snapshot may include
-   *  events we haven't built stations for (e.g., Jira). */
-  setStationData: (eventType: string, update: StationDataUpdate) => void
-  /** Spawn one chip animating from one station to another. Returns
-   *  true if a path exists in the routing table; false on no-path
-   *  (the caller should teleport — i.e., skip the animation and
-   *  rely on the next snapshot to update counts). */
-  spawnChip: (args: SpawnChipArgs) => boolean
+  /** Hand the scene the latest /api/factory/snapshot payload. The
+   *  scene's per-frame reconciler then projects every entity to
+   *  either a station (driving tray counts) or a transit (driving
+   *  chip meshes). Backend is the source of truth for both. */
+  applySnapshot: (snapshot: FactorySnapshot) => void
 }
 
 /** Back-compat alias retained for any consumers still importing the
@@ -2426,8 +2400,8 @@ export async function createIsoDebugScene(container: HTMLDivElement): Promise<Is
   // One row per station — keyed by event_type (= the station's id).
   // Pairs the spec/label with the live mesh handle (for setQueuedCount
   // / setRunCount) and the latest ClickedStationInfo to replay when
-  // the user clicks. setStationData mutates `data` in place; the
-  // click callback returns whatever's most recent.
+  // the user clicks. The reconciler below mutates `data` in place
+  // each frame; click callback returns whatever's most recent.
   type StationRow = {
     spec: Station
     handle: ReturnType<IsoScene['addStation']>
@@ -2468,7 +2442,8 @@ export async function createIsoDebugScene(container: HTMLDivElement): Promise<Is
   // Built AFTER all `.next` wiring above so every segment.next array
   // is populated. BFS from each station's east-output segment to
   // every other station's west-input segment yields the itinerary
-  // we hand to spawnItem when a transition WS event arrives.
+  // (and per-pair travel duration) the snapshot reconciler uses for
+  // chip placement.
   const routingTable: RoutingTable = buildRoutingTable(
     stationRows
       .filter(({ spec }) => spec.id != null)
@@ -2477,7 +2452,82 @@ export async function createIsoDebugScene(container: HTMLDivElement): Promise<Is
         exit: handle.ports[1].segment!,
         entry: handle.ports[0].segment!,
       })),
+    BELT_WORLD_SPEED,
   )
+
+  // ─── Snapshot reconciler ───────────────────────────────────────
+  // Single source of truth for what's parked where and what's in
+  // flight. Runs every frame off the latest snapshot:
+  //   1. project each entity via placeEntity → parked|transit
+  //   2. update tray counts / click-replay data only when changed
+  //   3. reconcile chip meshes against the live transit set
+  //
+  // The same projection drives both station counts and chip
+  // positions, so they cannot drift out of sync. WS events on the
+  // page just trigger a snapshot refetch — they don't drive any
+  // visual state directly.
+  const knownStations = new Set<string>(stationsByEvent.keys())
+  const chipController = renderer.getSnapshotChipController()
+  let latestSnapshot: FactorySnapshot | null = null
+  const lastTrayState = new Map<string, { queuedCount: number; runCount: number }>()
+
+  const reconcile = (): void => {
+    if (!latestSnapshot) return
+    const now = Date.now()
+    const transits = new Map<string, TransitPlacement>()
+    const parkedByStation = new Map<string, FactoryEntity[]>()
+
+    for (const e of latestSnapshot.entities) {
+      const p = placeEntity(e, knownStations, routingTable.getDuration, now)
+      if (!p) continue
+      if (p.kind === 'parked') {
+        const arr = parkedByStation.get(p.station)
+        if (arr) arr.push(e)
+        else parkedByStation.set(p.station, [e])
+      } else {
+        transits.set(e.id, {
+          from: p.from,
+          to: p.to,
+          progress: p.progress,
+          decor: chipDecorFor(e),
+        })
+      }
+    }
+
+    // Update station tray data. setQueuedCount/setRunCount touch a
+    // DynamicTexture; only call them when the count actually changes
+    // to avoid texture re-uploads on idle frames. Click-replay data
+    // is always refreshed so a same-count-different-entities case
+    // (one entity in, one out) reflects in the next drawer open.
+    for (const [eventType, row] of stationsByEvent) {
+      const fs = latestSnapshot.stations[eventType]
+      const runs = fs?.runs ?? []
+      const runEntityIds = new Set(runs.map((r) => r.task.entity_id))
+      const allParked = parkedByStation.get(eventType) ?? []
+      const queued = allParked.filter((e) => !runEntityIds.has(e.id))
+      const queuedCount = queued.length
+      const runCount = runs.length
+
+      const last = lastTrayState.get(eventType)
+      if (!last || last.queuedCount !== queuedCount || last.runCount !== runCount) {
+        row.handle.setQueuedCount(queuedCount)
+        row.handle.setRunCount(runCount)
+        lastTrayState.set(eventType, { queuedCount, runCount })
+      }
+      row.data = {
+        id: eventType,
+        label: row.spec.label ?? eventType,
+        queuedCount,
+        runCount,
+        queued,
+        runs,
+      }
+    }
+
+    chipController.reconcile(transits, (from, to) => routingTable.getItinerary(from, to))
+  }
+
+  const reconcileObserver = renderer.scene.onBeforeRenderObservable.add(reconcile)
 
   const ro = new ResizeObserver(() => {
     renderer.resize()
@@ -2486,6 +2536,7 @@ export async function createIsoDebugScene(container: HTMLDivElement): Promise<Is
 
   return {
     destroy: () => {
+      renderer.scene.onBeforeRenderObservable.remove(reconcileObserver)
       ro.disconnect()
       renderer.destroy()
       canvas.remove()
@@ -2524,27 +2575,37 @@ export async function createIsoDebugScene(container: HTMLDivElement): Promise<Is
         cb(row?.data ?? null)
       })
     },
-    setStationData: (eventType, update) => {
-      const row = stationsByEvent.get(eventType)
-      if (!row) return
-      row.handle.setQueuedCount(update.queuedCount)
-      row.handle.setRunCount(update.runCount)
-      row.data = {
-        id: eventType,
-        label: row.spec.label ?? eventType,
-        queuedCount: update.queuedCount,
-        runCount: update.runCount,
-        queued: update.queued,
-        runs: update.runs,
-      }
-    },
-    spawnChip: ({ fromEvent, toEvent, label, hue, onArrive }) => {
-      const itinerary = routingTable.getItinerary(fromEvent, toEvent)
-      if (!itinerary) return false
-      renderer.spawnItem(itinerary, { label, hue, onArrive })
-      return true
+    applySnapshot: (snapshot) => {
+      latestSnapshot = snapshot
+      // Run a reconciliation right away so the first paint after a
+      // refetch reflects the new data without waiting on the next
+      // frame (matters mostly for the initial load, where the user
+      // hasn't seen anything yet).
+      reconcile()
     },
   }
+}
+
+// Compute chip decoration (hue + short label) from a snapshot entity.
+// GitHub: hue from the repo, label is the PR number. Jira: hue from
+// the project key prefix of source_id, label is the full source_id.
+// Same hue for every chip belonging to the same repo/project keeps
+// them visually grouped without any user config.
+function chipDecorFor(entity: FactoryEntity): { hue?: number; label?: string } {
+  if (entity.source === 'github') {
+    return {
+      hue: entity.repo ? hashHue(entity.repo) : undefined,
+      label: entity.number != null ? `#${entity.number}` : undefined,
+    }
+  }
+  if (entity.source === 'jira') {
+    const projectKey = entity.source_id?.split('-')[0]
+    return {
+      hue: projectKey ? hashHue(projectKey) : undefined,
+      label: entity.source_id || undefined,
+    }
+  }
+  return {}
 }
 
 // hashHue is re-exported from iso-items so callers (the React-layer

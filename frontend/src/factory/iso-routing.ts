@@ -32,9 +32,26 @@ export interface RoutingTable {
    *  source station's exit segment; the last is the destination
    *  station's entry segment. */
   getItinerary(fromId: string, toId: string): PathSegment[] | null
+  /** Animation duration in ms for a chip traveling from fromId to
+   *  toId at the configured belt speed. Falls back to the supplied
+   *  default when no path exists — the snapshot reconciler still
+   *  needs a number so unknown pairs eventually snap to parked. */
+  getDuration(fromId: string, toId: string): number
 }
 
-export function buildRoutingTable(stations: StationEndpoints[]): RoutingTable {
+/** Build a routing table from the station endpoint set.
+ *
+ *  `worldSpeed` is in world-units per second; chip animation duration
+ *  per pair is derived as (sum of segment lengths) / worldSpeed so
+ *  chip travel time matches the visual length of the bridges. */
+export function buildRoutingTable(
+  stations: StationEndpoints[],
+  worldSpeed: number,
+  /** Returned by `getDuration` for pairs with no path; placeEntity
+   *  uses this so chips spawned on those (rare) transitions still
+   *  fall through to "parked" within a reasonable window. */
+  fallbackDurationMs: number = 2000,
+): RoutingTable {
   const entryToId = new Map<PathSegment, string>()
   for (const s of stations) entryToId.set(s.entry, s.id)
 
@@ -84,10 +101,22 @@ export function buildRoutingTable(stations: StationEndpoints[]): RoutingTable {
     )
   }
 
+  // Precompute per-pair durations from the segment lengths summed
+  // along each itinerary. Constant work done once at scene boot.
+  const durations = new Map<string, number>()
+  for (const [key, path] of table) {
+    const totalLen = path.reduce((acc, seg) => acc + seg.length, 0)
+    durations.set(key, (totalLen / worldSpeed) * 1000)
+  }
+
   return {
     getItinerary(fromId, toId) {
       if (fromId === toId) return null
       return table.get(`${fromId}\0${toId}`) ?? null
+    },
+    getDuration(fromId, toId) {
+      if (fromId === toId) return fallbackDurationMs
+      return durations.get(`${fromId}\0${toId}`) ?? fallbackDurationMs
     },
   }
 }

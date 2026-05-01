@@ -2,60 +2,43 @@ import * as Tooltip from '@radix-ui/react-tooltip'
 import { useEffect, useRef, useState } from 'react'
 import {
   createIsoDebugScene,
-  hashHue,
   type ClickedStationInfo,
   type IsoSceneHandle,
 } from '../factory/iso-debug'
-import { EntityLocationCache, projectEntityLocation } from '../factory/entity-cache'
 import { useWebSocket } from '../hooks/useWebSocket'
-import type { AgentRun, FactoryEntity, FactorySnapshot, FactoryStation, Task } from '../types'
+import type { AgentRun, FactoryEntity, FactorySnapshot, Task } from '../types'
 
-// Production factory page — Babylon scene driven by /api/factory/snapshot
-// and the WS event stream. The 12 stations on the floor map 1:1 to
-// GitHub PR event types; their tray counts come from the snapshot,
-// and chip animations between stations come from `event` WS messages
-// resolved against an entity-location cache (kept in localStorage so
-// it survives page reloads). Jira event types are ignored for now —
-// the floor doesn't have Jira stations yet.
+// Production factory page — Babylon scene driven by /api/factory/snapshot.
+// The page itself does almost nothing visual: it fetches the snapshot,
+// hands it to the scene, and pipes WS frames into a debounced refetch.
+//
+// All entity placement (which station they're parked at, whether
+// they're mid-flight on a bridge and how far along) is derived inside
+// the scene by a per-frame reconciler reading the snapshot's
+// `current_event_type` + `last_event_at` + `recent_events`. The
+// backend is therefore authoritative for both station tray counts and
+// chip positions; the same projection feeds both, so they cannot drift.
+// See `factory/place-entity.ts` for the projection function.
 
 // Debounce window for snapshot refetches. The router publishes one
-// `event` WS frame per detection plus a batched `tasks_updated` after
-// each poll cycle; collapsing these into one /api/factory/snapshot
-// call keeps the spam down. 1.5s feels instant to the user.
-const REFETCH_DEBOUNCE_MS = 1500
-
-// Event types the floor has stations for — same 12 as iso-debug.ts's
-// hardcoded list. Used to filter snapshot entities and project them
-// to the most recent station-mapped event in their history.
-const KNOWN_STATION_EVENTS = new Set<string>([
-  'github:pr:opened',
-  'github:pr:ready_for_review',
-  'github:pr:new_commits',
-  'github:pr:conflicts',
-  'github:pr:ci_check_passed',
-  'github:pr:ci_check_failed',
-  'github:pr:review_requested',
-  'github:pr:review_approved',
-  'github:pr:review_commented',
-  'github:pr:review_changes_requested',
-  'github:pr:closed',
-  'github:pr:merged',
-])
+// `event` WS frame per detection plus a batched `tasks_updated` per
+// poll cycle; collapsing those into one /api/factory/snapshot call
+// keeps server load down. Kept short so chip motion appears promptly
+// after the WS event lands — the snapshot determines when a transit
+// becomes visible (it carries the new last_event_at), and a long
+// debounce delays that.
+const REFETCH_DEBOUNCE_MS = 250
 
 export default function Factory() {
   const containerRef = useRef<HTMLDivElement>(null)
   const sceneRef = useRef<IsoSceneHandle | null>(null)
-  const cacheRef = useRef<EntityLocationCache | null>(null)
   const [picked, setPicked] = useState<ClickedStationInfo | null>(null)
 
-  // Mount the Babylon scene + entity cache once. Both live for the
-  // lifetime of the page; cleanup happens on unmount.
   useEffect(() => {
     const container = containerRef.current
     if (!container) return
     let cancelled = false
     let unsubClick: (() => void) | null = null
-    cacheRef.current = new EntityLocationCache()
     createIsoDebugScene(container).then((scene) => {
       if (cancelled) {
         scene.destroy()
@@ -69,15 +52,12 @@ export default function Factory() {
       unsubClick?.()
       sceneRef.current?.destroy()
       sceneRef.current = null
-      cacheRef.current?.destroy()
-      cacheRef.current = null
     }
   }, [])
 
-  // Snapshot loader — installs a window-level callback so the WS
-  // listener (defined below, separate effect) can trigger refetches
-  // without forcing a re-identify of the WS callback every render.
-  // Pattern lifted from the old 2.5D Factory page.
+  // Snapshot loader. The window-level callback is what the WS
+  // effect (next block) calls to schedule a debounced refetch
+  // without forcing this effect's identity to change on every render.
   useEffect(() => {
     let cancelled = false
     let pending: ReturnType<typeof setTimeout> | null = null
@@ -90,7 +70,7 @@ export default function Factory() {
         })
         .then((data) => {
           if (cancelled) return
-          applySnapshot(data, sceneRef.current, cacheRef.current)
+          sceneRef.current?.applySnapshot(data)
         })
         .catch((err) => {
           if (cancelled) return
@@ -117,41 +97,12 @@ export default function Factory() {
     }
   }, [])
 
-  // WS listener. Three cases:
-  //   • `event` for an entity transition → animate a chip from prior
-  //     station to new station (if both are known and reachable),
-  //     update the cache, and schedule a snapshot refetch.
-  //   • `tasks_updated` / `agent_run_update` → just refetch; these
-  //     don't move entities, only counts.
-  //   • everything else → ignored.
+  // WS frames are refetch hints only. Backend authority means we
+  // don't try to drive any chip or count update directly from the
+  // event payload — the next snapshot carries the same information
+  // in a form that's coherent with everything else on the floor.
   useWebSocket((evt) => {
-    if (evt.type === 'event') {
-      const e = evt.data
-      const entityId = e.entity_id ?? null
-      const newEvent = e.event_type
-      const cache = cacheRef.current
-      const scene = sceneRef.current
-      if (entityId && newEvent && cache && scene && KNOWN_STATION_EVENTS.has(newEvent)) {
-        const { prior } = cache.recordTransition(entityId, newEvent)
-        if (prior && prior !== newEvent && KNOWN_STATION_EVENTS.has(prior)) {
-          // Spawn the animation. Hue / label come from the snapshot's
-          // entity record, looked up at spawn time. Returns false on
-          // no-path-in-topology — we just skip the animation; the
-          // refetch below will reconcile counts.
-          scene.spawnChip({
-            fromEvent: prior,
-            toEvent: newEvent,
-            // Label and hue resolved from the most recent snapshot we
-            // have on hand. If the entity isn't in our last snapshot
-            // (truly new), the chip flies blank — fine for one frame;
-            // the next snapshot fills it in.
-            ...resolveChipDecor(entityId),
-          })
-        }
-      }
-      const refetch = (window as unknown as { __factoryRefetch?: () => void }).__factoryRefetch
-      refetch?.()
-    } else if (evt.type === 'tasks_updated' || evt.type === 'agent_run_update') {
+    if (evt.type === 'event' || evt.type === 'tasks_updated' || evt.type === 'agent_run_update') {
       const refetch = (window as unknown as { __factoryRefetch?: () => void }).__factoryRefetch
       refetch?.()
     }
@@ -184,88 +135,6 @@ export default function Factory() {
       <StationDrawer info={picked} />
     </div>
   )
-}
-
-// ─── Snapshot → scene wiring ───────────────────────────────────────
-
-// Latest snapshot, kept module-scoped so the WS handler can resolve
-// entity decorations (label, hue) at chip-spawn time without
-// piping snapshot state through React refs. Only the most recent
-// snapshot is ever read; older entries don't matter.
-let lastSnapshotEntities: Map<string, FactoryEntity> = new Map()
-
-function applySnapshot(
-  data: FactorySnapshot,
-  scene: IsoSceneHandle | null,
-  cache: EntityLocationCache | null,
-): void {
-  // Cache-side: seed location cache from the snapshot's projection.
-  // Drift between cache and snapshot is corrected here silently.
-  if (cache) cache.seedFromSnapshot(data, KNOWN_STATION_EVENTS)
-
-  // Module-scoped lookup for chip decoration at spawn time. Built
-  // from the latest snapshot every refresh.
-  const byId = new Map<string, FactoryEntity>()
-  for (const e of data.entities) byId.set(e.id, e)
-  lastSnapshotEntities = byId
-
-  if (!scene) return
-
-  // Project each entity to the station it's currently parked at —
-  // walk recent_events tail, fall back to current_event_type. The
-  // 2.5D factory uses the same rule (Factory.tsx:176-191 in the
-  // old file) to avoid the "current_event_type ordered by insertion
-  // time" bug that surfaced intermediate non-station events.
-  const entityParkedAt = new Map<string, string>()
-  for (const e of data.entities) {
-    const at = projectEntityLocation(e, KNOWN_STATION_EVENTS)
-    if (at) entityParkedAt.set(e.id, at)
-  }
-
-  // For each known station event_type, build:
-  //   - runs   : array of { run, task, mine } from snapshot.stations
-  //   - queued : entities parked here that aren't already in any run
-  // and push to the scene. Stations with no entry in snapshot.stations
-  // still get a setStationData call so their counts go to zero.
-  for (const eventType of KNOWN_STATION_EVENTS) {
-    const fs: FactoryStation | undefined = data.stations[eventType]
-    const runs = fs?.runs ?? []
-    const runEntityIds = new Set<string>(runs.map((r) => r.task.entity_id))
-    const queued = data.entities.filter(
-      (e) => entityParkedAt.get(e.id) === eventType && !runEntityIds.has(e.id),
-    )
-    scene.setStationData(eventType, {
-      queuedCount: queued.length,
-      runCount: runs.length,
-      queued,
-      runs,
-    })
-  }
-}
-
-// ─── Chip decoration ───────────────────────────────────────────────
-
-/** Compute the chip's label + hue from the entity's snapshot record.
- *  GitHub: hue from `repo`, label `#<number>`. Jira: hue from project
- *  prefix of `source_id`, label = source_id (the Jira key). Falls back
- *  to no decor when the entity isn't in our latest snapshot — the
- *  chip still rides, just plainly. */
-function resolveChipDecor(entityId: string): { label?: string; hue?: number } {
-  const e = lastSnapshotEntities.get(entityId)
-  if (!e) return {}
-  if (e.source === 'github') {
-    const label = e.number != null ? `#${e.number}` : undefined
-    const hue = e.repo ? hashHue(e.repo) : undefined
-    return { label, hue }
-  }
-  if (e.source === 'jira') {
-    const label = e.source_id || undefined
-    // Jira project key is the prefix before "-" (SKY-123 → "SKY").
-    const projectKey = e.source_id?.split('-')[0]
-    const hue = projectKey ? hashHue(projectKey) : undefined
-    return { label, hue }
-  }
-  return {}
 }
 
 // ─── Drawer (top-down chassis view of the clicked station) ────────
