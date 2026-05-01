@@ -84,13 +84,33 @@ func UpdateRunMemoryHumanContent(database *sql.DB, runID, content string) error 
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		// Logged-and-returned-nil is the right shape: the spawner's
-		// gate teardown should have written this row, but if the
-		// run_memory row genuinely doesn't exist (cleanup race,
-		// taken-over run, etc.), the human's submit shouldn't fail.
-		// The agent-side upsert path will surface its own warning if
-		// it failed earlier.
-		log.Printf("[memory] no run_memory row for run %s; human_content not recorded", runID)
+		// In SQLite, RowsAffected can be 0 both when no row matches
+		// and when the UPDATE is a no-op (for example, writing the
+		// same human_content again, or NULL to an already-NULL row).
+		// Verify existence before claiming the row is missing.
+		var exists int
+		err := database.QueryRow(
+			`SELECT 1 FROM run_memory WHERE run_id = ? LIMIT 1`,
+			runID,
+		).Scan(&exists)
+		switch err {
+		case nil:
+			// Matching row exists; the UPDATE was a no-op, so there is
+			// nothing to warn about.
+		case sql.ErrNoRows:
+			// Logged-and-returned-nil is the right shape: the spawner's
+			// gate teardown should have written this row, but if the
+			// run_memory row genuinely doesn't exist (cleanup race,
+			// taken-over run, etc.), the human's submit shouldn't fail.
+			// The agent-side upsert path will surface its own warning if
+			// it failed earlier.
+			log.Printf("[memory] no run_memory row for run %s; human_content not recorded", runID)
+		default:
+			// Keep this path non-fatal like the existing warning-only
+			// behavior, but avoid asserting that the row is absent when
+			// verification itself failed.
+			log.Printf("[memory] unable to verify run_memory row for run %s after no-op human_content update: %v", runID, err)
+		}
 	}
 	return nil
 }
