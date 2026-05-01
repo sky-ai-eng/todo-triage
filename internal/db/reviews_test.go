@@ -145,11 +145,65 @@ func TestGetPendingReview_ProjectsOriginals(t *testing.T) {
 	if got == nil {
 		t.Fatal("GetPendingReview returned nil")
 	}
-	if got.OriginalReviewBody != "draft" {
-		t.Errorf("OriginalReviewBody = %q, want %q", got.OriginalReviewBody, "draft")
+	if got.OriginalReviewBody == nil || *got.OriginalReviewBody != "draft" {
+		t.Errorf("OriginalReviewBody = %v, want pointer to %q", got.OriginalReviewBody, "draft")
 	}
-	if got.OriginalReviewEvent != "APPROVE" {
-		t.Errorf("OriginalReviewEvent = %q, want %q", got.OriginalReviewEvent, "APPROVE")
+	if got.OriginalReviewEvent == nil || *got.OriginalReviewEvent != "APPROVE" {
+		t.Errorf("OriginalReviewEvent = %v, want pointer to %q", got.OriginalReviewEvent, "APPROVE")
+	}
+}
+
+// TestGetPendingReview_LegacyOriginalsAreNil is the regression for
+// the COALESCE-collapses-snapshot-semantics bug. A row with NULL
+// original_review_body / original_review_event (legacy, mid-flight
+// when the columns landed) must surface as a nil pointer — not as
+// the empty string, which would be indistinguishable from a real
+// snapshot of an empty drafted body.
+func TestGetPendingReview_LegacyOriginalsAreNil(t *testing.T) {
+	db := newTestDB(t)
+	seedPendingReview(t, db, "rev_legacy")
+	// Direct UPDATE bypasses SetPendingReviewSubmission so the
+	// originals stay NULL (simulating a row that existed before the
+	// COALESCE writers were added).
+	if _, err := db.Exec(
+		`UPDATE pending_reviews SET review_body = ?, review_event = ? WHERE id = ?`,
+		"final", "APPROVE", "rev_legacy",
+	); err != nil {
+		t.Fatalf("seed legacy: %v", err)
+	}
+
+	got, err := GetPendingReview(db, "rev_legacy")
+	if err != nil {
+		t.Fatalf("GetPendingReview: %v", err)
+	}
+	if got.OriginalReviewBody != nil {
+		t.Errorf("OriginalReviewBody = %v, want nil (legacy NULL must not collapse to empty string)", *got.OriginalReviewBody)
+	}
+	if got.OriginalReviewEvent != nil {
+		t.Errorf("OriginalReviewEvent = %v, want nil", *got.OriginalReviewEvent)
+	}
+}
+
+// TestGetPendingReview_EmptyOriginalIsRealSnapshot is the inverse:
+// a legitimately-empty agent-drafted body (e.g. the agent posted
+// only inline comments, no top-level prose) must surface as a
+// non-nil pointer to "". Folding it onto NULL via COALESCE would
+// suppress the diff section when a human later adds body text.
+func TestGetPendingReview_EmptyOriginalIsRealSnapshot(t *testing.T) {
+	db := newTestDB(t)
+	seedPendingReview(t, db, "rev_empty_orig")
+	if err := SetPendingReviewSubmission(db, "rev_empty_orig", "", "COMMENT"); err != nil {
+		t.Fatalf("SetPendingReviewSubmission: %v", err)
+	}
+
+	got, err := GetPendingReview(db, "rev_empty_orig")
+	if err != nil {
+		t.Fatalf("GetPendingReview: %v", err)
+	}
+	if got.OriginalReviewBody == nil {
+		t.Errorf("OriginalReviewBody = nil, want non-nil pointer to \"\" (real snapshot of empty draft)")
+	} else if *got.OriginalReviewBody != "" {
+		t.Errorf("OriginalReviewBody = %q, want %q", *got.OriginalReviewBody, "")
 	}
 }
 
@@ -179,8 +233,38 @@ func TestListPendingReviewComments_ProjectsOriginalBody(t *testing.T) {
 	if got[0].Body != "user edit" {
 		t.Errorf("Body = %q, want %q", got[0].Body, "user edit")
 	}
-	if got[0].OriginalBody != "agent draft" {
-		t.Errorf("OriginalBody = %q, want %q (helper must project original_body)",
+	if got[0].OriginalBody == nil || *got[0].OriginalBody != "agent draft" {
+		t.Errorf("OriginalBody = %v, want pointer to %q (helper must project original_body)",
 			got[0].OriginalBody, "agent draft")
+	}
+}
+
+// TestListPendingReviewComments_LegacyOriginalBodyIsNil mirrors the
+// review-side legacy regression. A pre-SKY-204 comment row whose
+// original_body column is NULL must surface as nil so the
+// formatter folds it onto unchanged rather than emitting a
+// fabricated Was: "" diff entry against the user's current body.
+func TestListPendingReviewComments_LegacyOriginalBodyIsNil(t *testing.T) {
+	db := newTestDB(t)
+	seedPendingReview(t, db, "rev_legacy_c")
+	// Bypass AddPendingReviewComment (which writes original_body)
+	// so the row matches the pre-SKY-204 shape: original_body NULL.
+	if _, err := db.Exec(
+		`INSERT INTO pending_review_comments (id, review_id, path, line, body)
+		 VALUES (?, ?, ?, ?, ?)`,
+		"c_legacy", "rev_legacy_c", "x.go", 1, "legacy comment",
+	); err != nil {
+		t.Fatalf("seed legacy comment: %v", err)
+	}
+
+	got, err := ListPendingReviewComments(db, "rev_legacy_c")
+	if err != nil {
+		t.Fatalf("ListPendingReviewComments: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1", len(got))
+	}
+	if got[0].OriginalBody != nil {
+		t.Errorf("OriginalBody = %v, want nil (legacy NULL must not collapse to empty string)", *got[0].OriginalBody)
 	}
 }

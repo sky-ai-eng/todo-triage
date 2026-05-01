@@ -7,6 +7,13 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
+// strPtr returns a pointer to a string literal so test fixtures can
+// supply non-nil snapshots inline. nil vs non-nil-pointer-to-"" is a
+// load-bearing distinction in HumanFeedbackInput (legacy vs. real
+// empty snapshot), so legibility at the call site matters — using
+// raw `&"agent draft"` works but is awkward.
+func strPtr(s string) *string { return &s }
+
 // Golden tests for FormatHumanFeedback. The formatter is pure data
 // in / string out, so the tests live in this file as straight
 // equality checks against expected markdown. The goal is to pin the
@@ -17,9 +24,9 @@ import (
 
 func TestFormatHumanFeedback_NoEditsVerdictUnchanged(t *testing.T) {
 	got := FormatHumanFeedback(HumanFeedbackInput{
-		OriginalBody:  "Looks good to me.",
+		OriginalBody:  strPtr("Looks good to me."),
 		FinalBody:     "Looks good to me.",
-		OriginalEvent: "APPROVE",
+		OriginalEvent: strPtr("APPROVE"),
 		FinalEvent:    "APPROVE",
 		Comments: []ReviewCommentDiffEntry{
 			{Path: "foo.go", Line: 10, Status: CommentDiffUnchanged, Original: "nit", Final: "nit"},
@@ -40,9 +47,9 @@ func TestFormatHumanFeedback_NoEditsVerdictUnchanged(t *testing.T) {
 // from this entity's history.
 func TestFormatHumanFeedback_VerdictChangedOnly(t *testing.T) {
 	got := FormatHumanFeedback(HumanFeedbackInput{
-		OriginalBody:  "LGTM",
+		OriginalBody:  strPtr("LGTM"),
 		FinalBody:     "LGTM",
-		OriginalEvent: "APPROVE",
+		OriginalEvent: strPtr("APPROVE"),
 		FinalEvent:    "REQUEST_CHANGES",
 	})
 	if !strings.Contains(got, "**Verdict changed:** agent drafted APPROVE, human submitted REQUEST_CHANGES.") {
@@ -60,9 +67,9 @@ func TestFormatHumanFeedback_VerdictChangedOnly(t *testing.T) {
 // unambiguously regardless of what punctuation they contain.
 func TestFormatHumanFeedback_BodyEditedOnly(t *testing.T) {
 	got := FormatHumanFeedback(HumanFeedbackInput{
-		OriginalBody:  "this PR adds X.",
+		OriginalBody:  strPtr("this PR adds X."),
 		FinalBody:     "This PR adds X. Note the migration ordering issue.",
-		OriginalEvent: "COMMENT",
+		OriginalEvent: strPtr("COMMENT"),
 		FinalEvent:    "COMMENT",
 	})
 	wantPieces := []string{
@@ -91,9 +98,9 @@ func TestFormatHumanFeedback_BodyEditedOnly(t *testing.T) {
 // the list stays scannable.
 func TestFormatHumanFeedback_CommentEdited(t *testing.T) {
 	got := FormatHumanFeedback(HumanFeedbackInput{
-		OriginalBody:  "ok",
+		OriginalBody:  strPtr("ok"),
 		FinalBody:     "ok",
-		OriginalEvent: "APPROVE",
+		OriginalEvent: strPtr("APPROVE"),
 		FinalEvent:    "APPROVE",
 		Comments: []ReviewCommentDiffEntry{
 			{
@@ -126,9 +133,9 @@ func TestFormatHumanFeedback_CommentEdited(t *testing.T) {
 // here means that wiring can land without re-litigating format.
 func TestFormatHumanFeedback_CommentRemovedAndAdded(t *testing.T) {
 	got := FormatHumanFeedback(HumanFeedbackInput{
-		OriginalBody:  "x",
+		OriginalBody:  strPtr("x"),
 		FinalBody:     "x",
-		OriginalEvent: "COMMENT",
+		OriginalEvent: strPtr("COMMENT"),
 		FinalEvent:    "COMMENT",
 		Comments: []ReviewCommentDiffEntry{
 			{Path: "a.go", Line: 1, Status: CommentDiffRemoved, Original: "agent's drafted comment"},
@@ -156,9 +163,9 @@ func TestFormatHumanFeedback_CommentRemovedAndAdded(t *testing.T) {
 // substantiate.
 func TestFormatHumanFeedback_LegacyNullOriginalsDegrade(t *testing.T) {
 	got := FormatHumanFeedback(HumanFeedbackInput{
-		OriginalBody:  "", // NULL/legacy
+		OriginalBody:  nil, // legacy: no snapshot was captured
 		FinalBody:     "Final body the human submitted.",
-		OriginalEvent: "", // NULL/legacy
+		OriginalEvent: nil, // legacy: no snapshot was captured
 		FinalEvent:    "APPROVE",
 	})
 	if !strings.Contains(got, "**Verdict:** APPROVE.\n") {
@@ -182,9 +189,9 @@ func TestFormatHumanFeedback_LegacyNullOriginalsDegrade(t *testing.T) {
 // because the briefing teaches agents to scan top-to-bottom.
 func TestFormatHumanFeedback_CombinedAllChanged(t *testing.T) {
 	got := FormatHumanFeedback(HumanFeedbackInput{
-		OriginalBody:  "small nits.",
+		OriginalBody:  strPtr("small nits."),
 		FinalBody:     "Larger concerns: see comments.",
-		OriginalEvent: "APPROVE",
+		OriginalEvent: strPtr("APPROVE"),
 		FinalEvent:    "REQUEST_CHANGES",
 		Comments: []ReviewCommentDiffEntry{
 			{Path: "x.go", Line: 5, Status: CommentDiffEdited, Original: "minor", Final: "blocking issue here"},
@@ -219,41 +226,78 @@ func TestBuildHumanFeedbackInput_ClassifiesComments(t *testing.T) {
 		ID:                  "rev",
 		ReviewBody:          "final body",
 		ReviewEvent:         "REQUEST_CHANGES",
-		OriginalReviewBody:  "draft body",
-		OriginalReviewEvent: "APPROVE",
+		OriginalReviewBody:  strPtr("draft body"),
+		OriginalReviewEvent: strPtr("APPROVE"),
 		RunID:               "run-123",
 	}
 	comments := []domain.PendingReviewComment{
 		// Edited: body and original differ.
-		{ID: "c1", Path: "x.go", Line: 1, Body: "user edit", OriginalBody: "agent draft"},
+		{ID: "c1", Path: "x.go", Line: 1, Body: "user edit", OriginalBody: strPtr("agent draft")},
 		// Unchanged: body matches original (even if user PATCHed it back).
-		{ID: "c2", Path: "y.go", Line: 2, Body: "still the same", OriginalBody: "still the same"},
-		// Legacy (no original captured): treat as unchanged so we
-		// don't emit a Was: "" / Now: "..." entry that's
+		{ID: "c2", Path: "y.go", Line: 2, Body: "still the same", OriginalBody: strPtr("still the same")},
+		// Legacy (no original captured at all): treat as unchanged
+		// so we don't emit a Was: "" / Now: "..." entry that's
 		// indistinguishable from a real edit.
-		{ID: "c3", Path: "z.go", Line: 3, Body: "legacy comment", OriginalBody: ""},
+		{ID: "c3", Path: "z.go", Line: 3, Body: "legacy comment", OriginalBody: nil},
+		// Empty real snapshot: agent INSERT-ed with body="", user
+		// edited. Must classify as edited (NOT folded into the
+		// legacy-unchanged bucket).
+		{ID: "c4", Path: "w.go", Line: 4, Body: "human added text", OriginalBody: strPtr("")},
 	}
 
 	got := buildHumanFeedbackInput(review, comments, "REQUEST_CHANGES")
 
-	if got.OriginalBody != "draft body" || got.FinalBody != "final body" {
-		t.Errorf("body fields wrong: %+v", got)
+	if got.OriginalBody == nil || *got.OriginalBody != "draft body" || got.FinalBody != "final body" {
+		t.Errorf("body fields wrong: orig=%v final=%q", got.OriginalBody, got.FinalBody)
 	}
-	if got.OriginalEvent != "APPROVE" || got.FinalEvent != "REQUEST_CHANGES" {
-		t.Errorf("event fields wrong: orig=%q final=%q", got.OriginalEvent, got.FinalEvent)
+	if got.OriginalEvent == nil || *got.OriginalEvent != "APPROVE" || got.FinalEvent != "REQUEST_CHANGES" {
+		t.Errorf("event fields wrong: orig=%v final=%q", got.OriginalEvent, got.FinalEvent)
 	}
-	if len(got.Comments) != 3 {
-		t.Fatalf("len(Comments) = %d, want 3", len(got.Comments))
+	if len(got.Comments) != 4 {
+		t.Fatalf("len(Comments) = %d, want 4", len(got.Comments))
 	}
 	wantStatus := map[string]string{
 		"x.go": CommentDiffEdited,
 		"y.go": CommentDiffUnchanged,
 		"z.go": CommentDiffUnchanged,
+		"w.go": CommentDiffEdited,
 	}
 	for _, c := range got.Comments {
 		if want := wantStatus[c.Path]; c.Status != want {
 			t.Errorf("comment[%s]: status = %q, want %q", c.Path, c.Status, want)
 		}
+	}
+}
+
+// TestFormatHumanFeedback_EmptyOriginalBodyIsRealSnapshot is the
+// regression for the COALESCE-collapsed-sentinel bug: a
+// pending_reviews row whose original_review_body was a real empty
+// string (the agent drafted only inline comments, no top-level body)
+// must drive a body diff if the human added body text — not get
+// silently treated as legacy and skipped. Likewise for the verdict
+// line: a non-nil pointer to "" is a real snapshot, so an unchanged
+// comparison still applies.
+func TestFormatHumanFeedback_EmptyOriginalBodyIsRealSnapshot(t *testing.T) {
+	got := FormatHumanFeedback(HumanFeedbackInput{
+		OriginalBody:  strPtr(""), // agent drafted no top-level body
+		FinalBody:     "I added context the agent missed.",
+		OriginalEvent: strPtr("COMMENT"),
+		FinalEvent:    "COMMENT",
+	})
+	if !strings.Contains(got, "**Body:** Edited.") {
+		t.Errorf("empty real snapshot must drive a body-diff section when human adds text:\n%s", got)
+	}
+	if !strings.Contains(got, "> I added context the agent missed.") {
+		t.Errorf("final body missing from blockquote:\n%s", got)
+	}
+	if !strings.Contains(got, "> **Originally drafted as:**") {
+		t.Errorf("originally-drafted-as section missing:\n%s", got)
+	}
+	if strings.Contains(got, "**Verdict:** COMMENT.\n") {
+		t.Errorf("legacy-style bare verdict line leaked through; OriginalEvent was a real snapshot:\n%s", got)
+	}
+	if !strings.Contains(got, "**Verdict:** COMMENT (unchanged from agent's draft).") {
+		t.Errorf("expected unchanged annotation against real empty snapshot:\n%s", got)
 	}
 }
 
@@ -266,7 +310,7 @@ func TestBuildHumanFeedbackInput_ClassifiesComments(t *testing.T) {
 // consumer reads the result as a flat sentence either way).
 func TestFormatHumanFeedback_MultilineCommentBodyFoldsToSpaces(t *testing.T) {
 	got := FormatHumanFeedback(HumanFeedbackInput{
-		OriginalEvent: "COMMENT",
+		OriginalEvent: strPtr("COMMENT"),
 		FinalEvent:    "COMMENT",
 		Comments: []ReviewCommentDiffEntry{
 			{

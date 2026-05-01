@@ -12,20 +12,23 @@ import (
 // no-side-effects function so it's fully covered by golden tests.
 type HumanFeedbackInput struct {
 	// OriginalBody is the agent's drafted review body (write-once
-	// snapshot from pending_reviews.original_review_body). Empty
-	// string means no snapshot exists — typically a legacy review
-	// row from before SKY-204 added the column. The formatter
-	// degrades gracefully in that case (no body diff section,
-	// verdict line drops the unchanged/changed annotation) rather
-	// than fabricating an "unchanged" claim it can't actually verify.
-	OriginalBody string
+	// snapshot from pending_reviews.original_review_body). nil means
+	// no snapshot exists — typically a legacy review row from before
+	// SKY-204 added the column. A non-nil pointer to "" is a real
+	// snapshot of an empty drafted body (common — agents that
+	// produce inline comments alone leave the top-level body
+	// empty). The formatter degrades only on nil; an empty real
+	// snapshot still drives a body diff if the human added text.
+	OriginalBody *string
 
 	FinalBody string
 
-	// OriginalEvent / FinalEvent: same write-once contract on
-	// pending_reviews.original_review_event (added in SKY-205's
-	// migration 20260501_003 to fill the gap SKY-204 left).
-	OriginalEvent string
+	// OriginalEvent: same nil-vs-empty distinction as OriginalBody.
+	// In practice events shouldn't ever be a legitimately empty
+	// string (handleReviewSubmit rejects review_event=""), but the
+	// pointer encoding keeps the snapshot semantics symmetric and
+	// future-proof.
+	OriginalEvent *string
 	FinalEvent    string
 
 	Comments []ReviewCommentDiffEntry
@@ -37,13 +40,21 @@ type HumanFeedbackInput struct {
 // of submit, before DeletePendingReview clears them) with the user's
 // final comment set, keyed by comment ID. Status is one of:
 //
-//   - CommentDiffUnchanged: same id, body matches (silent — no entry
-//     emitted).
-//   - CommentDiffEdited:    same id, body differs.
+//   - CommentDiffUnchanged: same id, body matches the original
+//     snapshot (or no snapshot exists — the legacy case is folded
+//     into unchanged so we don't emit a Was: "" / Now: "..." entry
+//     against a fabricated original).
+//   - CommentDiffEdited:    same id, body differs from the snapshot.
 //   - CommentDiffRemoved:   id was in the agent's draft, not in the
-//     final set (the human deleted it).
+//     final set (deferred — see review_diff.go's note in
+//     buildHumanFeedbackInput).
 //   - CommentDiffAdded:     id is in the final set with no original_body
-//     captured (the human added it after the agent finished).
+//     captured (deferred — same note).
+//
+// Original/Final are plain strings rather than pointers because the
+// handler classifies the legacy case as Unchanged and never reads
+// Original on the unchanged path; non-unchanged statuses always
+// have a real snapshot to render.
 type ReviewCommentDiffEntry struct {
 	Path     string
 	Line     int
@@ -101,7 +112,9 @@ func FormatHumanFeedback(in HumanFeedbackInput) string {
 		writeBlockquote(&sb, in.FinalBody)
 		sb.WriteString(">\n")
 		sb.WriteString("> **Originally drafted as:**\n")
-		writeBlockquote(&sb, in.OriginalBody)
+		// bodyEdited is only true when OriginalBody != nil (see
+		// bodyChanged), so the deref is safe here.
+		writeBlockquote(&sb, *in.OriginalBody)
 	}
 
 	if commentEdited {
@@ -121,19 +134,21 @@ func bodyChanged(in HumanFeedbackInput) bool {
 	// Without an original snapshot we can't *prove* the body
 	// changed. Returning false here keeps the block honest —
 	// we're not claiming "as drafted" either, just declining to
-	// emit a body section we can't substantiate. The verdict line
-	// below carries the same restraint.
-	if in.OriginalBody == "" {
+	// emit a body section we can't substantiate. nil-vs-empty
+	// matters: a non-nil pointer to "" means the agent really
+	// drafted an empty body, and a human-added body is a real
+	// edit we want to surface.
+	if in.OriginalBody == nil {
 		return false
 	}
-	return strings.TrimSpace(in.OriginalBody) != strings.TrimSpace(in.FinalBody)
+	return strings.TrimSpace(*in.OriginalBody) != strings.TrimSpace(in.FinalBody)
 }
 
 func verdictChanged(in HumanFeedbackInput) bool {
-	if in.OriginalEvent == "" {
+	if in.OriginalEvent == nil {
 		return false
 	}
-	return in.OriginalEvent != in.FinalEvent
+	return *in.OriginalEvent != in.FinalEvent
 }
 
 func anyCommentEdits(comments []ReviewCommentDiffEntry) bool {
@@ -146,17 +161,17 @@ func anyCommentEdits(comments []ReviewCommentDiffEntry) bool {
 }
 
 func writeVerdictLine(sb *strings.Builder, in HumanFeedbackInput) {
-	switch in.OriginalEvent {
-	case "":
+	switch {
+	case in.OriginalEvent == nil:
 		// Legacy / no snapshot: emit the bare final verdict so
 		// the next agent at least knows what was submitted, but
 		// don't attach an unchanged/changed claim we can't back.
 		fmt.Fprintf(sb, "**Verdict:** %s.\n", in.FinalEvent)
-	case in.FinalEvent:
+	case *in.OriginalEvent == in.FinalEvent:
 		fmt.Fprintf(sb, "**Verdict:** %s (unchanged from agent's draft).\n", in.FinalEvent)
 	default:
 		fmt.Fprintf(sb, "**Verdict changed:** agent drafted %s, human submitted %s.\n",
-			in.OriginalEvent, in.FinalEvent)
+			*in.OriginalEvent, in.FinalEvent)
 	}
 }
 
@@ -205,6 +220,13 @@ func writeCommentEntry(sb *strings.Builder, c ReviewCommentDiffEntry) {
 // flow that doesn't exist yet. Both statuses are still emitted by
 // the formatter — they just won't appear in v1's output.
 //
+// Comment classification: nil OriginalBody means a legacy row from
+// before AddPendingReviewComment captured the snapshot — fold to
+// `unchanged` so we don't render "Was: <empty>" against a
+// fabricated original. A non-nil pointer to "" is a real snapshot of
+// an empty agent-drafted comment, which still drives the
+// edited/unchanged comparison normally.
+//
 // finalEvent (the value GitHub actually accepted) overrides
 // review.ReviewEvent for the "what was submitted" half of the
 // verdict diff. They're usually the same, but ghClient.SubmitReview
@@ -218,14 +240,18 @@ func buildHumanFeedbackInput(
 	entries := make([]ReviewCommentDiffEntry, 0, len(comments))
 	for _, c := range comments {
 		status := CommentDiffUnchanged
-		if c.OriginalBody != "" && c.OriginalBody != c.Body {
-			status = CommentDiffEdited
+		original := ""
+		if c.OriginalBody != nil {
+			original = *c.OriginalBody
+			if original != c.Body {
+				status = CommentDiffEdited
+			}
 		}
 		entries = append(entries, ReviewCommentDiffEntry{
 			Path:     c.Path,
 			Line:     c.Line,
 			Status:   status,
-			Original: c.OriginalBody,
+			Original: original,
 			Final:    c.Body,
 		})
 	}

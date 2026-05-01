@@ -16,22 +16,41 @@ func CreatePendingReview(database *sql.DB, r domain.PendingReview) error {
 }
 
 func GetPendingReview(database *sql.DB, reviewID string) (*domain.PendingReview, error) {
+	// original_review_body / original_review_event are deliberately
+	// NOT COALESCEd: SKY-205's diff formatter distinguishes "no
+	// snapshot exists" (NULL — legacy row predating the columns)
+	// from "snapshot of a legitimately empty value." Folding them
+	// together via COALESCE(..., '') would make a human-added body
+	// against an originally-empty draft look like legacy and
+	// silently suppress the diff section.
 	row := database.QueryRow(`
 		SELECT id, pr_number, owner, repo, commit_sha,
 		       COALESCE(diff_lines, ''), COALESCE(run_id, ''),
 		       COALESCE(review_body, ''), COALESCE(review_event, ''),
-		       COALESCE(original_review_body, ''), COALESCE(original_review_event, '')
+		       original_review_body, original_review_event
 		FROM pending_reviews WHERE id = ?`, reviewID)
 	var r domain.PendingReview
+	var origBody, origEvent sql.NullString
 	err := row.Scan(
 		&r.ID, &r.PRNumber, &r.Owner, &r.Repo, &r.CommitSHA,
 		&r.DiffLines, &r.RunID, &r.ReviewBody, &r.ReviewEvent,
-		&r.OriginalReviewBody, &r.OriginalReviewEvent,
+		&origBody, &origEvent,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
-	return &r, err
+	if err != nil {
+		return nil, err
+	}
+	if origBody.Valid {
+		s := origBody.String
+		r.OriginalReviewBody = &s
+	}
+	if origEvent.Valid {
+		s := origEvent.String
+		r.OriginalReviewEvent = &s
+	}
+	return &r, nil
 }
 
 // AddPendingReviewComment inserts a pending review comment, snapshotting
@@ -73,8 +92,13 @@ func DeletePendingReviewComment(database *sql.DB, commentID string) error {
 }
 
 func ListPendingReviewComments(database *sql.DB, reviewID string) ([]domain.PendingReviewComment, error) {
+	// original_body NOT COALESCEd — see GetPendingReview's note.
+	// nil OriginalBody === "legacy row, no snapshot," distinct from
+	// a non-nil pointer to "" which means "agent drafted an empty
+	// comment body" (rare, but the formatter must classify edits
+	// against the real value rather than dismissing the row).
 	rows, err := database.Query(
-		`SELECT id, review_id, path, line, start_line, body, COALESCE(original_body, '')
+		`SELECT id, review_id, path, line, start_line, body, original_body
 		 FROM pending_review_comments WHERE review_id = ? ORDER BY rowid`,
 		reviewID,
 	)
@@ -87,12 +111,17 @@ func ListPendingReviewComments(database *sql.DB, reviewID string) ([]domain.Pend
 	for rows.Next() {
 		var c domain.PendingReviewComment
 		var startLine sql.NullInt64
-		if err := rows.Scan(&c.ID, &c.ReviewID, &c.Path, &c.Line, &startLine, &c.Body, &c.OriginalBody); err != nil {
+		var origBody sql.NullString
+		if err := rows.Scan(&c.ID, &c.ReviewID, &c.Path, &c.Line, &startLine, &c.Body, &origBody); err != nil {
 			return nil, err
 		}
 		if startLine.Valid {
 			v := int(startLine.Int64)
 			c.StartLine = &v
+		}
+		if origBody.Valid {
+			s := origBody.String
+			c.OriginalBody = &s
 		}
 		comments = append(comments, c)
 	}
