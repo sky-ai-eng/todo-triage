@@ -47,7 +47,7 @@ import {
 } from '@babylonjs/core'
 
 import { buildBelt, buildCurvedBelt, type BeltBuild } from './iso-belt'
-import { ItemSimulator, type SpawnerOptions } from './iso-items'
+import { ItemSimulator, type SpawnerOptions, type SpawnOptions } from './iso-items'
 import type { PathSegment } from './iso-path'
 import { buildPoleMesh, type Pole, type PoleBuild } from './iso-pole'
 import { CONVEYOR_HEIGHT, CONVEYOR_WIDTH, type PortDirection, type PortHandle } from './iso-port'
@@ -593,6 +593,16 @@ export class IsoScene {
     options: SpawnerOptions = {},
   ): void {
     this.getItemSimulator().startSpawner(segment, intervalSeconds, options)
+  }
+
+  /** Spawn one chip that rides the given itinerary from start to end.
+   *  Production callers (the live-data spawn pipeline) pass an
+   *  itinerary precomputed by the routing table and a hue derived
+   *  from the entity's repo/project. The chip disposes when it
+   *  reaches the end of the itinerary; if `onArrive` is set in
+   *  options it fires just before disposal. */
+  spawnItem(itinerary: PathSegment[], options: SpawnOptions = {}): void {
+    this.getItemSimulator().spawnItem(itinerary, options)
   }
 
   destroy(): void {

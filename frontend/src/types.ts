@@ -74,6 +74,20 @@ export interface TriageEvent {
   created_at: string
 }
 
+/** Shape of `data` on a `{ type: "event" }` WS frame — matches Go's
+ *  `domain.Event`. The frontend factory uses entity_id + event_type
+ *  to drive chip animations between stations. */
+export interface DomainEvent {
+  id?: string
+  event_type: string
+  /** FK to entities.id; null for system events (poll markers, etc.). */
+  entity_id?: string | null
+  dedup_key?: string
+  metadata_json?: string
+  occurred_at?: string
+  created_at?: string
+}
+
 export interface Prompt {
   id: string
   name: string
@@ -192,7 +206,7 @@ export interface FactorySnapshot {
 export type WSEvent =
   | { type: 'agent_run_update'; run_id: string; data: { status: string } }
   | { type: 'agent_message'; run_id: string; data: AgentMessage }
-  | { type: 'event'; data: TriageEvent }
+  | { type: 'event'; data: DomainEvent }
   | { type: 'tasks_updated'; data: Record<string, never> }
   | { type: 'scoring_started'; data: { task_ids: string[] } }
   | { type: 'scoring_completed'; data: { task_ids: string[] } }

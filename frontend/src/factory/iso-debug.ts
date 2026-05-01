@@ -41,11 +41,14 @@
 
 import { Vector3 } from '@babylonjs/core'
 
+import { hashHue } from './iso-items'
 import { DEFAULT_PORT_RECESS_DEPTH } from './iso-port'
 import type { Pole } from './iso-pole'
 import { IsoScene } from './iso-renderer'
+import { buildRoutingTable, type RoutingTable } from './iso-routing'
 import type { Router } from './iso-router'
 import type { Station } from './iso-station'
+import type { FactoryEntity, FactoryStation } from '../types'
 
 const FLOOR_CELL = 80
 const FLOOR_SIZE = 4800 // 60 cells — extra room for downstream additions
@@ -761,6 +764,7 @@ const stationSpec = (
   queued: number,
   runs: number,
   label: string,
+  eventType: string,
 ): Station => ({
   x: col * FLOOR_CELL,
   y: row * FLOOR_CELL,
@@ -768,10 +772,12 @@ const stationSpec = (
   w: STATION_W * FLOOR_CELL,
   d: STATION_D * FLOOR_CELL,
   h: STATION_H,
-  // Slug the label as the station's stable id. Click hit-testing
-  // routes through this; the bottom drawer uses it to look up
-  // station metadata (label, etc.) when the user picks one.
-  id: label.toLowerCase().replace(/\s+/g, '-'),
+  // The station's stable id IS its event_type. Click hit-testing
+  // routes through this; setStationData / spawnChip / drawer lookup
+  // all key off it. Using the event_type directly means the
+  // /api/factory/snapshot's `stations[event_type]` map lines up 1:1
+  // with our 12 stations without an intermediate slug layer.
+  id: eventType,
   queuedCount: queued,
   runCount: runs,
   label,
@@ -781,26 +787,63 @@ const stationSpec = (
   ],
 })
 
-const PR_OPENED = stationSpec(PR_OPENED_COL, PR_OPENED_ROW, 1, 0, 'PR Opened')
+const PR_OPENED = stationSpec(PR_OPENED_COL, PR_OPENED_ROW, 1, 0, 'PR Opened', 'github:pr:opened')
 const READY_FOR_REVIEW = stationSpec(
   READY_FOR_REVIEW_COL,
   READY_FOR_REVIEW_ROW,
   2,
   1,
   'Ready for Review',
+  'github:pr:ready_for_review',
 )
-const NEW_COMMITS = stationSpec(NC_COL, NC_ROW, 4, 2, 'New Commits')
-const MERGE_CONFLICTS = stationSpec(DEST_COL, MC_ROW, 1, 0, 'Merge Conflicts')
-const CI_PASSED = stationSpec(DEST_COL, CI_PASSED_ROW, 0, 0, 'CI Passed')
-const CI_FAILED = stationSpec(DEST_COL, CI_FAILED_ROW, 2, 1, 'CI Failed')
-const REVIEW_REQUESTED = stationSpec(RR_COL, RR_ROW, 3, 1, 'Review Requested')
-const REVIEW_APPROVED = stationSpec(REVIEW_DEST_COL, REVIEW_APPROVED_ROW, 0, 0, 'Review Approved')
+const NEW_COMMITS = stationSpec(NC_COL, NC_ROW, 4, 2, 'New Commits', 'github:pr:new_commits')
+const MERGE_CONFLICTS = stationSpec(
+  DEST_COL,
+  MC_ROW,
+  1,
+  0,
+  'Merge Conflicts',
+  'github:pr:conflicts',
+)
+const CI_PASSED = stationSpec(
+  DEST_COL,
+  CI_PASSED_ROW,
+  0,
+  0,
+  'CI Passed',
+  'github:pr:ci_check_passed',
+)
+const CI_FAILED = stationSpec(
+  DEST_COL,
+  CI_FAILED_ROW,
+  2,
+  1,
+  'CI Failed',
+  'github:pr:ci_check_failed',
+)
+const REVIEW_REQUESTED = stationSpec(
+  RR_COL,
+  RR_ROW,
+  3,
+  1,
+  'Review Requested',
+  'github:pr:review_requested',
+)
+const REVIEW_APPROVED = stationSpec(
+  REVIEW_DEST_COL,
+  REVIEW_APPROVED_ROW,
+  0,
+  0,
+  'Review Approved',
+  'github:pr:review_approved',
+)
 const REVIEW_COMMENTED = stationSpec(
   REVIEW_DEST_COL,
   REVIEW_COMMENTED_ROW,
   1,
   0,
   'Review Commented',
+  'github:pr:review_commented',
 )
 const CHANGES_REQUESTED = stationSpec(
   REVIEW_DEST_COL,
@@ -808,9 +851,10 @@ const CHANGES_REQUESTED = stationSpec(
   2,
   0,
   'Changes Requested',
+  'github:pr:review_changes_requested',
 )
-const CLOSED = stationSpec(CLOSED_COL, CLOSED_ROW, 2, 0, 'Closed')
-const MERGED = stationSpec(MERGED_COL, MERGED_ROW, 1, 0, 'Merged')
+const CLOSED = stationSpec(CLOSED_COL, CLOSED_ROW, 2, 0, 'Closed', 'github:pr:closed')
+const MERGED = stationSpec(MERGED_COL, MERGED_ROW, 1, 0, 'Merged', 'github:pr:merged')
 
 // ─── Mergers / Splitters ──────────────────────────────────────────
 
@@ -1295,24 +1339,73 @@ export interface CameraStateForHUD {
 }
 
 export interface ClickedStationInfo {
+  /** The station's event_type (its stable id). */
   id: string
   label: string
   queuedCount: number
   runCount: number
+  /** Entities parked at this station with no active run. Drives
+   *  the drawer's intake-tray chip list. */
+  queued: FactoryEntity[]
+  /** Active runs at this station — same shape as the snapshot's
+   *  `stations[event_type].runs` array. Drives the drawer's main-
+   *  tray chip list. */
+  runs: FactoryStation['runs']
 }
 
-export interface IsoDebugSceneHandle {
+export interface StationDataUpdate {
+  queuedCount: number
+  runCount: number
+  queued: FactoryEntity[]
+  runs: FactoryStation['runs']
+}
+
+export interface SpawnChipArgs {
+  /** Source station's event_type. Must match a station id. */
+  fromEvent: string
+  /** Destination station's event_type. */
+  toEvent: string
+  /** Optional 1–8 char label rendered on the chip's top face. PR
+   *  number, Jira key, etc. */
+  label?: string
+  /** Optional hue [0, 360) for the chip's core. The pipeline derives
+   *  this from the entity's repo (GitHub) or project (Jira). */
+  hue?: number
+  /** Fired when the chip arrives at the destination station's
+   *  recess. The pipeline uses this to schedule a snapshot refetch
+   *  so tray counts catch up. */
+  onArrive?: () => void
+}
+
+export interface IsoSceneHandle {
   destroy: () => void
   resetView: () => void
-  /** Subscribe to camera state changes. The HUD uses this to render
-   * pitch/yaw/zoom live. Returns an unsubscribe function. */
+  /** Subscribe to camera state changes. Returns an unsubscribe
+   *  function. Used by debug HUDs (none currently active in
+   *  production, but the hook stays for future overlay work). */
   onCameraChange: (cb: (s: CameraStateForHUD) => void) => () => void
   /** Subscribe to station picks. Fires with the clicked station's
-   *  metadata, or `null` when the click landed off-station (empty
-   *  floor / belt / router). Drawers use the null signal to close.
+   *  full data (counts + queued + runs), or `null` when the click
+   *  landed off-station. Drawers use the null signal to close.
    *  Returns an unsubscribe function. */
   onStationClick: (cb: (info: ClickedStationInfo | null) => void) => () => void
+  /** Push the latest tray data for a station. Updates mesh counts
+   *  and stores the queued/runs arrays for the next click. Unknown
+   *  event_types are silently ignored — the snapshot may include
+   *  events we haven't built stations for (e.g., Jira). */
+  setStationData: (eventType: string, update: StationDataUpdate) => void
+  /** Spawn one chip animating from one station to another. Returns
+   *  true if a path exists in the routing table; false on no-path
+   *  (the caller should teleport — i.e., skip the animation and
+   *  rely on the next snapshot to update counts). */
+  spawnChip: (args: SpawnChipArgs) => boolean
 }
+
+/** Back-compat alias retained for any consumers still importing the
+ *  pre-rename type name. The scene factory was originally a debug
+ *  POC; it's now the production scene factory. New code should use
+ *  IsoSceneHandle. */
+export type IsoDebugSceneHandle = IsoSceneHandle
 
 export async function createIsoDebugScene(container: HTMLDivElement): Promise<IsoDebugSceneHandle> {
   const canvas = document.createElement('canvas')
@@ -2329,42 +2422,62 @@ export async function createIsoDebugScene(container: HTMLDivElement): Promise<Is
   loopPole3.internalSegment.next = [beltLoop3ToMerger.segment]
   beltLoop3ToMerger.segment.next = [merger.ports.get('south')!.segment!]
 
-  // ─── Spawner ──────────────────────────────────────────────────
-  // Emit one item every 1.5s at PR Opened's west input. Items
-  // appear at PR Opened's outside face, traverse the station, ride
-  // through the 4-pole Z-chain into RFR, then continue east into
-  // the intake splitter, merger, and NC chain.
-  renderer.startItemSpawner(prOpened.ports[0].segment!, 1.5, {
-    namespaces: ['triage-factory', 'claude-code', 'SKY', 'ENG'],
-  })
-
-  // Build a lookup keyed by id so onStationClick can hand the React
-  // drawer rich metadata (label + counts) without it having to
-  // re-derive from the renderer's internal state.
-  const stationMetaById = new Map<string, ClickedStationInfo>()
-  for (const s of [
-    PR_OPENED,
-    READY_FOR_REVIEW,
-    NEW_COMMITS,
-    MERGE_CONFLICTS,
-    CI_PASSED,
-    CI_FAILED,
-    REVIEW_REQUESTED,
-    REVIEW_APPROVED,
-    REVIEW_COMMENTED,
-    CHANGES_REQUESTED,
-    CLOSED,
-    MERGED,
-  ]) {
-    if (s.id && s.label) {
-      stationMetaById.set(s.id, {
-        id: s.id,
-        label: s.label,
-        queuedCount: s.queuedCount ?? 0,
-        runCount: s.runCount ?? 0,
-      })
-    }
+  // ─── Per-station registry ─────────────────────────────────────
+  // One row per station — keyed by event_type (= the station's id).
+  // Pairs the spec/label with the live mesh handle (for setQueuedCount
+  // / setRunCount) and the latest ClickedStationInfo to replay when
+  // the user clicks. setStationData mutates `data` in place; the
+  // click callback returns whatever's most recent.
+  type StationRow = {
+    spec: Station
+    handle: ReturnType<IsoScene['addStation']>
+    data: ClickedStationInfo
   }
+  const stationRows: { spec: Station; handle: ReturnType<IsoScene['addStation']> }[] = [
+    { spec: PR_OPENED, handle: prOpened },
+    { spec: READY_FOR_REVIEW, handle: readyForReview },
+    { spec: NEW_COMMITS, handle: newCommits },
+    { spec: MERGE_CONFLICTS, handle: mergeConflicts },
+    { spec: CI_PASSED, handle: ciPassed },
+    { spec: CI_FAILED, handle: ciFailed },
+    { spec: REVIEW_REQUESTED, handle: reviewRequested },
+    { spec: REVIEW_APPROVED, handle: reviewApproved },
+    { spec: REVIEW_COMMENTED, handle: reviewCommented },
+    { spec: CHANGES_REQUESTED, handle: changesRequested },
+    { spec: CLOSED, handle: closed },
+    { spec: MERGED, handle: merged },
+  ]
+  const stationsByEvent = new Map<string, StationRow>()
+  for (const { spec, handle } of stationRows) {
+    if (!spec.id) continue
+    stationsByEvent.set(spec.id, {
+      spec,
+      handle,
+      data: {
+        id: spec.id,
+        label: spec.label ?? spec.id,
+        queuedCount: spec.queuedCount ?? 0,
+        runCount: spec.runCount ?? 0,
+        queued: [],
+        runs: [],
+      },
+    })
+  }
+
+  // ─── Routing table ─────────────────────────────────────────────
+  // Built AFTER all `.next` wiring above so every segment.next array
+  // is populated. BFS from each station's east-output segment to
+  // every other station's west-input segment yields the itinerary
+  // we hand to spawnItem when a transition WS event arrives.
+  const routingTable: RoutingTable = buildRoutingTable(
+    stationRows
+      .filter(({ spec }) => spec.id != null)
+      .map(({ spec, handle }) => ({
+        id: spec.id!,
+        exit: handle.ports[1].segment!,
+        entry: handle.ports[0].segment!,
+      })),
+  )
 
   const ro = new ResizeObserver(() => {
     renderer.resize()
@@ -2380,8 +2493,7 @@ export async function createIsoDebugScene(container: HTMLDivElement): Promise<Is
     resetView: () => renderer.resetView(),
     onCameraChange: (cb) => {
       // Throttle to one notification per animation frame — Babylon's
-      // observable can fire on every input pixel, the HUD doesn't
-      // need that resolution.
+      // observable can fire on every input pixel.
       let raf: number | null = null
       const snapshot = (): CameraStateForHUD => ({
         pitch: renderer.camera.beta,
@@ -2408,9 +2520,34 @@ export async function createIsoDebugScene(container: HTMLDivElement): Promise<Is
           cb(null)
           return
         }
-        const meta = stationMetaById.get(stationId)
-        cb(meta ?? null)
+        const row = stationsByEvent.get(stationId)
+        cb(row?.data ?? null)
       })
+    },
+    setStationData: (eventType, update) => {
+      const row = stationsByEvent.get(eventType)
+      if (!row) return
+      row.handle.setQueuedCount(update.queuedCount)
+      row.handle.setRunCount(update.runCount)
+      row.data = {
+        id: eventType,
+        label: row.spec.label ?? eventType,
+        queuedCount: update.queuedCount,
+        runCount: update.runCount,
+        queued: update.queued,
+        runs: update.runs,
+      }
+    },
+    spawnChip: ({ fromEvent, toEvent, label, hue, onArrive }) => {
+      const itinerary = routingTable.getItinerary(fromEvent, toEvent)
+      if (!itinerary) return false
+      renderer.spawnItem(itinerary, { label, hue, onArrive })
+      return true
     },
   }
 }
+
+// hashHue is re-exported from iso-items so callers (the React-layer
+// spawn pipeline) can derive a chip hue from a repo / project string
+// without reaching into the simulator module directly.
+export { hashHue }

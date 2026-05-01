@@ -11,7 +11,6 @@ import Settings from './pages/Settings'
 import Prompts from './pages/Prompts'
 import Repos from './pages/Repos'
 import Factory from './pages/Factory'
-import IsoDebug from './pages/IsoDebug'
 import Shell from './Shell'
 import AuthGate from './AuthGate'
 import ToastProvider from './components/Toast/ToastProvider'
@@ -36,7 +35,6 @@ createRoot(document.getElementById('root')!).render(
           <Route path="/repos" element={<Repos />} />
           <Route path="/brief" element={<Brief />} />
           <Route path="/settings" element={<Settings />} />
-          <Route path="/factory-iso-debug" element={<IsoDebug />} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
