@@ -10,8 +10,8 @@ import (
 // TestLifetimeDistinctCounter_HydrateMatchesSQL pins the contract that
 // the in-memory counter, after Hydrate, returns the same per-event-type
 // counts as the canonical SQL aggregate. Production is allowed to drift
-// from the DB only if the bus subscriber misses an event — Hydrate is
-// where the cache and the DB agree by construction.
+// from the DB only if the RecordEvent hook is unset for some reason —
+// Hydrate is where the cache and the DB agree by construction.
 func TestLifetimeDistinctCounter_HydrateMatchesSQL(t *testing.T) {
 	database := newTestDB(t)
 	a := makeEntity(t, database, 1)
@@ -47,9 +47,9 @@ func TestLifetimeDistinctCounter_HydrateMatchesSQL(t *testing.T) {
 }
 
 // TestLifetimeDistinctCounter_RecordExtendsHydrate is the "warm cache"
-// path: after the initial scan the bus subscriber feeds new events in
-// via Record, and the snapshot must reflect them without another DB
-// round-trip. New entity → count goes up. Same entity at the same
+// path: after the initial scan the RecordEvent hook feeds new events
+// in via Record, and the snapshot must reflect them without another
+// DB round-trip. New entity → count goes up. Same entity at the same
 // station → count stays.
 func TestLifetimeDistinctCounter_RecordExtendsHydrate(t *testing.T) {
 	database := newTestDB(t)

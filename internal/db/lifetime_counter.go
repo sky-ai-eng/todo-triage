@@ -10,15 +10,19 @@ import (
 // LifetimeDistinctCounter is an in-memory aggregate of how many distinct
 // entities have ever produced an event of each event_type. Equivalent
 // to DistinctEntityCountsByEventTypeLifetime, but folded incrementally
-// off the event bus so the factory snapshot handler doesn't pay a full-
-// table scan on every poll.
+// off the RecordEvent write path (via SetOnEventRecorded) so the
+// factory snapshot handler doesn't pay a full-table scan on every poll.
 //
 // Lifecycle:
 //
 //   - Hydrate(db) runs the underlying SQL query once at startup. Cost:
-//     O(events) one-time.
-//   - Record(evt) is wired to the event bus. Cost: O(1) per event,
-//     guarded by a single mutex around the dedupe set + counter map.
+//     O(distinct (event_type, entity_id) pairs) one-time, scanned via
+//     the partial covering index.
+//   - Record(evt) is fired by db.SetOnEventRecorded inside RecordEvent
+//     itself, so every persisted event reaches the cache regardless of
+//     whether the caller went through the eventbus. Cost: O(1) per
+//     event, guarded by a single mutex around the dedupe set + counter
+//     map.
 //   - Snapshot() returns a map copy. Cost: O(types) — small constant.
 //
 // The dedupe set holds one entry per (event_type, entity_id) pair ever
@@ -84,9 +88,9 @@ func (c *LifetimeDistinctCounter) Hydrate(database *sql.DB) error {
 	return rows.Err()
 }
 
-// Record observes an event from the bus. No-op if the event has no
-// entity_id (system events) or if (event_type, entity_id) was already
-// counted. Safe for concurrent use.
+// Record observes an event from the RecordEvent hook. No-op if the
+// event has no entity_id (system events) or if (event_type, entity_id)
+// was already counted. Safe for concurrent use.
 func (c *LifetimeDistinctCounter) Record(evt domain.Event) {
 	if evt.EntityID == nil || *evt.EntityID == "" {
 		return
