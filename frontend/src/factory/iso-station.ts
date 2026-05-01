@@ -796,15 +796,24 @@ export function buildStationMesh(
   // Babylon's default Box UV mapping gives each face the full 0–1 UV
   // range, so whichever face of the thin screen plate is camera-facing
   // will display the text — no per-face UV gymnastics required.
-  const screenTexW = 512
-  const screenTexH = 256
+  //
+  // 4× resolution vs the screen face's effective pixel budget keeps
+  // the numerals crisp under the camera's iso zoom. Mipmaps are off
+  // (LINEAR_LINEAR sampling); anisotropic filtering at level 16
+  // handles the oblique viewing angle without adding blur.
+  const screenTexW = 1024
+  const screenTexH = 512
   const screenTex = new DynamicTexture(
     `status-screen-tex-${station.x}_${station.y}`,
     { width: screenTexW, height: screenTexH },
     scene,
     false,
+    Texture.BILINEAR_SAMPLINGMODE,
   )
+  screenTex.anisotropicFilteringLevel = 16
   const screenCtx = screenTex.getContext() as CanvasRenderingContext2D
+  screenCtx.imageSmoothingEnabled = true
+  screenCtx.imageSmoothingQuality = 'high'
 
   // Approximate the shared `materials.screen` look (dark blue glass
   // with low emissive lift) so the text sits on the same backdrop the
@@ -814,6 +823,11 @@ export function buildStationMesh(
   // angles.
   const screenBgFill = '#15171c'
   const screenTextFill = '#a4f8ff'
+  // Inter to match the etched label plates. 600 weight reads cleaner
+  // than 700 at the texture scale we're rendering at — the lighter
+  // weight gives more whitespace inside each glyph, which the iso
+  // camera's projection compresses less than thick strokes do.
+  const screenFontFamily = 'Inter, system-ui, -apple-system, sans-serif'
 
   const renderScreenText = (n: number) => {
     screenCtx.fillStyle = screenBgFill
@@ -825,12 +839,12 @@ export function buildStationMesh(
     // screen. We pre-rotate the drawing 90° CCW to compensate. After
     // rotation the text's natural width is laid out along canvas Y,
     // so the shrink-to-fit budget compares against canvas height.
-    const widthBudget = screenTexH - 40
-    let fontPx = 200
-    screenCtx.font = `700 ${fontPx}px ui-sans-serif, system-ui, -apple-system, sans-serif`
-    while (screenCtx.measureText(text).width > widthBudget && fontPx > 80) {
-      fontPx -= 6
-      screenCtx.font = `700 ${fontPx}px ui-sans-serif, system-ui, -apple-system, sans-serif`
+    const widthBudget = screenTexH - 80
+    let fontPx = 380
+    screenCtx.font = `600 ${fontPx}px ${screenFontFamily}`
+    while (screenCtx.measureText(text).width > widthBudget && fontPx > 160) {
+      fontPx -= 12
+      screenCtx.font = `600 ${fontPx}px ${screenFontFamily}`
     }
     screenCtx.fillStyle = screenTextFill
     screenCtx.textAlign = 'center'
