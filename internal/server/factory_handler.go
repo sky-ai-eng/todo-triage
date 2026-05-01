@@ -129,19 +129,22 @@ type factoryEntityJSON struct {
 
 	// PendingTasks groups active tasks for this entity by event_type.
 	// Drives the station drawer's drag-to-delegate flow: the frontend
-	// looks up tasks at the dropped station's event_type and forwards
-	// the task_id + dedup_key to /api/factory/delegate. Absent
-	// event_type → backend will synthesize a task on drop. For a
-	// dedup-discriminated event type (label_added, status_changed),
-	// the inner slice can have multiple entries; v1 frontend uses the
-	// first.
+	// reads the dropped station's first entry and forwards its
+	// dedup_key (with entity_id + event_type) to /api/factory/delegate,
+	// which find-or-creates via the unique index on (entity_id,
+	// event_type, dedup_key). Absent event_type → handler synthesizes
+	// a task. For a dedup-discriminated event type (label_added,
+	// status_changed), the inner slice can have multiple entries; v1
+	// frontend uses the first.
 	PendingTasks map[string][]pendingTaskRef `json:"pending_tasks,omitempty"`
 }
 
 // pendingTaskRef is the minimal task reference shipped per queued
-// entity for the drag-to-delegate flow. Full task records live on the
-// runs side via factoryRunJSON.task; pending tasks only need enough
-// info to round-trip the find-or-create call.
+// entity for the drag-to-delegate flow. dedup_key is what the request
+// to /api/factory/delegate carries (the handler keys find-or-create
+// on entity_id + event_type + dedup_key). task_id is informational —
+// not consumed by the request today — and is kept available for
+// future UI hints like "this chip already has a task here."
 type pendingTaskRef struct {
 	TaskID   string `json:"task_id"`
 	DedupKey string `json:"dedup_key"`
