@@ -40,13 +40,20 @@ func CompleteAgentRun(database *sql.DB, runID, status string, costUSD float64, d
 	return err
 }
 
-// GetAgentRun returns a single agent run by ID.
+// GetAgentRun returns a single agent run by ID. MemoryMissing is
+// derived from run_memory rather than read off a column on runs —
+// the row is absent (or has agent_content NULL) when the agent didn't
+// pass through the memory gate. See SKY-204 for the move from a
+// denormalized boolean to a JOIN-derived projection.
 func GetAgentRun(database *sql.DB, runID string) (*domain.AgentRun, error) {
 	row := database.QueryRow(`
-		SELECT id, task_id, status, model, started_at, completed_at,
-		       total_cost_usd, duration_ms, num_turns, stop_reason, worktree_path,
-		       result_summary, session_id, memory_missing
-		FROM runs WHERE id = ?
+		SELECT r.id, r.task_id, r.status, r.model, r.started_at, r.completed_at,
+		       r.total_cost_usd, r.duration_ms, r.num_turns, r.stop_reason, r.worktree_path,
+		       r.result_summary, r.session_id,
+		       (rm.agent_content IS NULL) AS memory_missing
+		FROM runs r
+		LEFT JOIN run_memory rm ON rm.run_id = r.id
+		WHERE r.id = ?
 	`, runID)
 
 	var r domain.AgentRun
@@ -88,13 +95,18 @@ func GetAgentRun(database *sql.DB, runID string) (*domain.AgentRun, error) {
 	return &r, nil
 }
 
-// AgentRunsForTask returns all runs for a given task.
+// AgentRunsForTask returns all runs for a given task. See GetAgentRun
+// for the MemoryMissing derivation.
 func AgentRunsForTask(database *sql.DB, taskID string) ([]domain.AgentRun, error) {
 	rows, err := database.Query(`
-		SELECT id, task_id, status, model, started_at, completed_at,
-		       total_cost_usd, duration_ms, num_turns, stop_reason, worktree_path,
-		       result_summary, session_id, memory_missing
-		FROM runs WHERE task_id = ? ORDER BY started_at DESC
+		SELECT r.id, r.task_id, r.status, r.model, r.started_at, r.completed_at,
+		       r.total_cost_usd, r.duration_ms, r.num_turns, r.stop_reason, r.worktree_path,
+		       r.result_summary, r.session_id,
+		       (rm.agent_content IS NULL) AS memory_missing
+		FROM runs r
+		LEFT JOIN run_memory rm ON rm.run_id = r.id
+		WHERE r.task_id = ?
+		ORDER BY r.started_at DESC
 	`, taskID)
 	if err != nil {
 		return nil, err
@@ -221,18 +233,6 @@ func MarkAgentRunCancelledIfActive(database *sql.DB, runID, stopReason, summary 
 		return false, err
 	}
 	return n > 0, nil
-}
-
-// MarkAgentRunMemoryMissing flags a run whose pre-complete memory-file gate
-// exhausted all retries without the agent producing a memory file. The run
-// still completes (we don't punish the agent for partial success by failing
-// the run outright), but downstream UI and diagnostics surface the flag so
-// the gap is visible. Called from the write-gate retry loop in SKY-141.
-func MarkAgentRunMemoryMissing(database *sql.DB, runID string) error {
-	_, err := database.Exec(`
-		UPDATE runs SET memory_missing = 1 WHERE id = ?
-	`, runID)
-	return err
 }
 
 // HasActiveRunForTask returns true if the task has any agent run that hasn't

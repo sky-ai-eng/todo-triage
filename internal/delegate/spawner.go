@@ -792,19 +792,22 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		}
 		completion = s.runMemoryGate(ctx, runID, task.ID, claudeCwd, completion, stream.SessionID(), model, repoEnv)
 
-		// Ingest the agent-written memory file (if present) or flag the
-		// run as memory_missing. Either way the run still counts as
-		// completed — we don't fail a run just because the agent skipped
-		// the memory write, but we DO surface the gap.
-		if memoryFileExists(claudeCwd, runID) {
-			if err := ingestAgentMemory(s.database, claudeCwd, runID, task.EntityID); err != nil {
-				log.Printf("[delegate] warning: failed to ingest memory file for run %s: %v", runID, err)
-			}
-		} else {
-			log.Printf("[delegate] run %s: memory file missing after gate retries, flagging memory_missing", runID)
-			if err := db.MarkAgentRunMemoryMissing(s.database, runID); err != nil {
-				log.Printf("[delegate] warning: failed to mark memory_missing for run %s: %v", runID, err)
-			}
+		// Unconditional upsert of the run_memory row at termination
+		// (SKY-204): row presence === "termination passed through the
+		// memory gate", agent_content NULL/empty === "agent didn't
+		// comply with the gate after retries." Replaces the previous
+		// branching write + denormalized memory_missing flag, both of
+		// which could drift from ground truth (a memory row written
+		// outside the gate path would leave the flag stale). The new
+		// shape also gives SKY-205's human-feedback writers an
+		// always-present row to UPDATE, so they don't need
+		// INSERT-or-UPDATE branching.
+		agentContent := readAgentMemoryFileOrEmpty(claudeCwd, runID)
+		if err := db.UpsertAgentMemory(s.database, runID, task.EntityID, agentContent); err != nil {
+			log.Printf("[delegate] warning: failed to upsert memory for run %s: %v", runID, err)
+		}
+		if agentContent == "" {
+			log.Printf("[delegate] run %s: memory file missing after gate retries (agent_content NULL)", runID)
 		}
 
 		resultSummary := ""
@@ -1118,27 +1121,23 @@ func memoryFileExists(cwd, runID string) bool {
 	return err == nil
 }
 
-// ingestAgentMemory reads an agent-written memory file from the worktree
-// and saves it as a task_memory row. Called after the write-gate has
-// verified the file is present. Returns an error only on read/DB failure —
-// "file missing" is not an error here because the caller already checked.
-func ingestAgentMemory(database *sql.DB, cwd, runID, entityID string) error {
+// readAgentMemoryFileOrEmpty returns the contents of the agent-written
+// ./task_memory/<runID>.md, or "" when the file is absent (or the read
+// fails for any reason — bad permissions, race with cleanup, etc.).
+// Empty string is the documented signal for "agent didn't comply with
+// the memory gate" and is what the caller passes to UpsertAgentMemory
+// to record the gap in run_memory. Read errors that aren't a missing
+// file get logged so they're not silent.
+func readAgentMemoryFileOrEmpty(cwd, runID string) string {
 	path := filepath.Join(cwd, "task_memory", runID+".md")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf("read memory file %s: %w", path, err)
+		if !os.IsNotExist(err) {
+			log.Printf("[delegate] warning: failed to read memory file %s: %v", path, err)
+		}
+		return ""
 	}
-	mem := domain.TaskMemory{
-		ID:        uuid.New().String(),
-		RunID:     runID,
-		EntityID:  entityID,
-		Content:   string(data),
-		CreatedAt: time.Now().UTC(),
-	}
-	if err := db.SaveRunMemory(database, mem); err != nil {
-		return fmt.Errorf("save memory row: %w", err)
-	}
-	return nil
+	return string(data)
 }
 
 // runMemoryGate enforces the pre-complete task_memory file requirement.

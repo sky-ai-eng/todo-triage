@@ -81,25 +81,29 @@ func TestMigrate_Idempotent(t *testing.T) {
 // TestMigrate_StampsBaselineOnExistingInstall is the existing-user
 // upgrade regression: a DB whose application tables predate the
 // migration system gets the baseline recorded as already-applied
-// without re-executing it, and existing rows survive untouched.
+// without re-executing it, post-baseline migrations apply normally,
+// and existing rows survive untouched.
 //
-// We simulate the pre-migration-system state by running Migrate
-// (which builds the schema), seeding a real entity, then dropping
-// schema_migrations. That leaves a DB shaped exactly like an upgrade
-// candidate: all the tables, none of the migration history, real data
-// the runner must preserve.
+// We simulate the pre-migration-system state by executing the
+// baseline SQL directly (no schema_migrations row). That leaves a DB
+// shaped exactly like an existing install at the cutover moment: all
+// the baseline tables, none of the migration history, real data the
+// runner must preserve. Migrate then stamps baseline and applies any
+// post-baseline migrations against it.
 func TestMigrate_StampsBaselineOnExistingInstall(t *testing.T) {
 	database := openMigrationsTestDB(t)
-	if err := Migrate(database); err != nil {
-		t.Fatalf("setup Migrate: %v", err)
+
+	body, err := migrationsFS.ReadFile(migrationsDir + "/" + baselineVersion + ".sql")
+	if err != nil {
+		t.Fatalf("read baseline migration: %v", err)
+	}
+	if _, err := database.Exec(string(body)); err != nil {
+		t.Fatalf("apply baseline (simulated existing install): %v", err)
 	}
 	if _, err := database.Exec(
 		`INSERT INTO entities (id, source, source_id, kind) VALUES ('e1', 'github', 'owner/repo#1', 'pr')`,
 	); err != nil {
 		t.Fatalf("seed entity: %v", err)
-	}
-	if _, err := database.Exec(`DROP TABLE schema_migrations`); err != nil {
-		t.Fatalf("drop schema_migrations: %v", err)
 	}
 
 	if err := Migrate(database); err != nil {
@@ -148,6 +152,97 @@ func TestMigrate_FreshDB_NoStamp(t *testing.T) {
 	}
 	if n != 0 {
 		t.Errorf("stamp inserted %d rows on blank DB; want 0", n)
+	}
+}
+
+// TestMigrate_SKY204_DataCarryOver pins the data shape change in
+// 20260501_002: pre-existing run_memory rows have their `content`
+// renamed into `agent_content`; new `original_*` columns on the
+// pending-review tables show up as NULL on rows that were inserted
+// before the migration; and runs.memory_missing is gone.
+//
+// Simulates the worst case for a real existing install: a DB at
+// baseline with live data in every affected table. Replaying
+// 20260501_002 against that shape must keep the data intact while
+// reshaping the schema around it.
+func TestMigrate_SKY204_DataCarryOver(t *testing.T) {
+	database := openMigrationsTestDB(t)
+
+	body, err := migrationsFS.ReadFile(migrationsDir + "/" + baselineVersion + ".sql")
+	if err != nil {
+		t.Fatalf("read baseline: %v", err)
+	}
+	if _, err := database.Exec(string(body)); err != nil {
+		t.Fatalf("apply baseline: %v", err)
+	}
+
+	// Seed the FK chain (events_catalog → entities → events → tasks →
+	// runs → run_memory) plus a pending_reviews + pending_review_comments
+	// row, all in their pre-migration shape.
+	if _, err := database.Exec(`
+		INSERT INTO events_catalog (id, source, category, label, description)
+		VALUES ('github:pr:opened', 'github', 'pr', 'PR opened', '');
+		INSERT INTO entities (id, source, source_id, kind, state)
+		VALUES ('e1', 'github', 'owner/repo#1', 'pr', 'active');
+		INSERT INTO events (id, entity_id, event_type, dedup_key)
+		VALUES ('ev1', 'e1', 'github:pr:opened', '');
+		INSERT INTO prompts (id, name, body) VALUES ('p1', 'Test', 'body');
+		INSERT INTO tasks (id, entity_id, event_type, primary_event_id)
+		VALUES ('t1', 'e1', 'github:pr:opened', 'ev1');
+		INSERT INTO runs (id, task_id, prompt_id, status, memory_missing)
+		VALUES ('r1', 't1', 'p1', 'completed', 0);
+		INSERT INTO run_memory (id, run_id, entity_id, content)
+		VALUES ('m1', 'r1', 'e1', 'agent wrote this');
+		INSERT INTO pending_reviews (id, pr_number, owner, repo, commit_sha, run_id, review_body, review_event)
+		VALUES ('pr1', 42, 'owner', 'repo', 'sha1', 'r1', 'pre-migration body', 'COMMENT');
+		INSERT INTO pending_review_comments (id, review_id, path, line, body)
+		VALUES ('c1', 'pr1', 'foo.go', 10, 'pre-migration comment');
+	`); err != nil {
+		t.Fatalf("seed pre-migration data: %v", err)
+	}
+
+	if err := Migrate(database); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	// run_memory: content carried into agent_content; human_content NULL.
+	var agentContent string
+	var humanContent sql.NullString
+	if err := database.QueryRow(
+		`SELECT agent_content, human_content FROM run_memory WHERE id = 'm1'`,
+	).Scan(&agentContent, &humanContent); err != nil {
+		t.Fatalf("scan run_memory post-migration: %v", err)
+	}
+	if agentContent != "agent wrote this" {
+		t.Errorf("agent_content = %q, want %q", agentContent, "agent wrote this")
+	}
+	if humanContent.Valid {
+		t.Errorf("human_content = %q, want NULL", humanContent.String)
+	}
+
+	// pending_reviews + pending_review_comments: original_* NULL on
+	// pre-existing rows (no draft to capture retroactively).
+	var origReviewBody, origCommentBody sql.NullString
+	if err := database.QueryRow(
+		`SELECT original_review_body FROM pending_reviews WHERE id = 'pr1'`,
+	).Scan(&origReviewBody); err != nil {
+		t.Fatalf("scan pending_reviews: %v", err)
+	}
+	if origReviewBody.Valid {
+		t.Errorf("original_review_body = %q, want NULL on pre-existing row", origReviewBody.String)
+	}
+	if err := database.QueryRow(
+		`SELECT original_body FROM pending_review_comments WHERE id = 'c1'`,
+	).Scan(&origCommentBody); err != nil {
+		t.Fatalf("scan pending_review_comments: %v", err)
+	}
+	if origCommentBody.Valid {
+		t.Errorf("original_body = %q, want NULL on pre-existing row", origCommentBody.String)
+	}
+
+	// runs.memory_missing column is gone — selecting it should error.
+	if _, err := database.Exec(`SELECT memory_missing FROM runs LIMIT 1`); err == nil {
+		t.Errorf("runs.memory_missing column still exists; expected DROP COLUMN to remove it")
 	}
 }
 

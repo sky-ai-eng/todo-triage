@@ -151,6 +151,13 @@ func ListFactoryActiveRuns(database *sql.DB) ([]FactoryActiveRun, error) {
 		args = append(args, factoryActiveRunStatuses[i])
 	}
 
+	// memory_missing is derived from a LEFT JOIN to run_memory rather
+	// than read off a column on runs (SKY-204): "the agent has not
+	// produced its memory file" === "no run_memory row exists for the
+	// run, OR the row exists with agent_content NULL." The denormalized
+	// boolean it replaces drifted from ground truth whenever a memory
+	// row was written outside the spawner's gate; the JOIN keeps the
+	// projection honest by construction.
 	query := `
 		SELECT
 			r.id, r.task_id, COALESCE(r.prompt_id, ''),
@@ -158,9 +165,11 @@ func ListFactoryActiveRuns(database *sql.DB) ([]FactoryActiveRun, error) {
 			r.total_cost_usd, r.duration_ms, r.num_turns,
 			COALESCE(r.stop_reason, ''), COALESCE(r.worktree_path, ''),
 			COALESCE(r.result_summary, ''), COALESCE(r.session_id, ''),
-			r.memory_missing, r.trigger_type, COALESCE(r.trigger_id, ''),
+			(rm.agent_content IS NULL) AS memory_missing,
+			r.trigger_type, COALESCE(r.trigger_id, ''),
 			` + taskColumnsWithEntity + `
 		FROM runs r
+		LEFT JOIN run_memory rm ON rm.run_id = r.id
 		JOIN tasks t ON r.task_id = t.id
 		JOIN entities e ON t.entity_id = e.id
 		WHERE r.status IN (` + placeholders + `)
