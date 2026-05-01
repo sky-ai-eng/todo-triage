@@ -246,6 +246,55 @@ func TestHandleSwipe_DismissCleansUpPendingApprovalRun(t *testing.T) {
 		"dismissed", "dismissed the task entirely")
 }
 
+// TestHandleUndo_404OnMissingTask pins the missing-id behavior:
+// /undo against a bogus task ID must return 404 with a clean error
+// body, not the SQLite FK violation surfaced as a 500. The
+// GetTask-first check in the handler fails fast before
+// UndoLastSwipe's INSERT into swipe_events trips the FK constraint
+// — so legitimate 404 callers don't have to parse SQLite error
+// strings to tell "doesn't exist" from "real server error."
+func TestHandleUndo_404OnMissingTask(t *testing.T) {
+	s := newTestServer(t)
+
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/no-such-task/undo", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandleRequeue_404OnMissingTask is the regression for the
+// silent-success bug: /requeue used to return 200 against a bogus
+// id because the underlying UPDATE just affected 0 rows. Both the
+// handler-level GetTask check and RequeueTask's ok-bool now catch
+// it — the test goes through the handler so both layers are
+// exercised together.
+func TestHandleRequeue_404OnMissingTask(t *testing.T) {
+	s := newTestServer(t)
+
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/no-such-task/requeue", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestRequeueTask_OkFalseOnMissingID directly exercises the DB
+// helper's ok-bool. The handler check above catches the common
+// case, but the bool is the defense against a race between
+// GetTask and the UPDATE (task deleted in the gap). Without this
+// signal, that race would silently 200 even with the handler
+// check in place.
+func TestRequeueTask_OkFalseOnMissingID(t *testing.T) {
+	s := newTestServer(t)
+
+	ok, err := db.RequeueTask(s.db, "no-such-task")
+	if err != nil {
+		t.Fatalf("RequeueTask: %v", err)
+	}
+	if ok {
+		t.Errorf("RequeueTask returned ok=true for missing id; want false")
+	}
+}
+
 // TestHandleUndo_NoPendingApprovalIsNoOp guards the common case:
 // the task has no delegated run (or its delegated run is still
 // active, not pending_approval). The cleanup should silently

@@ -268,7 +268,21 @@ func (s *Server) handleSnooze(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleUndo(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
-	task, _ := db.GetTask(s.db, id)
+	// GetTask up front does double duty: existence check for the
+	// 404 response AND loads the row needed for finalizeRequeue's
+	// Jira reversal context. Without the explicit nil check
+	// UndoLastSwipe would still fail on the swipe_events FK, but
+	// we'd surface the SQLite error string as a 500 — leaking
+	// implementation detail and confusing legitimate 404 callers.
+	task, err := db.GetTask(s.db, id)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if task == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "task not found"})
+		return
+	}
 
 	if err := db.UndoLastSwipe(s.db, id); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -287,13 +301,33 @@ func (s *Server) handleUndo(w http.ResponseWriter, r *http.Request) {
 // are deliberate state changes, not "reverse my last swipe," so
 // audit-logging them as undo events would muddy the swipe-UX
 // analytics.
+//
+// Belt-and-suspenders existence check: GetTask up front catches the
+// common bogus-id case and returns 404 with a clean error body;
+// RequeueTask's ok-bool catches the race where the task gets
+// deleted between the GetTask and the UPDATE. Without the second
+// check, that race would surface as a misleading 200/queued
+// response for an id that no longer exists.
 func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
-	task, _ := db.GetTask(s.db, id)
-
-	if err := db.RequeueTask(s.db, id); err != nil {
+	task, err := db.GetTask(s.db, id)
+	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if task == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "task not found"})
+		return
+	}
+
+	ok, err := db.RequeueTask(s.db, id)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "task not found"})
 		return
 	}
 

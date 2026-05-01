@@ -81,24 +81,40 @@ func SnoozeTask(database *sql.DB, taskID string, until time.Time, hesitationMs i
 // swipe subsystem and would muddy the analytics if every drag-to-
 // queue gesture got logged as if the user had swiped.
 //
+// Returns ok=false when no row matched the taskID. Without this
+// signal, the public /requeue endpoint would silently 200 on a
+// bogus id (the underlying UPDATE just affects 0 rows) — masking
+// frontend bugs and making races between GetTask and the UPDATE
+// indistinguishable from real successes. Mirrors the
+// MarkAgentRunCancelledIfActive / MarkAgentRunDiscarded ok-bool
+// pattern.
+//
 // Wrapped in a tx for symmetry with UndoLastSwipe + future-
-// proofing if more state needs clearing on requeue (e.g. snooze_until
-// is the only one today; if a future state needs reset, both helpers
-// should evolve together).
-func RequeueTask(database *sql.DB, taskID string) error {
+// proofing if more state needs clearing on requeue (snooze_until
+// is the only one today; if a future state needs reset, both
+// helpers should evolve together).
+func RequeueTask(database *sql.DB, taskID string) (bool, error) {
 	tx, err := database.Begin()
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.Exec(
+	res, err := tx.Exec(
 		`UPDATE tasks SET status = 'queued', snooze_until = NULL WHERE id = ?`,
 		taskID,
-	); err != nil {
-		return err
+	)
+	if err != nil {
+		return false, err
 	}
-	return tx.Commit()
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // UndoLastSwipe reverts the most recent swipe on a task, setting it back to queued.
