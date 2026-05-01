@@ -12,6 +12,7 @@ import {
 } from '@dnd-kit/core'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import PromptPicker from '../components/PromptPicker'
+import { toast } from '../components/Toast/toastStore'
 import { createIsoScene, type ClickedStationInfo, type IsoSceneHandle } from '../factory/iso-scene'
 import { useWebSocket } from '../hooks/useWebSocket'
 import type { AgentRun, FactoryEntity, FactorySnapshot, Task } from '../types'
@@ -197,8 +198,15 @@ export default function Factory() {
       const pd = pendingDelegate
       setPendingDelegate(null)
       if (!pd) return
+      // Two failure modes to surface, both as a toast:
+      //   - Network error (fetch throws) — caught below.
+      //   - Non-2xx HTTP — checked via res.ok. The handler returns
+      //     400/404/503 + `{error: "..."}`, which we forward verbatim.
+      // Refetch only fires on success so a 503 doesn't visually
+      // "succeed" by triggering an unrelated snapshot refresh.
+      const label = entityLabel(pd.entity)
       try {
-        await fetch('/api/factory/delegate', {
+        const res = await fetch('/api/factory/delegate', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -208,8 +216,21 @@ export default function Factory() {
             prompt_id: promptId,
           }),
         })
+        if (!res.ok) {
+          let detail = `HTTP ${res.status}`
+          try {
+            const body = (await res.json()) as { error?: string }
+            if (body.error) detail = body.error
+          } catch {
+            // Body wasn't JSON; stick with the status code.
+          }
+          toast.error(`Delegate ${label}: ${detail}`, 'Delegation failed')
+          return
+        }
       } catch (err) {
-        console.warn('[factory] delegate failed:', err)
+        const detail = err instanceof Error ? err.message : String(err)
+        toast.error(`Delegate ${label}: ${detail}`, 'Delegation failed')
+        return
       }
       const refetch = (window as unknown as { __factoryRefetch?: () => void }).__factoryRefetch
       refetch?.()
