@@ -55,6 +55,45 @@ func EventCountsByTypeSince(database *sql.DB, since time.Time) (map[string]int, 
 	return out, rows.Err()
 }
 
+// EventCountsByTypesLifetime counts events per event_type for the given
+// types, from catalog start (no time cutoff). Used by the factory to
+// surface persistent throughput on terminal stations like Merged and
+// Closed where a 24h window would obscure the long-run total. Cheap:
+// idx_events_type_created handles the filter; types is small (terminal
+// stations only).
+func EventCountsByTypesLifetime(database *sql.DB, types []string) (map[string]int, error) {
+	out := map[string]int{}
+	if len(types) == 0 {
+		return out, nil
+	}
+	placeholders := "?"
+	args := make([]any, 0, len(types))
+	args = append(args, types[0])
+	for i := 1; i < len(types); i++ {
+		placeholders += ", ?"
+		args = append(args, types[i])
+	}
+	rows, err := database.Query(`
+		SELECT event_type, COUNT(*)
+		FROM events
+		WHERE event_type IN (`+placeholders+`)
+		GROUP BY event_type
+	`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var eventType string
+		var count int
+		if err := rows.Scan(&eventType, &count); err != nil {
+			return nil, err
+		}
+		out[eventType] = count
+	}
+	return out, rows.Err()
+}
+
 // TaskCountsByEventTypeSince counts tasks per event_type created after
 // `since`. Used alongside EventCountsByTypeSince to compute the "triggered
 // / seen" ratio displayed in the station overlay.
@@ -343,18 +382,28 @@ func parseDBDatetime(s string) (time.Time, error) {
 	return time.Parse("2006-01-02 15:04:05.999999999 -0700 MST", cleaned)
 }
 
-// ListFactoryEntities returns up to `limit` active entities with their
-// most-recent-event context. Ordered by entities.created_at DESC — a
-// stable key that doesn't move as pollers run, so the displayed set
-// doesn't churn when GitHub and Jira pollers alternate (which bumps
-// last_polled_at on whichever side just finished and would shove the
-// other source out of the capped window).
+// FactoryClosedGracePeriod is the window during which a freshly-closed
+// entity remains in the factory snapshot so the chip can ride the final
+// bridge into its terminal station before disposal. One full poll cycle
+// (~30s baseline) plus headroom — generous enough to cover any chain
+// animation duration without being load-bearing.
+const FactoryClosedGracePeriod = 60 * time.Second
+
+// ListFactoryEntities returns up to `limit` entities with their
+// most-recent-event context: every active entity, plus any entity
+// closed within FactoryClosedGracePeriod so the chip can finish
+// animating to Merged/Closed before disappearing. Ordered by
+// entities.created_at DESC — a stable key that doesn't move as pollers
+// run, so the displayed set doesn't churn when GitHub and Jira pollers
+// alternate (which bumps last_polled_at on whichever side just
+// finished and would shove the other source out of the capped window).
 //
 // The latest-event subqueries use idx_events_entity_created, and the
 // source-time lookup additionally pulls occurred_at via COALESCE so the
 // factory chain animation orders by actual event time rather than
 // insertion time when the poller captured it.
 func ListFactoryEntities(database *sql.DB, limit int) ([]FactoryEntityRow, error) {
+	graceCutoff := time.Now().Add(-FactoryClosedGracePeriod)
 	rows, err := database.Query(`
 		SELECT
 			e.id, e.source, e.source_id, e.kind,
@@ -369,9 +418,10 @@ func ListFactoryEntities(database *sql.DB, limit int) ([]FactoryEntityRow, error
 			(SELECT created_at FROM events WHERE entity_id = e.id ORDER BY created_at DESC LIMIT 1)
 		FROM entities e
 		WHERE e.state = 'active'
+		   OR (e.closed_at IS NOT NULL AND e.closed_at > ?)
 		ORDER BY e.created_at DESC
 		LIMIT ?
-	`, limit)
+	`, graceCutoff, limit)
 	if err != nil {
 		return nil, err
 	}

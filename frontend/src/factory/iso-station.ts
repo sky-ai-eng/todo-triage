@@ -73,6 +73,11 @@ export interface Station {
   /** Etched identity label rendered along the back of the main tray
    *  floor. Empty/undefined → no label plate. */
   label?: string
+  /** Initial lifetime counter, rendered inline with the label (e.g.
+   *  "Merged · 247"). Undefined → no counter, label stays solo. The
+   *  handle's setLifetimeCount can update it later; passing 0 is a
+   *  valid initial value (renders "Label · 0"). */
+  lifetimeCount?: number
   /** Conveyor attach points on the station's walls. Each produces a
    *  recess + LED frame + internal belt stub. */
   ports?: Port[]
@@ -95,6 +100,10 @@ export interface StationHandle {
   setQueuedCount(n: number): void
   /** Show n run chips. n clamped to MAX_RUNS. */
   setRunCount(n: number): void
+  /** Update the inline lifetime counter on the label. No-op for
+   *  stations whose spec didn't request one (i.e., lifetimeCount was
+   *  undefined at build). Re-uses the existing label DynamicTexture. */
+  setLifetimeCount(n: number): void
 }
 
 // ─── Tray fractions ─────────────────────────────────────────────────────────
@@ -832,6 +841,13 @@ export function buildStationMesh(
   const labelBackEdge = mainTray.y1 - LABEL_PLATE_BACK_INSET
   const labelFrontEdge = labelBackEdge - labelDepth
   const trayCx = (mainTray.x0 + mainTray.x1) / 2
+
+  // Closure-scoped so setLifetimeCount can call back into a redraw
+  // after the plate is built. No-op when the station has no label
+  // (no plate exists to update).
+  let renderLabelTexture: ((lifetime: number | undefined) => void) | null = null
+  let lifetimeValue = station.lifetimeCount
+
   if (station.label && station.label.length > 0) {
     const plateW = trayW - 2 * (trayFloorInset + LABEL_PLATE_SIDE_MARGIN)
     const plateThickness = 0.6
@@ -851,24 +867,31 @@ export function buildStationMesh(
       false,
     )
     const ctx = tex.getContext() as CanvasRenderingContext2D
-    ctx.clearRect(0, 0, LABEL_TEX_W, LABEL_TEX_H)
-    let fontPx = 56
-    ctx.font = `600 ${fontPx}px Inter, system-ui, sans-serif`
-    while (ctx.measureText(station.label).width > LABEL_TEX_W - 60 && fontPx > 24) {
-      fontPx -= 2
+    const labelText = station.label
+
+    renderLabelTexture = (lifetime: number | undefined) => {
+      const text =
+        lifetime !== undefined ? `${labelText} · ${formatLifetimeCount(lifetime)}` : labelText
+      ctx.clearRect(0, 0, LABEL_TEX_W, LABEL_TEX_H)
+      let fontPx = 56
       ctx.font = `600 ${fontPx}px Inter, system-ui, sans-serif`
+      while (ctx.measureText(text).width > LABEL_TEX_W - 60 && fontPx > 24) {
+        fontPx -= 2
+        ctx.font = `600 ${fontPx}px Inter, system-ui, sans-serif`
+      }
+      ctx.fillStyle = '#ffffff'
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+      // Babylon's right-handed CreateBox flips V on the +z face's UVs,
+      // so we pre-flip the canvas's Y axis to compensate.
+      ctx.save()
+      ctx.translate(0, LABEL_TEX_H)
+      ctx.scale(1, -1)
+      ctx.fillText(text, LABEL_TEX_W / 2, LABEL_TEX_H / 2 + 2)
+      ctx.restore()
+      tex.update(true)
     }
-    ctx.fillStyle = '#ffffff'
-    ctx.textAlign = 'center'
-    ctx.textBaseline = 'middle'
-    // Babylon's right-handed CreateBox flips V on the +z face's UVs,
-    // so we pre-flip the canvas's Y axis to compensate.
-    ctx.save()
-    ctx.translate(0, LABEL_TEX_H)
-    ctx.scale(1, -1)
-    ctx.fillText(station.label, LABEL_TEX_W / 2, LABEL_TEX_H / 2 + 2)
-    ctx.restore()
-    tex.update(true)
+    renderLabelTexture(lifetimeValue)
     tex.hasAlpha = true
     tex.getAlphaFromRGB = false
 
@@ -1092,6 +1115,13 @@ export function buildStationMesh(
     scanner.setEnabled(target > 0)
   }
 
+  const setLifetimeCount = (n: number) => {
+    if (!renderLabelTexture) return
+    if (lifetimeValue === n) return
+    lifetimeValue = n
+    renderLabelTexture(n)
+  }
+
   setQueuedCount(station.queuedCount ?? 0)
   setRunCount(station.runCount ?? 0)
 
@@ -1122,7 +1152,18 @@ export function buildStationMesh(
     id: station.id,
     setQueuedCount,
     setRunCount,
+    setLifetimeCount,
   }
+}
+
+// formatLifetimeCount renders integers compactly so the inline label
+// stays legible past four digits. 0–999 verbatim, ≥1k formatted as
+// "1.2k" / "12k", ≥1m as "1.2M". Drops trailing ".0" for round numbers.
+function formatLifetimeCount(n: number): string {
+  if (n < 1000) return String(n)
+  if (n < 10_000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k'
+  if (n < 1_000_000) return Math.round(n / 1000) + 'k'
+  return (n / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M'
 }
 
 // ─── Chip grid layout ─────────────────────────────────────────────────────

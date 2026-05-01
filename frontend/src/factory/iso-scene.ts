@@ -856,8 +856,18 @@ const CHANGES_REQUESTED = stationSpec(
   'Changes Requested',
   'github:pr:review_changes_requested',
 )
-const CLOSED = stationSpec(CLOSED_COL, CLOSED_ROW, 2, 0, 'Closed', 'github:pr:closed')
-const MERGED = stationSpec(MERGED_COL, MERGED_ROW, 1, 0, 'Merged', 'github:pr:merged')
+// Terminal stations carry an inline lifetime counter on their label
+// plate ("Closed · 247"). Initial 0 keeps the rendering pass identical
+// to the other stations until the first snapshot arrives; the
+// reconciler updates via setLifetimeCount as items_lifetime changes.
+const CLOSED: Station = {
+  ...stationSpec(CLOSED_COL, CLOSED_ROW, 2, 0, 'Closed', 'github:pr:closed'),
+  lifetimeCount: 0,
+}
+const MERGED: Station = {
+  ...stationSpec(MERGED_COL, MERGED_ROW, 1, 0, 'Merged', 'github:pr:merged'),
+  lifetimeCount: 0,
+}
 
 // ─── Mergers / Splitters ──────────────────────────────────────────
 
@@ -2528,6 +2538,10 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
         row.handle.setRunCount(runCount)
         lastTrayState.set(eventType, { queuedCount, runCount })
       }
+      // Lifetime counter: setLifetimeCount is internally diff-gated and
+      // is a no-op on stations whose spec didn't request a counter, so
+      // we can call it unconditionally.
+      row.handle.setLifetimeCount(fs?.items_lifetime ?? 0)
       row.data = {
         id: eventType,
         label: row.spec.label ?? eventType,

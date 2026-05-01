@@ -23,11 +23,26 @@ const factoryEntityLimit = 500
 // The frontend keys StationDetailOverlay data off event_type; any event
 // type with zero activity in the window is omitted.
 type factoryStationJSON struct {
-	EventType    string           `json:"event_type"`
-	Items24h     int              `json:"items_24h"`
-	Triggered24h int              `json:"triggered_24h"`
-	ActiveRuns   int              `json:"active_runs"`
-	Runs         []factoryRunJSON `json:"runs"`
+	EventType    string `json:"event_type"`
+	Items24h     int    `json:"items_24h"`
+	Triggered24h int    `json:"triggered_24h"`
+	ActiveRuns   int    `json:"active_runs"`
+	// ItemsLifetime is the from-catalog-start event count, populated only
+	// for terminal event types (PR merged/closed, Jira issue completed)
+	// so those stations can render a persistent "shipped X" scoreboard.
+	// Always 0 on non-terminal stations; the frontend decides whether to
+	// render a scoreboard based on the station's identity, not this field.
+	ItemsLifetime int              `json:"items_lifetime"`
+	Runs          []factoryRunJSON `json:"runs"`
+}
+
+// factoryTerminalEventTypes is the set of event types whose stations
+// surface a lifetime counter. Mirrors routing.EntityTerminatingEvents
+// but kept inline here so the handler doesn't pull in routing.
+var factoryTerminalEventTypes = []string{
+	domain.EventGitHubPRMerged,
+	domain.EventGitHubPRClosed,
+	domain.EventJiraIssueCompleted,
 }
 
 type factoryRunJSON struct {
@@ -167,6 +182,11 @@ func (s *Server) handleFactorySnapshot(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	lifetimeCounts, err := db.EventCountsByTypesLifetime(s.db, factoryTerminalEventTypes)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
 
 	// --- Active runs --------------------------------------------------------
 	activeRuns, err := db.ListFactoryActiveRuns(s.db)
@@ -194,6 +214,15 @@ func (s *Server) handleFactorySnapshot(w http.ResponseWriter, r *http.Request) {
 	for eventType, count := range taskCounts {
 		st := ensureStation(eventType)
 		st.Triggered24h = count
+		stations[eventType] = st
+	}
+	// Lifetime counts ride only on terminal stations — ensureStation
+	// guarantees a row even when no terminal event has fired yet (count
+	// is zero), so the scoreboard plate renders 0 instead of vanishing
+	// the station from the snapshot.
+	for _, eventType := range factoryTerminalEventTypes {
+		st := ensureStation(eventType)
+		st.ItemsLifetime = lifetimeCounts[eventType]
 		stations[eventType] = st
 	}
 

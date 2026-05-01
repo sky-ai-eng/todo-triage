@@ -200,6 +200,10 @@ export interface FactoryStation {
   items_24h: number
   triggered_24h: number
   active_runs: number
+  /** From-catalog-start event count, surfaced only on terminal stations
+   *  (PR merged/closed, Jira issue completed) where a lifetime "shipped
+   *  X" number is meaningful. Always 0 on non-terminal stations. */
+  items_lifetime: number
   runs: Array<{
     run: AgentRun
     task: Task
