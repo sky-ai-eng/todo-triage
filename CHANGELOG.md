@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.3.0](https://github.com/sky-ai-eng/triage-factory/compare/v1.2.1...v1.3.0) (2026-05-01)
+
+
+### Features
+
+* **factory:** SKY-196 – move to 3d factory view ([#58](https://github.com/sky-ai-eng/triage-factory/issues/58)) ([480d5e6](https://github.com/sky-ai-eng/triage-factory/commit/480d5e6dd0d0b4c43508fec83c761a4977a4b49a))
+
+
+### Bug Fixes
+
+* **factory:** animate terminal states before closure ([#69](https://github.com/sky-ai-eng/triage-factory/issues/69)) ([07d778c](https://github.com/sky-ai-eng/triage-factory/commit/07d778c5510f5da18f6d548aabd87fa136c9023c))
+
 ## [1.2.1](https://github.com/sky-ai-eng/triage-factory/compare/v1.2.0...v1.2.1) (2026-04-30)
 
 
