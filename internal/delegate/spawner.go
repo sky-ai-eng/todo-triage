@@ -792,19 +792,33 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		}
 		completion = s.runMemoryGate(ctx, runID, task.ID, claudeCwd, completion, stream.SessionID(), model, repoEnv)
 
-		// Ingest the agent-written memory file (if present) or flag the
-		// run as memory_missing. Either way the run still counts as
-		// completed — we don't fail a run just because the agent skipped
-		// the memory write, but we DO surface the gap.
-		if memoryFileExists(claudeCwd, runID) {
-			if err := ingestAgentMemory(s.database, claudeCwd, runID, task.EntityID); err != nil {
-				log.Printf("[delegate] warning: failed to ingest memory file for run %s: %v", runID, err)
-			}
-		} else {
-			log.Printf("[delegate] run %s: memory file missing after gate retries, flagging memory_missing", runID)
-			if err := db.MarkAgentRunMemoryMissing(s.database, runID); err != nil {
-				log.Printf("[delegate] warning: failed to mark memory_missing for run %s: %v", runID, err)
-			}
+		// Unconditional upsert of the run_memory row at termination
+		// (SKY-204): row presence === "termination passed through the
+		// memory gate", agent_content NULL === "agent didn't comply
+		// with the gate after retries" (UpsertAgentMemory normalizes
+		// empty/whitespace input to NULL on the way in). Replaces the
+		// previous branching write + denormalized memory_missing
+		// flag, both of which could drift from ground truth. The new
+		// shape also gives SKY-205's human-feedback writers an
+		// always-present row to UPDATE, so they don't need
+		// INSERT-or-UPDATE branching.
+		//
+		// Three distinct noncompliance states all map to the same DB
+		// signal but get logged differently here — diagnosing a gap
+		// after the fact is much easier when the log line says
+		// "missing" vs "empty" vs "read error" instead of a single
+		// generic message.
+		agentContent, fileState := readAgentMemoryFile(claudeCwd, runID)
+		if err := db.UpsertAgentMemory(s.database, runID, task.EntityID, agentContent); err != nil {
+			log.Printf("[delegate] warning: failed to upsert memory for run %s: %v", runID, err)
+		}
+		switch fileState {
+		case memoryFileMissing:
+			log.Printf("[delegate] run %s: memory file missing after gate retries (agent_content NULL)", runID)
+		case memoryFileEmpty:
+			log.Printf("[delegate] run %s: memory file present but empty after gate retries (agent_content NULL)", runID)
+		case memoryFileReadErr:
+			log.Printf("[delegate] run %s: memory file unreadable after gate retries (agent_content NULL)", runID)
 		}
 
 		resultSummary := ""
@@ -1118,27 +1132,44 @@ func memoryFileExists(cwd, runID string) bool {
 	return err == nil
 }
 
-// ingestAgentMemory reads an agent-written memory file from the worktree
-// and saves it as a task_memory row. Called after the write-gate has
-// verified the file is present. Returns an error only on read/DB failure —
-// "file missing" is not an error here because the caller already checked.
-func ingestAgentMemory(database *sql.DB, cwd, runID, entityID string) error {
+// memoryFileState distinguishes the three reasons readAgentMemoryFile
+// returns no usable content. They all map to the same DB signal
+// (UpsertAgentMemory normalizes empty/whitespace to NULL agent_content
+// === "agent didn't comply with the gate"), but each carries different
+// diagnostic value when something looks wrong post-run, so the gate
+// teardown logs them distinctly.
+type memoryFileState int
+
+const (
+	memoryFilePresent memoryFileState = iota // file exists, has non-whitespace content
+	memoryFileMissing                        // file does not exist on disk
+	memoryFileEmpty                          // file exists but is empty / whitespace-only
+	memoryFileReadErr                        // file exists, read failed (permissions, race, etc.)
+)
+
+// readAgentMemoryFile returns the agent-written ./task_memory/<runID>.md
+// content along with a state classification. The content string is
+// empty for every non-Present state — callers pass it straight to
+// UpsertAgentMemory either way, but inspect the state to log
+// distinctly rather than collapsing every form of noncompliance to
+// the same line. Read errors that aren't a missing file are logged
+// at the read site so they aren't lost when the caller picks a
+// higher-level message.
+func readAgentMemoryFile(cwd, runID string) (string, memoryFileState) {
 	path := filepath.Join(cwd, "task_memory", runID+".md")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf("read memory file %s: %w", path, err)
+		if os.IsNotExist(err) {
+			return "", memoryFileMissing
+		}
+		log.Printf("[delegate] warning: failed to read memory file %s: %v", path, err)
+		return "", memoryFileReadErr
 	}
-	mem := domain.TaskMemory{
-		ID:        uuid.New().String(),
-		RunID:     runID,
-		EntityID:  entityID,
-		Content:   string(data),
-		CreatedAt: time.Now().UTC(),
+	content := string(data)
+	if strings.TrimSpace(content) == "" {
+		return "", memoryFileEmpty
 	}
-	if err := db.SaveRunMemory(database, mem); err != nil {
-		return fmt.Errorf("save memory row: %w", err)
-	}
-	return nil
+	return content, memoryFilePresent
 }
 
 // runMemoryGate enforces the pre-complete task_memory file requirement.

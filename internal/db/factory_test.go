@@ -9,6 +9,86 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
+// TestListFactoryActiveRuns_MemoryMissingDerivedFromJoin pins the
+// SKY-204 contract that the factory's in-flight overlay reads
+// `memory_missing` as a derivation over run_memory rather than off
+// the (now-removed) runs.memory_missing column. Four cases, all
+// must end up with the same noncompliance signal where applicable
+// despite differing on-disk shape:
+//
+//  1. No run_memory row at all → memory_missing=true (gate not
+//     reached yet).
+//  2. Row exists, agent_content NULL → memory_missing=true (the
+//     terminate-then-no-write path UpsertAgentMemory writes for
+//     gate-failed runs).
+//  3. Row exists, agent_content = "" → memory_missing=true (legacy
+//     carry-over from before SKY-204 normalized empty to NULL, or a
+//     direct INSERT that bypassed UpsertAgentMemory).
+//  4. Row exists, agent_content = real text → memory_missing=false.
+//
+// The (3) row is what motivated the NULLIF(TRIM(...), ”) derivation
+// in the SELECT; without that guard the overlay would silently
+// regress to "memory present" for any legacy-empty row.
+func TestListFactoryActiveRuns_MemoryMissingDerivedFromJoin(t *testing.T) {
+	database := newTestDB(t)
+	entity := makeEntity(t, database, 200)
+	eventID := recordEvent(t, database, entity.ID, domain.EventGitHubPROpened)
+	if _, err := database.Exec(
+		`INSERT INTO prompts (id, name, body) VALUES ('p_factory', 'Test', 'body')`,
+	); err != nil {
+		t.Fatalf("seed prompt: %v", err)
+	}
+	if _, err := database.Exec(`
+		INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status)
+		VALUES ('t_factory', ?, ?, ?, 'queued')
+	`, entity.ID, domain.EventGitHubPROpened, eventID); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+	for _, runID := range []string{"run_no_row", "run_null_agent", "run_empty_agent", "run_with_content"} {
+		if _, err := database.Exec(`
+			INSERT INTO runs (id, task_id, prompt_id, status, trigger_type)
+			VALUES (?, 't_factory', 'p_factory', 'running', 'manual')
+		`, runID); err != nil {
+			t.Fatalf("seed run %s: %v", runID, err)
+		}
+	}
+	if err := UpsertAgentMemory(database, "run_null_agent", entity.ID, ""); err != nil {
+		t.Fatalf("upsert null memory: %v", err)
+	}
+	// Direct INSERT (bypassing UpsertAgentMemory) so the row carries
+	// agent_content = "" rather than NULL — simulates a legacy row or
+	// a future writer that doesn't go through the helper.
+	if _, err := database.Exec(`
+		INSERT INTO run_memory (id, run_id, entity_id, agent_content)
+		VALUES ('m_empty', 'run_empty_agent', ?, '')
+	`, entity.ID); err != nil {
+		t.Fatalf("seed empty agent_content: %v", err)
+	}
+	if err := UpsertAgentMemory(database, "run_with_content", entity.ID, "agent reasoning"); err != nil {
+		t.Fatalf("upsert real memory: %v", err)
+	}
+
+	runs, err := ListFactoryActiveRuns(database)
+	if err != nil {
+		t.Fatalf("ListFactoryActiveRuns: %v", err)
+	}
+	got := map[string]bool{}
+	for _, fr := range runs {
+		got[fr.Run.ID] = fr.Run.MemoryMissing
+	}
+	want := map[string]bool{
+		"run_no_row":       true,
+		"run_null_agent":   true,
+		"run_empty_agent":  true,
+		"run_with_content": false,
+	}
+	for id, expected := range want {
+		if got[id] != expected {
+			t.Errorf("run %s: memory_missing = %v, want %v", id, got[id], expected)
+		}
+	}
+}
+
 // recordEvent inserts a real entity-attached event for tests. Returns the
 // event's UUID. Wraps RecordEvent to centralize the t.Fatalf on errors.
 func recordEvent(t *testing.T, database *sql.DB, entityID, eventType string) string {

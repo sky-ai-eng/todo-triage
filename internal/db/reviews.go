@@ -25,10 +25,16 @@ func GetPendingReview(database *sql.DB, reviewID string) (*domain.PendingReview,
 	return &r, err
 }
 
+// AddPendingReviewComment inserts a pending review comment, snapshotting
+// `body` into the write-once `original_body` column at the same time.
+// Subsequent edits via UpdatePendingReviewComment mutate `body` only;
+// `original_body` is the durable record of the agent's draft so the
+// follow-up workstream (SKY-205 / SKY-206) can compute a diff for the
+// human-feedback memory write.
 func AddPendingReviewComment(database *sql.DB, c domain.PendingReviewComment) error {
 	_, err := database.Exec(
-		`INSERT INTO pending_review_comments (id, review_id, path, line, start_line, body) VALUES (?, ?, ?, ?, ?, ?)`,
-		c.ID, c.ReviewID, c.Path, c.Line, c.StartLine, c.Body,
+		`INSERT INTO pending_review_comments (id, review_id, path, line, start_line, body, original_body) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		c.ID, c.ReviewID, c.Path, c.Line, c.StartLine, c.Body, c.Body,
 	)
 	return err
 }
@@ -99,12 +105,21 @@ func DeletePendingReview(database *sql.DB, reviewID string) error {
 	return tx.Commit()
 }
 
-// SetPendingReviewSubmission stores the deferred review body and event, marking
-// the review as ready for user approval rather than immediate GitHub submission.
+// SetPendingReviewSubmission stores the deferred review body and event,
+// marking the review as ready for user approval rather than immediate
+// GitHub submission. The `original_review_body` column is populated
+// once via COALESCE: the first call captures the agent's drafted body,
+// later calls (which may carry user-edited bodies) leave the snapshot
+// untouched. Encoding the write-once contract in SQL — rather than a
+// SELECT-then-UPDATE in Go — keeps it race-free without a transaction.
 func SetPendingReviewSubmission(database *sql.DB, reviewID, body, event string) error {
 	_, err := database.Exec(
-		`UPDATE pending_reviews SET review_body = ?, review_event = ? WHERE id = ?`,
-		body, event, reviewID,
+		`UPDATE pending_reviews
+		 SET review_body = ?,
+		     review_event = ?,
+		     original_review_body = COALESCE(original_review_body, ?)
+		 WHERE id = ?`,
+		body, event, body, reviewID,
 	)
 	return err
 }
