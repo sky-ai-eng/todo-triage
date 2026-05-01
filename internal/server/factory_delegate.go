@@ -66,15 +66,6 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Spawner availability gate runs after request + state validation
-	// so callers learn about bad input before they hit infrastructure
-	// gaps. Tests rely on this ordering to exercise 404/409 paths
-	// without installing a spawner.
-	if s.spawner == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "spawner not configured"})
-		return
-	}
-
 	// Anchor the (possibly synthesized) task on the most recent event
 	// matching all three of (entity_id, event_type, dedup_key). The
 	// dedup_key filter is pushed into the SQL — picking the latest
@@ -91,6 +82,18 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	}
 	if primaryEvent == nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no matching event for entity at this station"})
+		return
+	}
+
+	// Spawner availability gate runs after every request + state
+	// validation (400/404/409) so callers learn about bad input
+	// before they hit the infrastructure gap. Sits before the
+	// FindOrCreateTask + RecordSwipe writes so a missing spawner
+	// can't leave a half-applied delegate (task + swipe row but no
+	// run). Tests rely on this ordering to exercise the 404/409/400
+	// paths without installing a spawner.
+	if s.spawner == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "spawner not configured"})
 		return
 	}
 

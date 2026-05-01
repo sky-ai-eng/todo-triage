@@ -57,6 +57,30 @@ func TestHandleFactoryDelegate_404OnMissingEntity(t *testing.T) {
 	}
 }
 
+// TestHandleFactoryDelegate_400OnNoMatchingEvent confirms the
+// "no matching event" 400 fires for an active entity that hasn't
+// produced an event of the requested type — a malformed snapshot
+// reference or a stale frontend retry. Pinned without a spawner so
+// the test also doubles as a regression for the gate ordering: any
+// request validation error must precede the 503 infrastructure gate.
+func TestHandleFactoryDelegate_400OnNoMatchingEvent(t *testing.T) {
+	s := newTestServer(t)
+	entity, _, err := db.FindOrCreateEntity(s.db, "github", "owner/repo#400e", "pr", "", "")
+	if err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	// No event recorded — request asks to delegate at a station the
+	// entity has never produced.
+	rec := doJSON(t, s, http.MethodPost, "/api/factory/delegate", map[string]string{
+		"entity_id":  entity.ID,
+		"event_type": domain.EventGitHubPRCICheckPassed,
+		"prompt_id":  "p1",
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 (no matching event)", rec.Code)
+	}
+}
+
 // TestHandleFactoryDelegate_409OnClosedEntity is the regression for the
 // soft-close grace race: factory snapshots include entities for ~60s
 // after they close so the chip can ride into the terminal station, but
