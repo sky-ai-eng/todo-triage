@@ -36,7 +36,6 @@ import {
   MeshBuilder,
   PBRMaterial,
   Scene,
-  StandardMaterial,
   Texture,
   TransformNode,
   Vector3,
@@ -792,15 +791,11 @@ export function buildStationMesh(
     station.y + STATUS_PANEL_DEPTH - STATUS_SCREEN_THICKNESS / 2 - 0.05,
     panelCz,
   )
-  statusScreen.material = materials.screen
-  statusScreen.parent = root
-
-  // ─── Status screen text overlay ──────────────────────────────────────
-  // Thin Plane sitting just in front of the screen Box, displaying the
-  // lifetime entity-throughput counter for this station. Per-station
-  // DynamicTexture so each can update independently; the alpha-blended
-  // emissive material lets the dark blue screen show through behind
-  // the cyan numerals (the screen Box stays as the bezel/glow).
+  // Per-station screen material. Carries a DynamicTexture rendered
+  // with the lifetime counter on its albedo + emissive channels.
+  // Babylon's default Box UV mapping gives each face the full 0–1 UV
+  // range, so whichever face of the thin screen plate is camera-facing
+  // will display the text — no per-face UV gymnastics required.
   const screenTexW = 512
   const screenTexH = 256
   const screenTex = new DynamicTexture(
@@ -809,11 +804,20 @@ export function buildStationMesh(
     scene,
     false,
   )
-  screenTex.hasAlpha = true
   const screenCtx = screenTex.getContext() as CanvasRenderingContext2D
 
+  // Approximate the shared `materials.screen` look (dark blue glass
+  // with low emissive lift) so the text sits on the same backdrop the
+  // station already shows. Filled into the canvas itself rather than
+  // layered as a second material — keeps a single PBRMaterial per
+  // station and avoids a transparent plane that drops out at certain
+  // angles.
+  const screenBgFill = '#15171c'
+  const screenTextFill = '#a4f8ff'
+
   const renderScreenText = (n: number) => {
-    screenCtx.clearRect(0, 0, screenTexW, screenTexH)
+    screenCtx.fillStyle = screenBgFill
+    screenCtx.fillRect(0, 0, screenTexW, screenTexH)
     const text = formatLifetimeCount(n)
     let fontPx = 200
     screenCtx.font = `700 ${fontPx}px ui-sans-serif, system-ui, -apple-system, sans-serif`
@@ -821,51 +825,30 @@ export function buildStationMesh(
       fontPx -= 6
       screenCtx.font = `700 ${fontPx}px ui-sans-serif, system-ui, -apple-system, sans-serif`
     }
-    screenCtx.fillStyle = '#a4f8ff'
+    screenCtx.fillStyle = screenTextFill
     screenCtx.textAlign = 'center'
     screenCtx.textBaseline = 'middle'
-    // V-flip so the canvas's top-down coords land right-side up after
-    // the plane's X-axis rotation maps canvas-V onto world-Z.
-    screenCtx.save()
-    screenCtx.translate(0, screenTexH)
-    screenCtx.scale(1, -1)
     screenCtx.fillText(text, screenTexW / 2, screenTexH / 2)
-    screenCtx.restore()
     screenTex.update(true)
   }
   let lifetimeValue = 0
   renderScreenText(0)
 
-  const screenTextMat = new StandardMaterial(
-    `status-screen-text-mat-${station.x}_${station.y}`,
-    scene,
-  )
-  screenTextMat.diffuseTexture = screenTex
-  screenTextMat.useAlphaFromDiffuseTexture = true
-  screenTextMat.emissiveTexture = screenTex
-  screenTextMat.emissiveColor = Color3.White()
-  screenTextMat.disableLighting = true
-  ;(screenTextMat.diffuseTexture as Texture).wrapU = Texture.CLAMP_ADDRESSMODE
-  ;(screenTextMat.diffuseTexture as Texture).wrapV = Texture.CLAMP_ADDRESSMODE
-
-  const screenTextW = STATUS_PANEL_W - STATUS_SCREEN_INSET * 2
-  const screenTextH = STATUS_PANEL_H - STATUS_SCREEN_INSET * 2
-  const screenTextPlane = MeshBuilder.CreatePlane(
-    'status-screen-text',
-    { width: screenTextW, height: screenTextH },
-    scene,
-  )
-  // Plane is built in the XY plane (normal +Z); rotating +π/2 around
-  // X aligns the normal with -Y so the visible face looks toward the
-  // camera (which sits on the -Y side of the factory).
-  screenTextPlane.rotation.x = Math.PI / 2
-  screenTextPlane.position.set(
-    panelCx,
-    station.y + STATUS_PANEL_DEPTH - STATUS_SCREEN_THICKNESS - 0.15,
-    panelCz,
-  )
-  screenTextPlane.material = screenTextMat
-  screenTextPlane.parent = root
+  const screenMat = new PBRMaterial(`status-screen-mat-${station.x}_${station.y}`, scene)
+  screenMat.albedoColor = Color3.White()
+  screenMat.albedoTexture = screenTex
+  screenMat.emissiveTexture = screenTex
+  screenMat.emissiveColor = Color3.White()
+  screenMat.emissiveIntensity = 1.1
+  screenMat.metallic = 0.1
+  screenMat.roughness = 0.35
+  screenMat.clearCoat.isEnabled = true
+  screenMat.clearCoat.intensity = 0.7
+  screenMat.clearCoat.roughness = 0.05
+  ;(screenMat.albedoTexture as Texture).wrapU = Texture.CLAMP_ADDRESSMODE
+  ;(screenMat.albedoTexture as Texture).wrapV = Texture.CLAMP_ADDRESSMODE
+  statusScreen.material = screenMat
+  statusScreen.parent = root
 
   // ─── Vent glow slabs ─────────────────────────────────────────────────
   const ventGlowBackY = station.y + station.d - VENT_DEPTH + VENT_GLOW_THICKNESS / 2 + 0.05
