@@ -1,10 +1,6 @@
 import * as Tooltip from '@radix-ui/react-tooltip'
 import { useEffect, useRef, useState } from 'react'
-import {
-  createIsoDebugScene,
-  type ClickedStationInfo,
-  type IsoSceneHandle,
-} from '../factory/iso-debug'
+import { createIsoScene, type ClickedStationInfo, type IsoSceneHandle } from '../factory/iso-scene'
 import { useWebSocket } from '../hooks/useWebSocket'
 import type { AgentRun, FactoryEntity, FactorySnapshot, Task } from '../types'
 
@@ -39,7 +35,7 @@ export default function Factory() {
     if (!container) return
     let cancelled = false
     let unsubClick: (() => void) | null = null
-    createIsoDebugScene(container).then((scene) => {
+    createIsoScene(container).then((scene) => {
       if (cancelled) {
         scene.destroy()
         return

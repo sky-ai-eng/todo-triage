@@ -1382,13 +1382,7 @@ export interface IsoSceneHandle {
   applySnapshot: (snapshot: FactorySnapshot) => void
 }
 
-/** Back-compat alias retained for any consumers still importing the
- *  pre-rename type name. The scene factory was originally a debug
- *  POC; it's now the production scene factory. New code should use
- *  IsoSceneHandle. */
-export type IsoDebugSceneHandle = IsoSceneHandle
-
-export async function createIsoDebugScene(container: HTMLDivElement): Promise<IsoDebugSceneHandle> {
+export async function createIsoScene(container: HTMLDivElement): Promise<IsoSceneHandle> {
   const canvas = document.createElement('canvas')
   canvas.style.width = '100%'
   canvas.style.height = '100%'

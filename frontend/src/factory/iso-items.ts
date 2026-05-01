@@ -16,7 +16,7 @@
 //
 // Spawners (the demo-only periodic emitter) precompute an itinerary by
 // walking next[0] from their seed segment until a dead end, mirroring
-// the old "always pick next[0]" behavior so iso-debug.ts's spawner
+// the old "always pick next[0]" behavior so iso-scene.ts's spawner
 // keeps producing the visual it always did.
 //
 // Rendering is one shell + core mesh per item, plus an optional

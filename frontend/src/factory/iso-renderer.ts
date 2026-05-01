@@ -696,7 +696,7 @@ export class IsoScene {
   }
 
   /** Snapshot-driven chip controller. The scene reconciler in
-   *  iso-debug calls reconcile() every frame with the live transit
+   *  iso-scene calls reconcile() every frame with the live transit
    *  set; this controller owns those meshes and poses them from
    *  externally-supplied progress values. Lazily constructed so the
    *  PBR materials it shares with the queued-pad don't get built
