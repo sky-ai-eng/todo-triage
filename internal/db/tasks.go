@@ -219,6 +219,7 @@ func ListActiveTasksForEntities(database *sql.DB, entityIDs []string) ([]domain.
 			JOIN entities e ON t.entity_id = e.id
 			WHERE t.entity_id IN (`+strings.Join(placeholders, ",")+`)
 			  AND t.status NOT IN ('done', 'dismissed')
+			ORDER BY t.entity_id, t.event_type, t.created_at DESC, t.id DESC
 		`, args...)
 		if err != nil {
 			return nil, err
