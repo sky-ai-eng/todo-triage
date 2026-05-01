@@ -69,6 +69,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/tasks/{id}/swipe", s.handleSwipe)
 	s.mux.HandleFunc("POST /api/tasks/{id}/snooze", s.handleSnooze)
 	s.mux.HandleFunc("POST /api/tasks/{id}/undo", s.handleUndo)
+	s.mux.HandleFunc("POST /api/tasks/{id}/requeue", s.handleRequeue)
 
 	s.mux.HandleFunc("GET /api/agent/runs/{runID}", s.handleAgentStatus)
 	s.mux.HandleFunc("GET /api/agent/runs/{runID}/messages", s.handleAgentMessages)

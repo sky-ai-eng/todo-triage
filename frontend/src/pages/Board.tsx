@@ -320,14 +320,19 @@ export default function Board() {
       return
     }
 
-    // Any → Queue: undo/requeue
+    // Any → Queue: state-driven requeue. Distinct from /undo (the
+    // Cards swipe-toast UX): drag-to-queue isn't reversing the user's
+    // last gesture, it's a deliberate state change. /requeue runs the
+    // same cleanup (Jira reversal, pending_approval review teardown
+    // via SKY-206) without polluting swipe_events with phantom 'undo'
+    // rows for every drag.
     if (
       targetCol === 'queue' ||
       (wasDraggingFromSidebar && !['you', 'agent', 'done'].includes(overId))
     ) {
       // Don't requeue if source is already queue
       if (sourceCol !== 'queue') {
-        await fetch(`/api/tasks/${taskId}/undo`, { method: 'POST' })
+        await fetch(`/api/tasks/${taskId}/requeue`, { method: 'POST' })
         fetchTasks()
       }
       return
@@ -336,7 +341,7 @@ export default function Board() {
 
   const handleRequeue = useCallback(
     async (taskId: string) => {
-      await fetch(`/api/tasks/${taskId}/undo`, { method: 'POST' })
+      await fetch(`/api/tasks/${taskId}/requeue`, { method: 'POST' })
       fetchTasks()
     },
     [fetchTasks],

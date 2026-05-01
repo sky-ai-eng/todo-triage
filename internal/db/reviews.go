@@ -128,6 +128,40 @@ func ListPendingReviewComments(database *sql.DB, reviewID string) ([]domain.Pend
 	return comments, rows.Err()
 }
 
+// DeletePendingReviewByRunID tears down a pending review (and its
+// cascaded comments) keyed by the run that produced it. Used by
+// SKY-206's discard cleanup so a transient failure in a separate
+// lookup-by-id query doesn't strand the review row in the DB —
+// which is precisely the stale-state bug that workstream is fixing.
+//
+// Single transaction across the comments + review delete: if
+// either statement fails, the entire teardown rolls back and the
+// caller's error propagates rather than leaving a half-cleaned
+// state where comments are gone but the review row remains
+// (or vice versa). No-op on a run with no pending review (0 rows
+// affected on both DELETEs); safe to call unconditionally.
+func DeletePendingReviewByRunID(database *sql.DB, runID string) error {
+	tx, err := database.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(
+		`DELETE FROM pending_review_comments
+		 WHERE review_id IN (SELECT id FROM pending_reviews WHERE run_id = ?)`,
+		runID,
+	); err != nil {
+		return fmt.Errorf("delete review comments by run: %w", err)
+	}
+	if _, err := tx.Exec(
+		`DELETE FROM pending_reviews WHERE run_id = ?`,
+		runID,
+	); err != nil {
+		return fmt.Errorf("delete review by run: %w", err)
+	}
+	return tx.Commit()
+}
+
 // DeletePendingReview removes a review and all its comments (on submit or cancel).
 func DeletePendingReview(database *sql.DB, reviewID string) error {
 	tx, err := database.Begin()

@@ -239,6 +239,61 @@ func MarkAgentRunCancelledIfActive(database *sql.DB, runID, stopReason, summary 
 	return n > 0, nil
 }
 
+// MarkAgentRunDiscarded marks a pending_approval run as cancelled
+// when the user requeues / dismisses the task without submitting the
+// review the agent prepared. Mirrors MarkAgentRunCancelledIfActive
+// but specifically targets pending_approval — that helper deliberately
+// excludes pending_approval from its terminal-status filter so the
+// "process exited cleanly, awaiting user input" state isn't trampled
+// by a late takeover-rollback. Here we DO want to flip it: the user
+// has explicitly chosen to discard.
+//
+// The agent process has already exited by the time pending_approval
+// is reached (the spawner's runAgent defer ran), so there's nothing
+// to cancel at the process level — this is purely a DB cleanup.
+//
+// Idempotent against concurrent calls via the status='pending_approval'
+// guard: a second call against an already-cancelled row affects 0
+// rows. Returns ok=false in that case so the caller can skip the
+// websocket broadcast (no actual state change to push).
+func MarkAgentRunDiscarded(database *sql.DB, runID, stopReason string) (bool, error) {
+	now := time.Now()
+	res, err := database.Exec(`
+		UPDATE runs
+		SET status = 'cancelled',
+		    completed_at = COALESCE(completed_at, ?),
+		    stop_reason = ?,
+		    result_summary = COALESCE(NULLIF(result_summary, ''), ?)
+		WHERE id = ? AND status = 'pending_approval'
+	`, now, stopReason, "Review discarded by user.", runID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// PendingApprovalRunIDForTask returns the id of the (single)
+// pending_approval run on a task, or "" if none. Used by the
+// requeue-finalizer to decide whether the discard cleanup needs to
+// run. Bounded to one row by construction — the spawner only flips
+// to pending_approval after CompleteAgentRun, and a task only has
+// one in-flight delegation at a time.
+func PendingApprovalRunIDForTask(database *sql.DB, taskID string) (string, error) {
+	var id string
+	err := database.QueryRow(
+		`SELECT id FROM runs WHERE task_id = ? AND status = 'pending_approval' LIMIT 1`,
+		taskID,
+	).Scan(&id)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return id, err
+}
+
 // HasActiveRunForTask returns true if the task has any agent run that hasn't
 // reached a terminal state. Used as an in-flight gate for auto-delegation.
 func HasActiveRunForTask(database *sql.DB, taskID string) (bool, error) {
