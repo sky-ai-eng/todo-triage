@@ -819,16 +819,27 @@ export function buildStationMesh(
     screenCtx.fillStyle = screenBgFill
     screenCtx.fillRect(0, 0, screenTexW, screenTexH)
     const text = formatLifetimeCount(n)
+    // Babylon's default Box UV mapping puts the canvas U axis along
+    // the visible face's *vertical* edge, not its horizontal one — so
+    // text drawn upright on the canvas ends up rotated 90° CW on the
+    // screen. We pre-rotate the drawing 90° CCW to compensate. After
+    // rotation the text's natural width is laid out along canvas Y,
+    // so the shrink-to-fit budget compares against canvas height.
+    const widthBudget = screenTexH - 40
     let fontPx = 200
     screenCtx.font = `700 ${fontPx}px ui-sans-serif, system-ui, -apple-system, sans-serif`
-    while (screenCtx.measureText(text).width > screenTexW - 40 && fontPx > 80) {
+    while (screenCtx.measureText(text).width > widthBudget && fontPx > 80) {
       fontPx -= 6
       screenCtx.font = `700 ${fontPx}px ui-sans-serif, system-ui, -apple-system, sans-serif`
     }
     screenCtx.fillStyle = screenTextFill
     screenCtx.textAlign = 'center'
     screenCtx.textBaseline = 'middle'
-    screenCtx.fillText(text, screenTexW / 2, screenTexH / 2)
+    screenCtx.save()
+    screenCtx.translate(screenTexW / 2, screenTexH / 2)
+    screenCtx.rotate(-Math.PI / 2)
+    screenCtx.fillText(text, 0, 0)
+    screenCtx.restore()
     screenTex.update(true)
   }
   let lifetimeValue = 0
