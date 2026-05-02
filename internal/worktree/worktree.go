@@ -213,15 +213,6 @@ func RemoveClaudeProjectDir(cwd string) {
 	}
 }
 
-// prFetchRefspec teaches the bare clone to mirror GitHub's server-side
-// pull-request refs into refs/remotes/pr/<n> on every fetch. With this
-// in place a worktree can check out the head of any PR — including
-// PRs from forks — without ever cloning the fork itself; GitHub
-// maintains refs/pull/<n>/head on the upstream side and we just pull
-// it down. Without this refspec, fetching `refs/heads/<branch>` for
-// a fork PR fails because the branch doesn't exist on origin.
-const prFetchRefspec = "+refs/pull/*/head:refs/remotes/pr/*"
-
 // EnsureBareClone is the exported entry point for callers that want a
 // bare clone of owner/repo materialized and configured. It's idempotent:
 // no-op when the bare already exists with the right origin URL and PR
@@ -240,14 +231,23 @@ func EnsureBareClone(ctx context.Context, owner, repo, cloneURL string) (string,
 	return ensureBareCloneLocked(ctx, owner, repo, cloneURL)
 }
 
-// ensureBareCloneLocked clones the bare if missing, repairs a drifted
-// origin URL when one is configured, and configures the PR fetch
-// refspec. Caller must hold the per-repo lock.
+// ensureBareCloneLocked clones the bare if missing and repairs a
+// drifted origin URL when one is configured. Caller must hold the
+// per-repo lock.
 //
 // The clone-if-missing step is split into a separate helper so the
-// post-clone configuration runs whether or not the bare already
-// existed. A repo whose bare was created before this code shipped
-// won't have the PR refspec configured; calling this once corrects it.
+// post-clone configuration (the URL repair) runs whether or not the
+// bare already existed. A repo whose bare was created before this
+// code shipped may have origin pointed at a fork (the historical
+// bug); calling this on bootstrap corrects it.
+//
+// We deliberately do NOT add a global PR fetch refspec
+// (`+refs/pull/*/head:refs/remotes/pr/*`) to the bare. CreateForPR
+// already fetches the specific PR ref it needs via an explicit
+// refspec. A configured global refspec only kicks in for bare
+// `git fetch` / `git pull`, where it would mirror every PR's head
+// on every refresh — thousands of extra refs on busy repos for no
+// internal benefit.
 func ensureBareCloneLocked(ctx context.Context, owner, repo, cloneURL string) (string, error) {
 	bareDir, err := cloneBareIfMissing(ctx, owner, repo, cloneURL)
 	if err != nil {
@@ -257,9 +257,6 @@ func ensureBareCloneLocked(ctx context.Context, owner, repo, cloneURL string) (s
 		if err := repairOriginURL(ctx, bareDir, cloneURL); err != nil {
 			return "", fmt.Errorf("repair origin url: %w", err)
 		}
-	}
-	if err := ensurePRFetchRefspec(ctx, bareDir); err != nil {
-		return "", fmt.Errorf("ensure pr refspec: %w", err)
 	}
 	return bareDir, nil
 }
@@ -315,26 +312,6 @@ func repairOriginURL(ctx context.Context, bareDir, wantURL string) error {
 	}
 	log.Printf("[worktree] repairing origin url for %s: %q -> %q", bareDir, currentURL, wantURL)
 	return gitRunCtx(ctx, bareDir, "remote", "set-url", "origin", wantURL)
-}
-
-// ensurePRFetchRefspec adds the PR fetch refspec to remote.origin.fetch
-// if it isn't already present. Idempotent: skips the add when the line
-// is already configured.
-//
-// Read uses --get-all (not --get) because remote.origin.fetch is a
-// multi-valued config key — `git clone --bare` configures one default
-// value (+refs/heads/*:refs/heads/*) and we add a second. --get would
-// either return only the first or fail with "multiple values"; --get-all
-// returns every value newline-separated, which is what we need to
-// detect prior installation.
-func ensurePRFetchRefspec(ctx context.Context, bareDir string) error {
-	out, _ := gitOutputCtx(ctx, bareDir, "config", "--get-all", "remote.origin.fetch")
-	for _, line := range strings.Split(out, "\n") {
-		if strings.TrimSpace(line) == prFetchRefspec {
-			return nil
-		}
-	}
-	return gitRunCtx(ctx, bareDir, "config", "--add", "remote.origin.fetch", prFetchRefspec)
 }
 
 // makeWorktreeDir creates the run directory for a worktree.

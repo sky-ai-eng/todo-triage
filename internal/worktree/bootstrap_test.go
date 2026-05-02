@@ -53,55 +53,6 @@ func withTestHome(t *testing.T) string {
 	return home
 }
 
-// readFetchRefspecs returns every value of remote.origin.fetch in the
-// bare. Tolerates the "key not found" exit-1 from `git config
-// --get-all` — `git clone --bare` doesn't configure a fetch refspec
-// at all (just remote.origin.url), so a freshly-cloned bare with no
-// post-processing returns nothing. That's a valid state we still want
-// to inspect from tests.
-func readFetchRefspecs(t *testing.T, bareDir string) []string {
-	t.Helper()
-	out, err := exec.Command("git", "-C", bareDir, "config", "--get-all", "remote.origin.fetch").Output()
-	if err != nil {
-		// Exit 1 when the key has zero values is fine; surface other failures.
-		if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() == 1 {
-			return nil
-		}
-		t.Fatalf("read fetch refspecs: %v", err)
-	}
-	var refs []string
-	for _, line := range strings.Split(string(out), "\n") {
-		if s := strings.TrimSpace(line); s != "" {
-			refs = append(refs, s)
-		}
-	}
-	return refs
-}
-
-func TestEnsureBareClone_FreshCloneSetsPRRefspec(t *testing.T) {
-	withTestHome(t)
-	upstream := makeTestUpstream(t)
-
-	bareDir, err := EnsureBareClone(context.Background(), "owner1", "repo1", upstream)
-	if err != nil {
-		t.Fatalf("EnsureBareClone: %v", err)
-	}
-	if _, err := os.Stat(bareDir); err != nil {
-		t.Fatalf("bare dir not created: %v", err)
-	}
-
-	refspecs := readFetchRefspecs(t, bareDir)
-	found := false
-	for _, r := range refspecs {
-		if r == prFetchRefspec {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("PR refspec not configured on fresh clone. Got: %v", refspecs)
-	}
-}
-
 func TestEnsureBareClone_Idempotent(t *testing.T) {
 	withTestHome(t)
 	upstream := makeTestUpstream(t)
@@ -113,16 +64,8 @@ func TestEnsureBareClone_Idempotent(t *testing.T) {
 	}
 
 	bareDir, _ := repoDir("owner2", "repo2")
-	refspecs := readFetchRefspecs(t, bareDir)
-
-	prCount := 0
-	for _, r := range refspecs {
-		if r == prFetchRefspec {
-			prCount++
-		}
-	}
-	if prCount != 1 {
-		t.Errorf("expected exactly 1 PR refspec after 3 calls, got %d. Refspecs: %v", prCount, refspecs)
+	if _, err := os.Stat(bareDir); err != nil {
+		t.Fatalf("bare dir missing after repeated EnsureBareClone: %v", err)
 	}
 }
 
@@ -152,48 +95,6 @@ func TestEnsureBareClone_RepairsOriginURL(t *testing.T) {
 	}
 	if got := strings.TrimSpace(string(out)); got != upstream2 {
 		t.Errorf("expected origin repaired to %q, got %q", upstream2, got)
-	}
-}
-
-// TestEnsureBareClone_AddsRefspecToExistingBare covers the case where
-// a bare already exists on disk from before this code shipped — it
-// won't have the PR refspec configured. EnsureBareClone must upgrade
-// it in place rather than only configuring fresh clones, otherwise
-// existing users wouldn't get the fork-PR fix.
-func TestEnsureBareClone_AddsRefspecToExistingBare(t *testing.T) {
-	home := withTestHome(t)
-	upstream := makeTestUpstream(t)
-
-	// Manually create a bare without the PR refspec, mirroring how the
-	// pre-SKY-214 code cloned (--bare --filter=blob:none, no PR refspec).
-	// The blob filter is what forces git to set up a real
-	// remote.origin.fetch entry — a plain `git clone --bare` from a
-	// local path uses the alternates mechanism and skips the remote
-	// config entirely, which doesn't match what real users have on disk.
-	bareDir := filepath.Join(home, ".triagefactory", "repos", "owner4", "repo4.git")
-	if err := os.MkdirAll(filepath.Dir(bareDir), 0755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if out, err := exec.Command("git", "clone", "--bare", "--filter=blob:none", upstream, bareDir).CombinedOutput(); err != nil {
-		t.Fatalf("manual bare clone: %v: %s", err, out)
-	}
-	for _, r := range readFetchRefspecs(t, bareDir) {
-		if r == prFetchRefspec {
-			t.Fatalf("setup: PR refspec already present on plain --bare clone, test premise is wrong")
-		}
-	}
-
-	if _, err := EnsureBareClone(context.Background(), "owner4", "repo4", upstream); err != nil {
-		t.Fatalf("EnsureBareClone: %v", err)
-	}
-	found := false
-	for _, r := range readFetchRefspecs(t, bareDir) {
-		if r == prFetchRefspec {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("PR refspec not added to existing bare. Got: %v", readFetchRefspecs(t, bareDir))
 	}
 }
 
