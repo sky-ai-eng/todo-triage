@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.4.0](https://github.com/sky-ai-eng/triage-factory/compare/v1.3.0...v1.4.0) (2026-05-02)
+
+
+### Features
+
+* **board:** drag AgentCards between columns in terminal run states ([#77](https://github.com/sky-ai-eng/triage-factory/issues/77)) ([71a6d3a](https://github.com/sky-ai-eng/triage-factory/commit/71a6d3aeea74b8e3931c328c94ae113964228009))
+* **reviews:** block second submit-review per run + clearer queue wording (SKY-212) ([#78](https://github.com/sky-ai-eng/triage-factory/issues/78)) ([cb02370](https://github.com/sky-ai-eng/triage-factory/commit/cb0237028970ac9b0f428b3b64831e000efd2038))
+* **reviews:** cleanup discarded reviews + split /undo from /requeue (SKY-206) ([#75](https://github.com/sky-ai-eng/triage-factory/issues/75)) ([4c5a8b1](https://github.com/sky-ai-eng/triage-factory/commit/4c5a8b1ebafedb1e415f611dc170b63da41e7348))
+* **reviews:** persist human verdict to run_memory.human_content (SKY-205) ([#74](https://github.com/sky-ai-eng/triage-factory/issues/74)) ([f5b8512](https://github.com/sky-ai-eng/triage-factory/commit/f5b851279823589a7c858600f1aaaeb6d693a908))
+* **reviews:** Return-to-queue button on pending_approval AgentCards (SKY-207) ([#76](https://github.com/sky-ai-eng/triage-factory/issues/76)) ([b522644](https://github.com/sky-ai-eng/triage-factory/commit/b522644dfce370e66b473e0688939730b42ff0fe))
+
+
+### Bug Fixes
+
+* **delegate:** stamp run-message timestamps before WS broadcast (SKY-213) ([#79](https://github.com/sky-ai-eng/triage-factory/issues/79)) ([1be816c](https://github.com/sky-ai-eng/triage-factory/commit/1be816cb011c79671c03e70164321051e5053139))
+* **factory:** drag-to-delegate from station drawer ([#70](https://github.com/sky-ai-eng/triage-factory/issues/70)) ([1ece04d](https://github.com/sky-ai-eng/triage-factory/commit/1ece04d1185fb3e4f34c3edbd92ec43e446b14a5))
+* **reviews:** expand pr-review focus + drive inline suggestions ([#81](https://github.com/sky-ai-eng/triage-factory/issues/81)) ([263e846](https://github.com/sky-ai-eng/triage-factory/commit/263e846a1513967ef1fa6aa503d5f020581b48ba))
+
 ## [1.3.0](https://github.com/sky-ai-eng/triage-factory/compare/v1.2.1...v1.3.0) (2026-05-01)
 
 
