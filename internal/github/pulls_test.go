@@ -114,11 +114,10 @@ func TestGetPR_OwnRepoPR_HeadAndBaseEqual(t *testing.T) {
 
 // TestGetPR_DeletedFork_BaseStillPopulated covers the GitHub edge
 // case where head.repo is null because the contributor's fork was
-// deleted. CreateForPR explicitly errors on empty headCloneURL, so
-// the parser must leave CloneURL empty (not panic on the null) AND
-// must still populate BaseCloneURL — the spawner's error message
-// distinguishes "fork deleted" from "couldn't read PR" via that
-// asymmetry.
+// deleted. The parser must leave CloneURL empty (not panic on the
+// null) AND still populate BaseCloneURL and HeadRef so deleted-fork
+// PRs can still be recognized and handled using the base repository
+// metadata, including creating a read-only worktree when needed.
 func TestGetPR_DeletedFork_BaseStillPopulated(t *testing.T) {
 	prJSON := `{
 		"number": 99,
