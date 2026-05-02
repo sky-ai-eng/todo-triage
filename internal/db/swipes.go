@@ -34,6 +34,8 @@ func RecordSwipe(database *sql.DB, taskID, action string, hesitationMs int) (str
 		newStatus = "snoozed"
 	case "delegate":
 		newStatus = "delegated"
+	case "complete":
+		newStatus = "done"
 	default:
 		newStatus = "queued"
 	}

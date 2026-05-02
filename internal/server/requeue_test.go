@@ -246,6 +246,98 @@ func TestHandleSwipe_DismissCleansUpPendingApprovalRun(t *testing.T) {
 		"dismissed", "dismissed the task entirely")
 }
 
+// TestHandleSwipe_CompleteCleansUpPendingApprovalRun is the fourth
+// entry point: the Board's drag-AgentCard-to-Done gesture for a
+// pending_approval run. The complete swipe action flips the task to
+// 'done' (so the card lands in the Done column rather than
+// disappearing from the board, the way dismiss makes it) but reuses
+// the same SKY-206 cleanup — pending_reviews row gone, run flipped
+// to cancelled, agent_content preserved, human_content recording
+// the user's verdict with a complete-flavored marker that's distinct
+// from both the requeue and dismiss shapes. Future agents reading
+// memory should be able to tell "the human resolved this themselves
+// without applying my prepared review" from "the human walked away
+// from the entity entirely."
+func TestHandleSwipe_CompleteCleansUpPendingApprovalRun(t *testing.T) {
+	s := newTestServer(t)
+	taskID, runID, reviewID := pendingApprovalFixture(t, s.db)
+
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/swipe",
+		map[string]any{"action": "complete", "hesitation_ms": 0})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	assertPendingApprovalCleanedUp(t, s.db, taskID, runID, reviewID,
+		"done", "marked the task complete without submitting")
+}
+
+// TestHandleSwipe_ClaimCleansUpPendingApprovalRun guards the SKY-206
+// race the PR #77 review flagged: Board's drag-Agent-to-You issues
+// /swipe claim, but the frontend's agentRuns map can be transiently
+// empty during a fetchTasks refresh — so any frontend gating on
+// agentRuns[taskId]?.Status === 'pending_approval' would silently
+// skip the cleanup, stranding the prepared review row and leaving a
+// phantom pending_approval run.
+//
+// Backend-authoritative cleanup closes that hole: the swipe handler
+// runs cleanupPendingApprovalRun for every claim, and the
+// pending_approval-row lookup makes it a no-op for tasks without a
+// review. The claim-flavored marker carries its own
+// recalibration signal — "human took over manually" — distinct from
+// requeue/dismiss/complete.
+func TestHandleSwipe_ClaimCleansUpPendingApprovalRun(t *testing.T) {
+	s := newTestServer(t)
+	taskID, runID, reviewID := pendingApprovalFixture(t, s.db)
+
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/swipe",
+		map[string]any{"action": "claim", "hesitation_ms": 0})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	assertPendingApprovalCleanedUp(t, s.db, taskID, runID, reviewID,
+		"claimed", "claimed the task to handle it themselves")
+}
+
+// TestHandleSwipe_ClaimWithoutPendingApprovalIsNoOp pins the
+// idempotency contract: cleanupPendingApprovalRun must be a no-op
+// when the task has no pending_approval run, so adding the cleanup
+// to the claim path doesn't disturb the queue → claim flow used by
+// Cards.tsx and the existing Board queue → you drag.
+func TestHandleSwipe_ClaimWithoutPendingApprovalIsNoOp(t *testing.T) {
+	s := newTestServer(t)
+
+	// Plain queued task with no agent run. Mirrors what claim from
+	// the queue looks like — the event/task FK chain mirrors
+	// pendingApprovalFixture but stops short of any runs or reviews.
+	const eventType = "github:pr:opened"
+	if _, err := s.db.Exec(`
+		INSERT INTO entities (id, source, source_id, kind, state)
+		VALUES ('e1', 'github', 'sky/repo#1', 'pr', 'active');
+		INSERT INTO events (id, entity_id, event_type, dedup_key)
+		VALUES ('ev1', 'e1', ?, '');
+		INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status)
+		VALUES ('task-noruns', 'e1', ?, 'ev1', 'queued');
+	`, eventType, eventType); err != nil {
+		t.Fatalf("seed FK chain: %v", err)
+	}
+
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/task-noruns/swipe",
+		map[string]any{"action": "claim", "hesitation_ms": 0})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	var status string
+	if err := s.db.QueryRow(`SELECT status FROM tasks WHERE id = 'task-noruns'`).Scan(&status); err != nil {
+		t.Fatalf("scan task: %v", err)
+	}
+	if status != "claimed" {
+		t.Errorf("task.status = %q, want %q", status, "claimed")
+	}
+}
+
 // TestHandleUndo_404OnMissingTask pins the missing-id behavior:
 // /undo against a bogus task ID must return 404 with a clean error
 // body, not the SQLite FK violation surfaced as a 500. The
