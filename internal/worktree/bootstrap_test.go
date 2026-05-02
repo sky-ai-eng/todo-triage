@@ -2,6 +2,7 @@ package worktree
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -302,7 +303,7 @@ func TestCleanupPRConfig_RemovesForkPRArtifacts(t *testing.T) {
 	if err := RemoveAt(wtPath, "cleanup-test-run"); err != nil {
 		t.Fatalf("RemoveAt: %v", err)
 	}
-	CleanupPRConfig(context.Background(), "owner-cleanup-test", "repo-cleanup-test", 99)
+	CleanupPRConfig("owner-cleanup-test", "repo-cleanup-test", 99)
 
 	if out, err := exec.Command("git", "-C", bareDir, "remote").Output(); err != nil || strings.Contains(string(out), "head-99") {
 		t.Errorf("head-99 remote still present after cleanup: %s", out)
@@ -336,11 +337,194 @@ func TestCleanupPRConfig_OwnRepoIsNoOp(t *testing.T) {
 
 	// Cleanup for a PR that was never set up. Should not panic, fail,
 	// or affect the bare.
-	CleanupPRConfig(context.Background(), "owner-noop-test", "repo-noop-test", 12345)
+	CleanupPRConfig("owner-noop-test", "repo-noop-test", 12345)
 
 	bareDir, _ := repoDir("owner-noop-test", "repo-noop-test")
 	if out, err := exec.Command("git", "-C", bareDir, "config", "--get", "remote.origin.url").Output(); err != nil || strings.TrimSpace(string(out)) != upstream {
 		t.Errorf("origin URL damaged by no-op cleanup: %v / %s", err, out)
+	}
+}
+
+// TestSweepStaleForkPRConfig_RemovesOrphanedRemotes is the regression
+// test for the cancelled/taken-over leak path: when inline cleanup
+// in the runAgent defer doesn't fire, head-<n> remotes accumulate
+// in the bare. The sweep is the bootstrap-time backstop that walks
+// the bare's remotes and removes any whose synthetic branch isn't
+// held by a live worktree.
+//
+// Test setup: configure two fork-PR-like config blocks (head-50 and
+// head-51) and a stray non-PR remote (extra), without ever creating
+// a worktree. With no live worktrees on triagefactory/pr-50 or
+// triagefactory/pr-51, the sweep must remove both PR remotes and
+// preserve everything else.
+func TestSweepStaleForkPRConfig_RemovesOrphanedRemotes(t *testing.T) {
+	withTestHome(t)
+	upstream := makeTestUpstream(t)
+	if _, err := EnsureBareClone(context.Background(), "owner-sweep-test", "repo-sweep-test", upstream); err != nil {
+		t.Fatalf("EnsureBareClone: %v", err)
+	}
+	bareDir, _ := repoDir("owner-sweep-test", "repo-sweep-test")
+
+	// Stand up the per-PR config that fork-PR setup would have
+	// produced for two PRs that are now orphaned (no worktree).
+	for _, n := range []int{50, 51} {
+		remote := fmt.Sprintf("head-%d", n)
+		branch := fmt.Sprintf("triagefactory/pr-%d", n)
+		setup := [][]string{
+			{"-C", bareDir, "remote", "add", remote, upstream},
+			{"-C", bareDir, "fetch", remote, "main:" + branch},
+			{"-C", bareDir, "config", fmt.Sprintf("branch.%s.remote", branch), remote},
+			{"-C", bareDir, "config", fmt.Sprintf("branch.%s.merge", branch), "refs/heads/main"},
+		}
+		for _, c := range setup {
+			if out, err := exec.Command("git", c...).CombinedOutput(); err != nil {
+				t.Fatalf("git %v: %v: %s", c, err, out)
+			}
+		}
+	}
+	// A stray non-PR remote that the sweep must not touch.
+	if out, err := exec.Command("git", "-C", bareDir, "remote", "add", "extra", upstream).CombinedOutput(); err != nil {
+		t.Fatalf("add extra remote: %v: %s", err, out)
+	}
+
+	SweepStaleForkPRConfig("owner-sweep-test", "repo-sweep-test")
+
+	remotesOut, err := exec.Command("git", "-C", bareDir, "remote").Output()
+	if err != nil {
+		t.Fatalf("list remotes: %v", err)
+	}
+	remotes := strings.Fields(string(remotesOut))
+	for _, r := range remotes {
+		if r == "head-50" || r == "head-51" {
+			t.Errorf("orphan remote %q survived sweep", r)
+		}
+	}
+	hasOrigin, hasExtra := false, false
+	for _, r := range remotes {
+		if r == "origin" {
+			hasOrigin = true
+		}
+		if r == "extra" {
+			hasExtra = true
+		}
+	}
+	if !hasOrigin {
+		t.Errorf("origin removed by sweep")
+	}
+	if !hasExtra {
+		t.Errorf("non-PR remote 'extra' removed by sweep")
+	}
+	for _, n := range []int{50, 51} {
+		if _, err := exec.Command("git", "-C", bareDir, "config", "--get", fmt.Sprintf("branch.triagefactory/pr-%d.remote", n)).Output(); err == nil {
+			t.Errorf("orphan branch tracking config for pr-%d survived sweep", n)
+		}
+	}
+}
+
+// TestSweepStaleForkPRConfig_PreservesLiveWorktree is the safety
+// regression: the sweep must NOT remove a head-<n> remote whose
+// synthetic branch is checked out by a live worktree (the takeover
+// case — user is still using the takeover dir for push/pull). With
+// the worktree present, both the remote and the branch tracking
+// config must survive the sweep.
+func TestSweepStaleForkPRConfig_PreservesLiveWorktree(t *testing.T) {
+	withTestHome(t)
+	upstream := makeTestUpstream(t)
+	fork := makeTestUpstream(t)
+
+	work := filepath.Join(t.TempDir(), "fork-work")
+	if out, err := exec.Command("git", "init", "-b", "main", work).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	cmds := [][]string{
+		{"-C", work, "config", "user.email", "fork@example.com"},
+		{"-C", work, "config", "user.name", "Forker"},
+		{"-C", work, "remote", "add", "fork", fork},
+		{"-C", work, "remote", "add", "up", upstream},
+		{"-C", work, "fetch", "up", "main"},
+		{"-C", work, "checkout", "-b", "feature", "FETCH_HEAD"},
+		{"-C", work, "commit", "--allow-empty", "-m", "fork PR commit"},
+		{"-C", work, "push", "fork", "feature:refs/heads/feature"},
+		{"-C", work, "push", "up", "HEAD:refs/pull/77/head"},
+	}
+	for _, c := range cmds {
+		if out, err := exec.Command("git", c...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", c, err, out)
+		}
+	}
+
+	wtPath, err := CreateForPR(context.Background(), "owner-live-test", "repo-live-test", upstream, fork, "feature", 77, "live-test-run")
+	if err != nil {
+		t.Fatalf("CreateForPR: %v", err)
+	}
+	t.Cleanup(func() { _ = RemoveAt(wtPath, "live-test-run") })
+
+	// Sweep with the worktree still present. head-77 is in use, so
+	// the sweep must skip it.
+	SweepStaleForkPRConfig("owner-live-test", "repo-live-test")
+
+	bareDir, _ := repoDir("owner-live-test", "repo-live-test")
+	out, err := exec.Command("git", "-C", bareDir, "remote").Output()
+	if err != nil {
+		t.Fatalf("list remotes: %v", err)
+	}
+	if !strings.Contains(string(out), "head-77") {
+		t.Errorf("head-77 remote removed by sweep while worktree live: %s", out)
+	}
+	if _, err := exec.Command("git", "-C", bareDir, "config", "--get", "branch.triagefactory/pr-77.remote").Output(); err != nil {
+		t.Errorf("branch tracking config for live PR removed by sweep: %v", err)
+	}
+}
+
+// TestCleanupPRConfig_RunsAfterContextCancellation locks down the
+// detached-context behavior: the spawner's runAgent defer can fire
+// after the agent's parent ctx has been cancelled (run timeout,
+// server shutdown). Pre-fix, gitRunCtx with a cancelled ctx would
+// short-circuit every cleanup command and leak the per-PR config.
+// CleanupPRConfig now uses an internal context.Background() so
+// cleanup runs regardless of caller-side cancellation.
+func TestCleanupPRConfig_RunsAfterContextCancellation(t *testing.T) {
+	withTestHome(t)
+	upstream := makeTestUpstream(t)
+	fork := makeTestUpstream(t)
+
+	work := filepath.Join(t.TempDir(), "fork-work")
+	if out, err := exec.Command("git", "init", "-b", "main", work).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	cmds := [][]string{
+		{"-C", work, "config", "user.email", "fork@example.com"},
+		{"-C", work, "config", "user.name", "Forker"},
+		{"-C", work, "remote", "add", "fork", fork},
+		{"-C", work, "remote", "add", "up", upstream},
+		{"-C", work, "fetch", "up", "main"},
+		{"-C", work, "checkout", "-b", "feature", "FETCH_HEAD"},
+		{"-C", work, "commit", "--allow-empty", "-m", "fork PR commit"},
+		{"-C", work, "push", "fork", "feature:refs/heads/feature"},
+		{"-C", work, "push", "up", "HEAD:refs/pull/123/head"},
+	}
+	for _, c := range cmds {
+		if out, err := exec.Command("git", c...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", c, err, out)
+		}
+	}
+
+	wtPath, err := CreateForPR(context.Background(), "owner-cancel-test", "repo-cancel-test", upstream, fork, "feature", 123, "cancel-test-run")
+	if err != nil {
+		t.Fatalf("CreateForPR: %v", err)
+	}
+	if err := RemoveAt(wtPath, "cancel-test-run"); err != nil {
+		t.Fatalf("RemoveAt: %v", err)
+	}
+
+	// CleanupPRConfig takes no ctx — it constructs its own internal
+	// background ctx. Even if the caller's ctx is fully cancelled,
+	// cleanup must still run.
+	CleanupPRConfig("owner-cancel-test", "repo-cancel-test", 123)
+
+	bareDir, _ := repoDir("owner-cancel-test", "repo-cancel-test")
+	if out, err := exec.Command("git", "-C", bareDir, "remote").Output(); err != nil || strings.Contains(string(out), "head-123") {
+		t.Errorf("head-123 remote not cleaned up despite detached context: %v / %s", err, out)
 	}
 }
 

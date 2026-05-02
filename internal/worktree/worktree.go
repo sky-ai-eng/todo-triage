@@ -458,6 +458,12 @@ func forkPRRemoteName(prNumber int) string {
 	return fmt.Sprintf("head-%d", prNumber)
 }
 
+// cleanupTimeout caps the time CleanupPRConfig and SweepStaleForkPRConfig
+// will spend on their detached-context git invocations. Reclamation is
+// best-effort; if a single config-rewrite hangs (locked file, slow disk),
+// we'd rather time out than block run finalization indefinitely.
+const cleanupTimeout = 30 * time.Second
+
 // CleanupPRConfig removes the per-PR remote, branch tracking config,
 // and synthetic local branch that fork-PR delegations leave in the
 // bare repo. Idempotent: silently no-ops on own-repo PRs (where
@@ -469,12 +475,20 @@ func forkPRRemoteName(prNumber int) string {
 // PRs would accumulate hundreds of stale entries over time, slowing
 // `git fetch --all` and bloating the config file.
 //
+// Uses a detached background context with a bounded timeout rather
+// than threading the caller's ctx through. Cleanup must still run
+// when the agent's parent ctx has already been cancelled (run timed
+// out, user cancelled the run, server shutdown) — otherwise every
+// gitRunCtx call short-circuits with the ctx error and the per-PR
+// config never gets reclaimed. Best-effort cleanup is exactly the
+// case where you don't want propagating cancellation.
+//
 // Should be called after the worktree has been removed (RemoveAt) so
 // `git branch -D` doesn't fight with an in-use checkout. Errors from
-// individual git invocations are logged but not returned — cleanup
-// is best-effort and a partial failure shouldn't propagate up the
-// run-finalization path.
-func CleanupPRConfig(ctx context.Context, owner, repo string, prNumber int) {
+// individual git invocations are swallowed — cleanup is best-effort
+// and a partial failure shouldn't propagate up the run-finalization
+// path.
+func CleanupPRConfig(owner, repo string, prNumber int) {
 	mu := lockRepo(owner, repo)
 	mu.Lock()
 	defer mu.Unlock()
@@ -487,24 +501,107 @@ func CleanupPRConfig(ctx context.Context, owner, repo string, prNumber int) {
 		return
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	defer cancel()
+	removePRConfigLocked(ctx, bareDir, prNumber)
+}
+
+// removePRConfigLocked is the actual config-removal sequence for a
+// single PR. Caller must hold the per-repo lock. Used by both the
+// inline CleanupPRConfig (run finalization) and SweepStaleForkPRConfig
+// (bootstrap-time backstop) so the cleanup steps stay in lockstep.
+//
+// All three commands tolerate "already absent": git remote remove
+// errors when the remote isn't there, --remove-section errors when
+// the section is absent, branch -D errors when the branch is gone.
+// Each error is a normal idempotent state.
+func removePRConfigLocked(ctx context.Context, bareDir string, prNumber int) {
 	remoteName := forkPRRemoteName(prNumber)
 	localBranch := forkPRLocalBranch(prNumber)
-
-	// `git remote remove` deletes both the remote.<name>.* config
-	// keys and the per-remote refs/remotes/<name>/* entries. Errors
-	// when the remote doesn't exist (own-repo PR, already cleaned).
 	_ = gitRunCtx(ctx, bareDir, "remote", "remove", remoteName)
-
-	// Branch config block lives at branch.<localBranch>.* — wipe
-	// the whole section in one shot. The dotted section name needs
-	// the full key path; --remove-section takes "section.subsection"
-	// where subsection is the quoted identifier.
 	_ = gitRunCtx(ctx, bareDir, "config", "--remove-section", "branch."+localBranch)
-
-	// The synthetic local branch in the bare. -D forces deletion
-	// even if not merged, which is the right semantics here — the
-	// PR run is done and we're not preserving its history locally.
 	_ = gitRunCtx(ctx, bareDir, "branch", "-D", localBranch)
+}
+
+// SweepStaleForkPRConfig walks the bare's `head-<n>` remotes and
+// removes any whose corresponding `triagefactory/pr-<n>` branch is
+// not currently checked out by any live worktree. Backstop for the
+// two cases where inline CleanupPRConfig in the runAgent defer
+// doesn't fire:
+//
+//   - Run was taken over: the runAgent defer's wasTakenOver gate
+//     skips cleanup so the user's takeover dir can keep using
+//     head-<n> for push. Once the takeover dir is destroyed, this
+//     sweep reclaims the leak on the next bootstrap pass.
+//   - Run was cancelled at a layer above the runAgent defer (rare):
+//     inline cleanup never runs.
+//
+// Safe to call while takeovers are still in use because `git worktree
+// list` reports them and we only remove config for branches with no
+// live checkout. Best-effort: orphan-detection failures or partial
+// removes correct themselves on the next bootstrap.
+func SweepStaleForkPRConfig(owner, repo string) {
+	mu := lockRepo(owner, repo)
+	mu.Lock()
+	defer mu.Unlock()
+
+	bareDir, err := repoDir(owner, repo)
+	if err != nil {
+		return
+	}
+	if _, err := os.Stat(bareDir); err != nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	defer cancel()
+
+	inUse := liveWorktreeBranches(ctx, bareDir)
+	remotesOut, err := gitOutputCtx(ctx, bareDir, "remote")
+	if err != nil {
+		return
+	}
+	reclaimed := 0
+	for _, name := range strings.Split(remotesOut, "\n") {
+		name = strings.TrimSpace(name)
+		var prNumber int
+		// Sscanf returns 0 matches if the prefix doesn't fit, so
+		// `origin` and any user-added remote that doesn't follow the
+		// head-<n> naming gets skipped without a regex.
+		if n, _ := fmt.Sscanf(name, "head-%d", &prNumber); n != 1 {
+			continue
+		}
+		if inUse[forkPRLocalBranch(prNumber)] {
+			continue
+		}
+		removePRConfigLocked(ctx, bareDir, prNumber)
+		reclaimed++
+	}
+	if reclaimed > 0 {
+		log.Printf("[worktree] swept %d stale per-PR config block(s) from %s", reclaimed, bareDir)
+	}
+}
+
+// liveWorktreeBranches returns the set of refs/heads/<name> that
+// `git worktree list --porcelain` reports as checked out somewhere
+// (the bare itself if it has a HEAD, plus every linked worktree).
+// The sweep uses this to decide whether a head-<n> remote is still
+// actively backing a checkout — if its triagefactory/pr-<n> branch
+// is in this set, removing the remote would break that worktree.
+func liveWorktreeBranches(ctx context.Context, bareDir string) map[string]bool {
+	branches := make(map[string]bool)
+	out, err := gitOutputCtx(ctx, bareDir, "worktree", "list", "--porcelain")
+	if err != nil {
+		return branches
+	}
+	const prefix = "branch refs/heads/"
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, prefix) {
+			branches[strings.TrimPrefix(line, prefix)] = true
+		}
+	}
+	return branches
 }
 
 // configureForkPRTracking sets up the worktree's local branch so

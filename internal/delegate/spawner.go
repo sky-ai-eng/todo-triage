@@ -654,16 +654,23 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		// to still exist for its copy and explicitly cleans up afterward.
 		defer func() {
 			if s.wasTakenOver(runID) {
+				// Taken-over runs leave their worktree in place for the
+				// user's interactive session; don't touch the per-PR
+				// config either, since the takeover dir still uses
+				// head-<n> for push. SweepStaleForkPRConfig reclaims
+				// that config on the next bootstrap once the takeover
+				// dir is gone.
 				return
 			}
 			_ = worktree.RemoveAt(cfg.wtPath, runID)
 			// Fork-PR setup adds a per-PR remote and branch config to
 			// the shared bare repo. Reclaim those once the worktree is
 			// gone so they don't accumulate over the repo's lifetime.
-			// Idempotent and safe for non-fork PR runs (own-repo PRs and
-			// Jira runs hit the no-op path).
+			// CleanupPRConfig uses a detached internal context so
+			// cancellation of the agent's ctx (timeout, server
+			// shutdown) doesn't short-circuit the cleanup.
 			if cfg.prNumber > 0 && cfg.owner != "" && cfg.repo != "" {
-				worktree.CleanupPRConfig(ctx, cfg.owner, cfg.repo, cfg.prNumber)
+				worktree.CleanupPRConfig(cfg.owner, cfg.repo, cfg.prNumber)
 			}
 		}()
 	}

@@ -55,6 +55,12 @@ func BootstrapBareClones(ctx context.Context, targets []BootstrapTarget) {
 			failed++
 			continue
 		}
+		// Reclaim per-PR config blocks left over from runs that
+		// didn't reach inline cleanup — taken-over runs whose
+		// takeover dir has since been destroyed, runs cancelled
+		// above the runAgent defer, etc. Safe to call whether or
+		// not anything's there to clean.
+		SweepStaleForkPRConfig(t.Owner, t.Repo)
 		ensured++
 	}
 	log.Printf("[worktree] bootstrap complete in %s (%d ensured, %d skipped no-url, %d failed)",
