@@ -1012,12 +1012,12 @@ func (s *Spawner) persistYield(runID string, req *domain.YieldRequest, completio
 
 // ResumeAfterYield is the entry point used by the respond endpoint
 // after the user submits an answer to a yield. The handler records
-// the response message; this method validates the run is resumable,
-// registers a cancellation handle (so Cancel works during resume),
-// flips status to running, then spawns a goroutine that re-invokes
-// Claude with the user's plain-text response and runs the resulting
-// completion through the same processCompletion path the initial run
-// uses.
+// the response message and flips the run status to running; this
+// method validates the run is resumable, registers a cancellation
+// handle (so Cancel works during resume), then spawns a goroutine
+// that re-invokes Claude with the user's plain-text response and
+// runs the resulting completion through the same processCompletion
+// path the initial run uses.
 //
 // agentMessage is the plain-text rendering of the user's response
 // shaped by domain.RenderYieldResponseForAgent; passing it in rather
