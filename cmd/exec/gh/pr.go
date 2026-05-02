@@ -120,11 +120,24 @@ func prThreadView(client *ghclient.Client, args []string) {
 
 func prReviewView(client *ghclient.Client, args []string) {
 	if len(args) < 1 {
-		exitErr("usage: gh pr review-view <review_id> --pr <number>")
+		exitErr("usage: gh pr review-view <review_id> --pr <pr_number> [-v]")
 	}
 	reviewID := mustInt(args[0], "review_id")
+	// Explicit --pr-missing message: the most common mistake here is
+	// the agent extrapolating the `pr view <pr_number>` shape and
+	// writing `pr review-view <pr_number>` (omitting --pr). The
+	// generic "pr_number is required" mustInt error doesn't point at
+	// the asymmetry; spelling it out gets the agent to the corrected
+	// shape on the next attempt.
+	prFlag := flagVal(args, "--pr")
+	if prFlag == "" {
+		exitErr(fmt.Sprintf(
+			"review-view requires --pr <pr_number>. The positional argument %d is the review_id, not the PR number — they are different ids (review ids come from `gh pr view <pr_number> -v` -> reviews[].id). Canonical shape: gh pr review-view %d --pr <pr_number> [-v]",
+			reviewID, reviewID,
+		))
+	}
 	owner, repo := ownerRepo(args)
-	prNumber := mustInt(flagVal(args, "--pr"), "pr_number")
+	prNumber := mustInt(prFlag, "pr_number")
 	verbose := hasFlag(args, "-v") || hasFlag(args, "--verbose")
 	detail, err := client.GetReviewDetail(owner, repo, prNumber, reviewID, verbose)
 	exitOnErr(err)
