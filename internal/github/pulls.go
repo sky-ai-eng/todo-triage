@@ -8,6 +8,12 @@ import (
 )
 
 // PRView is the compact PR details returned by `gh pr view`.
+//
+// CloneURL is the head's clone URL (the FORK's URL when the PR is from
+// a fork). BaseCloneURL is the upstream's clone URL — by construction
+// the repo where /pulls/<n> lives, which is always the upstream. Use
+// BaseCloneURL when configuring a bare clone's origin; using CloneURL
+// for that purpose would point origin at a fork.
 type PRView struct {
 	Number       int               `json:"number"`
 	Title        string            `json:"title"`
@@ -24,6 +30,7 @@ type PRView struct {
 	HeadSHA      string            `json:"head_sha"`
 	HTMLURL      string            `json:"html_url"`
 	CloneURL     string            `json:"clone_url"`
+	BaseCloneURL string            `json:"base_clone_url"`
 	CreatedAt    string            `json:"created_at"`
 	UpdatedAt    string            `json:"updated_at"`
 	Reviews      []PRReviewSummary `json:"reviews"`
@@ -89,6 +96,9 @@ func (c *Client) GetPR(owner, repo string, number int, verbose bool) (*PRView, e
 	}
 	if base, ok := raw["base"].(map[string]any); ok {
 		pr.BaseRef = strVal(base, "ref")
+		if baseRepo, ok := base["repo"].(map[string]any); ok {
+			pr.BaseCloneURL = strVal(baseRepo, "clone_url")
+		}
 	}
 
 	// Fetch reviews

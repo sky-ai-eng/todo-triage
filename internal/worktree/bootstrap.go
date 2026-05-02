@@ -29,6 +29,16 @@ type BootstrapTarget struct {
 // help the cold-start case where every repo needs its initial clone,
 // and even then bandwidth is the limiting factor — serial keeps
 // network pressure predictable.
+//
+// **Best-effort, not a hard prereq.** Bootstrap is purely additive:
+// if a delegation arrives for a repo before bootstrap reaches it,
+// CreateForPR / CreateForBranch will lazily clone via the same
+// per-repo lockRepo() mutex this function takes. The two paths
+// serialize against each other (no double-clone) but the lazy path
+// pays the cold-clone cost itself. That's the same behavior as
+// before bootstrap existed; gating delegations on bootstrap completion
+// would only convert a "slow first delegation" into a hang if
+// profiling/cloning ever fails, which is strictly worse.
 func BootstrapBareClones(ctx context.Context, targets []BootstrapTarget) {
 	if len(targets) == 0 {
 		return

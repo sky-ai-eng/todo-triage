@@ -550,19 +550,21 @@ func (s *Spawner) setupGitHub(ctx context.Context, runID string, task domain.Tas
 		return runConfig{}, fmt.Errorf("failed to fetch PR: %w", err)
 	}
 
-	// Use the upstream's clone URL from repo_profiles, NOT pr.CloneURL.
-	// pr.CloneURL is the head's clone_url — the FORK's URL when the PR
-	// is from a fork — and passing it into the bare clone (on first
-	// encounter for this repo) leaves the bare's origin pointing at
-	// the fork. Profiling already populates the canonical upstream URL.
-	upstreamCloneURL := pr.CloneURL
-	repoID := owner + "/" + repo
-	if profile, _ := db.GetRepoProfile(s.database, repoID); profile != nil && profile.CloneURL != "" {
-		upstreamCloneURL = profile.CloneURL
+	// pr.CloneURL is the head's clone_url — the FORK's URL when the
+	// PR is from a fork — and passing it to the bare clone leaves
+	// origin pointing at the fork. pr.BaseCloneURL is the upstream
+	// (the repo where /pulls/<n> lives, which is always the canonical
+	// repo by construction), populated from base.repo.clone_url in
+	// the same GitHub response we already fetched. No DB lookup, no
+	// fallback chain — if BaseCloneURL is missing the PR JSON is
+	// malformed and we fail loudly rather than silently using the
+	// fork URL.
+	if pr.BaseCloneURL == "" {
+		return runConfig{}, fmt.Errorf("PR #%d on %s/%s: GitHub did not return base.repo.clone_url; cannot create worktree", prNumber, owner, repo)
 	}
 
 	s.updateStatus(runID, "cloning")
-	wtPath, err := worktree.CreateForPR(ctx, owner, repo, upstreamCloneURL, pr.HeadRef, prNumber, runID)
+	wtPath, err := worktree.CreateForPR(ctx, owner, repo, pr.BaseCloneURL, pr.HeadRef, prNumber, runID)
 	if err != nil {
 		return runConfig{}, fmt.Errorf("failed to create worktree: %w", err)
 	}
