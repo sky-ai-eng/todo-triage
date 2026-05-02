@@ -360,7 +360,15 @@ func CreateForPR(ctx context.Context, owner, repo, upstreamCloneURL, headCloneUR
 		return "", err
 	}
 
-	isFork := headCloneURL != "" && headCloneURL != upstreamCloneURL
+	// GitHub can return head.repo = null for deleted-fork PRs, which leaves
+	// headCloneURL empty. Treat that as a non-pushable PR and fail explicitly
+	// instead of falling through to the same-repo path and configuring pushes
+	// to origin.
+	if headCloneURL == "" {
+		return "", fmt.Errorf("PR #%d head repository is unavailable; cannot create a pushable worktree", prNumber)
+	}
+
+	isFork := headCloneURL != upstreamCloneURL
 	localBranch := headBranch
 	if isFork {
 		// pr-<n> is unique per PR, so two concurrent fork-PR delegations
