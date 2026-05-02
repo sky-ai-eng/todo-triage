@@ -220,6 +220,49 @@ func TestProjectDelete_MissingKnowledgeDir_NoError(t *testing.T) {
 	}
 }
 
+// TestProjectDelete_CleanupWarningRedactsPath pins the path-leak
+// fix: when on-disk cleanup fails, the X-Cleanup-Warning header
+// must be a generic message, not rmErr.Error() (which would
+// include absolute paths and OS-specific detail). Forces failure
+// by dropping write perms on the parent dir so RemoveAll can't
+// clear the contents.
+func TestProjectDelete_CleanupWarningRedactsPath(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+
+	s := newTestServer(t)
+	id, _ := db.CreateProject(s.db, domain.Project{Name: "padded"})
+
+	dir := filepath.Join(tempHome, ".triagefactory", "projects", id)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "secret-path-leak.md"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	// Drop write perms on the dir so RemoveAll fails to delete the
+	// child. Restore in cleanup so t.TempDir's own cleanup works.
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	rec := doJSON(t, s, http.MethodDelete, "/api/projects/"+id, nil)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", rec.Code)
+	}
+	warning := rec.Header().Get("X-Cleanup-Warning")
+	if warning == "" {
+		t.Fatal("expected X-Cleanup-Warning header, got empty")
+	}
+	if strings.Contains(warning, tempHome) || strings.Contains(warning, dir) {
+		t.Errorf("warning leaks filesystem path: %q", warning)
+	}
+	if strings.Contains(warning, "secret-path-leak.md") {
+		t.Errorf("warning leaks filename: %q", warning)
+	}
+}
+
 func TestValidatePinnedRepos_Slugs(t *testing.T) {
 	good := [][]string{
 		nil,
@@ -228,7 +271,7 @@ func TestValidatePinnedRepos_Slugs(t *testing.T) {
 		{"sky-ai-eng/triage-factory", "owner/repo"},
 	}
 	for _, repos := range good {
-		if errMsg := validatePinnedRepos(repos); errMsg != "" {
+		if _, errMsg := validatePinnedRepos(repos); errMsg != "" {
 			t.Errorf("repos=%v should pass, got %q", repos, errMsg)
 		}
 	}
@@ -241,8 +284,65 @@ func TestValidatePinnedRepos_Slugs(t *testing.T) {
 		{"x/"},
 	}
 	for _, repos := range bad {
-		if errMsg := validatePinnedRepos(repos); errMsg == "" {
+		if _, errMsg := validatePinnedRepos(repos); errMsg == "" {
 			t.Errorf("repos=%v should reject", repos)
 		}
+	}
+}
+
+// TestValidatePinnedRepos_NormalizesWhitespace pins the
+// trim-and-persist contract: validation strips whitespace AND the
+// caller persists the trimmed slugs. Without normalization,
+// " owner/repo " would pass (validator trims) but get stored
+// padded, breaking later lookups by slug.
+func TestValidatePinnedRepos_NormalizesWhitespace(t *testing.T) {
+	in := []string{"  owner/repo  ", "\tother/repo\n"}
+	out, errMsg := validatePinnedRepos(in)
+	if errMsg != "" {
+		t.Fatalf("expected pass, got %q", errMsg)
+	}
+	want := []string{"owner/repo", "other/repo"}
+	if len(out) != len(want) {
+		t.Fatalf("len = %d, want %d", len(out), len(want))
+	}
+	for i, w := range want {
+		if out[i] != w {
+			t.Errorf("[%d] = %q, want %q", i, out[i], w)
+		}
+	}
+}
+
+// TestProjectCreate_PaddedSlugsStoredTrimmed is the end-to-end
+// regression: padded input from a client must round-trip back as
+// trimmed. Without the normalization fix this test fails because
+// the original padded string gets persisted.
+func TestProjectCreate_PaddedSlugsStoredTrimmed(t *testing.T) {
+	s := newTestServer(t)
+	rec := doJSON(t, s, http.MethodPost, "/api/projects", map[string]any{
+		"name":         "P",
+		"pinned_repos": []string{"  owner/repo  "},
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201", rec.Code)
+	}
+	var got domain.Project
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	if len(got.PinnedRepos) != 1 || got.PinnedRepos[0] != "owner/repo" {
+		t.Errorf("pinned_repos = %v, want [\"owner/repo\"]", got.PinnedRepos)
+	}
+}
+
+func TestProjectPatch_PaddedSlugsStoredTrimmed(t *testing.T) {
+	s := newTestServer(t)
+	id, _ := db.CreateProject(s.db, domain.Project{Name: "P"})
+	rec := doJSON(t, s, http.MethodPatch, "/api/projects/"+id, map[string]any{
+		"pinned_repos": []string{" \tonly/one  "},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	got, _ := db.GetProject(s.db, id)
+	if len(got.PinnedRepos) != 1 || got.PinnedRepos[0] != "only/one" {
+		t.Errorf("pinned_repos = %v, want [\"only/one\"]", got.PinnedRepos)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -54,7 +55,8 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required"})
 		return
 	}
-	if errMsg := validatePinnedRepos(req.PinnedRepos); errMsg != "" {
+	pinned, errMsg := validatePinnedRepos(req.PinnedRepos)
+	if errMsg != "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": errMsg})
 		return
 	}
@@ -62,7 +64,7 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 	id, err := db.CreateProject(s.db, domain.Project{
 		Name:              name,
 		Description:       req.Description,
-		PinnedRepos:       req.PinnedRepos,
+		PinnedRepos:       pinned,
 		DesignerSessionID: req.DesignerSessionID,
 	})
 	if err != nil {
@@ -131,11 +133,12 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 		updated.Description = *req.Description
 	}
 	if req.PinnedRepos != nil {
-		if errMsg := validatePinnedRepos(*req.PinnedRepos); errMsg != "" {
+		pinned, errMsg := validatePinnedRepos(*req.PinnedRepos)
+		if errMsg != "" {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": errMsg})
 			return
 		}
-		updated.PinnedRepos = *req.PinnedRepos
+		updated.PinnedRepos = pinned
 	}
 	if req.SummaryMD != nil {
 		updated.SummaryMD = *req.SummaryMD
@@ -172,18 +175,22 @@ func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 
 	// Best-effort on-disk cleanup. The Curator runtime (SKY-216)
 	// hasn't shipped, so today this dir likely doesn't exist for
-	// any project — but the contract is "delete clears local state"
-	// so we walk through it now to keep the contract consistent
-	// once that runtime starts populating files. Failure is logged
-	// at the handler level but doesn't fail the API call: the DB
-	// delete is the source of truth and a stale on-disk dir is
+	// any project — but the contract is "delete clears local
+	// state" so we walk through it now to keep that contract
+	// consistent once that runtime starts populating files. The
+	// DB delete is the source of truth and a stale on-disk dir is
 	// recoverable (next run that needs that path will recreate or
-	// surface the issue).
+	// surface the issue), so a removal failure surfaces as a
+	// non-fatal warning rather than a 5xx.
+	//
+	// The full error (with absolute path + OS-specific detail) is
+	// logged server-side; the X-Cleanup-Warning header is a
+	// generic message so we don't leak filesystem layout to the
+	// client.
 	if dir, err := projectKnowledgeDir(id); err == nil {
 		if rmErr := os.RemoveAll(dir); rmErr != nil && !os.IsNotExist(rmErr) {
-			// Non-fatal — surface as a header so the client can
-			// log it, but the 204 stands.
-			w.Header().Set("X-Cleanup-Warning", rmErr.Error())
+			log.Printf("[projects] cleanup of project %s knowledge dir %q failed: %v", id, dir, rmErr)
+			w.Header().Set("X-Cleanup-Warning", "on-disk cleanup of project knowledge dir failed; check server logs")
 		}
 	}
 
@@ -205,22 +212,30 @@ func projectKnowledgeDir(id string) (string, error) {
 	return filepath.Join(home, ".triagefactory", "projects", id), nil
 }
 
-// validatePinnedRepos enforces the "owner/repo" slug shape. Returns
-// "" on success. The shape is GitHub-specific today; flagged in the
-// SKY-215 ticket as not blocking v1 (no second forge exists yet).
-func validatePinnedRepos(repos []string) string {
+// validatePinnedRepos validates the "owner/repo" slug shape AND
+// returns the normalized (trimmed) slice that callers should
+// persist. Without the normalization step, " owner/repo " would
+// pass validation (which trims) but get stored padded, making
+// future lookups by slug miss the row. The shape is GitHub-specific
+// today; flagged in the SKY-215 ticket as not blocking v1 (no
+// second forge exists yet).
+//
+// Returns (normalized, "") on success and (nil, errMsg) on failure.
+func validatePinnedRepos(repos []string) ([]string, string) {
+	out := make([]string, len(repos))
 	for i, r := range repos {
 		trimmed := strings.TrimSpace(r)
 		if trimmed == "" {
-			return "pinned_repos[" + strconv.Itoa(i) + "] is empty"
+			return nil, "pinned_repos[" + strconv.Itoa(i) + "] is empty"
 		}
 		// Require exactly one '/' with non-empty owner and repo.
 		// Anything else (no slash, leading/trailing slash, multiple
 		// slashes) is rejected — the slug shape is "owner/repo".
 		parts := strings.Split(trimmed, "/")
 		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-			return "pinned_repos[" + strconv.Itoa(i) + "] must be 'owner/repo'"
+			return nil, "pinned_repos[" + strconv.Itoa(i) + "] must be 'owner/repo'"
 		}
+		out[i] = trimmed
 	}
-	return ""
+	return out, ""
 }
