@@ -2,10 +2,20 @@ package db
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
+
+// ErrPendingReviewAlreadySubmitted is returned by
+// LockPendingReviewSubmission when the agent has already locked a
+// pending review (its original_* columns are populated, meaning a
+// prior submit-review call captured the agent's draft). It exists
+// to give cmd/exec/gh/pr.go a clear sentinel for SKY-212's
+// "block second submit" gate without leaking SQL specifics through
+// the call stack.
+var ErrPendingReviewAlreadySubmitted = errors.New("pending review already submitted to local approval queue")
 
 func CreatePendingReview(database *sql.DB, r domain.PendingReview) error {
 	_, err := database.Exec(
@@ -198,6 +208,78 @@ func SetPendingReviewSubmission(database *sql.DB, reviewID, body, event string) 
 		body, event, body, event, reviewID,
 	)
 	return err
+}
+
+// LockPendingReviewSubmission is the agent-side variant of
+// SetPendingReviewSubmission used by cmd/exec/gh's prSubmitReview.
+// It captures the agent's drafted body + event AND seals the
+// review against further agent submissions in a single atomic
+// UPDATE.
+//
+// The gate is `review_event IS NULL OR review_event = ”`: the
+// baseline schema leaves review_event empty on fresh
+// CreatePendingReview rows and any code path that finalizes a
+// submission populates it. That makes review_event the
+// era-independent "has been submitted" signal — which matters
+// because original_review_event was added later (SKY-205) and
+// pre-SKY-205 rows can sit in the DB with original_review_event
+// NULL even though they were already submitted (review_event +
+// original_review_body populated via the SKY-204 COALESCE writer).
+// Gating on original_review_event would falsely open the lock for
+// those rows.
+//
+// Originals use COALESCE so legacy rows with a SKY-204-era
+// original_review_body keep their snapshot if the gate ever lets a
+// write through (e.g. a fresh row from before either column
+// existed) — preserving the write-once contract regardless of
+// migration era.
+//
+// On second-and-later agent calls, RowsAffected is 0 and the
+// helper returns ErrPendingReviewAlreadySubmitted. SKY-212's
+// motivating bug: agents would call submit-review, see the
+// pending_approval response, then loop and call it again. The
+// gate forces a hard error on the second attempt so the agent's
+// tool result is unambiguous ("you already queued this review").
+//
+// Human edits via handleReviewUpdate stay on
+// SetPendingReviewSubmission — that path needs to update body /
+// event after the agent has already locked the review, and the
+// COALESCE in the existing function preserves originals through
+// those edits. Splitting into two functions keeps the gate
+// behavior off the human path.
+func LockPendingReviewSubmission(database *sql.DB, reviewID, body, event string) error {
+	res, err := database.Exec(
+		`UPDATE pending_reviews
+		 SET review_body = ?,
+		     review_event = ?,
+		     original_review_body = COALESCE(original_review_body, ?),
+		     original_review_event = COALESCE(original_review_event, ?)
+		 WHERE id = ? AND (review_event IS NULL OR review_event = '')`,
+		body, event, body, event, reviewID,
+	)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		// Distinguish "already submitted" from "no such review".
+		// A bogus reviewID shouldn't get the SKY-212 lock message;
+		// the agent should see a different error pointing at the
+		// argument. The lookup is cheap and the row is already in
+		// the page cache from the prSubmitReview load.
+		var exists int
+		if err := database.QueryRow(`SELECT COUNT(*) FROM pending_reviews WHERE id = ?`, reviewID).Scan(&exists); err != nil {
+			return err
+		}
+		if exists == 0 {
+			return fmt.Errorf("pending review %s not found", reviewID)
+		}
+		return ErrPendingReviewAlreadySubmitted
+	}
+	return nil
 }
 
 // PendingReviewByRunID returns the pending review associated with a given agent

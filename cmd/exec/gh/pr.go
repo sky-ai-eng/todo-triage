@@ -2,6 +2,7 @@ package gh
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -304,17 +305,39 @@ func prSubmitReview(client *ghclient.Client, database *db.DB, args []string) {
 		}
 	}
 
-	// In preview mode, store the raw body — the server injects header/footer
-	// with actual cost data at submit time.
+	// In preview mode (TRIAGE_FACTORY_REVIEW_PREVIEW=1, the default
+	// for delegated runs), the agent's submit-review queues the
+	// review for human approval rather than posting to GitHub. The
+	// server injects header/footer with actual cost data at submit
+	// time. SKY-212: lock the row on first agent submit so a second
+	// submit-review call in the same run gets a hard error instead
+	// of silently overwriting — agents were looping after seeing
+	// the pending_approval response, mistaking it for "still pending,
+	// keep going."
 	if os.Getenv("TRIAGE_FACTORY_REVIEW_PREVIEW") == "1" {
-		err = db.SetPendingReviewSubmission(database.Conn, reviewID, body, ghEvent)
+		err = db.LockPendingReviewSubmission(database.Conn, reviewID, body, ghEvent)
+		if errors.Is(err, db.ErrPendingReviewAlreadySubmitted) {
+			exitErr(fmt.Sprintf(
+				"review %s has already been queued for human approval. Do not call submit-review again — your work on this review is complete. Finish the run by writing task_memory/<run_id>.md and returning your completion JSON.",
+				reviewID,
+			))
+		}
 		exitOnErr(err)
 
 		printJSON(map[string]any{
-			"status":          "pending_approval",
+			// queued_for_human_approval makes the contract explicit:
+			// the review has been handed off to the human approval
+			// queue and the agent's work on this PR is done. The old
+			// "pending_approval" wording mirrored the run-status
+			// vocabulary and was easy to misread as "still pending,
+			// more to do." next_step spells out the wrap-up so even
+			// agents that aren't reading the prompt closely get the
+			// signal directly from the tool result.
+			"status":          "queued_for_human_approval",
 			"review_id":       reviewID,
 			"event":           ghEvent,
 			"comments_queued": len(ghComments),
+			"next_step":       "Review is queued for human approval. Do not call submit-review again. Finish the run by writing task_memory/<run_id>.md and returning your completion JSON.",
 		})
 		return
 	}
