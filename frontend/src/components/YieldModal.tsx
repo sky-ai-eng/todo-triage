@@ -202,8 +202,8 @@ function ChoiceBody({
               } disabled:opacity-50`}
             >
               <span
-                className={`shrink-0 inline-flex items-center justify-center w-4 h-4 rounded-${
-                  multi ? 'sm' : 'full'
+                className={`shrink-0 inline-flex items-center justify-center w-4 h-4 ${
+                  multi ? 'rounded-sm' : 'rounded-full'
                 } border ${checked ? 'border-accent bg-accent text-white' : 'border-border-subtle'}`}
                 aria-hidden
               >
