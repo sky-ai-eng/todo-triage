@@ -415,6 +415,8 @@ type runConfig struct {
 	hasWT    bool   // whether a worktree was created (controls cleanup)
 	owner    string // resolved GitHub owner (empty for no-repo Jira runs)
 	repo     string // resolved GitHub repo (empty for no-repo Jira runs)
+	prNumber int    // PR number (0 for non-PR runs); set so the runAgent defer can call worktree.CleanupPRConfig and reclaim the per-PR remote + branch tracking config the bare repo would otherwise accumulate
+	headRef  string // PR head ref (empty for non-PR runs); passed to CleanupPRConfig so own-repo branch tracking (branch.<headRef>.*) gets reclaimed alongside fork-only artifacts
 }
 
 // Delegate kicks off an async agent run for any task type.
@@ -550,8 +552,20 @@ func (s *Spawner) setupGitHub(ctx context.Context, runID string, task domain.Tas
 		return runConfig{}, fmt.Errorf("failed to fetch PR: %w", err)
 	}
 
+	// pr.BaseCloneURL is the upstream (the repo where /pulls/<n>
+	// lives, which is always the canonical repo by construction),
+	// populated from base.repo.clone_url. pr.CloneURL is the head's
+	// clone_url — the fork's URL when the PR is from a fork, equal
+	// to pr.BaseCloneURL for own-repo PRs. CreateForPR uses the
+	// upstream to fetch refs/pull/<n>/head and (if they differ) the
+	// head URL to configure push tracking so commits land in the
+	// fork's branch instead of creating a stray branch on upstream.
+	if pr.BaseCloneURL == "" {
+		return runConfig{}, fmt.Errorf("PR #%d on %s/%s: GitHub did not return base.repo.clone_url; cannot create worktree", prNumber, owner, repo)
+	}
+
 	s.updateStatus(runID, "cloning")
-	wtPath, err := worktree.CreateForPR(ctx, owner, repo, pr.CloneURL, pr.HeadRef, prNumber, runID)
+	wtPath, err := worktree.CreateForPR(ctx, owner, repo, pr.BaseCloneURL, pr.CloneURL, pr.HeadRef, prNumber, runID)
 	if err != nil {
 		return runConfig{}, fmt.Errorf("failed to create worktree: %w", err)
 	}
@@ -567,6 +581,8 @@ func (s *Spawner) setupGitHub(ctx context.Context, runID string, task domain.Tas
 		hasWT:    true,
 		owner:    owner,
 		repo:     repo,
+		prNumber: prNumber,
+		headRef:  pr.HeadRef,
 	}, nil
 }
 
@@ -640,9 +656,32 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		// to still exist for its copy and explicitly cleans up afterward.
 		defer func() {
 			if s.wasTakenOver(runID) {
+				// Taken-over runs leave their worktree in place for the
+				// user's interactive session; don't touch the per-PR
+				// config either, since the takeover dir still uses
+				// head-<n> for push. SweepStaleForkPRConfig reclaims
+				// that config on the next bootstrap once the takeover
+				// dir is gone.
 				return
 			}
-			_ = worktree.RemoveAt(cfg.wtPath, runID)
+			// Capture the RemoveAt error rather than discarding it.
+			// If the worktree dir failed to remove, the worktree is
+			// still on disk and still attached to the bare's branch
+			// tracking — stripping the per-PR config out from under a
+			// surviving checkout would break its push/pull. Skip
+			// cleanup in that case; the next bootstrap sweep will
+			// reclaim the orphan once the worktree is gone.
+			rmErr := worktree.RemoveAt(cfg.wtPath, runID)
+			if rmErr != nil {
+				log.Printf("[delegate] worktree remove failed for %s; skipping per-PR config cleanup: %v", runID, rmErr)
+				return
+			}
+			// CleanupPRConfig uses a detached internal context so
+			// cancellation of the agent's ctx (timeout, server
+			// shutdown) doesn't short-circuit the cleanup.
+			if cfg.prNumber > 0 && cfg.owner != "" && cfg.repo != "" {
+				worktree.CleanupPRConfig(cfg.owner, cfg.repo, cfg.headRef, cfg.prNumber)
+			}
 		}()
 	}
 

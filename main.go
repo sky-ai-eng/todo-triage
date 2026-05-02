@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -50,6 +51,36 @@ func pluralize(n int, singular, plural string) string {
 		return singular
 	}
 	return plural
+}
+
+// bootstrapBareClones reads the configured repos from the DB and asks
+// the worktree package to ensure each one is materialized on disk
+// as a bare clone with the right origin URL.
+//
+// Called after profiling completes — profiling is what populates
+// repo_profiles.clone_url, and BootstrapTargets without a CloneURL
+// are skipped. Profiles never become non-empty without a successful
+// profiling pass, so this ordering is intentional.
+//
+// Database read errors are logged and the bootstrap is skipped: a
+// transient DB issue shouldn't crash the main path, and the lazy
+// clone inside CreateForPR / CreateForBranch will recover the
+// affected delegations on next run.
+func bootstrapBareClones(database *sql.DB) {
+	profiles, err := db.GetAllRepoProfiles(database)
+	if err != nil {
+		log.Printf("[worktree] bootstrap: load profiles: %v", err)
+		return
+	}
+	targets := make([]worktree.BootstrapTarget, 0, len(profiles))
+	for _, p := range profiles {
+		targets = append(targets, worktree.BootstrapTarget{
+			Owner:    p.Owner,
+			Repo:     p.Repo,
+			CloneURL: p.CloneURL,
+		})
+	}
+	worktree.BootstrapBareClones(context.Background(), targets)
 }
 
 // printTopLevelHelp routes the two audiences (delegated Claude Code
@@ -410,6 +441,7 @@ func main() {
 				profileGate.Signal()
 				pollerMgr.RestartAll()
 				scorer.Trigger()
+				bootstrapBareClones(database)
 			}()
 		} else {
 			spawner.UpdateCredentials(nil, "")
@@ -509,6 +541,7 @@ func main() {
 			profileGate.Signal()
 			pollerMgr.RestartAll()
 			scorer.Trigger()
+			bootstrapBareClones(database)
 		}()
 	} else {
 		// Not fully configured — start pollers immediately (may be empty)
