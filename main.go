@@ -55,7 +55,7 @@ func pluralize(n int, singular, plural string) string {
 
 // bootstrapBareClones reads the configured repos from the DB and asks
 // the worktree package to ensure each one is materialized on disk
-// (bare clone with the right origin URL and PR fetch refspec).
+// as a bare clone with the right origin URL.
 //
 // Called after profiling completes — profiling is what populates
 // repo_profiles.clone_url, and BootstrapTargets without a CloneURL
