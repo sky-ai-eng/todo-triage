@@ -45,12 +45,11 @@ func seedYieldedRun(t *testing.T, s *Server, req *domain.YieldRequest) string {
 func TestHandleAgentRespond_404OnMissingRun(t *testing.T) {
 	s := newTestServer(t)
 	rec := doJSON(t, s, http.MethodPost, "/api/agent/runs/no-such-run/respond", map[string]any{"type": "confirmation", "accepted": true})
+	// Without a spawner, the spawner gate should fire first. A 503
+	// confirms the route is registered and prevents this test from
+	// silently passing on a missing route (404) or other regression.
 	if rec.Code != http.StatusServiceUnavailable {
-		// Without a spawner, the spawner gate fires first. That's
-		// acceptable: it tells us the route is registered. Real
-		// validation tests below seed a server with the spawner
-		// guard handled.
-		t.Logf("status without spawner = %d (expected 503; route registered)", rec.Code)
+		t.Fatalf("expected status %d from spawner gate for registered route, got %d", http.StatusServiceUnavailable, rec.Code)
 	}
 }
 
