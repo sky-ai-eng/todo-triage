@@ -556,18 +556,18 @@ func configureForkPRTracking(ctx context.Context, bareDir string, prNumber int, 
 	return nil
 }
 
-// configureOwnRepoPRTracking sets branch.<localBranch>.remote = origin
-// and branch.<localBranch>.merge = refs/heads/<localBranch> so a
-// bare `git push` resolves to origin/<localBranch> — same target the
-// agent would have hit with `git push origin <localBranch>` before
-// the envelope started discouraging the explicit-remote form.
+// configureOwnRepoPRTracking configures repository-wide push defaults so a
+// bare `git push` resolves to origin/<localBranch> for the current branch —
+// the same target the agent would have hit with `git push origin <localBranch>`
+// before the envelope started discouraging the explicit-remote form.
 //
-// No remote.origin.push refspec is needed: local and remote branch
-// names match, so push.default=simple (the default) is happy.
+// This intentionally avoids writing branch.<localBranch>.* entries into the
+// shared bare repo config, which would otherwise accumulate without bound as
+// new PR branches are created.
 func configureOwnRepoPRTracking(ctx context.Context, bareDir, localBranch string) error {
 	cfgs := [][]string{
-		{"config", fmt.Sprintf("branch.%s.remote", localBranch), "origin"},
-		{"config", fmt.Sprintf("branch.%s.merge", localBranch), "refs/heads/" + localBranch},
+		{"config", "remote.pushDefault", "origin"},
+		{"config", "push.default", "current"},
 	}
 	for _, args := range cfgs {
 		if err := gitRunCtx(ctx, bareDir, args...); err != nil {
