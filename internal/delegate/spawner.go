@@ -416,6 +416,7 @@ type runConfig struct {
 	owner    string // resolved GitHub owner (empty for no-repo Jira runs)
 	repo     string // resolved GitHub repo (empty for no-repo Jira runs)
 	prNumber int    // PR number (0 for non-PR runs); set so the runAgent defer can call worktree.CleanupPRConfig and reclaim the per-PR remote + branch tracking config the bare repo would otherwise accumulate
+	headRef  string // PR head ref (empty for non-PR runs); passed to CleanupPRConfig so own-repo branch tracking (branch.<headRef>.*) gets reclaimed alongside fork-only artifacts
 }
 
 // Delegate kicks off an async agent run for any task type.
@@ -581,6 +582,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, runID string, task domain.Tas
 		owner:    owner,
 		repo:     repo,
 		prNumber: prNumber,
+		headRef:  pr.HeadRef,
 	}, nil
 }
 
@@ -662,15 +664,23 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 				// dir is gone.
 				return
 			}
-			_ = worktree.RemoveAt(cfg.wtPath, runID)
-			// Fork-PR setup adds a per-PR remote and branch config to
-			// the shared bare repo. Reclaim those once the worktree is
-			// gone so they don't accumulate over the repo's lifetime.
+			// Capture the RemoveAt error rather than discarding it.
+			// If the worktree dir failed to remove, the worktree is
+			// still on disk and still attached to the bare's branch
+			// tracking — stripping the per-PR config out from under a
+			// surviving checkout would break its push/pull. Skip
+			// cleanup in that case; the next bootstrap sweep will
+			// reclaim the orphan once the worktree is gone.
+			rmErr := worktree.RemoveAt(cfg.wtPath, runID)
+			if rmErr != nil {
+				log.Printf("[delegate] worktree remove failed for %s; skipping per-PR config cleanup: %v", runID, rmErr)
+				return
+			}
 			// CleanupPRConfig uses a detached internal context so
 			// cancellation of the agent's ctx (timeout, server
 			// shutdown) doesn't short-circuit the cleanup.
 			if cfg.prNumber > 0 && cfg.owner != "" && cfg.repo != "" {
-				worktree.CleanupPRConfig(cfg.owner, cfg.repo, cfg.prNumber)
+				worktree.CleanupPRConfig(cfg.owner, cfg.repo, cfg.headRef, cfg.prNumber)
 			}
 		}()
 	}

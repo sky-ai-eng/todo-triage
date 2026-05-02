@@ -414,11 +414,10 @@ func CreateForPR(ctx context.Context, owner, repo, upstreamCloneURL, headCloneUR
 		if err := configureForkPRTracking(ctx, bareDir, prNumber, localBranch, headCloneURL, headBranch); err != nil {
 			// Fork tracking is part of the worktree's contract for fork
 			// PRs — without it, `git push` lands in the wrong place.
-			// Roll the worktree back so a half-configured state isn't
-			// returned.
-			if rmErr := RemoveAt(wtDir, runID); rmErr != nil {
-				log.Printf("[worktree] rollback after fork-tracking failure: %v", rmErr)
-			}
+			// Roll back both the worktree AND any partial shared-bare
+			// config so a half-configured state isn't left for later
+			// runs to inherit.
+			rollbackPRSetupLocked(ctx, bareDir, wtDir, runID, headBranch, prNumber)
 			return "", fmt.Errorf("configure fork PR tracking: %w", err)
 		}
 	case hasHeadRepo:
@@ -430,9 +429,7 @@ func CreateForPR(ctx context.Context, owner, repo, upstreamCloneURL, headCloneUR
 		// discourage because it's wrong for fork PRs and a bug magnet
 		// across the codebase.
 		if err := configureOwnRepoPRTracking(ctx, bareDir, localBranch); err != nil {
-			if rmErr := RemoveAt(wtDir, runID); rmErr != nil {
-				log.Printf("[worktree] rollback after own-repo tracking failure: %v", rmErr)
-			}
+			rollbackPRSetupLocked(ctx, bareDir, wtDir, runID, headBranch, prNumber)
 			return "", fmt.Errorf("configure own-repo PR tracking: %w", err)
 		}
 	default:
@@ -447,12 +444,41 @@ func CreateForPR(ctx context.Context, owner, repo, upstreamCloneURL, headCloneUR
 		log.Printf("[worktree] PR #%d head repository is unavailable (deleted fork); worktree is read-only", prNumber)
 	}
 
-	if err := addExcludesOrRollback(runID, wtDir); err != nil {
-		return "", err
+	if err := writeLocalExcludes(wtDir); err != nil {
+		// Tracking + remote already configured for fork/own-repo;
+		// roll back both the worktree AND that shared-bare state.
+		// Using rollbackPRSetupLocked instead of addExcludesOrRollback
+		// here keeps the fork/own-repo cases consistent — earlier
+		// rollbacks already clean up shared config, so this one
+		// shouldn't be the odd path that leaves it behind.
+		rollbackPRSetupLocked(ctx, bareDir, wtDir, runID, headBranch, prNumber)
+		return "", fmt.Errorf("write local git excludes: %w", err)
 	}
 
 	log.Printf("[worktree] PR worktree at %s (local branch: %s, head: %s, fork: %v)", wtDir, localBranch, headBranch, isFork)
 	return wtDir, nil
+}
+
+// rollbackPRSetupLocked undoes a partially-set-up PR worktree:
+// removes the worktree directory + bare's worktree registration,
+// then removes any shared-bare config that earlier steps already
+// wrote (head-<n> remote, branch.triagefactory/pr-<n>.* tracking,
+// branch.<headBranch>.* tracking, and the synthetic local branch).
+//
+// Caller must hold the per-repo lock (CreateForPR's mu). Best-effort
+// — individual command failures are logged but don't propagate. The
+// caller still returns the original setup error.
+//
+// Without this, a fork-tracking failure mid-write would leave a
+// stray head-<n> remote and partial branch tracking in the bare;
+// SweepStaleForkPRConfig would eventually clean those up on next
+// bootstrap, but until then they'd sit in the config potentially
+// confusing later runs.
+func rollbackPRSetupLocked(ctx context.Context, bareDir, wtDir, runID, headBranch string, prNumber int) {
+	if rmErr := RemoveAt(wtDir, runID); rmErr != nil {
+		log.Printf("[worktree] rollback PR setup: remove worktree: %v", rmErr)
+	}
+	removePRConfigLocked(ctx, bareDir, headBranch, prNumber)
 }
 
 // forkPRLocalBranch returns the bare-local branch name we use for a
@@ -476,31 +502,31 @@ func forkPRRemoteName(prNumber int) string {
 // we'd rather time out than block run finalization indefinitely.
 const cleanupTimeout = 30 * time.Second
 
-// CleanupPRConfig removes the per-PR remote, branch tracking config,
-// and synthetic local branch that fork-PR delegations leave in the
-// bare repo. Idempotent: silently no-ops on own-repo PRs (where
-// these config keys never get set) and on previously-cleaned bares.
+// CleanupPRConfig removes per-PR config blocks the bare repo
+// accumulated for a delegated PR run: the head-<n> remote and
+// triagefactory/pr-<n> branch tracking from fork-PR setup, and the
+// branch.<headBranch>.* tracking from own-repo PR setup. Idempotent
+// — anything already absent is a no-op.
 //
-// Without this cleanup, every fork PR delegation would leak a
-// permanent `head-<n>` remote and `branch.triagefactory/pr-<n>.*`
-// config block into the bare. Long-lived repos with frequent fork
-// PRs would accumulate hundreds of stale entries over time, slowing
-// `git fetch --all` and bloating the config file.
+// headBranch is the PR's actual head ref (cfg.headRef in the
+// spawner's runConfig). For own-repo PRs it's the worktree's local
+// branch; for fork PRs it's the contributor's branch on the fork.
+// Pass it so we can also clean the own-repo branch.<headBranch>.*
+// tracking — without it, only fork-specific config gets reclaimed.
 //
 // Uses a detached background context with a bounded timeout rather
 // than threading the caller's ctx through. Cleanup must still run
 // when the agent's parent ctx has already been cancelled (run timed
 // out, user cancelled the run, server shutdown) — otherwise every
 // gitRunCtx call short-circuits with the ctx error and the per-PR
-// config never gets reclaimed. Best-effort cleanup is exactly the
-// case where you don't want propagating cancellation.
+// config never gets reclaimed.
 //
 // Should be called after the worktree has been removed (RemoveAt) so
 // `git branch -D` doesn't fight with an in-use checkout. Errors from
 // individual git invocations are swallowed — cleanup is best-effort
 // and a partial failure shouldn't propagate up the run-finalization
 // path.
-func CleanupPRConfig(owner, repo string, prNumber int) {
+func CleanupPRConfig(owner, repo, headBranch string, prNumber int) {
 	mu := lockRepo(owner, repo)
 	mu.Lock()
 	defer mu.Unlock()
@@ -515,24 +541,35 @@ func CleanupPRConfig(owner, repo string, prNumber int) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 	defer cancel()
-	removePRConfigLocked(ctx, bareDir, prNumber)
+	removePRConfigLocked(ctx, bareDir, headBranch, prNumber)
 }
 
-// removePRConfigLocked is the actual config-removal sequence for a
-// single PR. Caller must hold the per-repo lock. Used by both the
-// inline CleanupPRConfig (run finalization) and SweepStaleForkPRConfig
+// removePRConfigLocked is the config-removal sequence for a single
+// PR. Caller must hold the per-repo lock. Used by both the inline
+// CleanupPRConfig (run finalization) and SweepStaleForkPRConfig
 // (bootstrap-time backstop) so the cleanup steps stay in lockstep.
 //
-// All three commands tolerate "already absent": git remote remove
-// errors when the remote isn't there, --remove-section errors when
-// the section is absent, branch -D errors when the branch is gone.
+// headBranch may be empty — the sweep doesn't have it. When set,
+// own-repo branch tracking (branch.<headBranch>.*) is also cleaned;
+// otherwise only the fork-specific artifacts (head-<n> remote,
+// triagefactory/pr-<n> branch + tracking) are touched. We never
+// `git branch -D` the headBranch itself because it's the user's
+// real branch — only the synthetic triagefactory/pr-<n> ref is
+// ours to delete.
+//
+// All commands tolerate "already absent": git remote remove errors
+// when the remote isn't there, --remove-section errors when the
+// section is absent, branch -D errors when the branch is gone.
 // Each error is a normal idempotent state.
-func removePRConfigLocked(ctx context.Context, bareDir string, prNumber int) {
+func removePRConfigLocked(ctx context.Context, bareDir, headBranch string, prNumber int) {
 	remoteName := forkPRRemoteName(prNumber)
-	localBranch := forkPRLocalBranch(prNumber)
+	syntheticBranch := forkPRLocalBranch(prNumber)
 	_ = gitRunCtx(ctx, bareDir, "remote", "remove", remoteName)
-	_ = gitRunCtx(ctx, bareDir, "config", "--remove-section", "branch."+localBranch)
-	_ = gitRunCtx(ctx, bareDir, "branch", "-D", localBranch)
+	_ = gitRunCtx(ctx, bareDir, "config", "--remove-section", "branch."+syntheticBranch)
+	_ = gitRunCtx(ctx, bareDir, "branch", "-D", syntheticBranch)
+	if headBranch != "" && headBranch != syntheticBranch {
+		_ = gitRunCtx(ctx, bareDir, "config", "--remove-section", "branch."+headBranch)
+	}
 }
 
 // SweepStaleForkPRConfig walks the bare's `head-<n>` remotes and
@@ -592,7 +629,11 @@ func SweepStaleForkPRConfig(owner, repo string) {
 		if inUse[forkPRLocalBranch(prNumber)] {
 			continue
 		}
-		removePRConfigLocked(ctx, bareDir, prNumber)
+		// Sweep doesn't know the original PR's head ref, so pass "" —
+		// own-repo branch tracking is bounded per-branch-name and not
+		// the sweep's job. The inline cleanup path in the spawner
+		// handles own-repo cleanup via cfg.headRef.
+		removePRConfigLocked(ctx, bareDir, "", prNumber)
 		reclaimed++
 	}
 	if reclaimed > 0 {
@@ -671,18 +712,26 @@ func configureForkPRTracking(ctx context.Context, bareDir string, prNumber int, 
 	return nil
 }
 
-// configureOwnRepoPRTracking configures repository-wide push defaults so a
-// bare `git push` resolves to origin/<localBranch> for the current branch —
-// the same target the agent would have hit with `git push origin <localBranch>`
-// before the envelope started discouraging the explicit-remote form.
+// configureOwnRepoPRTracking sets per-branch tracking
+// (branch.<localBranch>.{remote,merge}) so `git push` (no remote
+// argument) resolves to origin/<localBranch> for this specific
+// branch. Since local and remote branch names match for own-repo
+// PRs, push.default=simple (the default) is happy without further
+// config.
 //
-// This intentionally avoids writing branch.<localBranch>.* entries into the
-// shared bare repo config, which would otherwise accumulate without bound as
-// new PR branches are created.
+// Per-branch rather than repo-wide intentionally. Repo-wide settings
+// like remote.pushDefault and push.default=current would leak across
+// every worktree off this bare: once any own-repo PR runs, a later
+// deleted-fork PR (which deliberately skips tracking so push fails
+// loudly) would silently resolve `git push` against the inherited
+// repo-wide settings and create a stray branch on upstream. Per-PR
+// config blocks accumulate, but bounded by unique head-ref names
+// across the repo's lifetime — a real concern only at repo scales
+// well beyond what this tool targets.
 func configureOwnRepoPRTracking(ctx context.Context, bareDir, localBranch string) error {
 	cfgs := [][]string{
-		{"config", "remote.pushDefault", "origin"},
-		{"config", "push.default", "current"},
+		{"config", fmt.Sprintf("branch.%s.remote", localBranch), "origin"},
+		{"config", fmt.Sprintf("branch.%s.merge", localBranch), "refs/heads/" + localBranch},
 	}
 	for _, args := range cfgs {
 		if err := gitRunCtx(ctx, bareDir, args...); err != nil {

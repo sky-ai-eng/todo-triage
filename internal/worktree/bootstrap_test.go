@@ -303,7 +303,7 @@ func TestCleanupPRConfig_RemovesForkPRArtifacts(t *testing.T) {
 	if err := RemoveAt(wtPath, "cleanup-test-run"); err != nil {
 		t.Fatalf("RemoveAt: %v", err)
 	}
-	CleanupPRConfig("owner-cleanup-test", "repo-cleanup-test", 99)
+	CleanupPRConfig("owner-cleanup-test", "repo-cleanup-test", "feature", 99)
 
 	if out, err := exec.Command("git", "-C", bareDir, "remote").Output(); err != nil || strings.Contains(string(out), "head-99") {
 		t.Errorf("head-99 remote still present after cleanup: %s", out)
@@ -337,7 +337,7 @@ func TestCleanupPRConfig_OwnRepoIsNoOp(t *testing.T) {
 
 	// Cleanup for a PR that was never set up. Should not panic, fail,
 	// or affect the bare.
-	CleanupPRConfig("owner-noop-test", "repo-noop-test", 12345)
+	CleanupPRConfig("owner-noop-test", "repo-noop-test", "", 12345)
 
 	bareDir, _ := repoDir("owner-noop-test", "repo-noop-test")
 	if out, err := exec.Command("git", "-C", bareDir, "config", "--get", "remote.origin.url").Output(); err != nil || strings.TrimSpace(string(out)) != upstream {
@@ -402,6 +402,83 @@ func TestCreateForPR_DeletedFork_NoTrackingConfigured(t *testing.T) {
 	pushCmd := exec.Command("git", "-C", wtPath, "push")
 	if out, err := pushCmd.CombinedOutput(); err == nil {
 		t.Errorf("git push succeeded for deleted-fork PR with no tracking — should have failed: %s", out)
+	}
+}
+
+// TestCreateForPR_DeletedFork_PushFailsAfterPriorOwnRepoPR locks
+// down the regression Copilot's repo-wide-settings approach
+// introduced: once any own-repo PR ran on a bare, the bare carried
+// remote.pushDefault=origin and push.default=current. A later
+// deleted-fork PR (which deliberately skips tracking so push fails
+// loudly) would silently resolve `git push` against those inherited
+// repo-wide settings and create a stray branch on upstream.
+//
+// Switching back to per-branch tracking fixes it: the own-repo PR's
+// config lives in branch.<headBranch>.* and doesn't leak to other
+// branches. This test runs both PRs against the same bare and
+// asserts the deleted-fork push still fails.
+func TestCreateForPR_DeletedFork_PushFailsAfterPriorOwnRepoPR(t *testing.T) {
+	withTestHome(t)
+	upstream := makeTestUpstream(t)
+
+	// First, run an own-repo PR end-to-end so any bare-wide config
+	// gets written.
+	work := filepath.Join(t.TempDir(), "own-work")
+	if out, err := exec.Command("git", "init", "-b", "main", work).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	cmds := [][]string{
+		{"-C", work, "config", "user.email", "x@y.z"},
+		{"-C", work, "config", "user.name", "x"},
+		{"-C", work, "remote", "add", "up", upstream},
+		{"-C", work, "fetch", "up", "main"},
+		{"-C", work, "checkout", "-b", "real-feature", "FETCH_HEAD"},
+		{"-C", work, "commit", "--allow-empty", "-m", "own-repo PR commit"},
+		{"-C", work, "push", "up", "real-feature:refs/heads/real-feature"},
+		{"-C", work, "push", "up", "real-feature:refs/pull/100/head"},
+		{"-C", work, "commit", "--allow-empty", "-m", "deleted-fork PR commit"},
+		{"-C", work, "push", "up", "HEAD:refs/pull/200/head"},
+	}
+	for _, c := range cmds {
+		if out, err := exec.Command("git", c...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", c, err, out)
+		}
+	}
+
+	ownWtPath, err := CreateForPR(context.Background(), "owner-cross-test", "repo-cross-test", upstream, upstream, "real-feature", 100, "own-cross-run")
+	if err != nil {
+		t.Fatalf("CreateForPR own-repo: %v", err)
+	}
+	t.Cleanup(func() { _ = RemoveAt(ownWtPath, "own-cross-run") })
+
+	// Now stand up a deleted-fork PR (head URL empty) on the SAME bare.
+	deletedWtPath, err := CreateForPR(context.Background(), "owner-cross-test", "repo-cross-test", upstream, "", "deleted-feature", 200, "deleted-cross-run")
+	if err != nil {
+		t.Fatalf("CreateForPR deleted-fork: %v", err)
+	}
+	t.Cleanup(func() { _ = RemoveAt(deletedWtPath, "deleted-cross-run") })
+
+	// Per-branch tracking means the own-repo PR's config sits in
+	// branch.real-feature.* and does NOT bleed into the deleted-fork
+	// worktree. Verify by attempting `git push` and asserting it
+	// errors with "no upstream branch". Pre-fix this would silently
+	// push to upstream:refs/heads/deleted-feature.
+	for _, c := range [][]string{
+		{"-C", deletedWtPath, "config", "user.email", "agent@example.com"},
+		{"-C", deletedWtPath, "config", "user.name", "Agent"},
+		{"-C", deletedWtPath, "commit", "--allow-empty", "-m", "agent fix"},
+	} {
+		if out, err := exec.Command("git", c...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", c, err, out)
+		}
+	}
+	pushCmd := exec.Command("git", "-C", deletedWtPath, "push")
+	if out, err := pushCmd.CombinedOutput(); err == nil {
+		t.Errorf("git push succeeded for deleted-fork PR after prior own-repo run — should have failed: %s", out)
+	}
+	// Upstream must NOT have grown a stray deleted-feature branch.
+	if out, err := exec.Command("git", "-C", upstream, "show-ref", "--verify", "refs/heads/deleted-feature").CombinedOutput(); err == nil {
+		t.Errorf("upstream gained a stray refs/heads/deleted-feature branch — push leaked: %s", out)
 	}
 }
 
@@ -613,7 +690,7 @@ func TestCleanupPRConfig_RunsAfterContextCancellation(t *testing.T) {
 	// CleanupPRConfig takes no ctx — it constructs its own internal
 	// background ctx. Even if the caller's ctx is fully cancelled,
 	// cleanup must still run.
-	CleanupPRConfig("owner-cancel-test", "repo-cancel-test", 123)
+	CleanupPRConfig("owner-cancel-test", "repo-cancel-test", "feature", 123)
 
 	bareDir, _ := repoDir("owner-cancel-test", "repo-cancel-test")
 	if out, err := exec.Command("git", "-C", bareDir, "remote").Output(); err != nil || strings.Contains(string(out), "head-123") {
