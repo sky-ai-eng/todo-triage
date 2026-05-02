@@ -423,8 +423,11 @@ func ListTakenOverRunsForResume(database *sql.DB) ([]TakenOverRun, error) {
 	return out, rows.Err()
 }
 
-// InsertAgentMessage inserts a message and returns its ID.
-func InsertAgentMessage(database *sql.DB, msg domain.AgentMessage) (int64, error) {
+// InsertAgentMessage inserts a message and returns its ID. If msg.CreatedAt
+// is zero, it is stamped with time.Now().UTC() and written back to the caller
+// so a subsequent WS broadcast can carry the same value as the DB row without
+// a re-read.
+func InsertAgentMessage(database *sql.DB, msg *domain.AgentMessage) (int64, error) {
 	var toolCallsJSON, metadataJSON sql.NullString
 
 	if len(msg.ToolCalls) > 0 {
@@ -442,14 +445,19 @@ func InsertAgentMessage(database *sql.DB, msg domain.AgentMessage) (int64, error
 		metadataJSON = sql.NullString{String: string(b), Valid: true}
 	}
 
+	if msg.CreatedAt.IsZero() {
+		msg.CreatedAt = time.Now().UTC()
+	}
+
 	result, err := database.Exec(`
-		INSERT INTO run_messages (run_id, role, content, subtype, tool_calls, tool_call_id, is_error, metadata, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO run_messages (run_id, role, content, subtype, tool_calls, tool_call_id, is_error, metadata, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		msg.RunID, msg.Role, msg.Content, msg.Subtype,
 		toolCallsJSON, nullStr(msg.ToolCallID), msg.IsError, metadataJSON,
 		nullStr(msg.Model), nullInt(msg.InputTokens), nullInt(msg.OutputTokens),
 		nullInt(msg.CacheReadTokens), nullInt(msg.CacheCreationTokens),
+		msg.CreatedAt,
 	)
 	if err != nil {
 		return 0, err

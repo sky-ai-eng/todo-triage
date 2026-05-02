@@ -941,7 +941,7 @@ func (s *Spawner) consumeClaudeStream(stdout io.Reader, runID string, stream *st
 		}
 
 		for _, msg := range messages {
-			id, err := db.InsertAgentMessage(s.database, *msg)
+			id, err := db.InsertAgentMessage(s.database, msg)
 			if err != nil {
 				log.Printf("[delegate] error storing message: %v", err)
 				continue
@@ -1386,7 +1386,7 @@ func (s *Spawner) failRun(runID, taskID, triggerType, errMsg string) {
 		log.Printf("[delegate] warning: failed to mark run %s as failed: %v", runID, err)
 	}
 
-	if _, err := db.InsertAgentMessage(s.database, domain.AgentMessage{
+	if _, err := db.InsertAgentMessage(s.database, &domain.AgentMessage{
 		RunID:   runID,
 		Role:    "assistant",
 		Subtype: "text",
