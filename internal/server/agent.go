@@ -200,11 +200,12 @@ func (s *Server) handleAgentRespond(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Insert yield_response message + flip status atomically-enough:
-	// if MarkAgentRunResuming returns ok=false (a concurrent cancel
-	// raced us), the response message is still recorded on the run
-	// for transcript completeness — the racing path took the run to
-	// a terminal state and we just stop here.
+	// Record the response message before handing off to the spawner.
+	// If ResumeAfterYield refuses (concurrent cancel raced us, or the
+	// run is no longer resumable for some other reason), the response
+	// row stays in the transcript for completeness — the racing path
+	// took the run to a terminal state and the message is the
+	// historical record of what the user submitted.
 	displayContent := domain.RenderYieldResponseForDisplay(req, &resp)
 	msg, err := db.InsertYieldResponse(s.db, runID, &resp, displayContent)
 	if err != nil {
@@ -213,19 +214,18 @@ func (s *Server) handleAgentRespond(w http.ResponseWriter, r *http.Request) {
 	}
 	s.ws.Broadcast(websocket.Event{Type: "agent_message", RunID: runID, Data: msg})
 
-	flipped, err := db.MarkAgentRunResuming(s.db, runID)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "flip status: " + err.Error()})
-		return
-	}
-	if !flipped {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "run is no longer awaiting input"})
-		return
-	}
-	s.ws.Broadcast(websocket.Event{Type: "agent_run_update", RunID: runID, Data: map[string]string{"status": "running"}})
-
+	// Hand off to the spawner. Status flip from awaiting_input to
+	// running happens INSIDE ResumeAfterYield, AFTER the cancel
+	// handle is registered — that ordering closes the cancel race
+	// where a Cancel() arriving between flip and registration would
+	// silently mark the run cancelled while the resume goroutine
+	// still continues the Claude session.
 	agentText := domain.RenderYieldResponseForAgent(req, &resp)
 	if err := s.spawner.ResumeAfterYield(runID, agentText); err != nil {
+		if errors.Is(err, delegate.ErrYieldNotResumable) {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "resume: " + err.Error()})
 		return
 	}
@@ -238,7 +238,14 @@ func (s *Server) handleAgentRespond(w http.ResponseWriter, r *http.Request) {
 func validateYieldResponse(req *domain.YieldRequest, resp *domain.YieldResponse) string {
 	switch resp.Type {
 	case domain.YieldTypeConfirmation:
-		// Both true and false are valid; nothing else to check.
+		// Require an explicit accepted: a request body of
+		// `{"type":"confirmation"}` would otherwise decode to a
+		// silent rejection, which we don't want anyone to be able
+		// to do by accident. The pointer-typed field lets us tell
+		// "missing" apart from "explicit false".
+		if resp.Accepted == nil {
+			return "confirmation response missing required `accepted` field"
+		}
 		return ""
 	case domain.YieldTypeChoice:
 		if !req.Multi && len(resp.Selected) != 1 {
@@ -255,9 +262,14 @@ func validateYieldResponse(req *domain.YieldRequest, resp *domain.YieldResponse)
 		}
 		return ""
 	case domain.YieldTypePrompt:
-		// Empty prompt responses are accepted; the agent sees a
-		// neutral "user submitted an empty response" message and
-		// decides what to do.
+		// Mirror the frontend's submit-disabled-on-empty behavior:
+		// the modal won't let a user submit an empty prompt, but
+		// nothing stops a direct API call from doing so. Reject here
+		// so the agent never sees an ambiguous "the user submitted
+		// an empty response" follow-up.
+		if strings.TrimSpace(resp.Value) == "" {
+			return "prompt response value cannot be empty"
+		}
 		return ""
 	}
 	return "unknown yield type: " + resp.Type

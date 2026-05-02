@@ -1010,26 +1010,35 @@ func (s *Spawner) persistYield(runID string, req *domain.YieldRequest, completio
 	return nil
 }
 
+// ErrYieldNotResumable is returned by ResumeAfterYield when the run
+// can't be resumed in its current state — typically a concurrent
+// cancel or takeover flipped it terminal between the handler's
+// validation read and our status flip. The respond endpoint maps
+// this to 409 Conflict so the client can refresh and see the actual
+// state. SKY-139.
+var ErrYieldNotResumable = errors.New("yield: run not in awaiting_input")
+
 // ResumeAfterYield is the entry point used by the respond endpoint
-// after the user submits an answer to a yield. The handler records
-// the response message and flips the run status to running; this
-// method validates the run is resumable, registers a cancellation
-// handle (so Cancel works during resume), then spawns a goroutine
-// that re-invokes Claude with the user's plain-text response and
-// runs the resulting completion through the same processCompletion
-// path the initial run uses.
+// after the user records an answer to a yield. This method:
+//  1. validates the run is resumable (session id, worktree path, task)
+//  2. registers a cancellation handle in s.cancels[runID]
+//  3. flips status awaiting_input → running (with race guard)
+//  4. spawns the goroutine that re-invokes Claude with the user's
+//     plain-text response and runs the resulting completion through
+//     the same processCompletion path the initial run uses
 //
 // agentMessage is the plain-text rendering of the user's response
-// shaped by domain.RenderYieldResponseForAgent; passing it in rather
-// than re-deriving it here keeps the handler's validation and the
-// goroutine's invocation in sync.
+// shaped by domain.RenderYieldResponseForAgent.
 //
-// Cancel-during-resume is handled by registering the goroutine's
-// cancellation handle in s.cancels BEFORE the goroutine starts. If a
-// cancel arrives between this method returning and the goroutine
-// scheduling, ctx is already cancelled when the goroutine calls
-// ResumeWithMessage and the resume exits cleanly via the standard
-// ctx.Err() path. SKY-139.
+// Cancel-during-resume is closed by ordering: the cancel handle is in
+// place before the status flip, so any Cancel() arriving after the
+// flip finds the registered ctx and calls cancel() rather than
+// falling through to the DB-write path. The resume goroutine writes
+// its own terminal cancelled status when it observes ctx.Err() —
+// the registered-cancel path doesn't write to the DB itself, so
+// without that we'd leak a "cancelled but row says running" state.
+//
+// SKY-139.
 func (s *Spawner) ResumeAfterYield(runID, agentMessage string) error {
 	run, err := db.GetAgentRun(s.database, runID)
 	if err != nil {
@@ -1072,23 +1081,48 @@ func (s *Spawner) ResumeAfterYield(runID, agentMessage string) error {
 		triggerType = "manual"
 	}
 
-	// Register the cancel handle synchronously. Once this returns, a
-	// concurrent Cancel(runID) finds the entry and cancels the ctx;
-	// the goroutine sees ctx.Err() != nil at its first check.
+	// Step 1: register the cancel handle synchronously. Once this
+	// runs, a concurrent Cancel(runID) finds the entry and calls
+	// cancel() on the ctx instead of falling through to the
+	// MarkAgentRunCancelledIfActive DB-write path. The goroutine
+	// observes ctx.Err() and writes the terminal cancelled status
+	// itself.
 	ctx, cancel := context.WithCancel(context.Background())
 	s.mu.Lock()
-	if existing, ok := s.cancels[runID]; ok {
+	if _, ok := s.cancels[runID]; ok {
 		s.mu.Unlock()
 		cancel()
-		// A goroutine is already registered for this run. Should not
-		// happen for awaiting_input (the initial goroutine exited
-		// when it parked the run) but defend against a double-respond
-		// or stale entry.
-		_ = existing
+		// Should not happen for awaiting_input (the initial
+		// goroutine exited when it parked the run); defend against
+		// a double-respond or a stale entry.
 		return fmt.Errorf("run already has an active goroutine")
 	}
 	s.cancels[runID] = cancel
 	s.mu.Unlock()
+
+	// Step 2: flip status awaiting_input → running. This must happen
+	// AFTER cancel registration: if the order is reversed, a Cancel()
+	// arriving in the gap sees no goroutine, falls through to the DB
+	// path, and races the resume into the "row cancelled but
+	// goroutine still running" state the review bot flagged. With
+	// the cancel handle already in place, any Cancel() now hits
+	// cancel(ctx) and the goroutine handles the terminal write.
+	flipped, err := db.MarkAgentRunResuming(s.database, runID)
+	if err != nil {
+		s.mu.Lock()
+		delete(s.cancels, runID)
+		s.mu.Unlock()
+		cancel()
+		return fmt.Errorf("flip status: %w", err)
+	}
+	if !flipped {
+		s.mu.Lock()
+		delete(s.cancels, runID)
+		s.mu.Unlock()
+		cancel()
+		return ErrYieldNotResumable
+	}
+	s.broadcastRunUpdate(runID, "running")
 
 	go func() {
 		defer func() {
@@ -1103,10 +1137,22 @@ func (s *Spawner) ResumeAfterYield(runID, agentMessage string) error {
 			s.notifyDrainer(triggerType, taskCopy.EntityID)
 		}()
 
-		// If a cancel raced before the goroutine scheduled, exit now
-		// without making any Claude calls. Cancel() already wrote the
-		// terminal status via MarkAgentRunCancelledIfActive.
+		// markCancelled writes the terminal cancelled status iff the
+		// run is still non-terminal. The registered-handle Cancel()
+		// path doesn't touch the DB; this goroutine owns the
+		// terminal write any time it observes ctx.Err().
+		markCancelled := func() {
+			ok, _ := db.MarkAgentRunCancelledIfActive(s.database, runID, "user_cancelled", "Run cancelled by user")
+			if ok {
+				s.broadcastRunUpdate(runID, "cancelled")
+			}
+		}
+
+		// Cancel raced before the goroutine scheduled. Write the
+		// cancelled status ourselves and exit without invoking
+		// Claude.
 		if ctx.Err() != nil {
+			markCancelled()
 			return
 		}
 
@@ -1120,8 +1166,10 @@ func (s *Spawner) ResumeAfterYield(runID, agentMessage string) error {
 			RepoEnv: repoEnv,
 		})
 		if ctx.Err() != nil {
-			// User cancelled mid-resume. Cancel() already wrote the
-			// terminal status; nothing more to do here.
+			// User cancelled mid-resume. ResumeWithMessage SIGKILLed
+			// the subprocess via its own ctx.Done() watcher; we own
+			// the terminal status write.
+			markCancelled()
 			return
 		}
 		if err != nil {

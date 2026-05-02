@@ -5,15 +5,24 @@ import (
 	"testing"
 )
 
+func boolPtr(b bool) *bool { return &b }
+
 func TestRenderYieldResponseForAgent_Confirmation(t *testing.T) {
 	req := &YieldRequest{Type: YieldTypeConfirmation, Message: "force push?"}
-	got := RenderYieldResponseForAgent(req, &YieldResponse{Type: YieldTypeConfirmation, Accepted: true})
+	got := RenderYieldResponseForAgent(req, &YieldResponse{Type: YieldTypeConfirmation, Accepted: boolPtr(true)})
 	if !strings.Contains(got, "accepted") {
 		t.Errorf("missing 'accepted' in %q", got)
 	}
-	got = RenderYieldResponseForAgent(req, &YieldResponse{Type: YieldTypeConfirmation, Accepted: false})
+	got = RenderYieldResponseForAgent(req, &YieldResponse{Type: YieldTypeConfirmation, Accepted: boolPtr(false)})
 	if !strings.Contains(got, "declined") {
 		t.Errorf("missing 'declined' in %q", got)
+	}
+	// Nil Accepted defaults to "declined" in the renderer (validation
+	// rejects nil before reaching this layer; this is a defensive
+	// fallback rather than an expected input).
+	got = RenderYieldResponseForAgent(req, &YieldResponse{Type: YieldTypeConfirmation, Accepted: nil})
+	if !strings.Contains(got, "declined") {
+		t.Errorf("nil Accepted should render as declined, got %q", got)
 	}
 }
 
@@ -47,11 +56,11 @@ func TestRenderYieldResponseForAgent_PromptIncludesValue(t *testing.T) {
 
 func TestRenderYieldResponseForDisplay_PrefersUserLabels(t *testing.T) {
 	req := &YieldRequest{Type: YieldTypeConfirmation, AcceptLabel: "Force push", RejectLabel: "Stop"}
-	got := RenderYieldResponseForDisplay(req, &YieldResponse{Type: YieldTypeConfirmation, Accepted: true})
+	got := RenderYieldResponseForDisplay(req, &YieldResponse{Type: YieldTypeConfirmation, Accepted: boolPtr(true)})
 	if got != "Force push" {
 		t.Errorf("display = %q, want %q", got, "Force push")
 	}
-	got = RenderYieldResponseForDisplay(req, &YieldResponse{Type: YieldTypeConfirmation, Accepted: false})
+	got = RenderYieldResponseForDisplay(req, &YieldResponse{Type: YieldTypeConfirmation, Accepted: boolPtr(false)})
 	if got != "Stop" {
 		t.Errorf("display = %q, want %q", got, "Stop")
 	}
@@ -59,7 +68,7 @@ func TestRenderYieldResponseForDisplay_PrefersUserLabels(t *testing.T) {
 
 func TestRenderYieldResponseForDisplay_FallsBackWhenLabelsAbsent(t *testing.T) {
 	req := &YieldRequest{Type: YieldTypeConfirmation}
-	got := RenderYieldResponseForDisplay(req, &YieldResponse{Type: YieldTypeConfirmation, Accepted: true})
+	got := RenderYieldResponseForDisplay(req, &YieldResponse{Type: YieldTypeConfirmation, Accepted: boolPtr(true)})
 	if got != "Approved" {
 		t.Errorf("display = %q, want Approved", got)
 	}

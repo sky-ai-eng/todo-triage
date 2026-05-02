@@ -54,16 +54,40 @@ func TestHandleAgentRespond_404OnMissingRun(t *testing.T) {
 	}
 }
 
+func boolPtr(b bool) *bool { return &b }
+
 func TestValidateYieldResponse_TypeMismatch(t *testing.T) {
 	req := &domain.YieldRequest{Type: domain.YieldTypeConfirmation}
 	resp := &domain.YieldResponse{Type: domain.YieldTypeChoice}
 	if errMsg := validateYieldResponse(req, resp); errMsg == "" {
 		t.Error("expected error for type mismatch")
 	}
-	// Same-type passes.
-	resp = &domain.YieldResponse{Type: domain.YieldTypeConfirmation, Accepted: true}
+	// Same-type with explicit accepted=true passes.
+	resp = &domain.YieldResponse{Type: domain.YieldTypeConfirmation, Accepted: boolPtr(true)}
 	if errMsg := validateYieldResponse(req, resp); errMsg != "" {
 		t.Errorf("expected pass, got %q", errMsg)
+	}
+}
+
+// TestValidateYieldResponse_ConfirmationRejectsMissingAccepted pins
+// the fix for the review-bot-flagged "{type:confirmation} silently
+// decodes as a rejection" bug. With Accepted as *bool, missing
+// fields are nil and the validator rejects them. Both true and
+// false are valid when explicit.
+func TestValidateYieldResponse_ConfirmationRejectsMissingAccepted(t *testing.T) {
+	req := &domain.YieldRequest{Type: domain.YieldTypeConfirmation}
+
+	// Nil — reject.
+	if errMsg := validateYieldResponse(req, &domain.YieldResponse{Type: domain.YieldTypeConfirmation}); errMsg == "" {
+		t.Error("expected reject for missing accepted field")
+	}
+	// Explicit false — pass.
+	if errMsg := validateYieldResponse(req, &domain.YieldResponse{Type: domain.YieldTypeConfirmation, Accepted: boolPtr(false)}); errMsg != "" {
+		t.Errorf("explicit false should pass, got %q", errMsg)
+	}
+	// Explicit true — pass.
+	if errMsg := validateYieldResponse(req, &domain.YieldResponse{Type: domain.YieldTypeConfirmation, Accepted: boolPtr(true)}); errMsg != "" {
+		t.Errorf("explicit true should pass, got %q", errMsg)
 	}
 }
 
@@ -111,10 +135,16 @@ func TestValidateYieldResponse_RejectsUnknownChoiceID(t *testing.T) {
 	}
 }
 
-func TestValidateYieldResponse_PromptAcceptsEmpty(t *testing.T) {
+// TestValidateYieldResponse_PromptRejectsEmpty pins the fix for the
+// review-bot-flagged "empty prompt response should be blocked
+// server-side" bug. The frontend disables submit on empty input but
+// the API needs to enforce the same rule.
+func TestValidateYieldResponse_PromptRejectsEmpty(t *testing.T) {
 	req := &domain.YieldRequest{Type: domain.YieldTypePrompt, Message: "name?"}
-	if errMsg := validateYieldResponse(req, &domain.YieldResponse{Type: domain.YieldTypePrompt, Value: ""}); errMsg != "" {
-		t.Errorf("expected pass on empty prompt, got %q", errMsg)
+	for _, val := range []string{"", "   ", "\t\n"} {
+		if errMsg := validateYieldResponse(req, &domain.YieldResponse{Type: domain.YieldTypePrompt, Value: val}); errMsg == "" {
+			t.Errorf("expected reject for empty/whitespace prompt %q", val)
+		}
 	}
 	if errMsg := validateYieldResponse(req, &domain.YieldResponse{Type: domain.YieldTypePrompt, Value: "Aidan"}); errMsg != "" {
 		t.Errorf("expected pass on filled prompt, got %q", errMsg)

@@ -182,7 +182,8 @@ func TestInsertYieldResponse_StoresDisplayAndPayload(t *testing.T) {
 	_ = CreatePrompt(database, domain.Prompt{ID: "p", Name: "T", Body: "x", Source: "user"})
 	_ = CreateAgentRun(database, domain.AgentRun{ID: "r1", TaskID: task.ID, PromptID: "p", Status: "running", Model: "m"})
 
-	resp := &domain.YieldResponse{Type: domain.YieldTypeConfirmation, Accepted: true}
+	yes := true
+	resp := &domain.YieldResponse{Type: domain.YieldTypeConfirmation, Accepted: &yes}
 	msg, err := InsertYieldResponse(database, "r1", resp, "Force push")
 	if err != nil {
 		t.Fatalf("insert: %v", err)

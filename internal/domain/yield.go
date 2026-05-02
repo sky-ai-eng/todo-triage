@@ -47,8 +47,12 @@ type YieldChoiceOption struct {
 type YieldResponse struct {
 	Type string `json:"type"`
 
-	// Confirmation
-	Accepted bool `json:"accepted,omitempty"`
+	// Confirmation. Pointer so a missing field is distinguishable from
+	// an explicit `false` — without that distinction a request body
+	// like `{"type":"confirmation"}` would silently decode to a
+	// rejection. validateYieldResponse rejects nil for confirmation
+	// yields; the agent never sees an ambiguous answer.
+	Accepted *bool `json:"accepted,omitempty"`
 
 	// Choice — IDs of selected options. Length 1 for single-select; 0+ for multi.
 	Selected []string `json:"selected,omitempty"`
@@ -68,7 +72,7 @@ func RenderYieldResponseForAgent(req *YieldRequest, resp *YieldResponse) string 
 	}
 	switch resp.Type {
 	case YieldTypeConfirmation:
-		if resp.Accepted {
+		if resp.Accepted != nil && *resp.Accepted {
 			return "[user response] You asked: " + req.Message + "\nThe user accepted."
 		}
 		return "[user response] You asked: " + req.Message + "\nThe user declined."
@@ -101,7 +105,7 @@ func RenderYieldResponseForDisplay(req *YieldRequest, resp *YieldResponse) strin
 	}
 	switch resp.Type {
 	case YieldTypeConfirmation:
-		if resp.Accepted {
+		if resp.Accepted != nil && *resp.Accepted {
 			if req.AcceptLabel != "" {
 				return req.AcceptLabel
 			}
