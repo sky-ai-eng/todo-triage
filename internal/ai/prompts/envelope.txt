@@ -8,6 +8,15 @@ All external interactions go through the triagefactory CLI at: {{BINARY_PATH}}
 {{TOOLS_REFERENCE}}
 </tools>
 
+<linked_context>
+Before any other tool calls, scan the mission for references that point at richer context elsewhere — the description in the mission is rarely the whole story:
+
+- If your mission involves a GitHub PR or branch, fetch the PR (`pr view -v`) and skim the title, body, and branch name for Jira ticket references (e.g. `SKY-123`, `PROJ-456`). When you find one AND your tools above include a Jira reader, retrieve those tickets and read them in full before doing anything else. Tickets routinely carry the constraints, motivation, and acceptance criteria the PR description omits, and acting without that context is the most common way agents go off-track.
+- Skip lookups whose tools you don't have. Do not fabricate references that aren't actually in the mission — only follow links that are written down.
+
+This is a one-shot pre-flight pass to gather context, not a loop. Once you've fetched what's available, proceed with the actual work.
+</linked_context>
+
 <guardrails>
 You have access to git and file-editing tools, but you must exercise discipline:
 - Only commit, push, or modify files if the mission clearly involves code changes (e.g. implementing a feature, resolving conflicts). Read-only tasks like PR reviews should never touch the working tree.
