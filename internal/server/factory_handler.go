@@ -139,6 +139,12 @@ type factoryEntityJSON struct {
 	// (label_added, status_changed), the inner slice can have multiple
 	// entries; v1 frontend uses the first.
 	PendingTasks map[string][]pendingTaskRef `json:"pending_tasks,omitempty"`
+
+	// HasAwaitingInput is true if any run on this entity is in
+	// awaiting_input. The runs-tray chip paints an attention badge
+	// when this is set so a user scanning the factory can spot
+	// yielded runs at a glance. SKY-139.
+	HasAwaitingInput bool `json:"has_awaiting_input,omitempty"`
 }
 
 // pendingTaskRef is the minimal task reference shipped per queued
@@ -315,6 +321,12 @@ func (s *Server) handleFactorySnapshot(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	awaitingByEntity, err := db.EntitiesWithAwaitingInputRuns(s.db, entityIDs)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
 	entities := make([]factoryEntityJSON, 0, len(entityRows))
 	for _, row := range entityRows {
 		ej := factoryEntityJSON{
@@ -341,6 +353,9 @@ func (s *Server) handleFactorySnapshot(w http.ResponseWriter, r *http.Request) {
 		}
 		if pending, ok := pendingByEntity[row.Entity.ID]; ok {
 			ej.PendingTasks = pending
+		}
+		if _, ok := awaitingByEntity[row.Entity.ID]; ok {
+			ej.HasAwaitingInput = true
 		}
 		switch row.Entity.Source {
 		case "github":

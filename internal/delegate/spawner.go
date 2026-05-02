@@ -141,11 +141,25 @@ func (s *Spawner) Cancel(runID string) error {
 	cancel, ok := s.cancels[runID]
 	s.mu.Unlock()
 
-	if !ok {
-		return fmt.Errorf("no active run %s", runID)
+	if ok {
+		cancel()
+		return nil
 	}
 
-	cancel()
+	// No active goroutine — the run may be parked in awaiting_input
+	// with no subprocess to kill (SKY-139). Mark it cancelled directly
+	// via DB. MarkAgentRunCancelledIfActive's status-NOT-IN filter
+	// handles every non-terminal state, so this is also a defensive
+	// catch for any other "no goroutine but row not terminal"
+	// edge case.
+	flipped, err := db.MarkAgentRunCancelledIfActive(s.database, runID, "user_cancelled", "Run cancelled by user")
+	if err != nil {
+		return fmt.Errorf("mark cancelled: %w", err)
+	}
+	if !flipped {
+		return fmt.Errorf("no active run %s", runID)
+	}
+	s.broadcastRunUpdate(runID, "cancelled")
 	return nil
 }
 
@@ -815,98 +829,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	}
 
 	if completion != nil {
-		// Enforce the pre-complete task_memory write gate. If the agent
-		// returned a completion JSON without writing ./task_memory/<runID>.md,
-		// resume the session with a correction message (up to 2 retries).
-		// Retries that produce new completions are merged into the totals
-		// so cost/duration accounting reflects the full invocation, not
-		// just the initial call.
-		//
-		// Pass model + repoEnv explicitly rather than letting the gate
-		// read live spawner state, so a concurrent UpdateCredentials
-		// can't silently switch models or drop repo context mid-run.
-		repoEnv := ""
-		if cfg.owner != "" && cfg.repo != "" {
-			repoEnv = cfg.owner + "/" + cfg.repo
-		}
-		completion = s.runMemoryGate(ctx, runID, task.ID, claudeCwd, completion, stream.SessionID(), model, repoEnv)
-
-		// Unconditional upsert of the run_memory row at termination
-		// (SKY-204): row presence === "termination passed through the
-		// memory gate", agent_content NULL === "agent didn't comply
-		// with the gate after retries" (UpsertAgentMemory normalizes
-		// empty/whitespace input to NULL on the way in). Replaces the
-		// previous branching write + denormalized memory_missing
-		// flag, both of which could drift from ground truth. The new
-		// shape also gives SKY-205's human-feedback writers an
-		// always-present row to UPDATE, so they don't need
-		// INSERT-or-UPDATE branching.
-		//
-		// Three distinct noncompliance states all map to the same DB
-		// signal but get logged differently here — diagnosing a gap
-		// after the fact is much easier when the log line says
-		// "missing" vs "empty" vs "read error" instead of a single
-		// generic message.
-		agentContent, fileState := readAgentMemoryFile(claudeCwd, runID)
-		if err := db.UpsertAgentMemory(s.database, runID, task.EntityID, agentContent); err != nil {
-			log.Printf("[delegate] warning: failed to upsert memory for run %s: %v", runID, err)
-		}
-		switch fileState {
-		case memoryFileMissing:
-			log.Printf("[delegate] run %s: memory file missing after gate retries (agent_content NULL)", runID)
-		case memoryFileEmpty:
-			log.Printf("[delegate] run %s: memory file present but empty after gate retries (agent_content NULL)", runID)
-		case memoryFileReadErr:
-			log.Printf("[delegate] run %s: memory file unreadable after gate retries (agent_content NULL)", runID)
-		}
-
-		resultSummary := ""
-		status := "completed"
-		if completion.IsError {
-			status = "failed"
-		}
-		if parsed := parseAgentResult(completion.Result); parsed != nil {
-			resultSummary = parsed.Summary
-			switch parsed.Status {
-			case "failed":
-				status = "failed"
-			case "task_unsolvable":
-				status = "task_unsolvable"
-			}
-		}
-		if err := db.CompleteAgentRun(s.database, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultSummary); err != nil {
-			log.Printf("[delegate] warning: failed to record completion for run %s: %v", runID, err)
-		}
-
-		s.updateBreakerCounter(task.ID, triggerType, status)
-
-		if status == "completed" {
-			if pendingReview, _ := db.PendingReviewByRunID(s.database, runID); pendingReview != nil {
-				status = "pending_approval"
-				if _, err := s.database.Exec(`UPDATE runs SET status = ? WHERE id = ?`, status, runID); err != nil {
-					log.Printf("[delegate] warning: failed to set pending_approval for run %s: %v", runID, err)
-				}
-			}
-		}
-
-		if status == "completed" {
-			if _, err := s.database.Exec(`UPDATE tasks SET status = 'done' WHERE id = ?`, task.ID); err != nil {
-				log.Printf("[delegate] warning: failed to update task %s to done: %v", task.ID, err)
-			}
-		}
-		s.broadcastRunUpdate(runID, status)
-
-		// Toast the terminal state. Success cases auto-hide; failed/unsolvable
-		// show as an error toast so the user notices even if they've clicked
-		// away from the runs page.
-		switch status {
-		case "completed", "pending_approval":
-			toast.Success(s.wsHub, fmt.Sprintf("Run %s completed", shortRunID(runID)))
-		case "failed":
-			toast.Error(s.wsHub, fmt.Sprintf("Run %s failed: %s", shortRunID(runID), truncateToastMsg(resultSummary, 160)))
-		case "task_unsolvable":
-			toast.Warning(s.wsHub, fmt.Sprintf("Run %s — task unsolvable: %s", shortRunID(runID), truncateToastMsg(resultSummary, 140)))
-		}
+		s.processCompletion(ctx, runID, task, completion, claudeCwd, stream.SessionID(), model, cfg.owner, cfg.repo, triggerType)
 
 		// We've already captured the result from stdout; just drain any
 		// remaining subprocess state. Exit code is not load-bearing here.
@@ -925,6 +848,296 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	}
 
 	s.failRun(runID, task.ID, triggerType, "claude exited cleanly without producing a result event")
+}
+
+// processCompletion handles the post-stream branching for any Claude
+// invocation (initial run or yield-resume): if the parsed envelope is
+// a yield, park the run in awaiting_input; otherwise run the memory
+// gate and finalize the run as terminal. Shared between runAgent and
+// ResumeAfterYield so a yield-then-resume run lands in identical
+// terminal state to a run that completed in one shot — same memory
+// gate, same toast, same task-done bookkeeping. SKY-139.
+//
+// The caller is responsible for draining any subprocess state
+// (cmd.Wait); this helper only operates on the parsed completion.
+func (s *Spawner) processCompletion(
+	ctx context.Context,
+	runID string,
+	task domain.Task,
+	completion *runCompletion,
+	claudeCwd, sessionID, model, owner, repo, triggerType string,
+) {
+	// Yield branch (SKY-139): the agent emitted status:"yield" to
+	// pause the run for user input rather than terminating. Skip the
+	// memory gate (the agent isn't terminating; the gate runs at real
+	// completion) and skip CompleteAgentRun. Park the run in
+	// awaiting_input; the respond endpoint reopens the session via
+	// ResumeAfterYield when the user answers.
+	//
+	// IsError takes precedence: a Claude-side error (e.g. max-turns
+	// hit) that happens to carry yield-shaped JSON is still a failure,
+	// not an intentional pause.
+	if !completion.IsError {
+		if parsed := parseAgentResult(completion.Result); parsed != nil && parsed.Status == "yield" && parsed.Yield != nil {
+			if err := s.persistYield(runID, parsed.Yield, completion); err != nil {
+				log.Printf("[delegate] failed to persist yield for run %s: %v", runID, err)
+				s.failRun(runID, task.ID, triggerType, "failed to record yield: "+err.Error())
+			}
+			return
+		}
+	}
+
+	// Enforce the pre-complete task_memory write gate. If the agent
+	// returned a completion JSON without writing ./task_memory/<runID>.md,
+	// resume the session with a correction message (up to 2 retries).
+	// Retries that produce new completions are merged into the totals
+	// so cost/duration accounting reflects the full invocation, not
+	// just the initial call.
+	//
+	// Pass model + repoEnv explicitly rather than letting the gate
+	// read live spawner state, so a concurrent UpdateCredentials
+	// can't silently switch models or drop repo context mid-run.
+	repoEnv := ""
+	if owner != "" && repo != "" {
+		repoEnv = owner + "/" + repo
+	}
+	completion = s.runMemoryGate(ctx, runID, task.ID, claudeCwd, completion, sessionID, model, repoEnv)
+
+	// Unconditional upsert of the run_memory row at termination
+	// (SKY-204): row presence === "termination passed through the
+	// memory gate", agent_content NULL === "agent didn't comply with
+	// the gate after retries" (UpsertAgentMemory normalizes
+	// empty/whitespace input to NULL on the way in).
+	agentContent, fileState := readAgentMemoryFile(claudeCwd, runID)
+	if err := db.UpsertAgentMemory(s.database, runID, task.EntityID, agentContent); err != nil {
+		log.Printf("[delegate] warning: failed to upsert memory for run %s: %v", runID, err)
+	}
+	switch fileState {
+	case memoryFileMissing:
+		log.Printf("[delegate] run %s: memory file missing after gate retries (agent_content NULL)", runID)
+	case memoryFileEmpty:
+		log.Printf("[delegate] run %s: memory file present but empty after gate retries (agent_content NULL)", runID)
+	case memoryFileReadErr:
+		log.Printf("[delegate] run %s: memory file unreadable after gate retries (agent_content NULL)", runID)
+	}
+
+	resultSummary := ""
+	status := "completed"
+	if completion.IsError {
+		status = "failed"
+	}
+	if parsed := parseAgentResult(completion.Result); parsed != nil {
+		resultSummary = parsed.Summary
+		switch parsed.Status {
+		case "failed":
+			status = "failed"
+		case "task_unsolvable":
+			status = "task_unsolvable"
+		}
+	}
+	if err := db.CompleteAgentRun(s.database, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultSummary); err != nil {
+		log.Printf("[delegate] warning: failed to record completion for run %s: %v", runID, err)
+	}
+
+	s.updateBreakerCounter(task.ID, triggerType, status)
+
+	if status == "completed" {
+		if pendingReview, _ := db.PendingReviewByRunID(s.database, runID); pendingReview != nil {
+			status = "pending_approval"
+			if _, err := s.database.Exec(`UPDATE runs SET status = ? WHERE id = ?`, status, runID); err != nil {
+				log.Printf("[delegate] warning: failed to set pending_approval for run %s: %v", runID, err)
+			}
+		}
+	}
+
+	if status == "completed" {
+		if _, err := s.database.Exec(`UPDATE tasks SET status = 'done' WHERE id = ?`, task.ID); err != nil {
+			log.Printf("[delegate] warning: failed to update task %s to done: %v", task.ID, err)
+		}
+	}
+	s.broadcastRunUpdate(runID, status)
+
+	// Toast the terminal state. Success cases auto-hide; failed/unsolvable
+	// show as an error toast so the user notices even if they've clicked
+	// away from the runs page.
+	switch status {
+	case "completed", "pending_approval":
+		toast.Success(s.wsHub, fmt.Sprintf("Run %s completed", shortRunID(runID)))
+	case "failed":
+		toast.Error(s.wsHub, fmt.Sprintf("Run %s failed: %s", shortRunID(runID), truncateToastMsg(resultSummary, 160)))
+	case "task_unsolvable":
+		toast.Warning(s.wsHub, fmt.Sprintf("Run %s — task unsolvable: %s", shortRunID(runID), truncateToastMsg(resultSummary, 140)))
+	}
+}
+
+// persistYield records an agent yield request, accumulates the partial
+// invocation totals onto the run row, and parks the run in
+// awaiting_input. SKY-139.
+//
+// The status flip is guarded against concurrent terminal flips
+// (cancellation, takeover) by MarkAgentRunAwaitingInput's
+// status-NOT-IN filter. If the run already reached a terminal state
+// while the agent was emitting the yield envelope (rare but possible
+// — a user cancel raced the stream's last line), we still record the
+// yield_request message for transcript completeness but skip the
+// status flip and the toast. The terminal status the racing path set
+// stands.
+func (s *Spawner) persistYield(runID string, req *domain.YieldRequest, completion *runCompletion) error {
+	if err := db.AddAgentRunPartialTotals(s.database, runID, completion.CostUSD, completion.DurationMs, completion.NumTurns); err != nil {
+		log.Printf("[delegate] warning: failed to record partial totals for run %s: %v", runID, err)
+	}
+
+	msg, err := db.InsertYieldRequest(s.database, runID, req)
+	if err != nil {
+		return fmt.Errorf("insert yield request: %w", err)
+	}
+	s.broadcastMessage(runID, msg)
+
+	flipped, err := db.MarkAgentRunAwaitingInput(s.database, runID)
+	if err != nil {
+		return fmt.Errorf("mark awaiting_input: %w", err)
+	}
+	if !flipped {
+		// Terminal status was already set by a racing path (cancel,
+		// takeover). The yield_request message is recorded for
+		// transcript completeness but the run ends in whatever
+		// terminal state the racing path chose; no toast or
+		// broadcast needed (the racing path already broadcast).
+		return nil
+	}
+	s.broadcastRunUpdate(runID, "awaiting_input")
+	toast.Info(s.wsHub, fmt.Sprintf("Run %s waiting for response", shortRunID(runID)))
+	return nil
+}
+
+// ResumeAfterYield is the entry point used by the respond endpoint
+// after the user submits an answer to a yield. The handler records
+// the response message; this method validates the run is resumable,
+// registers a cancellation handle (so Cancel works during resume),
+// flips status to running, then spawns a goroutine that re-invokes
+// Claude with the user's plain-text response and runs the resulting
+// completion through the same processCompletion path the initial run
+// uses.
+//
+// agentMessage is the plain-text rendering of the user's response
+// shaped by domain.RenderYieldResponseForAgent; passing it in rather
+// than re-deriving it here keeps the handler's validation and the
+// goroutine's invocation in sync.
+//
+// Cancel-during-resume is handled by registering the goroutine's
+// cancellation handle in s.cancels BEFORE the goroutine starts. If a
+// cancel arrives between this method returning and the goroutine
+// scheduling, ctx is already cancelled when the goroutine calls
+// ResumeWithMessage and the resume exits cleanly via the standard
+// ctx.Err() path. SKY-139.
+func (s *Spawner) ResumeAfterYield(runID, agentMessage string) error {
+	run, err := db.GetAgentRun(s.database, runID)
+	if err != nil {
+		return fmt.Errorf("load run: %w", err)
+	}
+	if run == nil {
+		return fmt.Errorf("run not found")
+	}
+	if run.SessionID == "" {
+		return fmt.Errorf("run has no session id; cannot resume")
+	}
+	if run.WorktreePath == "" {
+		return fmt.Errorf("run has no worktree path; cannot resume")
+	}
+	task, err := db.GetTask(s.database, run.TaskID)
+	if err != nil {
+		return fmt.Errorf("load task: %w", err)
+	}
+	if task == nil {
+		return fmt.Errorf("task not found for run")
+	}
+
+	// Resolve owner/repo for repoEnv. Best-effort: Jira-only runs have
+	// no resolvable repo and the resumed subprocess simply runs
+	// without TRIAGE_FACTORY_REPO, the same way Jira-no-match runs do
+	// today.
+	owner, repo := "", ""
+	entity, err := db.GetEntity(s.database, task.EntityID)
+	if err == nil && entity != nil {
+		owner, repo = parseOwnerRepo(entity.SourceID)
+	}
+
+	// Capture state needed inside the goroutine.
+	sessionID := run.SessionID
+	cwd := run.WorktreePath
+	model := run.Model
+	taskCopy := *task
+	triggerType := run.TriggerType
+	if triggerType == "" {
+		triggerType = "manual"
+	}
+
+	// Register the cancel handle synchronously. Once this returns, a
+	// concurrent Cancel(runID) finds the entry and cancels the ctx;
+	// the goroutine sees ctx.Err() != nil at its first check.
+	ctx, cancel := context.WithCancel(context.Background())
+	s.mu.Lock()
+	if existing, ok := s.cancels[runID]; ok {
+		s.mu.Unlock()
+		cancel()
+		// A goroutine is already registered for this run. Should not
+		// happen for awaiting_input (the initial goroutine exited
+		// when it parked the run) but defend against a double-respond
+		// or stale entry.
+		_ = existing
+		return fmt.Errorf("run already has an active goroutine")
+	}
+	s.cancels[runID] = cancel
+	s.mu.Unlock()
+
+	go func() {
+		startTime := time.Now()
+		_ = startTime
+		defer func() {
+			s.mu.Lock()
+			delete(s.cancels, runID)
+			s.mu.Unlock()
+			cancel()
+			// Drain the per-entity firing queue on terminal exit —
+			// matches the initial-run defer in Delegate so a yield
+			// resume that lands the run terminal still flushes any
+			// queued auto-firings for the same entity.
+			s.notifyDrainer(triggerType, taskCopy.EntityID)
+		}()
+
+		// If a cancel raced before the goroutine scheduled, exit now
+		// without making any Claude calls. Cancel() already wrote the
+		// terminal status via MarkAgentRunCancelledIfActive.
+		if ctx.Err() != nil {
+			return
+		}
+
+		repoEnv := ""
+		if owner != "" && repo != "" {
+			repoEnv = owner + "/" + repo
+		}
+
+		outcome, err := s.ResumeWithMessage(ctx, runID, sessionID, cwd, agentMessage, ResumeOptions{
+			Model:   model,
+			RepoEnv: repoEnv,
+		})
+		if ctx.Err() != nil {
+			// User cancelled mid-resume. Cancel() already wrote the
+			// terminal status; nothing more to do here.
+			return
+		}
+		if err != nil {
+			s.failRun(runID, taskCopy.ID, triggerType, "resume after yield failed: "+err.Error())
+			return
+		}
+		if outcome == nil || outcome.Completion == nil {
+			s.failRun(runID, taskCopy.ID, triggerType, "resume after yield produced no completion")
+			return
+		}
+
+		s.processCompletion(ctx, runID, taskCopy, outcome.Completion, cwd, sessionID, model, owner, repo, triggerType)
+	}()
+	return nil
 }
 
 // consumeClaudeStream scans NDJSON output from claude -p, persists each
@@ -1481,6 +1694,34 @@ type agentResult struct {
 	Link    string         `json:"link"` // legacy — single URL
 	Summary string         `json:"summary"`
 	Links   map[string]any `json:"links"` // new — keyed URLs (pr_review, pr, jira_issues)
+
+	// Yield is populated when Status == "yield". The agent is asking
+	// the user a question and the run should park in awaiting_input
+	// rather than completing. See domain.YieldRequest and SKY-139 /
+	// internal/ai/prompts/envelope.txt for the agent-facing contract.
+	Yield *domain.YieldRequest `json:"yield,omitempty"`
+}
+
+// isValid reports whether the parsed envelope contains enough to act on.
+// Two terminal shapes are accepted:
+//   - completion / task_unsolvable: Summary is non-empty (the legacy
+//     contract — every successful or unsolvable envelope has a summary)
+//   - yield: Status == "yield" and the yield payload has a known type
+//
+// Anything else is treated as "didn't parse cleanly" — the parser
+// falls through to its markdown-fence and brace-extraction paths
+// before giving up.
+func (r *agentResult) isValid() bool {
+	if r.Summary != "" {
+		return true
+	}
+	if r.Status == "yield" && r.Yield != nil {
+		switch r.Yield.Type {
+		case domain.YieldTypeConfirmation, domain.YieldTypeChoice, domain.YieldTypePrompt:
+			return true
+		}
+	}
+	return false
 }
 
 // PrimaryLink returns the most relevant URL from the result.
@@ -1507,6 +1748,9 @@ func (r *agentResult) PrimaryLink() string {
 
 // parseAgentResult extracts the structured {status, link, summary} JSON from
 // the agent's final message. Handles markdown fences, leading/trailing text.
+// Recognizes both completion envelopes (status: completed | task_unsolvable
+// with a non-empty summary) and yield envelopes (status: yield with a typed
+// yield payload — SKY-139). See agentResult.isValid for the acceptance rule.
 func parseAgentResult(text string) *agentResult {
 	text = strings.TrimSpace(text)
 	if text == "" {
@@ -1514,7 +1758,7 @@ func parseAgentResult(text string) *agentResult {
 	}
 
 	var result agentResult
-	if json.Unmarshal([]byte(text), &result) == nil && result.Summary != "" {
+	if json.Unmarshal([]byte(text), &result) == nil && result.isValid() {
 		return &result
 	}
 
@@ -1528,7 +1772,7 @@ func parseAgentResult(text string) *agentResult {
 			stripped = stripped[:end]
 		}
 		stripped = strings.TrimSpace(stripped)
-		if json.Unmarshal([]byte(stripped), &result) == nil && result.Summary != "" {
+		if json.Unmarshal([]byte(stripped), &result) == nil && result.isValid() {
 			return &result
 		}
 	}
@@ -1536,7 +1780,7 @@ func parseAgentResult(text string) *agentResult {
 	if start := strings.Index(text, "{"); start >= 0 {
 		if end := strings.LastIndex(text, "}"); end > start {
 			candidate := text[start : end+1]
-			if json.Unmarshal([]byte(candidate), &result) == nil && result.Summary != "" {
+			if json.Unmarshal([]byte(candidate), &result) == nil && result.isValid() {
 				return &result
 			}
 		}

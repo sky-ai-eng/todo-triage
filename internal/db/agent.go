@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -30,14 +31,93 @@ func nullIfEmpty(s string) any {
 }
 
 // CompleteAgentRun updates a run with completion info.
+//
+// total_cost_usd / duration_ms / num_turns are *added* to existing
+// values rather than overwritten. For runs that never yielded the
+// columns are NULL coming in, so COALESCE(NULL, 0) + x = x — same
+// result as the previous assignment behavior. For yield-and-resume
+// runs (SKY-139) the partial totals from each yielded invocation are
+// already on the row via AddAgentRunPartialTotals; this final call
+// folds in the terminal invocation's totals to produce the correct
+// cumulative spend.
 func CompleteAgentRun(database *sql.DB, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary string) error {
 	now := time.Now()
 	_, err := database.Exec(`
 		UPDATE runs
-		SET status = ?, completed_at = ?, total_cost_usd = ?, duration_ms = ?, num_turns = ?, stop_reason = ?, result_summary = ?
+		SET status = ?,
+		    completed_at = ?,
+		    total_cost_usd = COALESCE(total_cost_usd, 0) + ?,
+		    duration_ms = COALESCE(duration_ms, 0) + ?,
+		    num_turns = COALESCE(num_turns, 0) + ?,
+		    stop_reason = ?,
+		    result_summary = ?
 		WHERE id = ?
 	`, status, now, costUSD, durationMs, numTurns, stopReason, resultSummary, runID)
 	return err
+}
+
+// AddAgentRunPartialTotals adds an invocation's cost/duration/turns to
+// the run's running totals without flipping status or completed_at.
+// Called when a run yields mid-execution so accumulated spend is
+// visible to the UI while the agent is parked in awaiting_input, and
+// so the eventual CompleteAgentRun produces a correct cumulative total
+// when it adds the terminal invocation's deltas on top. SKY-139.
+func AddAgentRunPartialTotals(database *sql.DB, runID string, costUSD float64, durationMs, numTurns int) error {
+	_, err := database.Exec(`
+		UPDATE runs
+		SET total_cost_usd = COALESCE(total_cost_usd, 0) + ?,
+		    duration_ms = COALESCE(duration_ms, 0) + ?,
+		    num_turns = COALESCE(num_turns, 0) + ?
+		WHERE id = ?
+	`, costUSD, durationMs, numTurns, runID)
+	return err
+}
+
+// MarkAgentRunAwaitingInput flips a running run to awaiting_input
+// without writing a terminal completed_at — the agent will be resumed
+// once the user responds. Guarded against concurrent terminal flips
+// (cancellation, takeover) by the status-NOT-IN filter; returns
+// ok=false (no error) if the row already reached a terminal state.
+//
+// SKY-139.
+func MarkAgentRunAwaitingInput(database *sql.DB, runID string) (bool, error) {
+	res, err := database.Exec(`
+		UPDATE runs
+		SET status = 'awaiting_input'
+		WHERE id = ?
+		  AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable', 'pending_approval', 'taken_over', 'awaiting_input')
+	`, runID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// MarkAgentRunResuming flips an awaiting_input run back to running
+// when the user responds and a resume goroutine is about to spawn.
+// Returns ok=false (no error) if the row isn't in awaiting_input —
+// either the run was cancelled while the user was deciding, or two
+// respond submissions raced and the second lost. The caller must
+// treat ok=false as "don't spawn the resume" to avoid double-resume.
+//
+// SKY-139.
+func MarkAgentRunResuming(database *sql.DB, runID string) (bool, error) {
+	res, err := database.Exec(`
+		UPDATE runs SET status = 'running'
+		WHERE id = ? AND status = 'awaiting_input'
+	`, runID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // GetAgentRun returns a single agent run by ID. MemoryMissing is
@@ -463,6 +543,148 @@ func InsertAgentMessage(database *sql.DB, msg *domain.AgentMessage) (int64, erro
 		return 0, err
 	}
 	return result.LastInsertId()
+}
+
+// EntitiesWithAwaitingInputRuns returns the subset of entityIDs that
+// have at least one run currently in awaiting_input. Used by the
+// factory snapshot to paint a "waiting for response" badge on the
+// chip without the frontend having to walk every run. Bounded to
+// snapshot's entity set (≤ factoryEntityLimit), so the IN-list stays
+// well under SQLite's variable cap and a single round trip suffices.
+// SKY-139.
+func EntitiesWithAwaitingInputRuns(database *sql.DB, entityIDs []string) (map[string]struct{}, error) {
+	out := make(map[string]struct{})
+	if len(entityIDs) == 0 {
+		return out, nil
+	}
+	placeholders := make([]string, len(entityIDs))
+	args := make([]any, 0, len(entityIDs))
+	for i, id := range entityIDs {
+		placeholders[i] = "?"
+		args = append(args, id)
+	}
+	query := `
+		SELECT DISTINCT t.entity_id
+		FROM runs r
+		JOIN tasks t ON t.id = r.task_id
+		WHERE r.status = 'awaiting_input'
+		  AND t.entity_id IN (` + strings.Join(placeholders, ",") + `)
+	`
+	rows, err := database.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = struct{}{}
+	}
+	return out, rows.Err()
+}
+
+// run_messages subtypes used by the SKY-139 yield-resume flow. Stored
+// in the existing transcript stream rather than dedicated tables so
+// the UI can render Q+A pairs inline with the rest of the run's
+// conversation, and so the run_messages-driven token/cost analytics
+// don't need to know yield exists.
+const (
+	YieldRequestSubtype  = "yield_request"
+	YieldResponseSubtype = "yield_response"
+)
+
+// InsertYieldRequest records the agent's yield request as an
+// assistant-role message with subtype yield_request. content is the
+// JSON-marshalled YieldRequest payload — the frontend parses it to
+// pick a renderer and the respond endpoint reads it back to validate
+// that a submitted response matches the open request's type.
+//
+// Returns the inserted message (ID populated, CreatedAt stamped) so
+// the caller can broadcast it without a re-read.
+func InsertYieldRequest(database *sql.DB, runID string, req *domain.YieldRequest) (*domain.AgentMessage, error) {
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshal yield request: %w", err)
+	}
+	msg := &domain.AgentMessage{
+		RunID:   runID,
+		Role:    "assistant",
+		Subtype: YieldRequestSubtype,
+		Content: string(payload),
+	}
+	id, err := InsertAgentMessage(database, msg)
+	if err != nil {
+		return nil, err
+	}
+	msg.ID = int(id)
+	return msg, nil
+}
+
+// InsertYieldResponse records the user's response to an open yield as
+// a user-role message with subtype yield_response. content is the
+// human-readable display rendering (e.g. "Approved", "Rebase onto
+// main", or the raw prompt text); metadata carries the structured
+// YieldResponse JSON so the backend can replay the answer later if
+// needed.
+//
+// The agent-facing plain-text rendering is computed at resume time
+// and not persisted on this row — it's a function of (request,
+// response) and reproducible from those two stored shapes.
+func InsertYieldResponse(database *sql.DB, runID string, resp *domain.YieldResponse, displayContent string) (*domain.AgentMessage, error) {
+	payload, err := json.Marshal(resp)
+	if err != nil {
+		return nil, fmt.Errorf("marshal yield response: %w", err)
+	}
+	msg := &domain.AgentMessage{
+		RunID:   runID,
+		Role:    "user",
+		Subtype: YieldResponseSubtype,
+		Content: displayContent,
+		Metadata: map[string]any{
+			"yield_response": json.RawMessage(payload),
+		},
+	}
+	id, err := InsertAgentMessage(database, msg)
+	if err != nil {
+		return nil, err
+	}
+	msg.ID = int(id)
+	return msg, nil
+}
+
+// LatestYieldRequest returns the most recent yield_request for a run,
+// or (nil, nil) if none exists. Used by the respond endpoint to read
+// back the open question so it can validate the submitted response's
+// shape against the request's type.
+//
+// "Most recent" is correct for "currently open" because once a yield
+// is answered, the run flips back to running and the agent has to
+// emit a fresh yield envelope to park again — each new park is a
+// new yield_request row that supersedes prior ones for the
+// "current open yield" purpose.
+func LatestYieldRequest(database *sql.DB, runID string) (*domain.YieldRequest, error) {
+	row := database.QueryRow(`
+		SELECT content FROM run_messages
+		WHERE run_id = ? AND subtype = ?
+		ORDER BY id DESC LIMIT 1
+	`, runID, YieldRequestSubtype)
+	var content sql.NullString
+	if err := row.Scan(&content); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if !content.Valid || content.String == "" {
+		return nil, nil
+	}
+	var req domain.YieldRequest
+	if err := json.Unmarshal([]byte(content.String), &req); err != nil {
+		return nil, fmt.Errorf("unmarshal yield request: %w", err)
+	}
+	return &req, nil
 }
 
 // MessagesForRun returns all messages for a given agent run, ordered by ID.

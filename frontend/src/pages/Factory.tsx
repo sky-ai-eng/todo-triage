@@ -601,11 +601,21 @@ function EntityTooltip({ entity }: { entity: FactoryEntity }) {
 
 function RunRow({ run, task }: { run: AgentRun; task: Task }) {
   const ref = task.source_id || task.entity_id
+  const isAwaiting = run.Status === 'awaiting_input'
   return (
     <div className="flex min-w-0 flex-1 items-baseline gap-2">
+      {isAwaiting && (
+        <span
+          className="inline-flex items-center text-[12px] leading-none"
+          style={{ color: runStatusColor(run.Status) }}
+          title="Agent waiting for user response"
+        >
+          ⏳
+        </span>
+      )}
       <span className="font-mono text-[11px] text-text-primary">{ref}</span>
       <span
-        className="text-[10px] uppercase tracking-wider"
+        className={`text-[10px] uppercase tracking-wider ${isAwaiting ? 'animate-pulse' : ''}`}
         style={{ color: runStatusColor(run.Status) }}
       >
         {runStatusLabel(run.Status)}
@@ -634,6 +644,7 @@ function runStatusColor(status: string): string {
     case 'agent_starting':
     case 'running':
       return '#5a8c6a' // --color-claim (sage)
+    case 'awaiting_input':
     case 'pending_approval':
       return '#b8943a' // --color-snooze (warm amber)
     case 'failed':
@@ -649,6 +660,8 @@ function runStatusLabel(status: string): string {
   switch (status) {
     case 'pending_approval':
       return 'pending'
+    case 'awaiting_input':
+      return 'waiting'
     case 'agent_starting':
       return 'starting'
     case 'worktree_created':
