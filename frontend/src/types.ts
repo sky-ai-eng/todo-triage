@@ -202,6 +202,10 @@ export interface FactoryEntity {
    *  not currently sent on the request — and is kept available for
    *  future UI hints (e.g., "this queued chip already has a task"). */
   pending_tasks?: Record<string, Array<{ task_id: string; dedup_key: string }>>
+  /** True if any run on this entity is in awaiting_input. Drives the
+   *  attention badge on the runs-tray chip so a user scanning the
+   *  factory can spot yielded runs without opening each card. */
+  has_awaiting_input?: boolean
 }
 
 export interface FactoryStation {
