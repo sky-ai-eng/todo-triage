@@ -11,7 +11,7 @@ Repo target resolution:
 - You almost never need to pass `--repo` — the env var is already set for you when your run has a repo context.
 
 Gotchas:
-- `pr view`, `pr diff`, `pr files` all take `<pr_number>` as the positional argument. **`pr review-view` is different** — it takes `<review_id>` positional and the PR number as `--pr <pr_number>`. Review ids come from `pr view -v` -> `reviews[].id`. Canonical shape:
+- `pr view`, `pr diff`, `pr files` all take `<pr_number>` as the positional argument. **`pr review-view` is different** — it takes `<review_id>` positional and the PR number as `--pr <pr_number>`. Review ids come from `pr view <pr_number> -v` -> `reviews[].id`. Canonical shape:
   ```
   {{BINARY_PATH}} exec gh pr review-view <review_id> --pr <pr_number> -v
   ```
