@@ -156,19 +156,31 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 	//     has exited, there's nothing to cancel — but the DB cleanup
 	//     is still needed). SKY-206 closed the gap that left
 	//     pending_reviews + a phantom run on a dismissed task.
-	// Both dismiss and complete are terminal-from-the-user's-side: any
-	// in-flight run must stop and any pending_approval review gets torn
-	// down. The discard memory note differs (dismissed vs completed)
-	// so the next agent reading run_memory can tell whether the human
-	// rejected the task entirely or accepted it as resolved without
-	// using the agent's prepared review. complete is the Board's
-	// drag-to-Done landing for terminal-state AgentCards (failed,
-	// cancelled, taken_over) where the user wants the task in the
-	// Done column rather than removed from view.
-	if req.Action == "dismiss" || req.Action == "complete" {
+	// Any user gesture that takes a task off the agent's hands —
+	// dismiss, complete, or claim — must tear down a pending_approval
+	// review if one exists and cancel any in-flight run. Otherwise a
+	// race in the frontend (agentRuns map briefly stale during a
+	// fetchTasks refresh) lets the user issue /swipe claim against a
+	// pending_approval card without going through /requeue first,
+	// stranding the prepared review row and the phantom
+	// pending_approval run that SKY-206 closed.
+	//
+	// Backend-authoritative is the right shape here: the swipe
+	// handler already loaded the task; cleanupPendingApprovalRun is
+	// idempotent (filters on status='pending_approval') and a no-op
+	// when no review exists. The discard memory note differs per
+	// action so the next agent reading run_memory can tell apart
+	// "human walked away from this entity" (dismiss) from "human
+	// resolved it themselves" (complete) from "human took over and
+	// will handle it manually" (claim) — three distinct
+	// recalibration signals.
+	if req.Action == "dismiss" || req.Action == "complete" || req.Action == "claim" {
 		outcome := discardOutcomeDismissed
-		if req.Action == "complete" {
+		switch req.Action {
+		case "complete":
 			outcome = discardOutcomeCompleted
+		case "claim":
+			outcome = discardOutcomeClaimed
 		}
 		s.cleanupPendingApprovalRun(id, outcome)
 		if s.spawner != nil {
@@ -351,14 +363,16 @@ func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
 
 // discardOutcome describes how the task ended up after the user
 // rejected the agent's prepared review. The DB cleanup path is the
-// same across all three values, but the human_content note baked
+// same across all four values, but the human_content note baked
 // into run_memory differs — the next agent reading prior memory
 // needs to know whether the human:
 //
 //   - re-queued the task (still on the docket; verdict was wrong),
 //   - dismissed it outright (the entity isn't worth pursuing),
-//   - or marked it complete (the entity was resolved, but not via
-//     the agent's prepared verdict).
+//   - marked it complete (the entity was resolved, but not via the
+//     agent's prepared verdict),
+//   - or claimed it themselves (the human took over and will handle
+//     the entity manually rather than re-attempting agent work).
 //
 // The distinction is the load-bearing signal in post-run memory:
 // each shape implies a different recalibration for future runs.
@@ -373,6 +387,16 @@ const (
 	// if any, is being discarded — the user is signalling "the work
 	// is finished" without applying the agent's verdict to GitHub.
 	discardOutcomeCompleted
+	// discardOutcomeClaimed: user claimed the task while it had a
+	// pending_approval run (Board's drag-to-You from Agent/Done, or
+	// the Cards swipe-right against a delegated task). The agent's
+	// prepared review is being thrown away in favor of the human
+	// handling the entity themselves. This case exists primarily
+	// to close the SKY-206 race where a stale frontend agentRuns
+	// map could let /swipe claim slip past without /requeue's
+	// cleanup; the swipe handler now runs the cleanup on every
+	// claim regardless of frontend state.
+	discardOutcomeClaimed
 )
 
 // finalizeRequeue runs the side-effect cleanup that both /undo and
@@ -501,8 +525,8 @@ func (s *Server) cleanupPendingApprovalRun(taskID string, outcome discardOutcome
 
 // buildDiscardHumanContent renders the post-run human verdict
 // recorded when the user rejects an agent-prepared review. The
-// three shapes — requeued, dismissed, completed — give the next
-// agent on this entity different recalibration signals:
+// four shapes — requeued, dismissed, completed, claimed — give
+// the next agent on this entity different recalibration signals:
 //
 //   - requeued: "try again, but not like that" (verdict was wrong;
 //     the task is back in the queue).
@@ -511,6 +535,8 @@ func (s *Server) cleanupPendingApprovalRun(taskID string, outcome discardOutcome
 //   - completed: "you reached the right ballpark but I resolved
 //     this myself" (the human accepted the task as done without
 //     applying the agent's prepared review).
+//   - claimed: "I'll handle this myself" (the human took over the
+//     task; the entity is still being worked on, just by hand).
 func buildDiscardHumanContent(outcome discardOutcome) string {
 	switch outcome {
 	case discardOutcomeDismissed:
@@ -519,6 +545,9 @@ func buildDiscardHumanContent(outcome discardOutcome) string {
 	case discardOutcomeCompleted:
 		return "**Outcome:** Human marked the task complete without submitting the prepared review.\n" +
 			"**Implication:** The human acknowledged the task as resolved but chose not to apply your verdict to the entity. They likely handled it manually or via a different framing. Future runs should consider whether the agent's path was the right one or whether the human's resolution implies a gap in the prompt's approach."
+	case discardOutcomeClaimed:
+		return "**Outcome:** Human discarded the prepared review and claimed the task to handle it themselves.\n" +
+			"**Implication:** The verdict you proposed was not accepted. The human took over to work the entity manually rather than apply your review or re-queue it for another agent attempt — a sign that automation wasn't the right fit for this case."
 	default: // discardOutcomeRequeued
 		return "**Outcome:** Human discarded the prepared review without submitting it; task returned to the triage queue.\n" +
 			"**Implication:** The verdict you proposed was not accepted. Reconsider whether this entity warrants any review at all, or whether a different framing is needed."

@@ -290,6 +290,20 @@ export default function Board() {
         if (oldIndex !== -1 && overTaskIndex !== -1 && oldIndex !== overTaskIndex) {
           setDone(arrayMove(done, oldIndex, overTaskIndex))
         }
+      } else if (sourceCol === 'agent') {
+        // Agent is rendered through the attention-weighted agentItems
+        // memo, so reordering only sticks for items in the same
+        // weight bucket (e.g., two pending_approval cards). Reorder
+        // the underlying delegated state and let the stable sort
+        // preserve relative position within the bucket. Without this
+        // branch SortableContext animates items into new positions
+        // during drag and they snap back on drop — the visible jolt
+        // PR #77 review flagged.
+        const oldIndex = delegated.findIndex((t) => t.id === taskId)
+        const overTaskIndex = delegated.findIndex((t) => t.id === overId)
+        if (oldIndex !== -1 && overTaskIndex !== -1 && oldIndex !== overTaskIndex) {
+          setDelegated(arrayMove(delegated, oldIndex, overTaskIndex))
+        }
       }
       return
     }
@@ -364,18 +378,17 @@ export default function Board() {
       return
     }
 
-    // Agent/Done → You: claim. pending_approval cards need the
-    // SKY-206 cleanup first (tear down the prepared review, write
-    // the discard verdict to run_memory.human_content) so /swipe
-    // claim doesn't leave a stranded pending_reviews row pointing
-    // at a now-claimed task. The two awaits are sequenced so a
-    // single fetchTasks at the end lands the card directly in You,
-    // without an intermediate queued flicker.
+    // Agent/Done → You: claim. The /swipe claim handler is now
+    // backend-authoritative for the SKY-206 cleanup — it runs
+    // cleanupPendingApprovalRun unconditionally, idempotent and a
+    // no-op when the task has no pending_approval run. So the
+    // frontend doesn't need to gate on agentRuns[taskId]?.Status,
+    // which would race with the post-fetchTasks window where the
+    // run hasn't been re-fetched yet (a pending_approval card
+    // briefly looks like a plain TaskCard without a run, and a
+    // gated /requeue would skip the cleanup that's actually
+    // needed).
     if (targetCol === 'you' && (sourceCol === 'agent' || sourceCol === 'done')) {
-      const run = agentRuns[taskId]
-      if (run?.Status === 'pending_approval') {
-        await fetch(`/api/tasks/${taskId}/requeue`, { method: 'POST' })
-      }
       await fetch(`/api/tasks/${taskId}/swipe`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
