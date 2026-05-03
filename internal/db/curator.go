@@ -28,9 +28,10 @@ func CreateCuratorRequest(database *sql.DB, projectID, userInput string) (string
 }
 
 // MarkCuratorRequestRunning flips a queued row to running and stamps
-// started_at. Returns sql.ErrNoRows if the row was already terminal —
-// this is the cancel-vs-pickup race: a user fired DELETE while the
-// row was queued, the goroutine sees a non-queued row when it
+// started_at. Returns sql.ErrNoRows if the row is not currently queued
+// (for example, it was already claimed or otherwise transitioned).
+// This includes the cancel-vs-pickup race: a user fired DELETE while
+// the row was queued, the goroutine sees a non-queued row when it
 // dequeues, and skips it.
 func MarkCuratorRequestRunning(database *sql.DB, id string) error {
 	res, err := database.Exec(`
