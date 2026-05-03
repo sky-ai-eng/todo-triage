@@ -143,8 +143,8 @@ func (c *Curator) CancelProject(projectID string) {
 // SendMessage calls. Called from main.go on graceful shutdown so
 // in-flight CC subprocesses are SIGKILLed before the process exits.
 // In-flight rows land as cancelled with reason "process shutting
-// down"; queued rows stay queued and are picked up by the next
-// process via QueuedCuratorRequestsForProject (recovery path).
+// down"; queued rows are not resumed by the next process and will
+// instead be cancelled on restart by orphaned-request cleanup.
 func (c *Curator) Shutdown() {
 	c.mu.Lock()
 	c.closed = true
