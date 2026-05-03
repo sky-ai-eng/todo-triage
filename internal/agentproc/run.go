@@ -106,10 +106,28 @@ type Outcome struct {
 //     mid-stream, subprocess crashed, or ctx cancelled. Outcome.Stderr
 //     is populated when the subprocess produced any.
 func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
-	cmd := exec.Command("claude", BuildArgs(opts)...)
+	// exec.CommandContext owns the cancel watcher: it spawns a goroutine
+	// at Start time that selects on ctx.Done() vs. an internal "wait
+	// finished" channel, and exits whichever fires first. That's
+	// important here because the subprocess may exit naturally well
+	// before ctx ever cancels — without this binding, a stray goroutine
+	// would block on <-ctx.Done() and, when ctx finally cancelled,
+	// SIGKILL whatever process happened to be reusing the original
+	// pgid. The Cancel hook below customizes the kill to target the
+	// process group (Setpgid is set), so child processes the agent
+	// spawned go down with it.
+	cmd := exec.CommandContext(ctx, "claude", BuildArgs(opts)...)
 	cmd.Dir = opts.Cwd
 	cmd.Env = append(os.Environ(), opts.ExtraEnv...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		// Process is non-nil here because the watcher only fires after
+		// Start has succeeded. ESRCH is fine — it just means the
+		// process group already exited on its own between Wait
+		// returning and the cancel watcher reading ctx.Done(),
+		// which is a race exec handles internally.
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -122,15 +140,6 @@ func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
 	if err := cmd.Start(); err != nil {
 		return &Outcome{Stderr: stderrBuf.String()}, fmt.Errorf("start claude: %w", err)
 	}
-
-	pgid := cmd.Process.Pid
-	go func() {
-		<-ctx.Done()
-		if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
-			// Best-effort; subprocess may have already exited.
-			_ = err
-		}
-	}()
 
 	stream := NewStreamState()
 	result, streamErr := consumeStream(stdout, sink, stream, opts.TraceID)
