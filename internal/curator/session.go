@@ -186,11 +186,15 @@ func (s *projectSession) dispatch(requestID string) {
 		TraceID: requestID,
 	}, newRequestSink(s.curator, s.projectID, requestID))
 
-	// Cancellation observed → terminal cancelled status. Use msgCtx
-	// rather than s.ctx so a project-wide shutdown that fires
-	// stopAll is also covered.
+	// Cancellation observed → terminal cancelled status. Distinguish
+	// between request-level cancellation and broader session/project
+	// shutdown so the recorded terminal reason is accurate.
 	if msgCtx.Err() != nil {
-		s.markCancelled(requestID, "user cancelled")
+		cancelReason := "user cancelled"
+		if s.ctx.Err() != nil {
+			cancelReason = "session cancelled"
+		}
+		s.markCancelled(requestID, cancelReason)
 		return
 	}
 
