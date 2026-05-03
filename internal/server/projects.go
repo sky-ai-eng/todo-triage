@@ -618,9 +618,35 @@ func readKnowledgeFiles(dir string) ([]knowledgeFile, error) {
 			SizeBytes: info.Size(),
 		}
 		if isTextMime(mimeType) && info.Size() <= knowledgeInlineMaxBytes {
-			body, err := os.ReadFile(full)
+			// openNoFollow closes the TOCTOU window between the
+			// Lstat above and reading the file: an attacker who can
+			// swap the path for a symlink in the intervening
+			// microseconds would otherwise have its target's bytes
+			// inlined into the listing response. Mirrors the same
+			// defense the raw-file endpoint uses; on non-unix
+			// builds this falls back to plain os.Open (Windows
+			// symlinks are admin-only and out of threat model).
+			f, err := openNoFollow(full)
+			if err != nil {
+				// If the open is a symlink rejection, skip the
+				// file rather than aborting the whole listing —
+				// the listing has to keep working for unrelated
+				// files even if a malicious one slips in.
+				if isSymlinkRejection(err) {
+					continue
+				}
+				return nil, err
+			}
+			body, err := io.ReadAll(io.LimitReader(f, knowledgeInlineMaxBytes+1))
+			f.Close()
 			if err != nil {
 				return nil, err
+			}
+			// Bound the inline content to the same cap the listing
+			// promises — defense in depth in case the file grew
+			// between Lstat and read.
+			if int64(len(body)) > knowledgeInlineMaxBytes {
+				body = body[:knowledgeInlineMaxBytes]
 			}
 			entry.Content = string(body)
 		}
@@ -873,6 +899,20 @@ func (s *Server) handleProjectKnowledgeFile(w http.ResponseWriter, r *http.Reque
 // siblings from succeeding.
 func (s *Server) handleProjectKnowledgeUpload(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+
+	// Take the same per-project lock that PATCH and DELETE use.
+	// Without it, an upload that has just verified the project
+	// exists could race a DELETE: DELETE drops the row and
+	// RemoveAll's the project dir, then this handler re-creates
+	// knowledge-base/ and writes files into a project that no
+	// longer exists in the DB — leaving orphaned on-disk state
+	// after a successful delete. Holding the mutex across the
+	// existence check + write makes the upload visibly atomic
+	// to a concurrent delete.
+	mu := s.projectMutex(id)
+	mu.Lock()
+	defer mu.Unlock()
+
 	project, err := db.GetProject(s.db, id)
 	if err != nil {
 		log.Printf("[projects] knowledge upload: db get %s: %v", id, err)
@@ -1046,6 +1086,20 @@ func writeUploadedFile(fh *multipart.FileHeader, dst string) string {
 // trash button.
 func (s *Server) handleProjectKnowledgeDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+
+	// Same per-project lock as upload + project PATCH/DELETE.
+	// Without it, the direct UPDATE summary_stale = TRUE below
+	// races a concurrent project PATCH: PATCH reads
+	// summary_stale=false, this handler removes the file and
+	// flips the flag, then PATCH's UpdateProject writes its
+	// pre-edit summary_stale=false back over our flip — the
+	// regenerator never picks the change up. Holding the lock
+	// makes the file remove + flag flip atomic from the
+	// perspective of other writers.
+	mu := s.projectMutex(id)
+	mu.Lock()
+	defer mu.Unlock()
+
 	project, err := db.GetProject(s.db, id)
 	if err != nil {
 		log.Printf("[projects] knowledge delete: db get %s: %v", id, err)

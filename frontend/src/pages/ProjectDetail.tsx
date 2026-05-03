@@ -1138,9 +1138,10 @@ function KnowledgeRow({
       .then((text) => {
         if (!cancelled) setLazyContent(text)
       })
-      .catch((error) => {
+      .catch((error: unknown) => {
         if (cancelled) return
-        toast.error(readError(error) || 'Failed to load file preview.')
+        const msg = error instanceof Error ? error.message : 'Failed to load file preview.'
+        toast.error(msg)
         setLazyContent('Failed to load file preview.')
       })
     return () => {
