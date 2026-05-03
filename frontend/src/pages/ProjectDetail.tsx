@@ -19,6 +19,8 @@ import type { Project, KnowledgeFile, KnowledgeUploadResult, ProjectExportPrevie
 import { readError } from '../lib/api'
 import { toast } from '../components/Toast/toastStore'
 import TrackerProjectPickers from '../components/TrackerProjectPickers'
+import CuratorChat from '../components/CuratorChat'
+import { useWebSocket } from '../hooks/useWebSocket'
 
 // ProjectDetail is the per-project workspace. Top-to-bottom on the
 // left:
@@ -30,10 +32,10 @@ import TrackerProjectPickers from '../components/TrackerProjectPickers'
 //   3. Knowledge base — markdown files under the project's
 //      knowledge-base directory, rendered read-only.
 //
-// The chat panel slot is the right column at a true 50/50 split. SKY-226
-// grafts in the streaming chat with renderers, queueing, and cancellation;
-// the placeholder reserves the column so SKY-226 doesn't trigger a
-// re-layout when it lands.
+// The chat panel sits in the right column at a true 50/50 split,
+// sticky and full-viewport-height-minus-12rem. CuratorChat owns its
+// own backend wiring (history fetch + websocket subscribe + send /
+// cancel) so this page just hands it the project id.
 //
 // Edits across the page are auto-saved — there's no explicit Save button.
 // The patch helper handles error toasts; on success the page resyncs from
@@ -339,7 +341,7 @@ export default function ProjectDetail() {
           <KnowledgePanel projectId={project.id} />
         </div>
 
-        <ChatSlotPlaceholder />
+        <CuratorChat projectId={project.id} />
       </div>
       {exportOpen && (
         <ProjectExportModal
@@ -971,6 +973,18 @@ function KnowledgePanel({ projectId }: { projectId: string }) {
     }
   }, [refreshFiles])
 
+  // Live updates: the backend's kbwatcher fires
+  // `project_knowledge_updated` whenever the curator (or any other
+  // writer) touches a file under <projectsRoot>/<id>/knowledge-base/.
+  // We refetch on receipt so files appear in the panel as the agent
+  // writes them mid-turn. Filter on project_id so other projects'
+  // knowledge edits don't trigger refetches here.
+  useWebSocket((event) => {
+    if (event.type !== 'project_knowledge_updated') return
+    if (event.project_id !== projectId) return
+    refreshFiles()
+  })
+
   const uploadFiles = useCallback(
     async (fileList: FileList | File[]) => {
       const arr = Array.from(fileList)
@@ -1476,23 +1490,6 @@ function isTextMime(mimeType: string): boolean {
     'application/typescript',
     'application/toml',
   ].includes(main)
-}
-
-function ChatSlotPlaceholder() {
-  return (
-    <Card className="lg:sticky lg:top-24 lg:h-[calc(100vh-12rem)] flex flex-col">
-      <h2 className="text-[13px] font-semibold tracking-tight text-text-primary uppercase mb-2">
-        Curator chat
-      </h2>
-      <div className="flex-1 flex items-center justify-center text-center px-6">
-        <div className="text-[12px] text-text-tertiary leading-relaxed italic">
-          Chat panel arrives in a follow-up ticket.
-          <br />
-          The Curator runtime is already running — you can hit it via the API in the meantime.
-        </div>
-      </div>
-    </Card>
-  )
 }
 
 // Card spreads through any HTML section attributes so callers can

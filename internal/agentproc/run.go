@@ -41,6 +41,14 @@ type RunOptions struct {
 	// have different threat models.
 	AllowedTools string
 
+	// AddDirs is the list of paths passed as `--add-dir`. Claude Code's
+	// per-tool path safety checks (notably the rm guard) treat the cwd
+	// as the only allowed working directory by default. Subdirectories
+	// like `<projectDir>/knowledge-base/` and `<projectDir>/repos/`
+	// need to be added explicitly so the agent can rm files there.
+	// Empty list omits the flag entirely.
+	AddDirs []string
+
 	// SystemPrompt, if non-empty, is passed as --append-system-prompt.
 	// Sits after Claude Code's default system prompt rather than
 	// replacing it; useful for runtime-specific role-shaping (the

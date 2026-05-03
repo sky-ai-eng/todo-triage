@@ -15,6 +15,17 @@ import (
 	"path/filepath"
 )
 
+// ProjectsRoot returns ~/.triagefactory/projects/. Single source of
+// truth for the per-project working-dir layout — both KnowledgeDir
+// below and the kbwatcher derive paths from here.
+func ProjectsRoot() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home dir: %w", err)
+	}
+	return filepath.Join(home, ".triagefactory", "projects"), nil
+}
+
 // KnowledgeDir returns ~/.triagefactory/projects/<id>/. The Curator's
 // CC subprocess runs from here, and SKY-218 will populate
 // knowledge-base/*.md inside it. Path resolution lives in this
@@ -24,11 +35,11 @@ func KnowledgeDir(projectID string) (string, error) {
 	if projectID == "" {
 		return "", errors.New("project id is required")
 	}
-	home, err := os.UserHomeDir()
+	root, err := ProjectsRoot()
 	if err != nil {
-		return "", fmt.Errorf("resolve home dir: %w", err)
+		return "", err
 	}
-	return filepath.Join(home, ".triagefactory", "projects", projectID), nil
+	return filepath.Join(root, projectID), nil
 }
 
 // ensureKnowledgeDir creates the project's working directory if it

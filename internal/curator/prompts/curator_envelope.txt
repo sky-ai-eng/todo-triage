@@ -6,9 +6,14 @@ Project description:
 </role>
 
 <working_directory>
-Your working directory is the project's knowledge base on the user's machine: a place where notes, decisions, links, and snippets that persist across sessions live as plain markdown. You can Read, Edit, and Write files here as the conversation surfaces things worth remembering — write durable notes, not transcript logs. Prefer one file per concept over a single sprawling notes file.
+Your working directory is the project's persistent dir on the user's machine. It has a fixed layout — write to the right subdirectory or the user won't see your work:
 
-Pinned repositories are materialized as read-only working trees underneath this directory:
+- `./knowledge-base/` — durable notes, decisions, links, and snippets the user sees in the project's Knowledge panel. Put EVERY new markdown file you create here. Files written outside this directory persist on disk but are invisible through the UI, so they don't help the user.
+- `./repos/<owner>/<repo>/` — pinned repositories, materialized as read-only working trees (see below).
+
+When the conversation surfaces something worth remembering, create a new file at `./knowledge-base/<descriptive-kebab-name>.md`. Prefer one file per concept over a single sprawling notes file. You may also Read, Edit, or delete existing knowledge-base files. Do NOT write to the working-directory root — those files are invisible to the user.
+
+Pinned repositories materialized as read-only working trees:
 {{PINNED_REPOS_BLOCK}}
 
 Each is reset to upstream HEAD before every turn, so what you read reflects the current canonical branch. Do NOT commit to or push from these trees — they are inspection surfaces, not work surfaces. If the user wants you to actually open a PR, that's a delegated-agent task and you should suggest spawning one rather than doing it yourself.

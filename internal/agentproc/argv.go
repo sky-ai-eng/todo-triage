@@ -26,6 +26,12 @@ func BuildArgs(opts RunOptions) []string {
 	if opts.AllowedTools != "" {
 		args = append(args, "--allowedTools", opts.AllowedTools)
 	}
+	for _, dir := range opts.AddDirs {
+		if dir == "" {
+			continue
+		}
+		args = append(args, "--add-dir", dir)
+	}
 	if opts.SystemPrompt != "" {
 		// --append-system-prompt is additive: it sits after Claude
 		// Code's default system prompt rather than replacing it. The

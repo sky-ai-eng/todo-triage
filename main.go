@@ -384,6 +384,18 @@ func main() {
 	curatorRuntime := curator.New(database, wsHub, "")
 	srv.SetCurator(curatorRuntime)
 
+	// Knowledge-base file watcher — fires `project_knowledge_updated`
+	// over the websocket whenever the curator (or anything else)
+	// touches a file under <projectsRoot>/<id>/knowledge-base/. The
+	// frontend Knowledge panel listens and refetches, so files appear
+	// in the UI as the agent writes them mid-turn. Failure here is
+	// non-fatal — the panel still works, just without live updates.
+	if root, err := curator.ProjectsRoot(); err != nil {
+		log.Printf("[kbwatcher] resolve projects root: %v (live KB updates disabled)", err)
+	} else if _, err := curator.NewKnowledgeWatcher(wsHub, root); err != nil {
+		log.Printf("[kbwatcher] start: %v (live KB updates disabled)", err)
+	}
+
 	// Event router — records events, creates/bumps tasks, auto-delegates on
 	// matching triggers, runs inline close checks. Also handles post-scoring
 	// re-derive via the scorer callback wired above.

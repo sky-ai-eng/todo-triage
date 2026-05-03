@@ -2,11 +2,13 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
 // Curator chat endpoints (SKY-216). Three operations the Projects
@@ -160,6 +162,48 @@ func (s *Server) handleCuratorCancel(w http.ResponseWriter, r *http.Request) {
 	if _, err := db.MarkCuratorRequestCancelledIfActive(s.db, inFlight.ID, "user cancelled"); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleCuratorReset wipes a project's curator session so the next
+// message starts a brand-new Claude Code session. Useful when the
+// allowlist or the envelope template change — `--resume` binds those
+// flags to the original session, so existing sessions don't pick up
+// new permissions until reset. Also handy for nuking a confused
+// conversation without deleting the whole project.
+//
+// 409 with a clear hint if there's an in-flight turn — caller should
+// cancel first. The DB op + the WS broadcast are decoupled because a
+// failed broadcast (e.g. hub paniced) shouldn't roll back the wipe.
+func (s *Server) handleCuratorReset(w http.ResponseWriter, r *http.Request) {
+	projectID := r.PathValue("id")
+	project, err := db.GetProject(s.db, projectID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if project == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "project not found"})
+		return
+	}
+
+	if err := db.ResetCuratorForProject(s.db, projectID); err != nil {
+		if errors.Is(err, db.ErrCuratorInFlight) {
+			writeJSON(w, http.StatusConflict, map[string]string{
+				"error": "in-flight curator request — cancel it before resetting",
+			})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	if s.ws != nil {
+		s.ws.Broadcast(websocket.Event{
+			Type:      "curator_reset",
+			ProjectID: projectID,
+		})
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

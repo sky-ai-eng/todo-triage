@@ -51,12 +51,36 @@ func TestBuildArgs_ResumeAddsResumeFlagBeforeModel(t *testing.T) {
 
 func TestBuildArgs_OmitsZeroValueFlags(t *testing.T) {
 	got := BuildArgs(RunOptions{Message: "hi"})
-	for _, flag := range []string{"--model", "--resume", "--allowedTools", "--max-turns"} {
+	for _, flag := range []string{"--model", "--resume", "--allowedTools", "--max-turns", "--add-dir"} {
 		if slices.Contains(got, flag) {
 			t.Errorf("expected %q to be omitted, got %v", flag, got)
 		}
 	}
 	if !slices.Contains(got, "--output-format") || !slices.Contains(got, "--verbose") {
 		t.Errorf("missing fixed flags: %v", got)
+	}
+}
+
+func TestBuildArgs_AddDirsEmitsOnePerEntry(t *testing.T) {
+	// --add-dir is repeatable; CC's path-scoped tool checks (notably
+	// the rm guard) treat each entry as an independent allowed dir
+	// rather than parsing a comma-joined list. Empty strings are
+	// dropped so callers can pass a slice with conditional entries
+	// without filtering at the call site.
+	got := BuildArgs(RunOptions{
+		Message: "hi",
+		AddDirs: []string{"/a", "", "/b/c"},
+	})
+	flags := []int{}
+	for i, v := range got {
+		if v == "--add-dir" {
+			flags = append(flags, i)
+		}
+	}
+	if len(flags) != 2 {
+		t.Fatalf("expected 2 --add-dir entries, got %d: %v", len(flags), got)
+	}
+	if got[flags[0]+1] != "/a" || got[flags[1]+1] != "/b/c" {
+		t.Errorf("add-dir values wrong: %v", got)
 	}
 }
