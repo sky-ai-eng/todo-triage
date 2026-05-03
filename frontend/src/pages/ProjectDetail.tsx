@@ -1,9 +1,20 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import * as Popover from '@radix-ui/react-popover'
-import { ArrowLeft, Trash2, Pencil, Check, X, Plus } from 'lucide-react'
+import {
+  ArrowLeft,
+  Trash2,
+  Pencil,
+  Check,
+  X,
+  Plus,
+  ExternalLink,
+  FileText,
+  Image as ImageIcon,
+  File as FileIcon,
+} from 'lucide-react'
 import Markdown from 'react-markdown'
-import type { Project, KnowledgeFile } from '../types'
+import type { Project, KnowledgeFile, KnowledgeUploadResult } from '../types'
 import { readError } from '../lib/api'
 import { toast } from '../components/Toast/toastStore'
 import TrackerProjectPickers from '../components/TrackerProjectPickers'
@@ -591,87 +602,375 @@ function IntegrationsPanel({
   )
 }
 
+// KnowledgePanel is the read+write surface for the project's
+// knowledge base. Two ways in: clicking "+ Add" opens the OS file
+// picker, or dragging files from the desktop drops them onto the
+// panel. Both paths funnel through uploadFiles which POSTs a
+// multipart request and refreshes the listing.
+//
+// Render switch is mime-driven: markdown via react-markdown, images
+// via <img> against the per-file raw endpoint, text-shaped types in
+// a <pre>, anything else gets an "Open" link that opens the raw
+// bytes in a new tab. The agent can read everything we store; the
+// preview switch is purely for the user-facing panel.
 function KnowledgePanel({ projectId }: { projectId: string }) {
   const [files, setFiles] = useState<KnowledgeFile[]>([])
   const [loading, setLoading] = useState(true)
   const [expanded, setExpanded] = useState<string | null>(null)
+  const [uploading, setUploading] = useState(false)
+  const [dragOver, setDragOver] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  // Counter, not boolean: dragenter/dragleave fire for every nested
+  // child element so a naive `setDragOver(true/false)` flickers off
+  // when crossing inner DOM boundaries. The counter increments on
+  // enter and decrements on leave; the visual state is "any drag in
+  // progress" iff counter > 0.
+  const dragDepth = useRef(0)
 
-  useEffect(() => {
-    let cancelled = false
-    const load = async () => {
-      try {
-        const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/knowledge`)
-        if (!res.ok) {
-          toast.error(await readError(res, 'Failed to load knowledge base'))
-          return
-        }
-        const data: KnowledgeFile[] = await res.json()
-        if (!cancelled) setFiles(data)
-      } catch (err) {
-        if (!cancelled) {
-          toast.error(
-            `Failed to load knowledge base: ${err instanceof Error ? err.message : String(err)}`,
-          )
-        }
-      } finally {
-        if (!cancelled) setLoading(false)
+  const refreshFiles = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/knowledge`)
+      if (!res.ok) {
+        toast.error(await readError(res, 'Failed to load knowledge base'))
+        return
       }
-    }
-    load()
-    return () => {
-      cancelled = true
+      const data: KnowledgeFile[] = await res.json()
+      setFiles(data)
+    } catch (err) {
+      toast.error(
+        `Failed to load knowledge base: ${err instanceof Error ? err.message : String(err)}`,
+      )
     }
   }, [projectId])
 
+  useEffect(() => {
+    let cancelled = false
+    refreshFiles().finally(() => {
+      if (!cancelled) setLoading(false)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [refreshFiles])
+
+  const uploadFiles = useCallback(
+    async (fileList: FileList | File[]) => {
+      const arr = Array.from(fileList)
+      if (arr.length === 0) return
+      setUploading(true)
+      try {
+        const form = new FormData()
+        for (const f of arr) form.append('file', f)
+        const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/knowledge`, {
+          method: 'POST',
+          body: form,
+        })
+        if (!res.ok) {
+          toast.error(await readError(res, 'Upload failed'))
+          return
+        }
+        const data: { results: KnowledgeUploadResult[] } = await res.json()
+        const ok = data.results.filter((r) => !r.error)
+        const failed = data.results.filter((r) => r.error)
+        if (ok.length > 0) {
+          toast.success(
+            ok.length === 1
+              ? `Added ${ok[0].path}`
+              : `Added ${ok.length} files to the knowledge base`,
+          )
+        }
+        for (const f of failed) {
+          toast.error(`${f.original}: ${f.error}`)
+        }
+        await refreshFiles()
+      } catch (err) {
+        toast.error(`Upload failed: ${err instanceof Error ? err.message : String(err)}`)
+      } finally {
+        setUploading(false)
+      }
+    },
+    [projectId, refreshFiles],
+  )
+
+  const handleDelete = useCallback(
+    async (file: KnowledgeFile) => {
+      if (!confirm(`Remove ${file.path} from the knowledge base?`)) return
+      try {
+        const res = await fetch(
+          `/api/projects/${encodeURIComponent(projectId)}/knowledge/${encodeURIComponent(file.path)}`,
+          { method: 'DELETE' },
+        )
+        if (!res.ok && res.status !== 204) {
+          toast.error(await readError(res, 'Failed to remove file'))
+          return
+        }
+        setFiles((prev) => prev.filter((f) => f.path !== file.path))
+        if (expanded === file.path) setExpanded(null)
+      } catch (err) {
+        toast.error(`Failed to remove file: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    },
+    [projectId, expanded],
+  )
+
+  const handleDragEnter = (e: React.DragEvent) => {
+    if (!hasFiles(e)) return
+    e.preventDefault()
+    dragDepth.current += 1
+    setDragOver(true)
+  }
+  const handleDragLeave = (e: React.DragEvent) => {
+    if (!hasFiles(e)) return
+    e.preventDefault()
+    dragDepth.current = Math.max(0, dragDepth.current - 1)
+    if (dragDepth.current === 0) setDragOver(false)
+  }
+  const handleDragOver = (e: React.DragEvent) => {
+    if (!hasFiles(e)) return
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'copy'
+  }
+  const handleDrop = (e: React.DragEvent) => {
+    if (!hasFiles(e)) return
+    e.preventDefault()
+    dragDepth.current = 0
+    setDragOver(false)
+    const dropped = e.dataTransfer.files
+    if (dropped && dropped.length > 0) {
+      uploadFiles(dropped)
+    }
+  }
+
   return (
-    <Card>
-      <h2 className="text-[13px] font-semibold tracking-tight text-text-primary uppercase mb-4">
-        Knowledge base
-      </h2>
+    <Card
+      className={`transition-shadow duration-200 ${dragOver ? 'ring-2 ring-accent' : ''}`}
+      onDragEnter={handleDragEnter}
+      onDragLeave={handleDragLeave}
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
+    >
+      <header className="flex items-center justify-between mb-4">
+        <h2 className="text-[13px] font-semibold tracking-tight text-text-primary uppercase">
+          Knowledge base
+        </h2>
+        <button
+          type="button"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={uploading}
+          className="
+            inline-flex items-center gap-1.5 rounded-full
+            px-3 py-1 text-[12px]
+            text-accent hover:bg-accent-soft
+            disabled:opacity-50 transition-colors
+          "
+        >
+          <Plus size={12} />
+          {uploading ? 'Uploading…' : 'Add'}
+        </button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          className="hidden"
+          onChange={(e) => {
+            if (e.target.files) uploadFiles(e.target.files)
+            // Reset so re-selecting the same file fires onChange again.
+            e.target.value = ''
+          }}
+        />
+      </header>
 
       {loading ? (
         <div className="text-[12px] text-text-tertiary">Loading…</div>
       ) : files.length === 0 ? (
-        <div className="text-[12px] text-text-tertiary italic">
-          No knowledge files yet. The Curator will populate this as you chat.
+        <div className="text-[12px] text-text-tertiary italic py-4 text-center">
+          No knowledge files yet. Drop files here or click <span className="not-italic">+ Add</span>
+          .
         </div>
       ) : (
         <div className="space-y-2">
-          {files.map((file) => {
-            const isExpanded = expanded === file.path
-            return (
-              <div
-                key={file.path}
-                className="rounded-lg border border-border-subtle bg-white/40 overflow-hidden"
-              >
-                <button
-                  type="button"
-                  onClick={() => setExpanded(isExpanded ? null : file.path)}
-                  className="
-                    w-full flex items-center justify-between gap-3
-                    px-3 py-2 text-left
-                    hover:bg-black/[0.02] transition-colors
-                  "
-                >
-                  <span className="text-[12px] font-medium text-text-primary truncate">
-                    {file.path}
-                  </span>
-                  <span className="text-[10px] text-text-tertiary tabular-nums shrink-0">
-                    {formatBytes(file.size_bytes)}
-                  </span>
-                </button>
-                {isExpanded && (
-                  <div className="border-t border-border-subtle px-4 py-3 prose prose-sm max-w-none text-[12px] text-text-secondary leading-relaxed">
-                    <Markdown>{file.content}</Markdown>
-                  </div>
-                )}
-              </div>
-            )
-          })}
+          {files.map((file) => (
+            <KnowledgeRow
+              key={file.path}
+              projectId={projectId}
+              file={file}
+              expanded={expanded === file.path}
+              onToggle={() => setExpanded(expanded === file.path ? null : file.path)}
+              onDelete={() => handleDelete(file)}
+            />
+          ))}
         </div>
       )}
     </Card>
   )
+}
+
+// hasFiles guards drag handlers against drag operations that aren't
+// carrying files (e.g. text/url drags from other parts of the app or
+// tabs). Without it the panel would highlight on every dragover from
+// a chip drag elsewhere on the page.
+function hasFiles(e: React.DragEvent): boolean {
+  const types = e.dataTransfer?.types
+  if (!types) return false
+  for (let i = 0; i < types.length; i++) {
+    if (types[i] === 'Files') return true
+  }
+  return false
+}
+
+// KnowledgeRow renders a single file. Expand toggles the inline
+// preview, which the row chooses based on mime_type:
+//   - text/markdown → react-markdown
+//   - image/* → <img> from the raw endpoint
+//   - other text-shaped → <pre>
+//   - anything else → "Open in new tab" link to raw endpoint
+//
+// Empty content with a text-shaped mime means the file was over the
+// inline-size limit; we lazy-fetch via the raw endpoint on first
+// expand.
+function KnowledgeRow({
+  projectId,
+  file,
+  expanded,
+  onToggle,
+  onDelete,
+}: {
+  projectId: string
+  file: KnowledgeFile
+  expanded: boolean
+  onToggle: () => void
+  onDelete: () => void
+}) {
+  const rawURL = `/api/projects/${encodeURIComponent(projectId)}/knowledge/${encodeURIComponent(file.path)}`
+  const isMarkdown = file.mime_type.startsWith('text/markdown')
+  const isImage = file.mime_type.startsWith('image/')
+  const isText = isTextMime(file.mime_type)
+
+  // Tri-state: null = not fetched yet, string (incl. "") = fetched.
+  // The loading flag is derived rather than stored — sidesteps the
+  // react-hooks/set-state-in-effect lint that flags a synchronous
+  // setLazyLoading(true) inside the effect body.
+  const [lazyContent, setLazyContent] = useState<string | null>(null)
+  const needsLazyFetch = expanded && isText && !file.content && lazyContent === null
+
+  useEffect(() => {
+    if (!needsLazyFetch) return
+    let cancelled = false
+    fetch(rawURL)
+      .then((r) => (r.ok ? r.text() : ''))
+      .then((text) => {
+        if (!cancelled) setLazyContent(text)
+      })
+      .catch(() => {
+        if (!cancelled) setLazyContent('')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [needsLazyFetch, rawURL])
+
+  const lazyLoading = needsLazyFetch
+
+  const Icon = isImage ? ImageIcon : isText ? FileText : FileIcon
+
+  return (
+    <div className="group rounded-lg border border-border-subtle bg-white/40 overflow-hidden">
+      <div className="flex items-center gap-2 pr-2">
+        <button
+          type="button"
+          onClick={onToggle}
+          className="
+            flex-1 flex items-center justify-between gap-3
+            px-3 py-2 text-left min-w-0
+            hover:bg-black/[0.02] transition-colors
+          "
+        >
+          <span className="flex items-center gap-2 min-w-0">
+            <Icon size={12} className="text-text-tertiary shrink-0" />
+            <span className="text-[12px] font-medium text-text-primary truncate">{file.path}</span>
+          </span>
+          <span className="text-[10px] text-text-tertiary tabular-nums shrink-0">
+            {formatBytes(file.size_bytes)}
+          </span>
+        </button>
+        <button
+          type="button"
+          onClick={onDelete}
+          aria-label={`Remove ${file.path}`}
+          className="
+            inline-flex items-center justify-center h-6 w-6 rounded-full
+            opacity-0 group-hover:opacity-100 focus-visible:opacity-100
+            text-text-tertiary hover:text-dismiss hover:bg-dismiss/[0.08]
+            focus:outline-none focus-visible:ring-2 focus-visible:ring-dismiss
+            transition-[opacity,color,background-color]
+          "
+        >
+          <X size={12} />
+        </button>
+      </div>
+      {expanded && (
+        <div className="border-t border-border-subtle px-4 py-3">
+          {isMarkdown ? (
+            <div className="prose prose-sm max-w-none text-[12px] text-text-secondary leading-relaxed">
+              <Markdown>{file.content || lazyContent || ''}</Markdown>
+            </div>
+          ) : isImage ? (
+            <img
+              src={rawURL}
+              alt={file.path}
+              className="max-w-full max-h-96 rounded-md mx-auto block"
+            />
+          ) : isText ? (
+            lazyLoading ? (
+              <div className="text-[12px] text-text-tertiary">Loading…</div>
+            ) : (
+              <pre className="text-[11px] text-text-secondary leading-relaxed whitespace-pre-wrap break-words font-mono max-h-96 overflow-auto">
+                {file.content || lazyContent || ''}
+              </pre>
+            )
+          ) : (
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-[12px] text-text-tertiary italic">
+                No inline preview for {file.mime_type || 'this file type'}.
+              </span>
+              <a
+                href={rawURL}
+                target="_blank"
+                rel="noreferrer"
+                className="
+                  inline-flex items-center gap-1 rounded-full
+                  bg-accent-soft text-accent px-3 py-1 text-[11px]
+                  hover:opacity-90
+                "
+              >
+                <ExternalLink size={10} />
+                Open
+              </a>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// isTextMime mirrors the backend's classification so the frontend
+// renders the same set as a <pre>. Source-of-truth lives in the
+// listing's MimeType for the binary/text branch on which content is
+// inlined; this just controls how the row renders.
+function isTextMime(mimeType: string): boolean {
+  if (!mimeType) return false
+  const main = mimeType.split(';')[0].trim()
+  if (main.startsWith('text/')) return true
+  return [
+    'application/json',
+    'application/yaml',
+    'application/x-yaml',
+    'application/xml',
+    'application/javascript',
+    'application/typescript',
+    'application/toml',
+  ].includes(main)
 }
 
 function ChatSlotPlaceholder() {
@@ -691,7 +990,18 @@ function ChatSlotPlaceholder() {
   )
 }
 
-function Card({ children, className = '' }: { children: React.ReactNode; className?: string }) {
+// Card spreads through any HTML section attributes so callers can
+// attach drag handlers, aria-* attrs, etc., without forcing a custom
+// prop list. KnowledgePanel uses this to wire onDragEnter/onDrop/etc.
+// onto the panel chrome for the drag-and-drop upload path.
+function Card({
+  children,
+  className = '',
+  ...rest
+}: {
+  children: React.ReactNode
+  className?: string
+} & Omit<React.HTMLAttributes<HTMLElement>, 'className' | 'children'>) {
   return (
     <section
       className={`
@@ -700,6 +1010,7 @@ function Card({ children, className = '' }: { children: React.ReactNode; classNa
         p-5 shadow-sm shadow-black/[0.03] backdrop-blur-xl
         ${className}
       `}
+      {...rest}
     >
       <span
         aria-hidden

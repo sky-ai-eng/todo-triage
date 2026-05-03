@@ -4,8 +4,13 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"log"
+	"mime"
+	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -412,16 +417,54 @@ func validateTrackerKeys(cfg config.Config, jiraKey, linearKey string) (string, 
 }
 
 // knowledgeFile is the per-file shape returned by the knowledge
-// endpoint. content is the raw markdown; the frontend renders it.
-// We surface the relative path (under <KnowledgeDir>/knowledge-base/)
-// rather than the absolute path so the API doesn't leak the user's
-// home directory layout.
+// endpoint. We surface the relative path (under
+// <KnowledgeDir>/knowledge-base/) rather than the absolute path so
+// the API doesn't leak the user's home directory layout.
+//
+// Content is inlined ONLY for text-shaped files under
+// knowledgeInlineMaxBytes — markdown, plain text, json/yaml/etc. that
+// the panel renders inline. Non-text files (images, PDFs, archives)
+// and large text files leave Content empty; the frontend fetches
+// them on-demand from the per-file raw endpoint when a preview is
+// actually needed. Two reasons:
+//   - Image bytes don't survive a JSON round-trip without base64
+//     encoding, which inflates the listing payload an order of
+//     magnitude even when the user never expands the file.
+//   - The list endpoint runs on every panel mount; inlining a
+//     50MB upload would block that response on disk reads the user
+//     hasn't asked for yet.
+//
+// MimeType drives the frontend's render switch (markdown / image /
+// text / no-preview). Detected from the file extension first
+// (mime.TypeByExtension) and falls back to "application/octet-stream"
+// for unknown types.
 type knowledgeFile struct {
 	Path      string `json:"path"`
+	MimeType  string `json:"mime_type"`
 	Content   string `json:"content"`
 	UpdatedAt string `json:"updated_at"`
 	SizeBytes int64  `json:"size_bytes"`
 }
+
+// knowledgeInlineMaxBytes caps the size of content we inline in the
+// list response. Above this, even text files get fetched lazily from
+// the raw endpoint when expanded. 256KB covers ~25k lines of code
+// or ~50 pages of prose — well past anything a knowledge file
+// reasonably needs to be, and small enough that loading the listing
+// stays snappy.
+const knowledgeInlineMaxBytes = 256 * 1024
+
+// knowledgeMaxUploadBytes caps individual file uploads at 5MB. The
+// Curator's agent has to read these into context at some point, so
+// extremely large files are the wrong shape for a knowledge base.
+// Multi-file uploads are bounded by knowledgeMaxRequestBytes below.
+const knowledgeMaxUploadBytes = 5 * 1024 * 1024
+
+// knowledgeMaxRequestBytes caps a single multipart request at 25MB
+// total. Big enough for a handful of images or PDFs at the per-file
+// limit, small enough that a malicious or accidental "drag in 500
+// files" doesn't lock up the process on disk + memory.
+const knowledgeMaxRequestBytes = 25 * 1024 * 1024
 
 // handleProjectKnowledge serves the curated markdown files that live
 // under the project's knowledge dir. SKY-217.
@@ -462,13 +505,20 @@ func (s *Server) handleProjectKnowledge(w http.ResponseWriter, r *http.Request) 
 }
 
 // readKnowledgeFiles walks one level of the knowledge-base directory
-// and returns the markdown files in stable order. Single level by
-// design — the agent is supposed to keep a flat layout under
-// knowledge-base/, and recursing here would surface scratch state
-// from any nested dirs the agent created.
+// and returns every regular file in stable order, with mime type
+// detected per file and content inlined for text-shaped files under
+// knowledgeInlineMaxBytes. Single level by design — the agent is
+// supposed to keep a flat layout under knowledge-base/, and recursing
+// here would surface scratch state from any nested dirs.
 //
 // "Doesn't exist" is not an error: a fresh project hasn't had any
 // knowledge written yet, so an empty list is the truthful response.
+//
+// Symlinks and non-regular files are skipped — the agent shouldn't be
+// pointing this directory at anything outside it, and reading through
+// a symlink could exfiltrate file contents from elsewhere on the
+// user's machine via a malicious upload (a `notes.md` symlink to
+// ~/.ssh/id_rsa, etc.). Better to skip silently than to follow.
 func readKnowledgeFiles(dir string) ([]knowledgeFile, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -483,9 +533,6 @@ func readKnowledgeFiles(dir string) ([]knowledgeFile, error) {
 			continue
 		}
 		name := e.Name()
-		if !strings.HasSuffix(strings.ToLower(name), ".md") {
-			continue
-		}
 		full := filepath.Join(dir, name)
 		info, err := os.Lstat(full)
 		if err != nil {
@@ -497,17 +544,347 @@ func readKnowledgeFiles(dir string) ([]knowledgeFile, error) {
 		if !info.Mode().IsRegular() {
 			continue
 		}
-		body, err := os.ReadFile(full)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, knowledgeFile{
+		mimeType := detectMimeType(name)
+		entry := knowledgeFile{
 			Path:      name,
-			Content:   string(body),
+			MimeType:  mimeType,
 			UpdatedAt: info.ModTime().UTC().Format("2006-01-02T15:04:05Z07:00"),
 			SizeBytes: info.Size(),
-		})
+		}
+		if isTextMime(mimeType) && info.Size() <= knowledgeInlineMaxBytes {
+			body, err := os.ReadFile(full)
+			if err != nil {
+				return nil, err
+			}
+			entry.Content = string(body)
+		}
+		out = append(out, entry)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
 	return out, nil
+}
+
+// detectMimeType maps a filename to a content-type using the
+// extension table Go's `mime` package ships. Falls back to
+// "application/octet-stream" for unknown extensions rather than
+// sniffing — sniffing requires reading the file, which is wasted
+// work for the listing path where we already skip non-text.
+//
+// We special-case .md → text/markdown. Go's stdlib mime table
+// includes it on most platforms but not all (depends on the system
+// mime.types file), so we pin the value to keep the frontend's
+// markdown-vs-other branch stable across machines.
+func detectMimeType(filename string) string {
+	ext := strings.ToLower(filepath.Ext(filename))
+	switch ext {
+	case ".md", ".markdown":
+		return "text/markdown; charset=utf-8"
+	}
+	if t := mime.TypeByExtension(ext); t != "" {
+		return t
+	}
+	return "application/octet-stream"
+}
+
+// isTextMime decides whether a content-type's bytes can be rendered
+// as a string in the frontend's <pre> or markdown renderer. Anything
+// in the text/ family is text by definition; a few application/
+// types (JSON, YAML, XML, JS) are also actually-text and worth
+// inlining so the panel can show them without an extra fetch.
+func isTextMime(mimeType string) bool {
+	if i := strings.Index(mimeType, ";"); i >= 0 {
+		mimeType = mimeType[:i]
+	}
+	mimeType = strings.TrimSpace(mimeType)
+	if strings.HasPrefix(mimeType, "text/") {
+		return true
+	}
+	switch mimeType {
+	case "application/json",
+		"application/yaml",
+		"application/x-yaml",
+		"application/xml",
+		"application/javascript",
+		"application/typescript",
+		"application/toml":
+		return true
+	}
+	return false
+}
+
+// sanitizeKnowledgeFilename hardens an uploaded filename before it
+// touches the filesystem. The agent is the primary writer here, but
+// uploads come from the browser and a malicious or careless filename
+// shouldn't be able to escape the knowledge-base/ subdir or shadow
+// system files.
+//
+// Rules:
+//   - Strip any path component (clients sometimes send full paths).
+//   - Reject empty results, "..", "." segments.
+//   - Reject leading dot (no hidden files — the agent's own scratch
+//     state lives at the project root with leading dots, and we don't
+//     want uploads colliding with it).
+//   - Reject path separators in the final name (defense in depth
+//     after the strip — Windows-style backslashes can survive
+//     filepath.Base on a Unix host).
+//
+// Returns the sanitized base name and an error message string for
+// the handler to surface as a 400.
+func sanitizeKnowledgeFilename(raw string) (string, string) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", "filename is required"
+	}
+	// filepath.Base on Unix doesn't strip Windows separators, so do
+	// it manually first to handle clients that send "folder\\file.md".
+	trimmed = strings.ReplaceAll(trimmed, "\\", "/")
+	base := filepath.Base(trimmed)
+	if base == "." || base == ".." || base == "/" || base == "" {
+		return "", "filename is invalid"
+	}
+	if strings.HasPrefix(base, ".") {
+		return "", "filename cannot start with a dot"
+	}
+	if strings.ContainsAny(base, "/\\") {
+		return "", "filename cannot contain path separators"
+	}
+	return base, ""
+}
+
+// resolveKnowledgePath maps a URL path parameter to an absolute file
+// path inside the project's knowledge-base directory and validates
+// that the resolved path stays within. Two layers of defense:
+//  1. URL-decode + sanitize via sanitizeKnowledgeFilename, which
+//     rejects "..", path separators, and leading dots.
+//  2. Resolve to absolute via filepath.Join(kbDir, name) and re-check
+//     the result has kbDir as its prefix. Belt-and-suspenders against
+//     anything the sanitizer might miss on a future filesystem.
+//
+// Returns (kbDir, fullPath, "") on success and ("", "", errMsg) on
+// failure.
+func resolveKnowledgePath(projectID, rawPath string) (string, string, string) {
+	root, err := curator.KnowledgeDir(projectID)
+	if err != nil {
+		return "", "", "resolve knowledge dir: " + err.Error()
+	}
+	kbDir := filepath.Join(root, "knowledge-base")
+	decoded, err := url.PathUnescape(rawPath)
+	if err != nil {
+		return "", "", "invalid path encoding"
+	}
+	name, errMsg := sanitizeKnowledgeFilename(decoded)
+	if errMsg != "" {
+		return "", "", errMsg
+	}
+	full := filepath.Join(kbDir, name)
+	rel, err := filepath.Rel(kbDir, full)
+	if err != nil || strings.HasPrefix(rel, "..") || rel == ".." {
+		return "", "", "path escapes knowledge-base directory"
+	}
+	return kbDir, full, ""
+}
+
+// handleProjectKnowledgeFile streams the raw bytes of a single
+// knowledge file. Used by the frontend for image <img src=> tags,
+// preview-not-available "Open" links, and lazy-fetch of large text
+// files. Sets Content-Disposition: inline so the browser previews
+// rather than downloads — this is a sidebar viewer, not a download
+// hub. Users who want to save a file can use Save As from there.
+func (s *Server) handleProjectKnowledgeFile(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	project, err := db.GetProject(s.db, id)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if project == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "project not found"})
+		return
+	}
+	_, full, errMsg := resolveKnowledgePath(id, r.PathValue("path"))
+	if errMsg != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": errMsg})
+		return
+	}
+	info, err := os.Stat(full)
+	if err != nil {
+		if os.IsNotExist(err) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if !info.Mode().IsRegular() {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "not a regular file"})
+		return
+	}
+	w.Header().Set("Content-Type", detectMimeType(filepath.Base(full)))
+	w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
+	w.Header().Set("Content-Disposition", "inline; filename="+strconv.Quote(filepath.Base(full)))
+	http.ServeFile(w, r, full)
+}
+
+// handleProjectKnowledgeUpload accepts one or more files via
+// multipart/form-data and writes each to the project's knowledge-base
+// directory. The dir is created lazily on first upload so a project
+// that's never been uploaded to (and never been chatted with) doesn't
+// accumulate empty directories.
+//
+// Conflict policy: REJECT. If a file with the same sanitized name
+// already exists, the upload returns 409 with a message naming the
+// conflict — the user explicitly picked "delete the old one first"
+// over auto-rename or overwrite. Implementation uses O_CREATE|O_EXCL
+// so the check + write is atomic against a concurrent upload of the
+// same name.
+//
+// Per-file size limit and total request limit are enforced via
+// http.MaxBytesReader at the wrapper level; a multipart file that
+// blows past knowledgeMaxUploadBytes during streaming surfaces as a
+// "request body too large" error and the partially-written file is
+// removed.
+//
+// Multi-file requests are partial-success: each file is processed
+// independently, and the response includes a per-file outcome. A
+// duplicate filename failing doesn't block siblings from succeeding.
+func (s *Server) handleProjectKnowledgeUpload(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	project, err := db.GetProject(s.db, id)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if project == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "project not found"})
+		return
+	}
+	root, err := curator.KnowledgeDir(id)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "resolve knowledge dir: " + err.Error()})
+		return
+	}
+	kbDir := filepath.Join(root, "knowledge-base")
+	if err := os.MkdirAll(kbDir, 0o755); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "create knowledge dir: " + err.Error()})
+		return
+	}
+
+	// MaxBytesReader caps the WHOLE request, including form fields
+	// and per-file streams. Per-file caps are enforced separately
+	// during the copy below so a single oversize file doesn't poison
+	// siblings that were within budget.
+	r.Body = http.MaxBytesReader(w, r.Body, knowledgeMaxRequestBytes)
+	if err := r.ParseMultipartForm(8 << 20); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "multipart parse: " + err.Error()})
+		return
+	}
+	files := r.MultipartForm.File["file"]
+	if len(files) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no files in upload (use form field 'file')"})
+		return
+	}
+
+	type uploadResult struct {
+		Path     string `json:"path,omitempty"`
+		Original string `json:"original"`
+		Error    string `json:"error,omitempty"`
+	}
+	results := make([]uploadResult, 0, len(files))
+	for _, fh := range files {
+		original := fh.Filename
+		name, errMsg := sanitizeKnowledgeFilename(original)
+		if errMsg != "" {
+			results = append(results, uploadResult{Original: original, Error: errMsg})
+			continue
+		}
+		if fh.Size > knowledgeMaxUploadBytes {
+			results = append(results, uploadResult{
+				Original: original,
+				Error:    fmt.Sprintf("file exceeds %d-byte limit", knowledgeMaxUploadBytes),
+			})
+			continue
+		}
+		full := filepath.Join(kbDir, name)
+		if errMsg := writeUploadedFile(fh, full); errMsg != "" {
+			results = append(results, uploadResult{Original: original, Error: errMsg})
+			continue
+		}
+		results = append(results, uploadResult{Path: name, Original: original})
+	}
+
+	// 207-ish semantics in a 200: each entry carries its own status.
+	// We pick 200 here rather than 207 (Multi-Status) because the
+	// rest of the API speaks plain JSON, not WebDAV; a single shape
+	// keeps client handling consistent across endpoints.
+	writeJSON(w, http.StatusOK, map[string]any{"results": results})
+}
+
+// writeUploadedFile copies the uploaded file's bytes to the target
+// path with O_EXCL semantics — fails fast if a file with the same
+// name already exists, instead of overwriting. The exclusive open is
+// the actual race-safe enforcement of the "reject conflict" policy:
+// a quick os.Stat check beforehand is racy because two uploads can
+// see "doesn't exist" and both proceed to write.
+func writeUploadedFile(fh *multipart.FileHeader, dst string) string {
+	src, err := fh.Open()
+	if err != nil {
+		return "open upload: " + err.Error()
+	}
+	defer src.Close()
+
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return "file already exists — delete it first"
+		}
+		return "create file: " + err.Error()
+	}
+	defer out.Close()
+
+	// Cap the per-file copy at knowledgeMaxUploadBytes + 1 so we
+	// detect oversize uploads even if the multipart header lied
+	// about Size. If we hit the cap, remove the partial file.
+	limited := io.LimitReader(src, knowledgeMaxUploadBytes+1)
+	written, err := io.Copy(out, limited)
+	if err != nil {
+		_ = os.Remove(dst)
+		return "write file: " + err.Error()
+	}
+	if written > knowledgeMaxUploadBytes {
+		_ = os.Remove(dst)
+		return fmt.Sprintf("file exceeds %d-byte limit", knowledgeMaxUploadBytes)
+	}
+	return ""
+}
+
+// handleProjectKnowledgeDelete removes a single file from the
+// knowledge-base directory. The Curator's RemoveAll on project
+// delete handles whole-dir cleanup; this is the per-file pair to
+// the upload endpoint, mirrored on the frontend by the per-file
+// trash button.
+func (s *Server) handleProjectKnowledgeDelete(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	project, err := db.GetProject(s.db, id)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if project == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "project not found"})
+		return
+	}
+	_, full, errMsg := resolveKnowledgePath(id, r.PathValue("path"))
+	if errMsg != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": errMsg})
+		return
+	}
+	if err := os.Remove(full); err != nil {
+		if os.IsNotExist(err) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

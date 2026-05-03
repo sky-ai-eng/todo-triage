@@ -1,8 +1,11 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
+	"mime/multipart"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +15,33 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
+
+// doMultipartUpload posts files (one per map entry, all under the
+// "file" form key) to the given path and returns the recorded
+// response. Mirrors doJSON's call shape so the test bodies stay flat.
+func doMultipartUpload(t *testing.T, s *Server, path string, files map[string][]byte) *httptest.ResponseRecorder {
+	t.Helper()
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	for name, body := range files {
+		fw, err := mw.CreateFormFile("file", name)
+		if err != nil {
+			t.Fatalf("create form file %q: %v", name, err)
+		}
+		if _, err := fw.Write(body); err != nil {
+			t.Fatalf("write form file %q: %v", name, err)
+		}
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatalf("close multipart: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, path, &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	rec := httptest.NewRecorder()
+	s.mux.ServeHTTP(rec, req)
+	return rec
+}
 
 func TestProjectCreate_Happy(t *testing.T) {
 	s := newTestServer(t)
@@ -512,10 +542,14 @@ func TestProjectKnowledge_EmptyForFreshProject(t *testing.T) {
 	}
 }
 
-// TestProjectKnowledge_ReturnsMarkdownFiles verifies the happy path:
-// markdown files in the project's knowledge-base/ subdir get
-// surfaced with relative path, content, and size.
-func TestProjectKnowledge_ReturnsMarkdownFiles(t *testing.T) {
+// TestProjectKnowledge_ReturnsAllFileTypes pins the post-SKY-217
+// "knowledge base accepts anything Claude Code can read" contract:
+// the listing surfaces every regular file under knowledge-base/,
+// detects mime type per extension, and inlines content only for
+// text-shaped files. Images and similar binaries surface with a
+// mime type and size but no inline content — the frontend lazily
+// fetches them via the per-file raw endpoint.
+func TestProjectKnowledge_ReturnsAllFileTypes(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	s := newTestServer(t)
@@ -525,15 +559,18 @@ func TestProjectKnowledge_ReturnsMarkdownFiles(t *testing.T) {
 	if err := os.MkdirAll(kbDir, 0o755); err != nil {
 		t.Fatalf("mkdir knowledge-base: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(kbDir, "alpha.md"), []byte("# Alpha\n"), 0o644); err != nil {
-		t.Fatalf("write alpha.md: %v", err)
+	// Cover the four render branches: markdown, plain text, image
+	// (binary), and JSON (text-shaped application/* type).
+	files := map[string][]byte{
+		"alpha.md":    []byte("# Alpha\n"),
+		"notes.txt":   []byte("plain notes"),
+		"data.json":   []byte(`{"k":1}`),
+		"diagram.png": {0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a}, // PNG magic
 	}
-	if err := os.WriteFile(filepath.Join(kbDir, "beta.md"), []byte("# Beta\nbody"), 0o644); err != nil {
-		t.Fatalf("write beta.md: %v", err)
-	}
-	// Non-markdown is filtered out.
-	if err := os.WriteFile(filepath.Join(kbDir, "ignored.txt"), []byte("nope"), 0o644); err != nil {
-		t.Fatalf("write ignored.txt: %v", err)
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(kbDir, name), body, 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
 	}
 
 	rec := doJSON(t, s, http.MethodGet, "/api/projects/"+id+"/knowledge", nil)
@@ -544,17 +581,359 @@ func TestProjectKnowledge_ReturnsMarkdownFiles(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("got %d files, want 2 (txt should be excluded)", len(got))
+	if len(got) != 4 {
+		t.Fatalf("got %d files, want 4 (one per extension)", len(got))
 	}
-	if got[0].Path != "alpha.md" || got[1].Path != "beta.md" {
-		t.Errorf("paths = [%q, %q], want sorted [alpha.md beta.md]", got[0].Path, got[1].Path)
+	byPath := make(map[string]knowledgeFile, len(got))
+	for _, f := range got {
+		byPath[f.Path] = f
 	}
-	if got[0].Content != "# Alpha\n" {
-		t.Errorf("alpha content = %q", got[0].Content)
+
+	if md := byPath["alpha.md"]; !strings.HasPrefix(md.MimeType, "text/markdown") {
+		t.Errorf("alpha.md mime = %q, want text/markdown*", md.MimeType)
+	} else if md.Content != "# Alpha\n" {
+		t.Errorf("alpha.md content = %q (text-shaped should inline)", md.Content)
 	}
-	if got[1].SizeBytes != int64(len("# Beta\nbody")) {
-		t.Errorf("beta size = %d, want %d", got[1].SizeBytes, len("# Beta\nbody"))
+
+	if txt := byPath["notes.txt"]; !strings.HasPrefix(txt.MimeType, "text/plain") {
+		t.Errorf("notes.txt mime = %q, want text/plain*", txt.MimeType)
+	} else if txt.Content != "plain notes" {
+		t.Errorf("notes.txt content = %q", txt.Content)
+	}
+
+	if j := byPath["data.json"]; !strings.HasPrefix(j.MimeType, "application/json") {
+		t.Errorf("data.json mime = %q, want application/json", j.MimeType)
+	} else if j.Content != `{"k":1}` {
+		t.Errorf("data.json content = %q (JSON should inline)", j.Content)
+	}
+
+	if png := byPath["diagram.png"]; png.MimeType != "image/png" {
+		t.Errorf("diagram.png mime = %q, want image/png", png.MimeType)
+	} else if png.Content != "" {
+		t.Errorf("diagram.png content = %q, want empty (binary not inlined)", png.Content)
+	}
+}
+
+// TestProjectKnowledge_LargeTextNotInlined gates the inline-size
+// limit. A text file over knowledgeInlineMaxBytes shows up in the
+// listing with metadata but no Content — frontend lazy-fetches the
+// body when the user expands the file.
+func TestProjectKnowledge_LargeTextNotInlined(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	s := newTestServer(t)
+	id, _ := db.CreateProject(s.db, domain.Project{Name: "with-big-file"})
+
+	kbDir := filepath.Join(home, ".triagefactory", "projects", id, "knowledge-base")
+	if err := os.MkdirAll(kbDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	big := bytes.Repeat([]byte("x"), knowledgeInlineMaxBytes+1)
+	if err := os.WriteFile(filepath.Join(kbDir, "big.md"), big, 0o644); err != nil {
+		t.Fatalf("write big.md: %v", err)
+	}
+
+	rec := doJSON(t, s, http.MethodGet, "/api/projects/"+id+"/knowledge", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	var got []knowledgeFile
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	if len(got) != 1 {
+		t.Fatalf("got %d files", len(got))
+	}
+	if got[0].Content != "" {
+		t.Errorf("oversize text should not inline content (got %d bytes)", len(got[0].Content))
+	}
+	if got[0].SizeBytes != int64(len(big)) {
+		t.Errorf("size = %d, want %d", got[0].SizeBytes, len(big))
+	}
+}
+
+// TestProjectKnowledge_SkipsSymlinks pins the symlink-skipping
+// defense. A malicious or careless upload that drops a symlink
+// pointing at ~/.ssh/id_rsa would otherwise be readable through
+// the knowledge listing; the readKnowledgeFiles loop skips
+// symlinks specifically to close that path.
+func TestProjectKnowledge_SkipsSymlinks(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	s := newTestServer(t)
+	id, _ := db.CreateProject(s.db, domain.Project{Name: "symlink-test"})
+
+	kbDir := filepath.Join(home, ".triagefactory", "projects", id, "knowledge-base")
+	if err := os.MkdirAll(kbDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(kbDir, "real.md"), []byte("ok"), 0o644); err != nil {
+		t.Fatalf("write real: %v", err)
+	}
+	// Symlink pointing to a sibling outside the listing's domain.
+	target := filepath.Join(home, "secret.txt")
+	if err := os.WriteFile(target, []byte("don't read me"), 0o644); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	if err := os.Symlink(target, filepath.Join(kbDir, "leak.md")); err != nil {
+		t.Skipf("symlink unsupported on this platform: %v", err)
+	}
+
+	rec := doJSON(t, s, http.MethodGet, "/api/projects/"+id+"/knowledge", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	var got []knowledgeFile
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	if len(got) != 1 || got[0].Path != "real.md" {
+		t.Errorf("expected only [real.md], got %d entries", len(got))
+	}
+}
+
+// TestSanitizeKnowledgeFilename pins the bad-input table. Adding a
+// case here is the cheap way to guard the upload + delete + raw-fetch
+// paths against a new attack class without re-running an HTTP
+// roundtrip per case.
+func TestSanitizeKnowledgeFilename(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string // empty = expect rejection
+	}{
+		{"notes.md", "notes.md"},
+		{"  notes.md  ", "notes.md"},
+		{"sub/dir/notes.md", "notes.md"}, // path stripped to base
+		{"..", ""},                       // dotdot rejected
+		{".", ""},                        // dot rejected
+		{"", ""},                         // empty rejected
+		{".hidden", ""},                  // leading dot rejected
+		{"folder\\file.md", "file.md"},   // windows-style stripped
+		{"a/../b.md", "b.md"},            // base of "../b.md" is "b.md"
+		{string([]byte{}), ""},           // truly empty
+	}
+	for _, tc := range cases {
+		got, errMsg := sanitizeKnowledgeFilename(tc.in)
+		if tc.want == "" {
+			if errMsg == "" {
+				t.Errorf("input %q expected rejection, got %q", tc.in, got)
+			}
+			continue
+		}
+		if errMsg != "" {
+			t.Errorf("input %q expected %q, rejected with %q", tc.in, tc.want, errMsg)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("input %q got %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestProjectKnowledgeUpload_Happy verifies the multipart upload
+// path: a single file lands at <kbDir>/<original-name> and shows up
+// in the subsequent listing.
+func TestProjectKnowledgeUpload_Happy(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	s := newTestServer(t)
+	id, _ := db.CreateProject(s.db, domain.Project{Name: "uploads"})
+
+	rec := doMultipartUpload(t, s, "/api/projects/"+id+"/knowledge", map[string][]byte{
+		"hello.md": []byte("# hello\n"),
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("upload status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	full := filepath.Join(home, ".triagefactory", "projects", id, "knowledge-base", "hello.md")
+	body, err := os.ReadFile(full)
+	if err != nil {
+		t.Fatalf("read uploaded file: %v", err)
+	}
+	if string(body) != "# hello\n" {
+		t.Errorf("uploaded content = %q", string(body))
+	}
+}
+
+// TestProjectKnowledgeUpload_RejectsConflict pins the "conflict =
+// reject" decision. Re-uploading the same name without first
+// deleting surfaces an error in the per-file results, while siblings
+// in the same request continue independently.
+func TestProjectKnowledgeUpload_RejectsConflict(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	s := newTestServer(t)
+	id, _ := db.CreateProject(s.db, domain.Project{Name: "conflicts"})
+
+	// Pre-seed an existing file.
+	kbDir := filepath.Join(home, ".triagefactory", "projects", id, "knowledge-base")
+	if err := os.MkdirAll(kbDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(kbDir, "notes.md"), []byte("original"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	rec := doMultipartUpload(t, s, "/api/projects/"+id+"/knowledge", map[string][]byte{
+		"notes.md":   []byte("would-overwrite"),
+		"sibling.md": []byte("ok"),
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	var resp struct {
+		Results []struct {
+			Path     string `json:"path"`
+			Original string `json:"original"`
+			Error    string `json:"error"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Results) != 2 {
+		t.Fatalf("got %d results, want 2", len(resp.Results))
+	}
+	var conflictErr, siblingPath string
+	for _, r := range resp.Results {
+		if r.Original == "notes.md" {
+			conflictErr = r.Error
+		}
+		if r.Original == "sibling.md" {
+			siblingPath = r.Path
+		}
+	}
+	if conflictErr == "" {
+		t.Error("expected conflict error on notes.md")
+	}
+	if siblingPath != "sibling.md" {
+		t.Errorf("expected sibling to succeed, got path=%q", siblingPath)
+	}
+
+	// Original content must be untouched after the rejected overwrite.
+	body, _ := os.ReadFile(filepath.Join(kbDir, "notes.md"))
+	if string(body) != "original" {
+		t.Errorf("conflict overwrote: got %q, want %q", body, "original")
+	}
+}
+
+// TestProjectKnowledgeUpload_SizeLimit verifies the per-file cap.
+// A blob larger than knowledgeMaxUploadBytes gets rejected with no
+// partial file left on disk.
+func TestProjectKnowledgeUpload_SizeLimit(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	s := newTestServer(t)
+	id, _ := db.CreateProject(s.db, domain.Project{Name: "sizecap"})
+
+	huge := bytes.Repeat([]byte("x"), knowledgeMaxUploadBytes+10)
+	rec := doMultipartUpload(t, s, "/api/projects/"+id+"/knowledge", map[string][]byte{
+		"big.bin": huge,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	var resp struct {
+		Results []struct {
+			Original string `json:"original"`
+			Error    string `json:"error"`
+		} `json:"results"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if len(resp.Results) != 1 || resp.Results[0].Error == "" {
+		t.Fatalf("expected size-limit rejection, got %+v", resp.Results)
+	}
+	full := filepath.Join(home, ".triagefactory", "projects", id, "knowledge-base", "big.bin")
+	if _, err := os.Stat(full); !os.IsNotExist(err) {
+		t.Errorf("rejected upload left a file on disk")
+	}
+}
+
+// TestProjectKnowledgeFile_StreamsRaw verifies the per-file raw
+// endpoint serves the bytes with the correct Content-Type header.
+// This is what the frontend's <img src=> tags hit for image
+// previews.
+func TestProjectKnowledgeFile_StreamsRaw(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	s := newTestServer(t)
+	id, _ := db.CreateProject(s.db, domain.Project{Name: "raw"})
+
+	kbDir := filepath.Join(home, ".triagefactory", "projects", id, "knowledge-base")
+	if err := os.MkdirAll(kbDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	pngBytes := []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00}
+	if err := os.WriteFile(filepath.Join(kbDir, "logo.png"), pngBytes, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	rec := doJSON(t, s, http.MethodGet, "/api/projects/"+id+"/knowledge/logo.png", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "image/png" {
+		t.Errorf("Content-Type = %q, want image/png", got)
+	}
+	if !bytes.Equal(rec.Body.Bytes(), pngBytes) {
+		t.Errorf("body bytes don't round-trip")
+	}
+}
+
+// TestProjectKnowledgeFile_RejectsTraversal pins the path-traversal
+// defense. Even URL-encoded "../config.yaml" surfaces as a 400, not
+// a successful read of a sensitive file outside the knowledge-base.
+func TestProjectKnowledgeFile_RejectsTraversal(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	s := newTestServer(t)
+	id, _ := db.CreateProject(s.db, domain.Project{Name: "traversal"})
+
+	// URL-encoded forms bypass net/http's path cleanup and reach the
+	// handler intact — that's where our resolveKnowledgePath defense
+	// has to actually fire. Literal ".." is handled upstream by the
+	// mux redirecting to the cleaned path, which we accept as
+	// equivalent (the file never gets read either way).
+	bad := []string{
+		"%2E%2E",               // url-encoded ".."
+		"%2E%2E%2Fconfig.yaml", // url-encoded "../config.yaml"
+		".hidden",              // leading dot
+	}
+	for _, p := range bad {
+		rec := doJSON(t, s, http.MethodGet, "/api/projects/"+id+"/knowledge/"+p, nil)
+		if rec.Code != http.StatusBadRequest && rec.Code != http.StatusNotFound {
+			t.Errorf("path %q got status %d, want 400 or 404", p, rec.Code)
+		}
+	}
+}
+
+// TestProjectKnowledgeDelete_RemovesFile verifies the delete endpoint
+// pairs cleanly with upload — a file uploaded then deleted no longer
+// appears in the listing.
+func TestProjectKnowledgeDelete_RemovesFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	s := newTestServer(t)
+	id, _ := db.CreateProject(s.db, domain.Project{Name: "delete"})
+
+	kbDir := filepath.Join(home, ".triagefactory", "projects", id, "knowledge-base")
+	if err := os.MkdirAll(kbDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	full := filepath.Join(kbDir, "doomed.md")
+	if err := os.WriteFile(full, []byte("bye"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	rec := doJSON(t, s, http.MethodDelete, "/api/projects/"+id+"/knowledge/doomed.md", nil)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("delete status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(full); !os.IsNotExist(err) {
+		t.Errorf("file still on disk after delete")
+	}
+
+	// Second delete returns 404.
+	rec = doJSON(t, s, http.MethodDelete, "/api/projects/"+id+"/knowledge/doomed.md", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("re-delete status = %d, want 404", rec.Code)
 	}
 }
 
