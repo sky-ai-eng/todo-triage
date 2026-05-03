@@ -73,9 +73,9 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": errMsg})
 		return
 	}
-	jiraKey := req.JiraProjectKey
-	linearKey := req.LinearProjectKey
-	if strings.TrimSpace(jiraKey) != "" || strings.TrimSpace(linearKey) != "" {
+	jiraKey := strings.TrimSpace(req.JiraProjectKey)
+	linearKey := strings.TrimSpace(req.LinearProjectKey)
+	if jiraKey != "" || linearKey != "" {
 		cfg, err := config.Load()
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load config: " + err.Error()})
