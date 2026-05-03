@@ -39,7 +39,7 @@ const (
 	knowledgeDebounce = 100 * time.Millisecond
 )
 
-// Broadcaster is the slice of *websocket.Hub the watcher needs.
+// Broadcaster is the subset of *websocket.Hub behavior the watcher needs.
 // Stating it as an interface lets tests substitute a recorder without
 // wiring a real http server + ws client.
 type Broadcaster interface {
