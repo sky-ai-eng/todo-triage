@@ -1,24 +1,20 @@
 package delegate
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -794,18 +790,10 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		return
 	}
 
-	args := []string{
-		"-p", prompt,
-		"--model", model,
-		"--output-format", "stream-json",
-		"--verbose",
-		"--allowedTools", BuildAllowedTools(selfBin),
-		"--max-turns", "100",
+	extraEnv := []string{
+		"TRIAGE_FACTORY_RUN_ID=" + runID,
+		"TRIAGE_FACTORY_REVIEW_PREVIEW=1",
 	}
-
-	cmd := exec.Command("claude", args...)
-	cmd.Dir = claudeCwd
-	cmd.Env = append(os.Environ(), "TRIAGE_FACTORY_RUN_ID="+runID, "TRIAGE_FACTORY_REVIEW_PREVIEW=1")
 	// Set TRIAGE_FACTORY_REPO when the run has a resolved GitHub repo context
 	// so gh subcommands can default to the right target without the agent
 	// needing to pass --repo on every invocation. Left unset for Jira runs
@@ -813,68 +801,45 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	// (unlikely — no worktree) or hard-error, which is correct since they
 	// shouldn't be touching GitHub.
 	if cfg.owner != "" && cfg.repo != "" {
-		cmd.Env = append(cmd.Env, "TRIAGE_FACTORY_REPO="+cfg.owner+"/"+cfg.repo)
+		extraEnv = append(extraEnv, "TRIAGE_FACTORY_REPO="+cfg.owner+"/"+cfg.repo)
 	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		s.failRun(runID, task.ID, triggerType, "failed to create stdout pipe: "+err.Error())
-		return
-	}
-
-	var stderrBuf bytes.Buffer
-	cmd.Stderr = &stderrBuf
-
-	if err := cmd.Start(); err != nil {
-		s.failRun(runID, task.ID, triggerType, "failed to start claude: "+err.Error())
-		return
-	}
-
-	pgid := cmd.Process.Pid
-	log.Printf("[delegate] claude started (pid: %d, pgid: %d, cwd: %s)", cmd.Process.Pid, pgid, claudeCwd)
-
-	go func() {
-		<-ctx.Done()
-		if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
-			log.Printf("[delegate] warning: failed to kill process group %d: %v", pgid, err)
-		}
-	}()
 
 	s.updateStatus(runID, "running")
 
-	stream := newStreamState()
-	completion, streamErr := s.consumeClaudeStream(stdout, runID, stream)
-	if streamErr != nil {
-		log.Printf("[delegate] scanner error for run %s: %v", runID, streamErr)
-	}
+	log.Printf("[delegate] claude starting for run %s (cwd: %s)", runID, claudeCwd)
+	outcome, err := agentproc.Run(ctx, agentproc.RunOptions{
+		Cwd:          claudeCwd,
+		Model:        model,
+		Message:      prompt,
+		AllowedTools: BuildAllowedTools(selfBin),
+		MaxTurns:     100,
+		ExtraEnv:     extraEnv,
+		TraceID:      runID,
+	}, newRunSink(s, runID))
 
 	// If Takeover() flipped the takenOver flag while we were streaming,
 	// every code path below — completion ingestion, status updates, fail
 	// paths, toasts — would step on the takeover lifecycle. Bail out
 	// silently: Takeover owns the DB row and the worktree from here on.
-	// We still drain cmd.Wait so the subprocess is reaped.
 	if s.wasTakenOver(runID) {
-		_ = cmd.Wait()
 		return
 	}
 
-	if completion != nil {
-		s.processCompletion(ctx, runID, task, completion, claudeCwd, stream.SessionID(), model, cfg.owner, cfg.repo, triggerType)
-
-		// We've already captured the result from stdout; just drain any
-		// remaining subprocess state. Exit code is not load-bearing here.
-		_ = cmd.Wait()
+	if outcome != nil && outcome.Result != nil {
+		s.processCompletion(ctx, runID, task, outcome.Result, claudeCwd, outcome.SessionID, model, cfg.owner, cfg.repo, triggerType)
 		return
 	}
 
-	if err := cmd.Wait(); err != nil {
+	if err != nil {
 		if ctx.Err() != nil {
 			s.handleCancelled(runID, startTime, cfg.wtPath)
 			return
 		}
-		stderr := stderrBuf.String()
-		s.failRun(runID, task.ID, triggerType, fmt.Sprintf("claude exited with error: %v\nstderr: %s", err, stderr))
+		stderr := ""
+		if outcome != nil {
+			stderr = outcome.Stderr
+		}
+		s.failRun(runID, task.ID, triggerType, fmt.Sprintf("%v\nstderr: %s", err, stderr))
 		return
 	}
 
@@ -890,12 +855,13 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 // gate, same toast, same task-done bookkeeping. SKY-139.
 //
 // The caller is responsible for draining any subprocess state
-// (cmd.Wait); this helper only operates on the parsed completion.
+// (the agentproc.Run path waits internally); this helper only
+// operates on the parsed completion.
 func (s *Spawner) processCompletion(
 	ctx context.Context,
 	runID string,
 	task domain.Task,
-	completion *runCompletion,
+	completion *agentproc.Result,
 	claudeCwd, sessionID, model, owner, repo, triggerType string,
 ) {
 	// Yield branch (SKY-139): the agent emitted status:"yield" to
@@ -1013,7 +979,7 @@ func (s *Spawner) processCompletion(
 // yield_request message for transcript completeness but skip the
 // status flip and the toast. The terminal status the racing path set
 // stands.
-func (s *Spawner) persistYield(runID string, req *domain.YieldRequest, completion *runCompletion) error {
+func (s *Spawner) persistYield(runID string, req *domain.YieldRequest, completion *agentproc.Result) error {
 	if err := db.AddAgentRunPartialTotals(s.database, runID, completion.CostUSD, completion.DurationMs, completion.NumTurns); err != nil {
 		log.Printf("[delegate] warning: failed to record partial totals for run %s: %v", runID, err)
 	}
@@ -1217,75 +1183,6 @@ func (s *Spawner) ResumeAfterYield(runID, agentMessage string) error {
 	return nil
 }
 
-// consumeClaudeStream scans NDJSON output from claude -p, persists each
-// accumulated message via InsertAgentMessage, broadcasts them to UI
-// subscribers, and returns the first `result` event seen as a
-// *runCompletion. Shared between the initial agent invocation and the
-// ResumeWithMessage helper so stream handling stays consistent across
-// both entry points.
-//
-// Session id is persisted on runs as soon as the `system/init`
-// event surfaces it, not at stream close. Inline persistence means any
-// mid-run consumer (a future concurrent gate, or a panic handler
-// recovering from a crash) can read it from the database without
-// waiting for the stream to complete. On resume the same stream still
-// carries a fresh init event with the same session id, so writing it
-// again is idempotent.
-//
-// Returns nil *runCompletion if the stream ended without a result event
-// — the caller treats that as an involuntary failure and decides via
-// cmd.Wait() whether to attribute the failure to cancellation or a
-// real crash.
-func (s *Spawner) consumeClaudeStream(stdout io.Reader, runID string, stream *streamState) (*runCompletion, error) {
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
-
-	sessionPersisted := false
-
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-
-		messages, completion := stream.parseLine(line, runID)
-
-		// Persist session id the first time it appears. Done inline so
-		// mid-run consumers can read it from runs without needing
-		// the stream to have closed first.
-		if !sessionPersisted {
-			if sid := stream.SessionID(); sid != "" {
-				if err := db.SetAgentRunSession(s.database, runID, sid); err != nil {
-					log.Printf("[delegate] warning: failed to persist session_id for run %s: %v", runID, err)
-				}
-				sessionPersisted = true
-				// Re-broadcast the running status so the frontend
-				// re-fetches the run row and picks up SessionID. The
-				// "Take over" button is gated on session id presence;
-				// without this nudge it stays hidden until the next
-				// status flip (often "running" → terminal), which is
-				// too late to be useful.
-				s.broadcastRunUpdate(runID, "running")
-			}
-		}
-
-		for _, msg := range messages {
-			id, err := db.InsertAgentMessage(s.database, msg)
-			if err != nil {
-				log.Printf("[delegate] error storing message: %v", err)
-				continue
-			}
-			msg.ID = int(id)
-			s.broadcastMessage(runID, msg)
-		}
-
-		if completion != nil {
-			return completion, nil
-		}
-	}
-	return nil, scanner.Err()
-}
-
 // ResumeOptions configures a ResumeWithMessage invocation. Callers that
 // care about consistency with an earlier invocation should populate these
 // explicitly — the fallbacks read live Spawner state and will race with
@@ -1325,7 +1222,7 @@ type ResumeOptions struct {
 // memory_missing," while a yield-resume flow might treat it as a
 // session-level failure and surface an error.
 type ResumeOutcome struct {
-	Completion *runCompletion
+	Completion *agentproc.Result
 	Result     *agentResult
 	StderrText string
 }
@@ -1333,15 +1230,15 @@ type ResumeOutcome struct {
 // ResumeWithMessage resumes a prior headless claude session with a new
 // user message and streams the result through the same message-
 // persistence path as the initial invocation. Used by the SKY-141
-// task-memory write-gate retry loop, and designed to be reusable by
-// SKY-139's yield-to-user flow once that ticket lands.
+// task-memory write-gate retry loop and the SKY-139 yield-to-user flow.
 //
 // Callers pass the sessionID captured during the initial run (read
-// from runs.session_id, populated by consumeClaudeStream), the
-// cwd the original run used so the resumed subprocess sees the same
-// worktree, and the user message to append to the conversation. The
-// runID is reused so resumed messages append to the existing
-// run_messages stream — the UI sees one coherent conversation.
+// from runs.session_id, populated on the runSink during the original
+// invocation), the cwd the original run used so the resumed
+// subprocess sees the same worktree, and the user message to append
+// to the conversation. The runID is reused so resumed messages append
+// to the existing run_messages stream — the UI sees one coherent
+// conversation.
 //
 // This helper does NOT update runs status. The caller manages
 // lifecycle: the memory-gate retry loop keeps the run in its current
@@ -1369,77 +1266,47 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, runID, sessionID, cwd, 
 		return nil, fmt.Errorf("resolve own binary path: %w", err)
 	}
 
-	args := []string{
-		"-p", message,
-		"--resume", sessionID,
-		"--model", model,
-		"--output-format", "stream-json",
-		"--verbose",
-		"--allowedTools", BuildAllowedTools(selfBin),
-		"--max-turns", "100",
+	extraEnv := []string{
+		"TRIAGE_FACTORY_RUN_ID=" + runID,
+		"TRIAGE_FACTORY_REVIEW_PREVIEW=1",
 	}
-
-	cmd := exec.Command("claude", args...)
-	cmd.Dir = cwd
-	cmd.Env = append(os.Environ(), "TRIAGE_FACTORY_RUN_ID="+runID, "TRIAGE_FACTORY_REVIEW_PREVIEW=1")
 	// Preserve the initial run's GitHub repo context so gh subcommands
 	// in the resumed session keep their implicit --repo default. Without
 	// this, a resumed run on a GitHub task could suddenly fail any gh
 	// invocation that relied on the env var set in runAgent.
 	if opts.RepoEnv != "" {
-		cmd.Env = append(cmd.Env, "TRIAGE_FACTORY_REPO="+opts.RepoEnv)
-	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("stdout pipe: %w", err)
+		extraEnv = append(extraEnv, "TRIAGE_FACTORY_REPO="+opts.RepoEnv)
 	}
 
-	var stderrBuf bytes.Buffer
-	cmd.Stderr = &stderrBuf
+	apOutcome, runErr := agentproc.Run(ctx, agentproc.RunOptions{
+		Cwd:          cwd,
+		Model:        model,
+		SessionID:    sessionID,
+		Message:      message,
+		AllowedTools: BuildAllowedTools(selfBin),
+		MaxTurns:     100,
+		ExtraEnv:     extraEnv,
+		TraceID:      runID,
+	}, newRunSink(s, runID))
 
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start claude resume: %w", err)
-	}
-
-	pgid := cmd.Process.Pid
-	go func() {
-		<-ctx.Done()
-		if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
-			// Best-effort; subprocess may have already exited
-			_ = err
+	outcome := &ResumeOutcome{}
+	if apOutcome != nil {
+		outcome.Completion = apOutcome.Result
+		outcome.StderrText = apOutcome.Stderr
+		if apOutcome.Result != nil {
+			outcome.Result = parseAgentResult(apOutcome.Result.Result)
 		}
-	}()
-
-	stream := newStreamState()
-	completion, streamErr := s.consumeClaudeStream(stdout, runID, stream)
-
-	waitErr := cmd.Wait()
-
-	outcome := &ResumeOutcome{
-		Completion: completion,
-		StderrText: stderrBuf.String(),
-	}
-	if completion != nil {
-		outcome.Result = parseAgentResult(completion.Result)
 	}
 
-	// A stream error with no completion means the subprocess produced
-	// malformed output or died mid-stream. Surface it to the caller so
-	// the gate can decide whether to retry or give up.
-	if streamErr != nil && completion == nil {
-		return outcome, fmt.Errorf("resume stream: %w", streamErr)
-	}
-
-	// A wait error without a captured completion is an involuntary
-	// failure — the subprocess exited without sending a result event.
-	// Either cancellation (via ctx) or a genuine crash.
-	if waitErr != nil && completion == nil {
+	if runErr != nil && (apOutcome == nil || apOutcome.Result == nil) {
+		// agentproc.Run returns ctx.Err() directly when ctx triggered
+		// the kill before any completion was captured; preserve that
+		// shape so the SKY-139 yield-resume goroutine's ctx.Err()
+		// check still routes through markCancelled.
 		if ctx.Err() != nil {
 			return outcome, ctx.Err()
 		}
-		return outcome, fmt.Errorf("claude resume failed: %w (stderr: %s)", waitErr, stderrBuf.String())
+		return outcome, fmt.Errorf("claude resume failed: %w (stderr: %s)", runErr, outcome.StderrText)
 	}
 
 	return outcome, nil
@@ -1512,9 +1379,8 @@ func readAgentMemoryFile(cwd, runID string) (string, memoryFileState) {
 //
 // The gate does not touch runs status — that remains the caller's
 // responsibility. Side effects: (a) spawns resume subprocesses via
-// ResumeWithMessage, whose messages land in run_messages via
-// consumeClaudeStream's persistence, (b) logs progress for operator
-// diagnosis.
+// ResumeWithMessage, whose messages land in run_messages via the
+// runSink, (b) logs progress for operator diagnosis.
 //
 // Model and repoEnv are passed in rather than read from live spawner
 // state so the gate's retries use the same model and repo context as
@@ -1522,15 +1388,15 @@ func readAgentMemoryFile(cwd, runID string) (string, memoryFileState) {
 // concurrent UpdateCredentials could silently switch models mid-run.
 //
 // If no session id is available (shouldn't happen in practice because
-// consumeClaudeStream persists the init event, but defensive), the gate
+// the runSink persists the init event, but defensive), the gate
 // logs and returns without retrying. The caller will see a missing
 // memory file and flag memory_missing.
 func (s *Spawner) runMemoryGate(
 	ctx context.Context,
 	runID, taskID, cwd string,
-	initial *runCompletion,
+	initial *agentproc.Result,
 	sessionID, model, repoEnv string,
-) *runCompletion {
+) *agentproc.Result {
 	if memoryFileExists(cwd, runID) {
 		return initial
 	}
@@ -1560,7 +1426,7 @@ func (s *Spawner) runMemoryGate(
 			return current
 		}
 		if outcome.Completion != nil {
-			current = mergeCompletion(current, outcome.Completion)
+			current = agentproc.MergeResult(current, outcome.Completion)
 		}
 		if memoryFileExists(cwd, runID) {
 			return current
@@ -1568,32 +1434,6 @@ func (s *Spawner) runMemoryGate(
 	}
 
 	return current
-}
-
-// mergeCompletion combines an initial completion event with one from a
-// resumed session so final accounting reflects total cost, duration, and
-// turn count across all invocations. The result text and stop_reason
-// come from the resume (that's what the caller wants to report as the
-// final outcome), but cost and turns are summed.
-//
-// If either the resume's Result or StopReason is empty, the base's
-// values are preserved — partial resume outcomes shouldn't blank
-// fields that were already populated.
-func mergeCompletion(base, resume *runCompletion) *runCompletion {
-	merged := *base
-	merged.CostUSD += resume.CostUSD
-	merged.DurationMs += resume.DurationMs
-	merged.NumTurns += resume.NumTurns
-	if resume.IsError {
-		merged.IsError = true
-	}
-	if resume.Result != "" {
-		merged.Result = resume.Result
-	}
-	if resume.StopReason != "" {
-		merged.StopReason = resume.StopReason
-	}
-	return &merged
 }
 
 // materializePriorMemories writes any existing task_memory rows for the

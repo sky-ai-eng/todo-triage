@@ -1,4 +1,11 @@
-package delegate
+// Package agentproc invokes a headless `claude -p` subprocess and turns
+// its stream-json output into structured messages + a terminal Result.
+// It is the storage-neutral half of the runtime: it knows how to talk
+// to Claude Code and parse what comes back, but not where to put the
+// results. Callers wire it up with a Sink that decides persistence
+// (delegate writes to runs / run_messages; the curator runtime in
+// SKY-216 writes to its own tables).
+package agentproc
 
 import (
 	"encoding/json"
@@ -6,35 +13,42 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// streamState tracks the current assistant message being accumulated
-// across multiple NDJSON lines (thinking → text → tool_use all share one msg ID).
-type streamState struct {
+// StreamState tracks the current assistant message being accumulated
+// across multiple NDJSON lines (thinking → text → tool_use all share
+// one msg ID).
+type StreamState struct {
 	currentMsgID string
 	current      *domain.AgentMessage
 	sessionID    string // captured from the system/init event at stream start
 }
 
-func newStreamState() *streamState {
-	return &streamState{}
+// NewStreamState returns a fresh state ready for ParseLine.
+func NewStreamState() *StreamState {
+	return &StreamState{}
 }
 
 // SessionID returns the Claude Code session_id captured from the stream's
 // `system/init` event, or empty if that event hasn't been seen yet.
-// Used by the spawner to persist the id on the runs table so later `--resume`
-// invocations (write-gate retry, SKY-139 yield) can attach to the session.
-func (s *streamState) SessionID() string { return s.sessionID }
+// Callers persist this once it surfaces so later `--resume` invocations
+// can attach to the session.
+func (s *StreamState) SessionID() string { return s.sessionID }
 
 // flush returns the accumulated assistant message (if any) and resets state.
-func (s *streamState) flush() *domain.AgentMessage {
+func (s *StreamState) flush() *domain.AgentMessage {
 	msg := s.current
 	s.current = nil
 	s.currentMsgID = ""
 	return msg
 }
 
-// parseLine processes one NDJSON line from claude's stream-json output.
-// Returns messages ready to store and an optional run completion signal.
-func (s *streamState) parseLine(line []byte, runID string) ([]*domain.AgentMessage, *runCompletion) {
+// ParseLine processes one NDJSON line from claude's stream-json output.
+// Returns messages ready to store and an optional terminal Result.
+//
+// traceID is stamped onto every emitted message's RunID field — the
+// caller's choice of identifier (delegate runs use the agent run ID;
+// the curator wires its own message-group ID through). Storage
+// decisions live in the Sink, not here.
+func (s *StreamState) ParseLine(line []byte, traceID string) ([]*domain.AgentMessage, *Result) {
 	var raw map[string]any
 	if err := json.Unmarshal(line, &raw); err != nil {
 		return nil, nil
@@ -44,9 +58,9 @@ func (s *streamState) parseLine(line []byte, runID string) ([]*domain.AgentMessa
 
 	switch lineType {
 	case "system":
-		// system/init carries session_id we need for --resume. Other system
-		// subtypes are ignored — they're metadata for the harness, not
-		// content the spawner needs to persist.
+		// system/init carries session_id we need for --resume. Other
+		// system subtypes are ignored — they're metadata for the
+		// harness, not content the consumer needs to persist.
 		if subtype, _ := raw["subtype"].(string); subtype == "init" {
 			if sid, ok := raw["session_id"].(string); ok {
 				s.sessionID = sid
@@ -55,15 +69,15 @@ func (s *streamState) parseLine(line []byte, runID string) ([]*domain.AgentMessa
 		return nil, nil
 
 	case "assistant":
-		return s.handleAssistant(raw, runID), nil
+		return s.handleAssistant(raw, traceID), nil
 
 	case "user":
-		// Tool result — flush any pending assistant message first
+		// Tool result — flush any pending assistant message first.
 		var out []*domain.AgentMessage
 		if flushed := s.flush(); flushed != nil {
 			out = append(out, flushed)
 		}
-		if msg := parseToolResult(raw, runID); msg != nil {
+		if msg := parseToolResult(raw, traceID); msg != nil {
 			out = append(out, msg)
 		}
 		return out, nil
@@ -79,7 +93,7 @@ func (s *streamState) parseLine(line []byte, runID string) ([]*domain.AgentMessa
 	return nil, nil
 }
 
-func (s *streamState) handleAssistant(raw map[string]any, runID string) []*domain.AgentMessage {
+func (s *StreamState) handleAssistant(raw map[string]any, traceID string) []*domain.AgentMessage {
 	msgObj, ok := raw["message"].(map[string]any)
 	if !ok {
 		return nil
@@ -90,25 +104,22 @@ func (s *streamState) handleAssistant(raw map[string]any, runID string) []*domai
 		return nil
 	}
 
-	// If this is a new message ID, flush the previous one
 	var flushed []*domain.AgentMessage
 	if msgID != s.currentMsgID && s.current != nil {
 		flushed = append(flushed, s.flush())
 	}
 
-	// Initialize if needed
 	if s.current == nil {
 		model, _ := msgObj["model"].(string)
 		s.currentMsgID = msgID
 		s.current = &domain.AgentMessage{
-			RunID:   runID,
+			RunID:   traceID,
 			Role:    "assistant",
 			Subtype: "text",
 			Model:   model,
 		}
 	}
 
-	// Extract token usage (take latest — each line repeats cumulative usage)
 	if usage, ok := msgObj["usage"].(map[string]any); ok {
 		s.current.InputTokens = intPtr(usage, "input_tokens")
 		s.current.OutputTokens = intPtr(usage, "output_tokens")
@@ -116,7 +127,6 @@ func (s *streamState) handleAssistant(raw map[string]any, runID string) []*domai
 		s.current.CacheCreationTokens = intPtr(usage, "cache_creation_input_tokens")
 	}
 
-	// Process content blocks
 	contentBlocks, _ := msgObj["content"].([]any)
 	for _, block := range contentBlocks {
 		b, ok := block.(map[string]any)
@@ -126,7 +136,7 @@ func (s *streamState) handleAssistant(raw map[string]any, runID string) []*domai
 
 		switch b["type"] {
 		case "thinking":
-			// Skip thinking content — too verbose to store
+			// Skip — too verbose to store.
 
 		case "text":
 			text, _ := b["text"].(string)
@@ -145,7 +155,6 @@ func (s *streamState) handleAssistant(raw map[string]any, runID string) []*domai
 		}
 	}
 
-	// Check if this message is complete (stop_reason present = final turn)
 	if stopReason, _ := msgObj["stop_reason"].(string); stopReason != "" {
 		if msg := s.flush(); msg != nil {
 			flushed = append(flushed, msg)
@@ -155,7 +164,7 @@ func (s *streamState) handleAssistant(raw map[string]any, runID string) []*domai
 	return flushed
 }
 
-func parseToolResult(raw map[string]any, runID string) *domain.AgentMessage {
+func parseToolResult(raw map[string]any, traceID string) *domain.AgentMessage {
 	msgObj, ok := raw["message"].(map[string]any)
 	if !ok {
 		return nil
@@ -179,7 +188,6 @@ func parseToolResult(raw map[string]any, runID string) *domain.AgentMessage {
 	toolUseID, _ := b["tool_use_id"].(string)
 	isError, _ := b["is_error"].(bool)
 
-	// Fallback to top-level convenience field
 	if content == "" {
 		if r, ok := raw["tool_use_result"].(string); ok {
 			content = r
@@ -187,7 +195,7 @@ func parseToolResult(raw map[string]any, runID string) *domain.AgentMessage {
 	}
 
 	return &domain.AgentMessage{
-		RunID:      runID,
+		RunID:      traceID,
 		Role:       "tool",
 		Subtype:    "tool",
 		Content:    content,
@@ -196,7 +204,10 @@ func parseToolResult(raw map[string]any, runID string) *domain.AgentMessage {
 	}
 }
 
-type runCompletion struct {
+// Result is the terminal `result` event from a claude -p stream:
+// final accounting (cost, duration, turn count) plus the agent's
+// last message text and stop reason.
+type Result struct {
 	IsError    bool
 	DurationMs int
 	NumTurns   int
@@ -205,8 +216,8 @@ type runCompletion struct {
 	Result     string
 }
 
-func parseResult(raw map[string]any) *runCompletion {
-	rc := &runCompletion{}
+func parseResult(raw map[string]any) *Result {
+	rc := &Result{}
 	rc.IsError, _ = raw["is_error"].(bool)
 	if d, ok := raw["duration_ms"].(float64); ok {
 		rc.DurationMs = int(d)
