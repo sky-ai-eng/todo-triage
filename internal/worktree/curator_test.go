@@ -10,7 +10,7 @@ import (
 )
 
 // TestEnsureCuratorWorktree_FreshMaterializesAtExpectedPath pins the
-// layout contract: <projectDir>/repos/<owner>-<repo>/, checked out at
+// layout contract: <projectDir>/repos/<owner>/<repo>/, checked out at
 // the requested branch. SKY-217's frontend will encode the same path
 // when telling the agent where to look for source.
 func TestEnsureCuratorWorktree_FreshMaterializesAtExpectedPath(t *testing.T) {
