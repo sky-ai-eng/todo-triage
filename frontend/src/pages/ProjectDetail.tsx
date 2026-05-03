@@ -370,11 +370,16 @@ function PinnedReposInline({
       try {
         const res = await fetch('/api/repos')
         if (!res.ok) {
-          await readError(res, 'load repos')
+          const message = await readError(res, 'load repos')
+          if (!cancelled) toast.error(message)
           return
         }
         const data: Array<{ id: string }> = await res.json()
         if (!cancelled) setAvailable(data.map((r) => r.id))
+      } catch (err) {
+        if (!cancelled) {
+          toast.error(err instanceof Error ? err.message : 'Failed to load repos')
+        }
       } finally {
         if (!cancelled) setLoading(false)
       }
