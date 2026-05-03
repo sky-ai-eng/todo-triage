@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -21,6 +22,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/projectbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
@@ -140,6 +143,166 @@ func (s *Server) handleProjectGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, project)
+}
+
+type projectBundleGitHubProbe struct {
+	client *ghclient.Client
+}
+
+func (p projectBundleGitHubProbe) CloneURLForRepo(_ context.Context, owner, repo string) (string, error) {
+	if p.client == nil {
+		return "", errors.New("GitHub is not configured")
+	}
+	meta, err := p.client.GetRepoMeta(owner, repo)
+	if err != nil {
+		return "", err
+	}
+	if meta == nil {
+		return "", errors.New("repo metadata is missing")
+	}
+	return meta.CloneURL, nil
+}
+
+const (
+	projectBundleMaxUploadBytes = int64(1024 * 1024 * 1024) // 1GiB
+)
+
+func (s *Server) handleProjectExportPreview(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	preview, err := projectbundle.Preview(r.Context(), s.db, id)
+	if err != nil {
+		if errors.Is(err, projectbundle.ErrProjectNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "project not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, preview)
+}
+
+func (s *Server) handleProjectExport(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	project, err := db.GetProject(s.db, id)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if project == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "project not found"})
+		return
+	}
+	stream, err := projectbundle.Export(r.Context(), s.db, id)
+	if err != nil {
+		if errors.Is(err, projectbundle.ErrProjectNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "project not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	defer stream.Close()
+
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", projectBundleFilename(project.Name)))
+	if _, err := io.Copy(w, stream); err != nil {
+		log.Printf("[projects] export stream %s: %v", id, err)
+	}
+}
+
+func (s *Server) handleProjectImport(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, projectBundleMaxUploadBytes)
+	if err := r.ParseMultipartForm(64 << 20); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "multipart parse: " + err.Error()})
+		return
+	}
+	defer func() {
+		if r.MultipartForm != nil {
+			_ = r.MultipartForm.RemoveAll()
+		}
+	}()
+
+	file, _, err := r.FormFile("bundle")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bundle file is required (form field 'bundle')"})
+		return
+	}
+	defer file.Close()
+
+	size, err := file.Seek(0, io.SeekEnd)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to determine bundle size"})
+		return
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to rewind bundle"})
+		return
+	}
+
+	project, warnings, err := projectbundle.Import(
+		r.Context(),
+		s.db,
+		file,
+		size,
+		projectBundleGitHubProbe{client: s.ghClient},
+	)
+	if err != nil {
+		var dupNameErr *projectbundle.DuplicateNameError
+		if errors.As(err, &dupNameErr) {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error":   "duplicate_name",
+				"message": "rename or delete the existing project first",
+			})
+			return
+		}
+		var missingReposErr *projectbundle.MissingReposError
+		if errors.As(err, &missingReposErr) {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error":         "missing_repos",
+				"missing_repos": missingReposErr.Missing,
+			})
+			return
+		}
+		var unsupported *projectbundle.UnsupportedFormatError
+		if errors.As(err, &unsupported) || errors.Is(err, projectbundle.ErrManifestMissing) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"project":  project,
+		"warnings": warnings,
+	})
+}
+
+func projectBundleFilename(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "project"
+	}
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-' || r == '_' || r == ' ':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
+		}
+	}
+	safe := strings.TrimSpace(b.String())
+	if safe == "" {
+		safe = "project"
+	}
+	return safe + ".tfproject"
 }
 
 func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {

@@ -161,6 +161,36 @@ export interface Project {
   updated_at: string
 }
 
+export interface ProjectExportPreviewFile {
+  path: string
+  size_bytes: number
+}
+
+export interface ProjectExportPreview {
+  files: ProjectExportPreviewFile[]
+  total_size: number
+}
+
+export interface ProjectImportWarning {
+  code: string
+  repo?: string
+  message: string
+}
+
+export interface ProjectImportResult {
+  project: Project
+  warnings: ProjectImportWarning[]
+}
+
+export interface ProjectImportError {
+  error: string
+  message?: string
+  missing_repos?: Array<{
+    repo: string
+    error: string
+  }>
+}
+
 export interface KnowledgeFile {
   path: string
   /** RFC 6838 content type detected from the filename extension —

@@ -12,9 +12,10 @@ import {
   FileText,
   Image as ImageIcon,
   File as FileIcon,
+  Download,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
-import type { Project, KnowledgeFile, KnowledgeUploadResult } from '../types'
+import type { Project, KnowledgeFile, KnowledgeUploadResult, ProjectExportPreview } from '../types'
 import { readError } from '../lib/api'
 import { toast } from '../components/Toast/toastStore'
 import TrackerProjectPickers from '../components/TrackerProjectPickers'
@@ -43,6 +44,7 @@ export default function ProjectDetail() {
   const [project, setProject] = useState<Project | null>(null)
   const [loading, setLoading] = useState(true)
   const [missing, setMissing] = useState(false)
+  const [exportOpen, setExportOpen] = useState(false)
   // loadError distinguishes "really gone" (404 → missing=true) from
   // "transient failure" (5xx, network drop). Without it, a flaky
   // network request would land in the missing branch and the user
@@ -293,19 +295,34 @@ export default function ProjectDetail() {
         >
           <ArrowLeft size={14} /> Projects
         </Link>
-        <button
-          type="button"
-          onClick={handleDelete}
-          className="
-            inline-flex items-center gap-1.5 rounded-full
-            px-3 py-1.5 text-[12px]
-            text-dismiss/80 hover:text-dismiss hover:bg-dismiss/[0.08]
-            transition-all
-          "
-        >
-          <Trash2 size={12} />
-          Delete project
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setExportOpen(true)}
+            className="
+              inline-flex items-center gap-1.5 rounded-full
+              px-3 py-1.5 text-[12px]
+              text-text-secondary border border-border-subtle bg-white/60
+              hover:text-text-primary hover:bg-white transition-all
+            "
+          >
+            <Download size={12} />
+            Export
+          </button>
+          <button
+            type="button"
+            onClick={handleDelete}
+            className="
+              inline-flex items-center gap-1.5 rounded-full
+              px-3 py-1.5 text-[12px]
+              text-dismiss/80 hover:text-dismiss hover:bg-dismiss/[0.08]
+              transition-all
+            "
+          >
+            <Trash2 size={12} />
+            Delete project
+          </button>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -324,6 +341,13 @@ export default function ProjectDetail() {
 
         <ChatSlotPlaceholder />
       </div>
+      {exportOpen && (
+        <ProjectExportModal
+          projectId={project.id}
+          projectName={project.name}
+          onClose={() => setExportOpen(false)}
+        />
+      )}
     </div>
   )
 }
@@ -1103,6 +1127,179 @@ function KnowledgePanel({ projectId }: { projectId: string }) {
       )}
     </Card>
   )
+}
+
+function ProjectExportModal({
+  projectId,
+  projectName,
+  onClose,
+}: {
+  projectId: string
+  projectName: string
+  onClose: () => void
+}) {
+  const [preview, setPreview] = useState<ProjectExportPreview | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [exporting, setExporting] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    setError(null)
+    fetch(`/api/projects/${encodeURIComponent(projectId)}/export/preview`)
+      .then(async (res) => {
+        if (!res.ok) {
+          throw new Error(await readError(res, 'Failed to load export preview'))
+        }
+        return (await res.json()) as ProjectExportPreview
+      })
+      .then((data) => {
+        if (!cancelled) setPreview(data)
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : String(err))
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [projectId])
+
+  const startExport = async () => {
+    setExporting(true)
+    setError(null)
+    try {
+      const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/export`)
+      if (!res.ok) {
+        setError(await readError(res, 'Export failed'))
+        return
+      }
+      const blob = await res.blob()
+      const fallback = `${projectName || 'project'}.tfproject`
+      const filename = extractFilename(res.headers.get('Content-Disposition')) || fallback
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+      toast.success(`Exported "${projectName}"`)
+      onClose()
+    } catch (err) {
+      setError(`Export failed: ${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm"
+      onClick={() => {
+        if (!exporting) onClose()
+      }}
+    >
+      <div
+        className="
+          relative w-full max-w-2xl
+          rounded-2xl border border-border-glass
+          bg-gradient-to-br from-white/95 via-white/90 to-white/85
+          shadow-xl shadow-black/[0.08] backdrop-blur-xl
+          p-6
+        "
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="project-export-title"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h2
+          id="project-export-title"
+          className="text-lg font-semibold tracking-tight text-text-primary mb-1"
+        >
+          Review export contents
+        </h2>
+        <p className="text-[12px] text-text-tertiary mb-4">
+          This bundle includes everything listed below. Review before sharing.
+        </p>
+
+        {loading ? (
+          <div className="text-[12px] text-text-tertiary">Loading preview…</div>
+        ) : error ? (
+          <div className="rounded-lg border border-dismiss/20 bg-dismiss/5 px-3 py-2 text-[12px] text-dismiss">
+            {error}
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <div className="max-h-72 overflow-y-auto rounded-lg border border-border-subtle bg-white/60">
+              {(preview?.files || []).map((file) => (
+                <div
+                  key={file.path}
+                  className="flex items-center justify-between gap-3 border-b last:border-b-0 border-border-subtle px-3 py-2"
+                >
+                  <span className="text-[12px] text-text-primary truncate">{file.path}</span>
+                  <span className="text-[11px] text-text-tertiary tabular-nums shrink-0">
+                    {formatBytes(file.size_bytes)}
+                  </span>
+                </div>
+              ))}
+              {preview && preview.files.length === 0 && (
+                <div className="px-3 py-2 text-[12px] text-text-tertiary italic">
+                  No files to export.
+                </div>
+              )}
+            </div>
+            <div className="text-[12px] text-text-secondary">
+              Total size:{' '}
+              <span className="font-medium text-text-primary">
+                {formatBytes(preview?.total_size || 0)}
+              </span>
+            </div>
+          </div>
+        )}
+
+        <div className="flex justify-end gap-2 pt-5">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={exporting}
+            className="
+              rounded-full px-4 py-2 text-[13px]
+              text-text-secondary hover:text-text-primary hover:bg-black/[0.03]
+              transition-all disabled:opacity-50
+            "
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={startExport}
+            disabled={loading || exporting || !!error}
+            className="
+              rounded-full px-4 py-2 text-[13px] font-medium
+              bg-accent text-white hover:opacity-90
+              disabled:opacity-50 transition-all
+            "
+          >
+            {exporting ? 'Exporting…' : 'Download .tfproject'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function extractFilename(contentDisposition: string | null): string | null {
+  if (!contentDisposition) return null
+  const match = /filename="?([^"]+)"?/i.exec(contentDisposition)
+  if (!match || !match[1]) return null
+  return match[1]
 }
 
 // hasFiles guards drag handlers against drag operations that aren't

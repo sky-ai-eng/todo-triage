@@ -43,6 +43,36 @@ func doMultipartUpload(t *testing.T, s *Server, path string, files map[string][]
 	return rec
 }
 
+func doBundleImport(t *testing.T, s *Server, bundle []byte) *httptest.ResponseRecorder {
+	t.Helper()
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fw, err := mw.CreateFormFile("bundle", "project.tfproject")
+	if err != nil {
+		t.Fatalf("create bundle form file: %v", err)
+	}
+	if _, err := fw.Write(bundle); err != nil {
+		t.Fatalf("write bundle form file: %v", err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatalf("close multipart: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/projects/import", &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	rec := httptest.NewRecorder()
+	s.mux.ServeHTTP(rec, req)
+	return rec
+}
+
+func contains(items []string, want string) bool {
+	for _, item := range items {
+		if item == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestProjectCreate_Happy(t *testing.T) {
 	s := newTestServer(t)
 	seedConfiguredRepo(t, s, "sky-ai-eng", "triage-factory")
@@ -119,6 +149,106 @@ func TestProjectList_EmptyReturnsArray(t *testing.T) {
 	body := strings.TrimSpace(rec.Body.String())
 	if body != "[]" {
 		t.Errorf("body = %q, want []", body)
+	}
+}
+
+func TestProjectExportPreview_IncludesManifestAndKnowledge(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+
+	s := newTestServer(t)
+	id, err := db.CreateProject(s.db, domain.Project{Name: "Export me"})
+	if err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+	kbDir := filepath.Join(tempHome, ".triagefactory", "projects", id, "knowledge-base")
+	if err := os.MkdirAll(kbDir, 0o755); err != nil {
+		t.Fatalf("mkdir kb: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(kbDir, "notes.md"), []byte("hello"), 0o644); err != nil {
+		t.Fatalf("write notes: %v", err)
+	}
+
+	rec := doJSON(t, s, http.MethodGet, "/api/projects/"+id+"/export/preview", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var preview struct {
+		Files []struct {
+			Path string `json:"path"`
+		} `json:"files"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &preview); err != nil {
+		t.Fatalf("decode preview: %v", err)
+	}
+	paths := make([]string, 0, len(preview.Files))
+	for _, f := range preview.Files {
+		paths = append(paths, f.Path)
+	}
+	if !contains(paths, "manifest.yaml") {
+		t.Fatalf("preview is missing manifest.yaml: %v", paths)
+	}
+	if !contains(paths, "knowledge-base/notes.md") {
+		t.Fatalf("preview is missing knowledge file: %v", paths)
+	}
+}
+
+func TestProjectImport_RoundTripThroughHTTP(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+
+	source := newTestServer(t)
+	sourceID, err := db.CreateProject(source.db, domain.Project{
+		Name:        "HTTP Export Source",
+		Description: "from source",
+	})
+	if err != nil {
+		t.Fatalf("seed source project: %v", err)
+	}
+	kbDir := filepath.Join(tempHome, ".triagefactory", "projects", sourceID, "knowledge-base")
+	if err := os.MkdirAll(kbDir, 0o755); err != nil {
+		t.Fatalf("mkdir kb: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(kbDir, "readme.md"), []byte("import me"), 0o644); err != nil {
+		t.Fatalf("write knowledge file: %v", err)
+	}
+
+	exportRec := doJSON(t, source, http.MethodGet, "/api/projects/"+sourceID+"/export", nil)
+	if exportRec.Code != http.StatusOK {
+		t.Fatalf("export status = %d, want 200; body=%s", exportRec.Code, exportRec.Body.String())
+	}
+	if got := exportRec.Header().Get("Content-Type"); got != "application/zip" {
+		t.Fatalf("export content-type = %q, want application/zip", got)
+	}
+
+	target := newTestServer(t)
+	importRec := doBundleImport(t, target, exportRec.Body.Bytes())
+	if importRec.Code != http.StatusCreated {
+		t.Fatalf("import status = %d, want 201; body=%s", importRec.Code, importRec.Body.String())
+	}
+	var body struct {
+		Project  domain.Project      `json:"project"`
+		Warnings []map[string]string `json:"warnings"`
+	}
+	if err := json.Unmarshal(importRec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode import body: %v", err)
+	}
+	if body.Project.ID == "" || body.Project.ID == sourceID {
+		t.Fatalf("imported project id invalid: %q", body.Project.ID)
+	}
+	if body.Project.Name != "HTTP Export Source" {
+		t.Fatalf("imported project name = %q", body.Project.Name)
+	}
+	if len(body.Warnings) != 0 {
+		t.Fatalf("unexpected warnings: %+v", body.Warnings)
+	}
+	importedKB := filepath.Join(tempHome, ".triagefactory", "projects", body.Project.ID, "knowledge-base", "readme.md")
+	got, err := os.ReadFile(importedKB)
+	if err != nil {
+		t.Fatalf("read imported knowledge file: %v", err)
+	}
+	if string(got) != "import me" {
+		t.Fatalf("imported knowledge content mismatch: %q", string(got))
 	}
 }
 

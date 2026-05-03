@@ -1,0 +1,363 @@
+package projectbundle
+
+import (
+	"bytes"
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	_ "modernc.org/sqlite"
+
+	"github.com/sky-ai-eng/triage-factory/internal/curator"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/worktree"
+)
+
+type fakeProbe struct {
+	cloneURLs map[string]string
+	errs      map[string]error
+}
+
+func (p fakeProbe) CloneURLForRepo(_ context.Context, owner, repo string) (string, error) {
+	slug := owner + "/" + repo
+	if err, ok := p.errs[slug]; ok {
+		return "", err
+	}
+	if cloneURL, ok := p.cloneURLs[slug]; ok {
+		return cloneURL, nil
+	}
+	return "", fmt.Errorf("repo %s unreachable", slug)
+}
+
+func newBundleTestDB(t *testing.T) *sql.DB {
+	t.Helper()
+	database, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	database.SetMaxOpenConns(1)
+	database.SetMaxIdleConns(1)
+	t.Cleanup(func() { _ = database.Close() })
+	if err := db.Migrate(database); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if err := db.SeedEventTypes(database); err != nil {
+		t.Fatalf("seed event types: %v", err)
+	}
+	return database
+}
+
+type fixture struct {
+	projectID    string
+	projectName  string
+	sessionID    string
+	resolvedRoot string
+}
+
+func seedFixture(t *testing.T, database *sql.DB, projectName string) fixture {
+	t.Helper()
+
+	const slug = "sky-ai-eng/triage-factory"
+	const cloneURL = "https://github.com/sky-ai-eng/triage-factory.git"
+
+	if err := db.UpsertRepoProfile(database, domain.RepoProfile{
+		ID:          slug,
+		Owner:       "sky-ai-eng",
+		Repo:        "triage-factory",
+		CloneURL:    cloneURL,
+		ProfiledAt:  ptrTime(time.Now().UTC()),
+		Description: "fixture",
+	}); err != nil {
+		t.Fatalf("seed repo profile: %v", err)
+	}
+
+	sessionID := "11111111-2222-3333-4444-555555555555"
+	projectID, err := db.CreateProject(database, domain.Project{
+		Name:             projectName,
+		Description:      "Fixture project",
+		SummaryMD:        "summary",
+		SummaryStale:     true,
+		CuratorSessionID: sessionID,
+		PinnedRepos:      []string{slug},
+		JiraProjectKey:   "SKY",
+	})
+	if err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+
+	root, err := curator.KnowledgeDir(projectID)
+	if err != nil {
+		t.Fatalf("resolve knowledge dir: %v", err)
+	}
+	kbDir := filepath.Join(root, "knowledge-base")
+	if err := os.MkdirAll(kbDir, 0o755); err != nil {
+		t.Fatalf("mkdir knowledge dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(kbDir, "notes.md"), []byte("# Notes\nkeep this"), 0o644); err != nil {
+		t.Fatalf("write notes.md: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(kbDir, "diagram.png"), []byte{0x89, 0x50, 0x4e, 0x47}, 0o644); err != nil {
+		t.Fatalf("write diagram.png: %v", err)
+	}
+
+	reqID, err := db.CreateCuratorRequest(database, projectID, "hello")
+	if err != nil {
+		t.Fatalf("seed curator request: %v", err)
+	}
+	if err := db.MarkCuratorRequestRunning(database, reqID); err != nil {
+		t.Fatalf("mark request running: %v", err)
+	}
+	if _, err := db.CompleteCuratorRequest(database, reqID, "done", "", 0.12, 2400, 4); err != nil {
+		t.Fatalf("complete request: %v", err)
+	}
+	_, err = db.InsertCuratorMessage(database, &domain.CuratorMessage{
+		RequestID: reqID,
+		Role:      "assistant",
+		Subtype:   "text",
+		Content:   "done",
+		CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("insert curator message: %v", err)
+	}
+	if err := db.InsertPendingContext(database, projectID, sessionID, domain.ChangeTypePinnedRepos, `["sky-ai-eng/triage-factory"]`); err != nil {
+		t.Fatalf("insert pending context: %v", err)
+	}
+
+	resolvedRoot := worktree.ResolveClaudeProjectCwd(root)
+	encoded := worktree.EncodeClaudeProjectDir(resolvedRoot)
+	claudeRoot := filepath.Join(os.Getenv("HOME"), ".claude", "projects", encoded)
+	if err := os.MkdirAll(claudeRoot, 0o700); err != nil {
+		t.Fatalf("mkdir claude root: %v", err)
+	}
+	transcript := filepath.Join(claudeRoot, sessionID+".jsonl")
+	transcriptBody := strings.Join([]string{
+		fmt.Sprintf(`{"type":"permission-mode","sessionId":"%s"}`, sessionID),
+		fmt.Sprintf(`{"type":"system","subtype":"compact_boundary","content":"Conversation compacted","cwd":"%s","sessionId":"%s","compactMetadata":{"trigger":"manual"}}`, resolvedRoot, sessionID),
+		fmt.Sprintf(`{"type":"user","message":{"content":"Summary block"},"cwd":"%s","sessionId":"%s"}`, resolvedRoot, sessionID),
+		fmt.Sprintf(`{"type":"system","subtype":"compact_boundary","content":"Conversation compacted","cwd":"%s","sessionId":"%s","compactMetadata":{"trigger":"manual"}}`, resolvedRoot, sessionID),
+		"",
+	}, "\n")
+	if err := os.WriteFile(transcript, []byte(transcriptBody), 0o600); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	subagentDir := filepath.Join(claudeRoot, sessionID, "subagents")
+	toolDir := filepath.Join(claudeRoot, sessionID, "tool-results")
+	if err := os.MkdirAll(subagentDir, 0o700); err != nil {
+		t.Fatalf("mkdir subagent dir: %v", err)
+	}
+	if err := os.MkdirAll(toolDir, 0o700); err != nil {
+		t.Fatalf("mkdir tool-results dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(subagentDir, "agent-one.jsonl"), []byte(fmt.Sprintf(`{"sessionId":"%s","cwd":"%s","agentId":"agent-one"}`+"\n", sessionID, resolvedRoot)), 0o600); err != nil {
+		t.Fatalf("write subagent jsonl: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(subagentDir, "agent-one.meta.json"), []byte(fmt.Sprintf(`{"cwd":"%s","sessionId":"%s"}`, resolvedRoot, sessionID)), 0o600); err != nil {
+		t.Fatalf("write subagent meta: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(toolDir, "toolu_123.txt"), []byte(fmt.Sprintf("session=%s cwd=%s\n", sessionID, resolvedRoot)), 0o600); err != nil {
+		t.Fatalf("write tool-results: %v", err)
+	}
+
+	return fixture{
+		projectID:    projectID,
+		projectName:  projectName,
+		sessionID:    sessionID,
+		resolvedRoot: resolvedRoot,
+	}
+}
+
+func exportFixtureBundle(t *testing.T, database *sql.DB, projectID string) []byte {
+	t.Helper()
+	reader, err := Export(context.Background(), database, projectID)
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	defer reader.Close()
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read export: %v", err)
+	}
+	return data
+}
+
+func TestImport_RoundTripSessionTreeAndCompactions(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	sourceDB := newBundleTestDB(t)
+	f := seedFixture(t, sourceDB, "Roundtrip source")
+	bundleBytes := exportFixtureBundle(t, sourceDB, f.projectID)
+
+	targetDB := newBundleTestDB(t)
+	imported, warnings, err := Import(
+		context.Background(),
+		targetDB,
+		bytes.NewReader(bundleBytes),
+		int64(len(bundleBytes)),
+		fakeProbe{cloneURLs: map[string]string{"sky-ai-eng/triage-factory": "https://github.com/sky-ai-eng/triage-factory.git"}},
+	)
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected warnings: %+v", warnings)
+	}
+	if imported.ID == f.projectID {
+		t.Fatal("import should allocate a new project id")
+	}
+	if imported.CuratorSessionID == "" || imported.CuratorSessionID == f.sessionID {
+		t.Fatalf("expected fresh curator session id, got %q", imported.CuratorSessionID)
+	}
+
+	newRoot, err := curator.KnowledgeDir(imported.ID)
+	if err != nil {
+		t.Fatalf("resolve imported root: %v", err)
+	}
+	notes, err := os.ReadFile(filepath.Join(newRoot, "knowledge-base", "notes.md"))
+	if err != nil {
+		t.Fatalf("read imported notes: %v", err)
+	}
+	if string(notes) != "# Notes\nkeep this" {
+		t.Fatalf("imported notes mismatch: %q", string(notes))
+	}
+
+	newResolved := worktree.ResolveClaudeProjectCwd(newRoot)
+	newEncoded := worktree.EncodeClaudeProjectDir(newResolved)
+	newTranscript := filepath.Join(home, ".claude", "projects", newEncoded, imported.CuratorSessionID+".jsonl")
+	transcriptBody, err := os.ReadFile(newTranscript)
+	if err != nil {
+		t.Fatalf("read imported transcript: %v", err)
+	}
+	body := string(transcriptBody)
+	if strings.Count(body, `"subtype":"compact_boundary"`) != 2 {
+		t.Fatalf("expected two compact_boundary markers in imported transcript, got %d", strings.Count(body, `"subtype":"compact_boundary"`))
+	}
+	if strings.Contains(body, f.sessionID) {
+		t.Fatalf("imported transcript still contains old session id %s", f.sessionID)
+	}
+	if !strings.Contains(body, imported.CuratorSessionID) {
+		t.Fatalf("imported transcript missing new session id %s", imported.CuratorSessionID)
+	}
+	if strings.Contains(body, f.resolvedRoot) {
+		t.Fatalf("imported transcript still contains old cwd %s", f.resolvedRoot)
+	}
+	if !strings.Contains(body, newResolved) {
+		t.Fatalf("imported transcript missing rewritten cwd %s", newResolved)
+	}
+
+	subagentBody, err := os.ReadFile(filepath.Join(home, ".claude", "projects", newEncoded, imported.CuratorSessionID, "subagents", "agent-one.jsonl"))
+	if err != nil {
+		t.Fatalf("read imported subagent jsonl: %v", err)
+	}
+	if strings.Contains(string(subagentBody), f.sessionID) || strings.Contains(string(subagentBody), f.resolvedRoot) {
+		t.Fatalf("subagent jsonl did not rewrite old session/cwd: %s", string(subagentBody))
+	}
+	toolBody, err := os.ReadFile(filepath.Join(home, ".claude", "projects", newEncoded, imported.CuratorSessionID, "tool-results", "toolu_123.txt"))
+	if err != nil {
+		t.Fatalf("read imported tool result: %v", err)
+	}
+	if strings.Contains(string(toolBody), f.sessionID) || strings.Contains(string(toolBody), f.resolvedRoot) {
+		t.Fatalf("tool result did not rewrite old session/cwd: %s", string(toolBody))
+	}
+
+	reqs, err := db.ListCuratorRequestsByProject(targetDB, imported.ID)
+	if err != nil {
+		t.Fatalf("list imported requests: %v", err)
+	}
+	if len(reqs) != 1 {
+		t.Fatalf("expected 1 imported request, got %d", len(reqs))
+	}
+	msgs, err := db.ListCuratorMessagesByRequest(targetDB, reqs[0].ID)
+	if err != nil {
+		t.Fatalf("list imported messages: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 imported message, got %d", len(msgs))
+	}
+	pending, err := db.ListPendingContext(targetDB, imported.ID)
+	if err != nil {
+		t.Fatalf("list pending context: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("expected 1 pending context row, got %d", len(pending))
+	}
+	if pending[0].CuratorSessionID != imported.CuratorSessionID {
+		t.Fatalf("pending context session id = %q, want %q", pending[0].CuratorSessionID, imported.CuratorSessionID)
+	}
+}
+
+func TestImport_MissingReposAbortsWithoutWrites(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	sourceDB := newBundleTestDB(t)
+	f := seedFixture(t, sourceDB, "Missing repo source")
+	bundleBytes := exportFixtureBundle(t, sourceDB, f.projectID)
+
+	targetDB := newBundleTestDB(t)
+	_, _, err := Import(
+		context.Background(),
+		targetDB,
+		bytes.NewReader(bundleBytes),
+		int64(len(bundleBytes)),
+		fakeProbe{errs: map[string]error{"sky-ai-eng/triage-factory": errors.New("returned 404")}},
+	)
+	var missing *MissingReposError
+	if !errors.As(err, &missing) {
+		t.Fatalf("expected MissingReposError, got %v", err)
+	}
+	if len(missing.Missing) != 1 || missing.Missing[0].Repo != "sky-ai-eng/triage-factory" {
+		t.Fatalf("unexpected missing repos payload: %+v", missing.Missing)
+	}
+	projects, err := db.ListProjects(targetDB)
+	if err != nil {
+		t.Fatalf("list projects: %v", err)
+	}
+	if len(projects) != 0 {
+		t.Fatalf("import should not create projects on preflight failure, got %d", len(projects))
+	}
+}
+
+func TestImport_DuplicateNameAborts(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	sourceDB := newBundleTestDB(t)
+	f := seedFixture(t, sourceDB, "Duplicate Name")
+	bundleBytes := exportFixtureBundle(t, sourceDB, f.projectID)
+
+	targetDB := newBundleTestDB(t)
+	if _, err := db.CreateProject(targetDB, domain.Project{Name: "Duplicate Name"}); err != nil {
+		t.Fatalf("seed duplicate name: %v", err)
+	}
+	_, _, err := Import(
+		context.Background(),
+		targetDB,
+		bytes.NewReader(bundleBytes),
+		int64(len(bundleBytes)),
+		fakeProbe{cloneURLs: map[string]string{"sky-ai-eng/triage-factory": "https://github.com/sky-ai-eng/triage-factory.git"}},
+	)
+	var dup *DuplicateNameError
+	if !errors.As(err, &dup) {
+		t.Fatalf("expected DuplicateNameError, got %v", err)
+	}
+	projects, err := db.ListProjects(targetDB)
+	if err != nil {
+		t.Fatalf("list projects: %v", err)
+	}
+	if len(projects) != 1 {
+		t.Fatalf("duplicate-name import should not create rows, got %d", len(projects))
+	}
+}
+
+func ptrTime(t time.Time) *time.Time { return &t }

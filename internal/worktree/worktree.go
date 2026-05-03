@@ -97,6 +97,14 @@ func encodeClaudeProjectDir(resolvedAbs string) string {
 	return strings.NewReplacer("/", "-", ".", "-").Replace(resolvedAbs)
 }
 
+// EncodeClaudeProjectDir exposes Claude Code's cwd-encoding rule to
+// non-worktree packages that need to locate session artifacts (for
+// example project bundle import/export). Input must already be the
+// symlink-resolved absolute cwd.
+func EncodeClaudeProjectDir(resolvedAbs string) string {
+	return encodeClaudeProjectDir(resolvedAbs)
+}
+
 // claudeProjectEncoding combines symlink resolution and encoding for
 // callers that have an unresolved cwd. Returns the encoded name and
 // the resolved path. On EvalSymlinks failure (typically because the
