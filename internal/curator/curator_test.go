@@ -37,15 +37,34 @@ func seedProject(t *testing.T, database *sql.DB, name string) string {
 }
 
 // TestCurator_SendMessage_RejectsAfterShutdown pins the contract that
-// downstream HTTP handlers can rely on: once Shutdown is called, no
-// more requests get persisted, even if a handler races the stop.
+// downstream HTTP handlers can rely on: once Shutdown has been called,
+// SendMessage refuses the request AND, if a row was already inserted
+// before the closed check (which is the realistic interleaving — DB
+// write happens before getOrStartSession), that row is flipped to
+// cancelled rather than left dangling in `queued`.
 func TestCurator_SendMessage_RejectsAfterShutdown(t *testing.T) {
 	database := newTestDB(t)
+	projectID := seedProject(t, database, "p")
 	c := New(database, nil, "")
 	c.Shutdown()
 
-	if _, err := c.SendMessage("any", "hi"); err == nil {
-		t.Errorf("expected error after shutdown, got nil")
+	_, err := c.SendMessage(projectID, "hi")
+	if err == nil {
+		t.Fatal("expected error after shutdown, got nil")
+	}
+
+	// The row that SendMessage persisted before the closed check
+	// must not be left in `queued` — otherwise it would dangle
+	// forever (no goroutine ever picks it up).
+	requests, err := db.ListCuratorRequestsByProject(database, projectID)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(requests) != 1 {
+		t.Fatalf("expected 1 request row, got %d", len(requests))
+	}
+	if requests[0].Status != "cancelled" {
+		t.Errorf("post-shutdown row status = %q, want cancelled", requests[0].Status)
 	}
 }
 

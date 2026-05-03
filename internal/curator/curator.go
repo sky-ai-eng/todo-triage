@@ -58,20 +58,26 @@ func (c *Curator) UpdateCredentials(model string) {
 // at the handler before reaching us); the project must exist
 // (handler checks). This function does not validate either —
 // callers are trusted to pre-check.
+//
+// Shutdown safety: getOrStartSession holds c.mu and refuses to
+// hand back a session once c.closed flips, so a SendMessage that
+// races Shutdown either (a) wins the lock first and gets a session
+// that Shutdown then tears down — the session ctx kills the dispatch
+// before it spawns claude — or (b) loses the lock and gets nil back,
+// in which case the persisted row is flipped to cancelled before we
+// return. Either way, no message reaches a non-running goroutine.
 func (c *Curator) SendMessage(projectID, content string) (string, error) {
-	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-		return "", errors.New("curator is shut down")
-	}
-	c.mu.Unlock()
-
 	requestID, err := db.CreateCuratorRequest(c.database, projectID, content)
 	if err != nil {
 		return "", fmt.Errorf("create curator request: %w", err)
 	}
 
 	session := c.getOrStartSession(projectID)
+	if session == nil {
+		_, _ = db.MarkCuratorRequestCancelledIfActive(c.database, requestID, "curator is shut down")
+		return "", errors.New("curator is shut down")
+	}
+
 	select {
 	case session.queue <- requestID:
 		c.broadcastRequestUpdate(projectID, requestID, "queued")
@@ -172,10 +178,17 @@ func (c *Curator) cancelQueuedRows(projectID, reason string) {
 // getOrStartSession returns the per-project session, starting a new
 // goroutine if needed. Holding c.mu across the start prevents two
 // concurrent SendMessage calls for the same project from spawning
-// two goroutines.
+// two goroutines, and folds the closed-check into the same critical
+// section as the map mutation so a racing Shutdown can't observe a
+// "no sessions to stop" snapshot while a fresh session is being
+// inserted. Returns nil iff the curator has been shut down — caller
+// flips the persisted row to cancelled so it doesn't dangle.
 func (c *Curator) getOrStartSession(projectID string) *projectSession {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.closed {
+		return nil
+	}
 	if existing, ok := c.sessions[projectID]; ok {
 		return existing
 	}

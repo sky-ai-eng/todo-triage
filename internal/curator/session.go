@@ -139,27 +139,32 @@ func (s *projectSession) dispatch(requestID string) {
 		msgCancel()
 	}()
 
+	// Pre-flight model check before we spawn claude. The Curator
+	// constructor takes "" until config loads (mirroring Spawner),
+	// and a SendMessage that lands during that window would
+	// otherwise reach agentproc.Run and emit a confusing
+	// "missing --model" error from claude itself. Fail the row up
+	// front so the user sees a clear message.
+	if model == "" {
+		s.failRequest(requestID, "curator AI model is not configured")
+		return
+	}
+
 	systemPrompt := buildSystemPrompt(project.Name)
 
-	outcome, runErr := func() (agentproc.RunOutcome, error) {
-		if model == "" {
-			return agentproc.RunOutcome{}, errors.New("curator AI model is not configured")
-		}
-
-		return agentproc.Run(msgCtx, agentproc.RunOptions{
-			Cwd:          cwd,
-			Model:        model,
-			SessionID:    project.CuratorSessionID,
-			Message:      req.UserInput,
-			SystemPrompt: systemPrompt,
-			AllowedTools: BuildAllowedTools(),
-			ExtraEnv: []string{
-				"TRIAGE_FACTORY_CURATOR_PROJECT_ID=" + s.projectID,
-				"TRIAGE_FACTORY_CURATOR_REQUEST_ID=" + requestID,
-			},
-			TraceID: requestID,
-		}, newRequestSink(s.curator, s.projectID, requestID))
-	}()
+	outcome, runErr := agentproc.Run(msgCtx, agentproc.RunOptions{
+		Cwd:          cwd,
+		Model:        model,
+		SessionID:    project.CuratorSessionID,
+		Message:      req.UserInput,
+		SystemPrompt: systemPrompt,
+		AllowedTools: BuildAllowedTools(),
+		ExtraEnv: []string{
+			"TRIAGE_FACTORY_CURATOR_PROJECT_ID=" + s.projectID,
+			"TRIAGE_FACTORY_CURATOR_REQUEST_ID=" + requestID,
+		},
+		TraceID: requestID,
+	}, newRequestSink(s.curator, s.projectID, requestID))
 
 	// Cancellation observed → terminal cancelled status. Use msgCtx
 	// rather than s.ctx so a project-wide shutdown that fires

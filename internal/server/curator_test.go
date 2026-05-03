@@ -63,11 +63,16 @@ func TestHandleCuratorSend_404OnMissingProject(t *testing.T) {
 }
 
 func TestHandleCuratorSend_AcceptedReturnsRequestID(t *testing.T) {
-	// 202 + a request_id is the contract the Projects page (SKY-217)
-	// will rely on. We cancel the project immediately after to stop
-	// the goroutine before it actually invokes claude.
+	// 202 + a non-empty request_id + a persisted row is the HTTP
+	// contract the Projects page (SKY-217) will rely on. The
+	// goroutine's dispatch behavior (running → terminal flips) is
+	// covered by the curator package's own tests; asserting on it
+	// here would be a flake — on hosts with `claude` on PATH it
+	// could spawn and stream before this test reads the row, on
+	// hosts without it the row could fail-fast to the failed
+	// status. Either way, the row's *terminal-ness* is not the
+	// HTTP handler's contract.
 	srv, c, projectID := curatorTestSetup(t)
-	defer c.CancelProject(projectID)
 
 	rr := doJSON(t, srv, http.MethodPost, "/api/projects/"+projectID+"/curator/messages", map[string]string{"content": "hello"})
 	if rr.Code != http.StatusAccepted {
@@ -81,17 +86,19 @@ func TestHandleCuratorSend_AcceptedReturnsRequestID(t *testing.T) {
 		t.Error("empty request_id in response")
 	}
 
-	// Row must exist with status queued or running (depending on
-	// goroutine scheduling) but must not be terminal.
+	// Tear down synchronously before the row is read so the
+	// project's goroutine doesn't keep racing the assertion.
+	// CancelProject blocks on the goroutine's exit (curator's
+	// shutdown contract) so by the time it returns no further
+	// status writes can land on the row.
+	c.CancelProject(projectID)
+
 	got, err := db.GetCuratorRequest(srv.db, resp.RequestID)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
 	if got == nil {
 		t.Fatal("request row not persisted")
-	}
-	if got.IsTerminal() {
-		t.Errorf("request landed terminal too quickly: status=%q", got.Status)
 	}
 }
 
