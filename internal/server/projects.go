@@ -1125,7 +1125,7 @@ func (s *Server) handleProjectKnowledgeDelete(w http.ResponseWriter, r *http.Req
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to remove file"})
 		return
 	}
-	if _, err := s.db.Exec(`UPDATE projects SET summary_stale = TRUE WHERE id = ?`, id); err != nil {
+	if _, err := s.db.Exec(`UPDATE projects SET summary_stale = TRUE, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, id); err != nil {
 		log.Printf("[projects] knowledge delete: mark summary_stale for %s: %v", id, err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to update project state"})
 		return
