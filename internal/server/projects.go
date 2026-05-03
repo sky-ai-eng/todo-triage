@@ -510,7 +510,7 @@ func queuePendingContextChanges(database *sql.DB, before, after domain.Project) 
 	if sessionID == "" {
 		return
 	}
-	if !stringSliceEqual(before.PinnedRepos, after.PinnedRepos) {
+	if !pinnedReposSetEqual(before.PinnedRepos, after.PinnedRepos) {
 		baseline, err := curator.EncodeStringSliceBaseline(before.PinnedRepos)
 		if err != nil {
 			log.Printf("[projects] encode pinned-repos baseline for %s: %v", before.ID, err)
@@ -536,16 +536,26 @@ func queuePendingContextChanges(database *sql.DB, before, after domain.Project) 
 	}
 }
 
-// stringSliceEqual is a deep-equality check that treats nil and []string{}
-// as the same value — the validator normalizes either to an empty slice
-// before reaching this point, but using equal-to-zero here is robust
-// against future loosening.
-func stringSliceEqual(a, b []string) bool {
+// pinnedReposSetEqual compares two pinned-repo slices as sets — order
+// is irrelevant. The diff renderer in the curator package treats
+// pinned_repos as a set (added/removed semantics), so a PATCH that only
+// reorders the list produces no rendered diff. Without the set-equal
+// check here we'd queue a pending row that goes through claim/render/
+// finalize and produces an empty note — wasted I/O and a noisy audit
+// trail. nil and empty are equivalent.
+func pinnedReposSetEqual(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	for i := range a {
-		if a[i] != b[i] {
+	if len(a) == 0 {
+		return true
+	}
+	aSorted := append([]string(nil), a...)
+	bSorted := append([]string(nil), b...)
+	sort.Strings(aSorted)
+	sort.Strings(bSorted)
+	for i := range aSorted {
+		if aSorted[i] != bSorted[i] {
 			return false
 		}
 	}

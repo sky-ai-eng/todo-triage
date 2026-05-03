@@ -104,9 +104,12 @@ func TestConsumePendingContext_ClaimsAndReturnsRows(t *testing.T) {
 		t.Fatalf("insert: %v", err)
 	}
 
-	claimed, err := db.ConsumePendingContext(database, projectID, sessionID, requestID)
+	project, claimed, err := db.ConsumePendingContext(database, projectID, requestID)
 	if err != nil {
 		t.Fatalf("consume: %v", err)
+	}
+	if project == nil {
+		t.Fatal("expected project to be returned alongside claims")
 	}
 	if len(claimed) != 1 {
 		t.Fatalf("expected 1 claimed row, got %d", len(claimed))
@@ -120,7 +123,7 @@ func TestConsumePendingContext_ClaimsAndReturnsRows(t *testing.T) {
 
 	// Second consume sees no pending rows — first call drained them.
 	requestID2, _ := db.CreateCuratorRequest(database, projectID, "again")
-	again, err := db.ConsumePendingContext(database, projectID, sessionID, requestID2)
+	_, again, err := db.ConsumePendingContext(database, projectID, requestID2)
 	if err != nil {
 		t.Fatalf("second consume: %v", err)
 	}
@@ -129,30 +132,130 @@ func TestConsumePendingContext_ClaimsAndReturnsRows(t *testing.T) {
 	}
 }
 
-// TestConsumePendingContext_DifferentSessionIsNoop checks that consume
-// scopes by session: a pending row for session A is not picked up by
-// a dispatch on session B (which happens after a session reset).
-func TestConsumePendingContext_DifferentSessionIsNoop(t *testing.T) {
+// TestConsumePendingContext_ScopesToCurrentSession verifies the helper
+// only claims rows for whatever session is currently set on the
+// project. A row left over from an older session id (post-reset) is
+// not touched, even though it sits in the same project.
+func TestConsumePendingContext_ScopesToCurrentSession(t *testing.T) {
 	database := newPendingContextDB(t)
-	projectID, sessionID := seedProjectWithSession(t, database)
+	projectID, _ := seedProjectWithSession(t, database)
 	requestID, _ := db.CreateCuratorRequest(database, projectID, "hi")
 
-	if err := db.InsertPendingContext(database, projectID, sessionID, domain.ChangeTypePinnedRepos, `["a/b"]`); err != nil {
+	// Row left over from a different session id. With session-1 as
+	// the project's current session id, this row should be invisible
+	// to consume.
+	if err := db.InsertPendingContext(database, projectID, "other-session", domain.ChangeTypePinnedRepos, `["a/b"]`); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 
-	claimed, err := db.ConsumePendingContext(database, projectID, "different-session", requestID)
+	_, claimed, err := db.ConsumePendingContext(database, projectID, requestID)
 	if err != nil {
 		t.Fatalf("consume: %v", err)
 	}
 	if len(claimed) != 0 {
-		t.Errorf("session scoping broken: claimed %d rows from a different session", len(claimed))
+		t.Errorf("session scoping broken: claimed %d rows from a foreign session", len(claimed))
 	}
 
-	// Original row should still be pending.
+	// Original row should still be pending (untouched).
 	rows, _ := db.ListPendingContext(database, projectID)
 	if len(rows) != 1 || rows[0].ConsumedAt != nil {
-		t.Errorf("original row should still be pending, got %+v", rows)
+		t.Errorf("foreign-session row should still be pending, got %+v", rows)
+	}
+}
+
+// TestConsumePendingContext_NoSessionYet confirms a session-less
+// project (no first message ever) returns the project with no claims
+// and no error. The PATCH handler short-circuits on empty session id
+// so there should never be rows to claim, but the helper still has
+// to be safe to call.
+func TestConsumePendingContext_NoSessionYet(t *testing.T) {
+	database := newPendingContextDB(t)
+	id, err := db.CreateProject(database, domain.Project{Name: "p"})
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	requestID, _ := db.CreateCuratorRequest(database, id, "hi")
+
+	project, claimed, err := db.ConsumePendingContext(database, id, requestID)
+	if err != nil {
+		t.Fatalf("consume on session-less project: %v", err)
+	}
+	if project == nil {
+		t.Fatal("expected project, got nil")
+	}
+	if project.CuratorSessionID != "" {
+		t.Errorf("CuratorSessionID = %q, want empty", project.CuratorSessionID)
+	}
+	if len(claimed) != 0 {
+		t.Errorf("session-less project produced %d claims (expected 0)", len(claimed))
+	}
+}
+
+// TestConsumePendingContext_MissingProject documents the contract: a
+// project that disappears between the dispatch's earlier checks and
+// the consume call yields (nil, empty, nil) so the caller can surface
+// the missing project as a request failure cleanly.
+func TestConsumePendingContext_MissingProject(t *testing.T) {
+	database := newPendingContextDB(t)
+	project, claimed, err := db.ConsumePendingContext(database, "no-such-project", "no-such-request")
+	if err != nil {
+		t.Fatalf("consume on missing project: %v", err)
+	}
+	if project != nil {
+		t.Errorf("expected nil project, got %+v", project)
+	}
+	if len(claimed) != 0 {
+		t.Errorf("expected no claims on missing project, got %+v", claimed)
+	}
+}
+
+// TestConsumePendingContext_ReturnsCurrentProjectState is the SKY-224
+// race regression test. Before the fix, dispatch read the project at
+// T0, a PATCH landed at T0.5 (queueing a pending row baseline=T0),
+// and then ConsumePendingContext claimed that row at T1 — the diff
+// against the dispatch's stale T0 envelope saw no change, suppressed
+// the note, and finalize-on-done dropped the row, silently losing
+// the user's delta. The fix: ConsumePendingContext reads the project
+// inside the same TX as the consume, so the caller's downstream diff
+// sees post-PATCH state matching the row's baseline anchor.
+//
+// We simulate the race by inserting a pending row baselined at the
+// pre-PATCH state, then mutating the project to the post-PATCH
+// state, then consuming. The returned project must reflect the
+// mutation — proving the helper read project state at consume time
+// rather than at row-insert time.
+func TestConsumePendingContext_ReturnsCurrentProjectState(t *testing.T) {
+	database := newPendingContextDB(t)
+	projectID, sessionID := seedProjectWithSession(t, database)
+	requestID, _ := db.CreateCuratorRequest(database, projectID, "hi")
+
+	// Queue a delta whose baseline is "[]" (project pre-PATCH state).
+	if err := db.InsertPendingContext(database, projectID, sessionID, domain.ChangeTypePinnedRepos, `[]`); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	// Apply the PATCH the row was queued for: the project's
+	// pinned_repos transitions from [] to [a/b].
+	before, err := db.GetProject(database, projectID)
+	if err != nil || before == nil {
+		t.Fatalf("read project: %v", err)
+	}
+	updated := *before
+	updated.PinnedRepos = []string{"a/b"}
+	if err := db.UpdateProject(database, updated); err != nil {
+		t.Fatalf("update project: %v", err)
+	}
+
+	// Consume should see the post-PATCH state, not the pre-PATCH state.
+	project, claimed, err := db.ConsumePendingContext(database, projectID, requestID)
+	if err != nil {
+		t.Fatalf("consume: %v", err)
+	}
+	if len(claimed) != 1 {
+		t.Fatalf("expected 1 claim, got %d", len(claimed))
+	}
+	if project == nil || len(project.PinnedRepos) != 1 || project.PinnedRepos[0] != "a/b" {
+		t.Errorf("project state stale at consume time: %+v", project)
 	}
 }
 
@@ -167,7 +270,7 @@ func TestFinalizePendingContext_DeletesConsumedRows(t *testing.T) {
 
 	_ = db.InsertPendingContext(database, projectID, sessionID, domain.ChangeTypePinnedRepos, `["a/b"]`)
 	_ = db.InsertPendingContext(database, projectID, sessionID, domain.ChangeTypeJiraProjectKey, `null`)
-	if _, err := db.ConsumePendingContext(database, projectID, sessionID, requestID); err != nil {
+	if _, _, err := db.ConsumePendingContext(database, projectID, requestID); err != nil {
 		t.Fatalf("consume: %v", err)
 	}
 	if err := db.FinalizePendingContext(database, requestID); err != nil {
@@ -188,7 +291,7 @@ func TestRevertPendingContext_RestoresClaimedRows(t *testing.T) {
 	requestID, _ := db.CreateCuratorRequest(database, projectID, "hi")
 
 	_ = db.InsertPendingContext(database, projectID, sessionID, domain.ChangeTypePinnedRepos, `["a/b"]`)
-	if _, err := db.ConsumePendingContext(database, projectID, sessionID, requestID); err != nil {
+	if _, _, err := db.ConsumePendingContext(database, projectID, requestID); err != nil {
 		t.Fatalf("consume: %v", err)
 	}
 	if err := db.RevertPendingContext(database, requestID); err != nil {
@@ -196,7 +299,7 @@ func TestRevertPendingContext_RestoresClaimedRows(t *testing.T) {
 	}
 
 	requestID2, _ := db.CreateCuratorRequest(database, projectID, "retry")
-	again, err := db.ConsumePendingContext(database, projectID, sessionID, requestID2)
+	_, again, err := db.ConsumePendingContext(database, projectID, requestID2)
 	if err != nil {
 		t.Fatalf("re-consume: %v", err)
 	}
@@ -221,7 +324,7 @@ func TestRevertPendingContext_MergesMidDispatchPATCH(t *testing.T) {
 
 	// Earliest baseline (oldest unconsumed).
 	_ = db.InsertPendingContext(database, projectID, sessionID, domain.ChangeTypePinnedRepos, `["original"]`)
-	if _, err := db.ConsumePendingContext(database, projectID, sessionID, requestID); err != nil {
+	if _, _, err := db.ConsumePendingContext(database, projectID, requestID); err != nil {
 		t.Fatalf("consume: %v", err)
 	}
 

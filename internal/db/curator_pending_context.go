@@ -2,7 +2,6 @@ package db
 
 import (
 	"database/sql"
-	"errors"
 	"fmt"
 	"time"
 
@@ -35,21 +34,67 @@ func InsertPendingContext(database *sql.DB, projectID, sessionID, changeType, ba
 }
 
 // ConsumePendingContext atomically claims every unconsumed row for
-// (projectID, sessionID), tagging them with requestID + the current
-// timestamp, and returns them ordered by created_at so the caller can
-// render them in the order they were queued.
+// the given project+request and returns them alongside a fresh
+// snapshot of the project — both reads happen inside the same
+// transaction so the diff at the call site is computed against
+// project state that is consistent with the rows being returned. A
+// PATCH that lands between an earlier `db.GetProject` and this call
+// (and queues a brand-new pending row baselined at the value the
+// dispatch already saw) would otherwise be lost: consume claims it,
+// the diff against the dispatch's stale envelope sees no change, and
+// the row is finalized on `done` having delivered nothing. Reading
+// the project inside the consume TX closes that window — the caller
+// uses the returned *domain.Project for every downstream decision
+// (envelope render, pinned-repo materialization, diff rendering) and
+// the row's baseline lines up with the value the diff is computed
+// against.
 //
-// The UPDATE-then-SELECT runs in a single immediate transaction so a
-// PATCH that lands during the window cannot be claimed twice, and the
-// caller observes exactly the rows it owns. Returns an empty slice
-// (not nil) when there is nothing pending — callers can range over
-// the result without a nil-check.
-func ConsumePendingContext(database *sql.DB, projectID, sessionID, requestID string) ([]domain.CuratorPendingContext, error) {
+// Locking semantics: the first statement in the TX is the UPDATE,
+// which causes SQLite to upgrade to a RESERVED lock immediately, so
+// any concurrent PATCH that's also a writer waits for COMMIT. The
+// follow-up SELECTs inside the TX therefore see a consistent picture.
+// The pool is sized to MaxOpenConns=1 in production so concurrent TXs
+// are serialized at the Go layer too, but the TX-local consistency
+// matters for correctness regardless of pool size.
+//
+// Session id is read from the project row inside the TX rather than
+// taken as a parameter so the consume scopes to whatever session is
+// currently set on the project, even if the caller has a stale view
+// of it. An empty session id (project never chatted with) yields a
+// no-op consume — the next dispatch's static envelope renders fresh
+// values directly. Returns (nil project, nil rows, nil error) when
+// the project no longer exists; the caller decides whether to fail
+// the request.
+func ConsumePendingContext(database *sql.DB, projectID, requestID string) (*domain.Project, []domain.CuratorPendingContext, error) {
 	tx, err := database.Begin()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer tx.Rollback()
+
+	project, err := scanProject(tx.QueryRow(`
+		SELECT id, name, description, summary_md, summary_stale, curator_session_id, pinned_repos, jira_project_key, linear_project_key, created_at, updated_at
+		FROM projects WHERE id = ?
+	`, projectID))
+	if err != nil {
+		return nil, nil, fmt.Errorf("read project: %w", err)
+	}
+	if project == nil {
+		// Project disappeared between the dispatch's earlier checks and
+		// here. The caller will surface this as a request failure; we
+		// return cleanly so the deferred Rollback fires without noise.
+		return nil, []domain.CuratorPendingContext{}, nil
+	}
+	if project.CuratorSessionID == "" {
+		// No session yet — there cannot be any pending rows, since the
+		// PATCH handler short-circuits on empty session id. Skip the
+		// UPDATE/SELECT entirely and return the fresh project so the
+		// caller can still use it for envelope rendering.
+		if err := tx.Commit(); err != nil {
+			return nil, nil, err
+		}
+		return project, []domain.CuratorPendingContext{}, nil
+	}
 
 	now := time.Now().UTC()
 	if _, err := tx.Exec(`
@@ -58,8 +103,8 @@ func ConsumePendingContext(database *sql.DB, projectID, sessionID, requestID str
 		 WHERE project_id = ?
 		   AND curator_session_id = ?
 		   AND consumed_at IS NULL
-	`, now, requestID, projectID, sessionID); err != nil {
-		return nil, fmt.Errorf("claim pending rows: %w", err)
+	`, now, requestID, projectID, project.CuratorSessionID); err != nil {
+		return nil, nil, fmt.Errorf("claim pending rows: %w", err)
 	}
 
 	rows, err := tx.Query(`
@@ -70,7 +115,7 @@ func ConsumePendingContext(database *sql.DB, projectID, sessionID, requestID str
 		 ORDER BY created_at ASC, id ASC
 	`, requestID)
 	if err != nil {
-		return nil, fmt.Errorf("read claimed rows: %w", err)
+		return nil, nil, fmt.Errorf("read claimed rows: %w", err)
 	}
 	defer rows.Close()
 
@@ -78,17 +123,17 @@ func ConsumePendingContext(database *sql.DB, projectID, sessionID, requestID str
 	for rows.Next() {
 		row, err := scanPendingContext(rows)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		out = append(out, row)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return out, nil
+	return project, out, nil
 }
 
 // FinalizePendingContext deletes every row consumed by requestID. Called
@@ -193,6 +238,12 @@ func ListPendingContext(database *sql.DB, projectID string) ([]domain.CuratorPen
 	return out, rows.Err()
 }
 
+// scanPendingContext is rows-only — it doesn't paper over sql.ErrNoRows
+// because the only callers iterate via rows.Next() (which surfaces
+// "no row" as a false return, never as ErrNoRows). Hiding ErrNoRows
+// here would silently swallow the error if a future caller
+// mistakenly used QueryRow.Scan; surfacing it lets the misuse
+// produce a real, visible error instead.
 func scanPendingContext(scanner interface {
 	Scan(dest ...any) error
 }) (domain.CuratorPendingContext, error) {
@@ -205,9 +256,6 @@ func scanPendingContext(scanner interface {
 		&row.ID, &row.ProjectID, &row.CuratorSessionID, &row.ChangeType,
 		&row.BaselineValue, &consumedAt, &consumedBy, &row.CreatedAt,
 	); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return domain.CuratorPendingContext{}, nil
-		}
 		return domain.CuratorPendingContext{}, err
 	}
 	if consumedAt.Valid {

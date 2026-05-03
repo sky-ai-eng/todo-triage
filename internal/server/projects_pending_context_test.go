@@ -151,6 +151,44 @@ func TestProjectPatch_CoalescesRepeatedPATCHes(t *testing.T) {
 	}
 }
 
+// TestProjectPatch_NoQueueOnPureReorder verifies that pinned_repos is
+// treated as a set on both sides of the diff: a PATCH that only
+// reorders the existing list should not queue a row, since the
+// curator-side renderer would compute an empty add/remove diff and
+// the row would round-trip through claim/render/finalize having
+// produced nothing. Avoiding the wasted I/O at the queue side keeps
+// the audit trail and the consume path quiet.
+func TestProjectPatch_NoQueueOnPureReorder(t *testing.T) {
+	s := newTestServer(t)
+	seedConfiguredRepo(t, s, "sky-ai-eng", "triage-factory")
+	seedConfiguredRepo(t, s, "sky-ai-eng", "another")
+	id, _ := seedProjectWithSessionForPatch(t, s)
+
+	// Seed a known order via direct DB write so the comparison below
+	// is unambiguously a reorder.
+	if err := db.UpdateProject(s.db, domain.Project{
+		ID:               id,
+		Name:             "P",
+		PinnedRepos:      []string{"sky-ai-eng/triage-factory", "sky-ai-eng/another"},
+		CuratorSessionID: "session-1",
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// PATCH with the same set in reverse order.
+	rec := doJSON(t, s, http.MethodPatch, "/api/projects/"+id, map[string]any{
+		"pinned_repos": []string{"sky-ai-eng/another", "sky-ai-eng/triage-factory"},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+
+	rows, _ := db.ListPendingContext(s.db, id)
+	if len(rows) != 0 {
+		t.Errorf("reorder PATCH queued %d rows (set semantics broken): %+v", len(rows), rows)
+	}
+}
+
 // TestProjectPatch_QueuesJiraChange exercises the tracker side. Linear
 // is rejected by the validator (integration not yet shipped), so we
 // only test that path indirectly via clearing — direct setting cannot

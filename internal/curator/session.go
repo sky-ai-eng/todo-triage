@@ -147,9 +147,27 @@ func (s *projectSession) dispatch(requestID string) {
 		return
 	}
 
-	project, err := db.GetProject(s.curator.database, s.projectID)
+	// Consume pending context-change rows AND read the project state in
+	// one transaction. This is intentional: the diff at the bottom of
+	// this function compares each pending row's baseline against the
+	// project's current value, and if those two reads were independent
+	// a PATCH that landed between them could be claimed here while the
+	// envelope (built from the older read) showed values matching the
+	// baseline — the diff would suppress the note, finalize on `done`,
+	// and the user's delta would be lost. ConsumePendingContext returns
+	// the project state alongside the claimed rows so every downstream
+	// step (materialize, envelope render, diff) sees the same snapshot.
+	//
+	// Two-phase consume: rows are *claimed* here (consumed_at +
+	// consumed_by_request_id stamped) but not deleted. On terminal
+	// `done` we finalize (purge); on `cancelled` or `failed` we
+	// revert (un-consume) so a transient agentproc failure doesn't
+	// silently lose the user's deltas. The merge logic in
+	// RevertPendingContext handles the case where a NEW PATCH lands
+	// during dispatch.
+	project, pending, err := db.ConsumePendingContext(s.curator.database, s.projectID, requestID)
 	if err != nil {
-		s.failRequest(requestID, fmt.Sprintf("load project: %v", err))
+		s.failRequest(requestID, fmt.Sprintf("consume pending context: %v", err))
 		return
 	}
 	if project == nil {
@@ -171,6 +189,7 @@ func (s *projectSession) dispatch(requestID string) {
 		// take seconds on a fresh fetch). Don't waste cycles spawning
 		// claude only to immediately cancel it.
 		s.markCancelled(requestID, "user cancelled")
+		s.revertPendingFor(requestID)
 		return
 	}
 
@@ -186,6 +205,7 @@ func (s *projectSession) dispatch(requestID string) {
 	// front so the user sees a clear message.
 	if model == "" {
 		s.failRequest(requestID, "curator AI model is not configured")
+		s.revertPendingFor(requestID)
 		return
 	}
 
@@ -198,6 +218,7 @@ func (s *projectSession) dispatch(requestID string) {
 	selfBin, err := os.Executable()
 	if err != nil {
 		s.failRequest(requestID, fmt.Sprintf("resolve own binary path: %v", err))
+		s.revertPendingFor(requestID)
 		return
 	}
 
@@ -210,25 +231,6 @@ func (s *projectSession) dispatch(requestID string) {
 		BinaryPath:         selfBin,
 	}
 	systemPrompt := renderEnvelope(envelope)
-
-	// Consume any pending context-change rows queued for this session
-	// since the last user message — pinned-repo or tracker edits the
-	// user made via PATCH while the conversation was idle. Empty
-	// session id (very first message of a fresh project) matches no
-	// rows; the call is a cheap no-op in that case.
-	//
-	// Two-phase consume: rows are *claimed* here (consumed_at +
-	// consumed_by_request_id stamped) but not deleted. On terminal
-	// `done` we finalize (purge); on `cancelled` or `failed` we
-	// revert (un-consume) so a transient agentproc failure doesn't
-	// silently lose the user's deltas. The merge logic in
-	// RevertPendingContext handles the case where a NEW PATCH lands
-	// during dispatch.
-	pending, err := db.ConsumePendingContext(s.curator.database, s.projectID, project.CuratorSessionID, requestID)
-	if err != nil {
-		s.failRequest(requestID, fmt.Sprintf("consume pending context: %v", err))
-		return
-	}
 
 	message := req.UserInput
 	contextNote := pendingChangesNote(pending, envelope)
