@@ -13,3 +13,11 @@ import "os"
 func openNoFollow(path string) (*os.File, error) {
 	return os.Open(path)
 }
+
+// isSymlinkRejection always returns false on non-unix builds. Plain
+// os.Open doesn't refuse symlinks (we'd need O_NOFOLLOW for that),
+// so any error here is genuinely an I/O / permission problem rather
+// than the kernel rejecting a symlink.
+func isSymlinkRejection(_ error) bool {
+	return false
+}

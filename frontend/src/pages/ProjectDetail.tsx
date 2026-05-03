@@ -96,51 +96,81 @@ export default function ProjectDetail() {
   // responses: if A→B→C navigation fires three fetches and they
   // resolve in the wrong order, only the latest effect's setState
   // path survives (each prior cleanup aborts its controller).
+  //
+  // We stash the controller in a ref so the retry button (rendered
+  // outside this effect's scope) can swap in its own controller AND
+  // have it aborted on subsequent navigation. Without the ref, a
+  // user who hits retry then navigates away would leave the retry's
+  // fetch alive — its setProject would land for the wrong id.
+  const loadAbortRef = useRef<AbortController | null>(null)
+
   useEffect(() => {
     if (!id) return
     setProject(null)
     setMissing(false)
     setLoadError(null)
     setLoading(true)
+    // Bump patchSeq + reset lastLandedSeq on id change so any
+    // in-flight PATCH responses from project A find their mySeq
+    // already overtaken when they land — they can't accidentally
+    // setProject(A) over project B's freshly-loaded state.
+    patchSeq.current += 1
+    lastLandedSeq.current = patchSeq.current
     const controller = new AbortController()
+    loadAbortRef.current = controller
     loadProject(controller.signal)
-    return () => controller.abort()
+    return () => {
+      controller.abort()
+      // Clear the ref only if it still points at our controller —
+      // the retry path may have swapped in a fresh one and we
+      // don't want to step on its lifecycle.
+      if (loadAbortRef.current === controller) {
+        loadAbortRef.current = null
+      }
+    }
   }, [id, loadProject])
 
   const patch = useCallback(
     async (body: Record<string, unknown>) => {
       if (!id) return false
-      // Capture the seq BEFORE the await so concurrent calls each
-      // hold their own "am I newer than what's currently on screen"
-      // yardstick. The check at apply time compares against
-      // lastLandedSeq (the highest seq we've actually rendered), not
-      // patchSeq.current, so a newer-but-failed sibling can't suppress
-      // an older-but-successful response.
+      // Capture id + seq BEFORE the await. Both gates run at apply
+      // time:
+      //   - id gate: if the user navigated to a different project,
+      //     this PATCH was issued against a different id and must
+      //     not setProject — that would replace project B's state
+      //     with project A's row, and any subsequent autosave
+      //     would merge A's data back into B.
+      //   - seq gate: lastLandedSeq tracks the highest seq we've
+      //     actually rendered, so older successful responses can't
+      //     overwrite a newer one and a newer-failed sibling can't
+      //     suppress an older-successful response.
+      const myID = id
       patchSeq.current += 1
       const mySeq = patchSeq.current
       try {
-        const res = await fetch(`/api/projects/${encodeURIComponent(id)}`, {
+        const res = await fetch(`/api/projects/${encodeURIComponent(myID)}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         })
         if (!res.ok) {
-          toast.error(await readError(res, 'Failed to update project'))
+          if (myID === id) {
+            toast.error(await readError(res, 'Failed to update project'))
+          }
           return false
         }
         const fresh: Project = await res.json()
-        // Only apply if we'd be moving the rendered seq forward — an
-        // older response arriving after a newer one already rendered
-        // gets dropped, but an older response arriving after a newer
-        // *failure* still lands (lastLandedSeq stayed at the prior
-        // success).
-        if (mySeq > lastLandedSeq.current) {
+        if (myID === id && mySeq > lastLandedSeq.current) {
           lastLandedSeq.current = mySeq
           setProject(fresh)
         }
         return true
       } catch (err) {
-        toast.error(`Failed to update project: ${err instanceof Error ? err.message : String(err)}`)
+        if (myID === id) {
+          toast.error(
+            `Failed to update project: ${err instanceof Error ? err.message : String(err)}`,
+          )
+        }
         return false
       }
     },
@@ -215,7 +245,15 @@ export default function ProjectDetail() {
           onClick={() => {
             setLoadError(null)
             setLoading(true)
+            // Abort any prior in-flight load (e.g. the original
+            // load we're retrying after) and register the new
+            // controller so subsequent navigation can abort it
+            // through the same ref the effect uses. Without this,
+            // a retry started right before navigating away keeps
+            // running and its setProject lands for the wrong id.
+            loadAbortRef.current?.abort()
             const controller = new AbortController()
+            loadAbortRef.current = controller
             loadProject(controller.signal)
           }}
           className="
@@ -476,6 +514,7 @@ function PinnedReposInline({
 }) {
   const [available, setAvailable] = useState<string[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [adderOpen, setAdderOpen] = useState(false)
   const [search, setSearch] = useState('')
 
@@ -504,31 +543,40 @@ function PinnedReposInline({
     }
   }, [pinned])
 
-  useEffect(() => {
-    let cancelled = false
-    const load = async () => {
-      try {
-        const res = await fetch('/api/repos')
-        if (!res.ok) {
-          const message = await readError(res, 'load repos')
-          if (!cancelled) toast.error(message)
-          return
-        }
-        const data: Array<{ id: string }> = await res.json()
-        if (!cancelled) setAvailable(data.map((r) => r.id))
-      } catch (err) {
-        if (!cancelled) {
-          toast.error(err instanceof Error ? err.message : 'Failed to load repos')
-        }
-      } finally {
-        if (!cancelled) setLoading(false)
+  // loadRepos populates `available` from the configured-repos API.
+  // Tracks loadError separately so a transient failure surfaces as
+  // a "couldn't load — try again" hint in the popover instead of
+  // the misleading "No repos configured" empty state, which would
+  // route the user to a setup page they may have already completed.
+  const loadRepos = useCallback(async (signal: AbortSignal) => {
+    setLoadError(null)
+    try {
+      const res = await fetch('/api/repos', { signal })
+      if (signal.aborted) return
+      if (!res.ok) {
+        const message = await readError(res, 'load repos')
+        setLoadError(message)
+        toast.error(message)
+        return
       }
-    }
-    load()
-    return () => {
-      cancelled = true
+      const data: Array<{ id: string }> = await res.json()
+      if (signal.aborted) return
+      setAvailable(data.map((r) => r.id))
+    } catch (err) {
+      if (signal.aborted) return
+      const message = err instanceof Error ? err.message : 'Failed to load repos'
+      setLoadError(message)
+      toast.error(message)
+    } finally {
+      if (!signal.aborted) setLoading(false)
     }
   }, [])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    loadRepos(controller.signal)
+    return () => controller.abort()
+  }, [loadRepos])
 
   // applyChange queues a target state and drains. Concurrent calls
   // collapse: if the user clicks four removes quickly, the first
@@ -628,6 +676,22 @@ function PinnedReposInline({
             <div className="max-h-60 overflow-y-auto">
               {loading ? (
                 <div className="text-[12px] text-text-tertiary px-2 py-1">Loading…</div>
+              ) : loadError ? (
+                <div className="text-[12px] text-text-tertiary px-2 py-1">
+                  Couldn&rsquo;t load configured repos.{' '}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setLoading(true)
+                      const controller = new AbortController()
+                      loadRepos(controller.signal)
+                    }}
+                    className="text-accent hover:underline"
+                  >
+                    Try again
+                  </button>
+                  .
+                </div>
               ) : available.length === 0 ? (
                 <div className="text-[12px] text-text-tertiary px-2 py-1">
                   No repos configured.{' '}

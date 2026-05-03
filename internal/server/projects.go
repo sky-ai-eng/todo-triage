@@ -75,13 +75,23 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	jiraKey := strings.TrimSpace(req.JiraProjectKey)
 	linearKey := strings.TrimSpace(req.LinearProjectKey)
-	if jiraKey != "" || linearKey != "" {
-		cfg, err := config.Load()
+	// Mirror the PATCH path's lazy-load policy: only read config
+	// when the Jira side actually needs validation. Linear validation
+	// rejects non-empty regardless of cfg (integration not configured
+	// yet), so loading config for a Linear-only POST would turn a
+	// deterministic 400 into a 500 if config.yaml is broken — even
+	// though that field's validation never reads it.
+	cfg := config.Config{}
+	if jiraKey != "" {
+		loaded, err := config.Load()
 		if err != nil {
 			log.Printf("handleProjectCreate: failed to load config: %v", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load config"})
 			return
 		}
+		cfg = loaded
+	}
+	if jiraKey != "" || linearKey != "" {
 		jiraKey, linearKey, errMsg = validateTrackerKeys(cfg, jiraKey, linearKey)
 		if errMsg != "" {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": errMsg})
@@ -817,12 +827,18 @@ func (s *Server) handleProjectKnowledgeFile(w http.ResponseWriter, r *http.Reque
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "file not found"})
 			return
 		}
-		// ELOOP from O_NOFOLLOW (Linux/macOS errno when the final
-		// component is a symlink) surfaces as a generic syscall
-		// error here; we return 400 rather than 500 since it
-		// indicates the path was a symlink, not an I/O failure.
+		// Distinguish ELOOP (symlink rejected by O_NOFOLLOW) from
+		// other openNoFollow failures. Permission denied, EIO, and
+		// similar are server-side problems that should surface as
+		// 500 so the operator can spot them — collapsing all
+		// failures to "not a regular file" 400 would mask real
+		// production issues behind a misleading client error.
 		log.Printf("[projects] knowledge fetch: open %s: %v", full, err)
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "not a regular file"})
+		if isSymlinkRejection(err) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "not a regular file"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to read file"})
 		return
 	}
 	defer f.Close()
@@ -928,6 +944,31 @@ func (s *Server) handleProjectKnowledgeUpload(w http.ResponseWriter, r *http.Req
 			continue
 		}
 		results = append(results, uploadResult{Path: name, Original: original})
+	}
+
+	// Flip summary_stale if anything actually landed. Per the
+	// schema comment on summary_stale, knowledge-base changes have
+	// to mark the project so SKY-220's regenerator picks them up.
+	// A pure-failures request (every file rejected for conflict /
+	// size / sanitize) leaves the on-disk state unchanged, so we
+	// don't need to bump summary_stale in that case — keeping the
+	// flip conditional on at-least-one-success avoids a regen
+	// trigger for a no-op upload.
+	wroteAny := false
+	for _, r := range results {
+		if r.Error == "" {
+			wroteAny = true
+			break
+		}
+	}
+	if wroteAny {
+		if _, err := s.db.Exec(`UPDATE projects SET summary_stale = TRUE WHERE id = ?`, id); err != nil {
+			// Log but don't fail the upload — the files are on disk
+			// and the user expects the response to reflect that.
+			// summary_stale is a hint to the regenerator, not part
+			// of the upload's correctness contract.
+			log.Printf("[projects] knowledge upload: mark summary_stale for %s: %v", id, err)
+		}
 	}
 
 	// 207-ish semantics in a 200: each entry carries its own status.
