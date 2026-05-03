@@ -604,6 +604,9 @@ func indexZipEntries(files []*zip.File) (map[string]*zip.File, error) {
 		if clean == "." || strings.HasPrefix(clean, "../") {
 			return nil, fmt.Errorf("invalid bundle path %q", zf.Name)
 		}
+		if _, exists := out[clean]; exists {
+			return nil, fmt.Errorf("duplicate bundle path %q", clean)
+		}
 		out[clean] = zf
 	}
 	return out, nil
