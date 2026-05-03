@@ -461,9 +461,11 @@ func importPendingContext(
 			}
 			var consumedBy any
 			if row.ConsumedByRequestID != "" {
-				if mapped := requestIDMap[row.ConsumedByRequestID]; mapped != "" {
-					consumedBy = mapped
+				mapped := requestIDMap[row.ConsumedByRequestID]
+				if mapped == "" {
+					return fmt.Errorf("pending context references unknown consumed_by_request_id %q", row.ConsumedByRequestID)
 				}
+				consumedBy = mapped
 			}
 			_, err := tx.Exec(`
 			INSERT INTO curator_pending_context (
