@@ -3,6 +3,7 @@ import Markdown from 'react-markdown'
 import { Send, Square, ChevronDown, ChevronRight, AlertCircle, RotateCcw } from 'lucide-react'
 import { useCuratorChat } from '../hooks/useCuratorChat'
 import { linkifyMarkdown, type LinkifyContext } from '../lib/linkify'
+import { toast } from './Toast/toastStore'
 import type { CuratorMessage, CuratorRequestWithMessages, ToolCall } from '../types'
 
 // CuratorChat renders the streamed conversation for one project on
@@ -24,37 +25,32 @@ interface Props {
   projectId: string
 }
 
-// Cached at module scope: /api/settings is hit once per page load
-// regardless of how many CuratorChat mounts/remounts happen, and the
-// Jira base URL doesn't change without a full settings save.
-let cachedJiraBaseURL: string | null | undefined
-let cachedJiraBaseURLPromise: Promise<string | undefined> | null = null
-
-function loadJiraBaseURL(): Promise<string | undefined> {
-  if (cachedJiraBaseURL !== undefined) {
-    return Promise.resolve(cachedJiraBaseURL ?? undefined)
-  }
-  if (cachedJiraBaseURLPromise) return cachedJiraBaseURLPromise
-  cachedJiraBaseURLPromise = fetch('/api/settings')
-    .then((r) => (r.ok ? r.json() : null))
-    .then((d) => {
-      const url = d?.jira?.base_url || undefined
-      cachedJiraBaseURL = url ?? null
-      return url
-    })
-    .catch(() => {
-      cachedJiraBaseURL = null
-      return undefined
-    })
-  return cachedJiraBaseURLPromise
-}
-
 export default function CuratorChat({ projectId }: Props) {
   const chat = useCuratorChat(projectId)
-  const [jiraBaseURL, setJiraBaseURL] = useState<string | undefined>(cachedJiraBaseURL ?? undefined)
+
+  // Per-mount fetch of the Jira base URL for the linkifier. Earlier
+  // versions cached at module scope, but that turned a transient fetch
+  // failure into a session-permanent one (`null` was indistinguishable
+  // from "not configured" so subsequent mounts skipped the retry) and
+  // also meant a settings save during the same SPA session wouldn't
+  // surface until a full page reload. /api/settings is cheap; per-mount
+  // is fine. AbortController gates the setter against unmount/remount
+  // so a slow response can't land on a stale view.
+  const [jiraBaseURL, setJiraBaseURL] = useState<string | undefined>(undefined)
   useEffect(() => {
-    if (cachedJiraBaseURL !== undefined) return
-    loadJiraBaseURL().then(setJiraBaseURL)
+    const ac = new AbortController()
+    fetch('/api/settings', { signal: ac.signal })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (ac.signal.aborted) return
+        setJiraBaseURL(d?.jira?.base_url || undefined)
+      })
+      .catch(() => {
+        // Linkifier degrades gracefully — Jira refs render as plain
+        // text until a future remount succeeds. No toast: the user
+        // didn't ask for anything that depends on this.
+      })
+    return () => ac.abort()
   }, [])
   const linkifyCtx: LinkifyContext = useMemo(() => ({ jiraBaseURL }), [jiraBaseURL])
 
@@ -217,10 +213,15 @@ function ChatHeader({ chat }: { chat: ReturnType<typeof useCuratorChat> }) {
     }
     const result = await chat.reset()
     if (!result.ok && result.error) {
-      // The hook surfaces in-flight conflicts as conflict=true with a
-      // pre-shaped message; both kinds get the same toast so the user
-      // sees the actionable hint either way.
-      alert(result.error)
+      // 409 conflicts get warning tone (recoverable — the user just
+      // needs to cancel the in-flight turn first); other failures
+      // (network, 500) are real errors. Either way it's the toast
+      // store, not alert() — alert is blocking + unstyled.
+      if (result.conflict) {
+        toast.warning(result.error)
+      } else {
+        toast.error(result.error)
+      }
     }
   }
 
