@@ -1020,18 +1020,24 @@ func (s *Server) handleProjectKnowledgeUpload(w http.ResponseWriter, r *http.Req
 }
 
 // writeUploadedFile copies the uploaded file's bytes to the target
-// path with O_EXCL semantics — fails fast if a file with the same
-// name already exists, instead of overwriting. The exclusive open is
-// the actual race-safe enforcement of the "reject conflict" policy:
-// a quick os.Stat check beforehand is racy because two uploads can
-// see "doesn't exist" and both proceed to write.
+// path atomically: stream into a sibling temp file, then os.Link
+// the temp into the destination. Concurrent listings / raw-fetches
+// see either no file (pre-link) or the fully-written file
+// (post-link) — never the partial bytes mid-stream.
 //
-// On every cleanup path the destination is closed BEFORE os.Remove.
-// On Windows os.Remove fails on a still-open file, leaving the
-// partial upload on disk — which would also poison the next upload
-// of the same name (O_EXCL would still see the orphan and reject).
-// Unix tolerates remove-while-open but the explicit-close pattern
-// keeps the two platforms behaving the same.
+// Conflict detection rides on the link step: os.Link refuses if the
+// destination already exists, which is the race-safe enforcement of
+// "reject conflict" — a quick os.Stat check beforehand is racy
+// because two uploads could both see "doesn't exist" and proceed.
+//
+// Temp files use a leading-dot prefix so the listing's
+// sanitizeKnowledgeFilename filter hides them from the user-visible
+// listing while the upload is in progress.
+//
+// Cleanup invariants: the temp file is removed on every error path
+// (and on the success path after link). The destination is never
+// touched if any step fails. On Windows os.Remove fails on a
+// still-open file, so the temp handle is closed before the remove.
 func writeUploadedFile(fh *multipart.FileHeader, dst string) string {
 	src, err := fh.Open()
 	if err != nil {
@@ -1039,44 +1045,64 @@ func writeUploadedFile(fh *multipart.FileHeader, dst string) string {
 	}
 	defer src.Close()
 
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	dir := filepath.Dir(dst)
+	tmp, err := os.CreateTemp(dir, ".upload-*.partial")
 	if err != nil {
-		if errors.Is(err, os.ErrExist) {
-			return "file already exists — delete it first"
-		}
-		return "create file: " + err.Error()
+		return "create temp file: " + err.Error()
 	}
+	tmpName := tmp.Name()
 	closed := false
 	closeOnce := func() {
 		if !closed {
-			out.Close()
+			tmp.Close()
 			closed = true
 		}
 	}
-	defer closeOnce()
+	// removePartial cleans the temp file. Safe to call multiple times
+	// (os.Remove of a missing file is benign on both platforms).
+	removePartial := func() {
+		closeOnce()
+		_ = os.Remove(tmpName)
+	}
 
 	// Cap the per-file copy at knowledgeMaxUploadBytes + 1 so we
 	// detect oversize uploads even if the multipart header lied
-	// about Size. If we hit the cap, remove the partial file —
-	// which means we have to close the handle first.
+	// about Size. If we hit the cap, remove the partial file.
 	limited := io.LimitReader(src, knowledgeMaxUploadBytes+1)
-	written, err := io.Copy(out, limited)
+	written, err := io.Copy(tmp, limited)
 	if err != nil {
-		closeOnce()
-		_ = os.Remove(dst)
+		removePartial()
 		return "write file: " + err.Error()
 	}
 	if written > knowledgeMaxUploadBytes {
-		closeOnce()
-		_ = os.Remove(dst)
+		removePartial()
 		return fmt.Sprintf("file exceeds %d-byte limit", knowledgeMaxUploadBytes)
 	}
-	if err := out.Close(); err != nil {
+	if err := tmp.Close(); err != nil {
 		closed = true
-		_ = os.Remove(dst)
-		return "close file: " + err.Error()
+		_ = os.Remove(tmpName)
+		return "close temp file: " + err.Error()
 	}
 	closed = true
+
+	// Atomic publish via link: succeeds iff dst doesn't exist, races
+	// concurrent uploads cleanly, and never leaves a partial dst on
+	// disk. After link, both paths point at the same inode; the
+	// remove of tmpName drops the temp name and leaves dst as the
+	// persistent file.
+	if err := os.Link(tmpName, dst); err != nil {
+		_ = os.Remove(tmpName)
+		if errors.Is(err, os.ErrExist) {
+			return "file already exists — delete it first"
+		}
+		return "publish file: " + err.Error()
+	}
+	if err := os.Remove(tmpName); err != nil {
+		// Failed to remove the temp name post-link. dst is correct;
+		// the orphan is just a leading-dot file the listing will
+		// filter out. Log and move on.
+		log.Printf("[projects] knowledge upload: remove temp %s: %v", tmpName, err)
+	}
 	return ""
 }
 

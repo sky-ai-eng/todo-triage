@@ -58,6 +58,13 @@ export default function ProjectDetail() {
   // though the earlier edit persisted server-side.
   const patchSeq = useRef(0)
   const lastLandedSeq = useRef(0)
+  // currentIDRef holds the live id so PATCH callbacks (whose closure
+  // captures id at issue time) can check whether the user has navigated
+  // to a different project before toasting an error or applying state.
+  // Without this, comparing `myID === id` inside the closure compares
+  // the captured id to itself — always true — and a PATCH-error toast
+  // for project A still fires while the user is looking at project B.
+  const currentIDRef = useRef<string | undefined>(id)
 
   const loadProject = useCallback(
     async (signal: AbortSignal) => {
@@ -110,6 +117,11 @@ export default function ProjectDetail() {
     setMissing(false)
     setLoadError(null)
     setLoading(true)
+    // Update the live-id ref synchronously so any in-flight PATCH
+    // closures that compare against currentIDRef.current see the
+    // new id and bail before toasting / setProject for the project
+    // they were issued against.
+    currentIDRef.current = id
     // Bump patchSeq + reset lastLandedSeq on id change so any
     // in-flight PATCH responses from project A find their mySeq
     // already overtaken when they land — they can't accidentally
@@ -153,20 +165,24 @@ export default function ProjectDetail() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         })
+        // Compare captured myID against the LIVE current id (via ref)
+        // rather than the closure's `id` — the closure captured the
+        // same value as myID, so `myID === id` would always be true
+        // and the guard wouldn't actually protect against navigation.
         if (!res.ok) {
-          if (myID === id) {
+          if (myID === currentIDRef.current) {
             toast.error(await readError(res, 'Failed to update project'))
           }
           return false
         }
         const fresh: Project = await res.json()
-        if (myID === id && mySeq > lastLandedSeq.current) {
+        if (myID === currentIDRef.current && mySeq > lastLandedSeq.current) {
           lastLandedSeq.current = mySeq
           setProject(fresh)
         }
         return true
       } catch (err) {
-        if (myID === id) {
+        if (myID === currentIDRef.current) {
           toast.error(
             `Failed to update project: ${err instanceof Error ? err.message : String(err)}`,
           )
@@ -866,6 +882,13 @@ function KnowledgePanel({ projectId }: { projectId: string }) {
   const [loading, setLoading] = useState(true)
   const [expanded, setExpanded] = useState<string | null>(null)
   const [uploading, setUploading] = useState(false)
+  // Synchronous ref so the drop/picker guards can reject overlapping
+  // uploads without racing setState. A naive `if (uploading) return`
+  // would let a second drop slip through between the first call's
+  // `setUploading(true)` and the next render — and crucially, the
+  // first call's `finally { setUploading(false) }` would re-enable
+  // the UI while the second call is still running.
+  const uploadInflight = useRef(0)
   const [dragOver, setDragOver] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   // Counter, not boolean: dragenter/dragleave fire for every nested
@@ -874,36 +897,35 @@ function KnowledgePanel({ projectId }: { projectId: string }) {
   // enter and decrements on leave; the visual state is "any drag in
   // progress" iff counter > 0.
   const dragDepth = useRef(0)
-  // Two seqs mirroring the patch helper above: refreshSeq counts
-  // every fetch issued, lastLandedSeq tracks the highest seq whose
-  // response actually got applied. The "skip stale response" check
-  // uses lastLandedSeq so a later-but-failed refresh doesn't
-  // suppress an earlier-but-successful one — without this, an
-  // upload-triggered refresh that errors would mask the newly-
-  // uploaded files indefinitely if the prior in-flight refresh
-  // landed first with stale data.
+  // refreshSeq gates refresh responses to "the most recent fetch
+  // currently in flight." Unlike PATCH responses (where each carries
+  // post-mutation state and an older success is still authoritative
+  // for that mutation), a GET reflects the filesystem at the time
+  // of the read — older GETs are unconditionally stale relative to
+  // any newer GET that started after them. So the check is the
+  // straightforward "drop if I'm not the latest issued."
+  //
+  // The previous "land older success even after a newer failure"
+  // logic introduced a worse bug: in the upload → refresh flow, a
+  // newer refresh that errored would let an older pre-upload
+  // refresh land afterward and repaint the listing without the
+  // just-uploaded files. Better to keep stale-rendered data than to
+  // actively replace fresh data with stale data.
   const refreshSeq = useRef(0)
-  const lastLandedRefreshSeq = useRef(0)
 
   const refreshFiles = useCallback(async () => {
     refreshSeq.current += 1
     const mySeq = refreshSeq.current
     try {
       const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/knowledge`)
+      if (mySeq !== refreshSeq.current) return
       if (!res.ok) {
-        // Only surface the error if it's the most recent fetch in
-        // flight; otherwise a newer fetch's success is still on the
-        // way and the toast would be misleading.
-        if (mySeq === refreshSeq.current) {
-          toast.error(await readError(res, 'Failed to load knowledge base'))
-        }
+        toast.error(await readError(res, 'Failed to load knowledge base'))
         return
       }
       const data: KnowledgeFile[] = await res.json()
-      if (mySeq > lastLandedRefreshSeq.current) {
-        lastLandedRefreshSeq.current = mySeq
-        setFiles(data)
-      }
+      if (mySeq !== refreshSeq.current) return
+      setFiles(data)
     } catch (err) {
       if (mySeq !== refreshSeq.current) return
       toast.error(
@@ -929,6 +951,11 @@ function KnowledgePanel({ projectId }: { projectId: string }) {
     async (fileList: FileList | File[]) => {
       const arr = Array.from(fileList)
       if (arr.length === 0) return
+      if (uploadInflight.current > 0) {
+        toast.warning('Another upload is in progress — wait for it to finish.')
+        return
+      }
+      uploadInflight.current += 1
       setUploading(true)
       try {
         const form = new FormData()
@@ -958,7 +985,8 @@ function KnowledgePanel({ projectId }: { projectId: string }) {
       } catch (err) {
         toast.error(`Upload failed: ${err instanceof Error ? err.message : String(err)}`)
       } finally {
-        setUploading(false)
+        uploadInflight.current -= 1
+        if (uploadInflight.current === 0) setUploading(false)
       }
     },
     [projectId, refreshFiles],
