@@ -38,12 +38,12 @@ func CreateProject(database *sql.DB, p domain.Project) (string, error) {
 	}
 	now := time.Now().UTC()
 	_, err = database.Exec(`
-		INSERT INTO projects (id, name, description, summary_md, summary_stale, designer_session_id, pinned_repos, created_at, updated_at)
+		INSERT INTO projects (id, name, description, summary_md, summary_stale, curator_session_id, pinned_repos, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		id, p.Name, p.Description,
 		nullIfEmpty(p.SummaryMD), p.SummaryStale,
-		nullIfEmpty(p.DesignerSessionID), string(pinnedJSON),
+		nullIfEmpty(p.CuratorSessionID), string(pinnedJSON),
 		now, now,
 	)
 	if err != nil {
@@ -55,7 +55,7 @@ func CreateProject(database *sql.DB, p domain.Project) (string, error) {
 // GetProject returns a project by id, or (nil, nil) if not found.
 func GetProject(database *sql.DB, id string) (*domain.Project, error) {
 	row := database.QueryRow(`
-		SELECT id, name, description, summary_md, summary_stale, designer_session_id, pinned_repos, created_at, updated_at
+		SELECT id, name, description, summary_md, summary_stale, curator_session_id, pinned_repos, created_at, updated_at
 		FROM projects WHERE id = ?
 	`, id)
 	return scanProject(row)
@@ -66,7 +66,7 @@ func GetProject(database *sql.DB, id string) (*domain.Project, error) {
 // in any plausible install).
 func ListProjects(database *sql.DB) ([]domain.Project, error) {
 	rows, err := database.Query(`
-		SELECT id, name, description, summary_md, summary_stale, designer_session_id, pinned_repos, created_at, updated_at
+		SELECT id, name, description, summary_md, summary_stale, curator_session_id, pinned_repos, created_at, updated_at
 		FROM projects ORDER BY LOWER(name) ASC
 	`)
 	if err != nil {
@@ -104,13 +104,13 @@ func UpdateProject(database *sql.DB, p domain.Project) error {
 		UPDATE projects
 		SET name = ?, description = ?,
 		    summary_md = ?, summary_stale = ?,
-		    designer_session_id = ?, pinned_repos = ?,
+		    curator_session_id = ?, pinned_repos = ?,
 		    updated_at = ?
 		WHERE id = ?
 	`,
 		p.Name, p.Description,
 		nullIfEmpty(p.SummaryMD), p.SummaryStale,
-		nullIfEmpty(p.DesignerSessionID), string(pinnedJSON),
+		nullIfEmpty(p.CuratorSessionID), string(pinnedJSON),
 		now, p.ID,
 	)
 	if err != nil {
@@ -177,7 +177,7 @@ func scanProject(row rowScanner) (*domain.Project, error) {
 	}
 	p.SummaryMD = summaryMD.String
 	p.SummaryStale = summaryFlag != 0
-	p.DesignerSessionID = sessionID.String
+	p.CuratorSessionID = sessionID.String
 	p.CreatedAt = createdAt
 	p.UpdatedAt = updatedAt
 	if pinnedJSON == "" {

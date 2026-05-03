@@ -1,0 +1,194 @@
+package curator
+
+import (
+	"database/sql"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
+	_ "modernc.org/sqlite"
+)
+
+func newTestDB(t *testing.T) *sql.DB {
+	t.Helper()
+	database, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	database.SetMaxOpenConns(1)
+	database.SetMaxIdleConns(1)
+	t.Cleanup(func() { database.Close() })
+	if err := db.Migrate(database); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	return database
+}
+
+func seedProject(t *testing.T, database *sql.DB, name string) string {
+	t.Helper()
+	id, err := db.CreateProject(database, domain.Project{Name: name})
+	if err != nil {
+		t.Fatalf("create project %q: %v", name, err)
+	}
+	return id
+}
+
+// TestCurator_SendMessage_RejectsAfterShutdown pins the contract that
+// downstream HTTP handlers can rely on: once Shutdown is called, no
+// more requests get persisted, even if a handler races the stop.
+func TestCurator_SendMessage_RejectsAfterShutdown(t *testing.T) {
+	database := newTestDB(t)
+	c := New(database, nil, "")
+	c.Shutdown()
+
+	if _, err := c.SendMessage("any", "hi"); err == nil {
+		t.Errorf("expected error after shutdown, got nil")
+	}
+}
+
+// TestCurator_CancelProject_FlipsQueuedRows is the project-delete
+// hook: queued rows for the deleted project must land terminal so
+// they aren't left dangling. Verified without spawning agentproc by
+// pre-seeding queued rows directly and checking status post-cancel.
+func TestCurator_CancelProject_FlipsQueuedRows(t *testing.T) {
+	database := newTestDB(t)
+	projectID := seedProject(t, database, "p")
+
+	id1, _ := db.CreateCuratorRequest(database, projectID, "first")
+	id2, _ := db.CreateCuratorRequest(database, projectID, "second")
+
+	c := New(database, nil, "")
+	t.Cleanup(c.Shutdown)
+	c.CancelProject(projectID)
+
+	for _, id := range []string{id1, id2} {
+		got, _ := db.GetCuratorRequest(database, id)
+		if got.Status != "cancelled" {
+			t.Errorf("request %s status = %q, want cancelled", id, got.Status)
+		}
+	}
+}
+
+// TestCurator_CancelProject_KillsActiveSession checks that a project
+// already running has its goroutine torn down. We spawn the goroutine
+// by sending a message (which puts it on the queue), then immediately
+// cancel the project — the goroutine should exit cleanly without
+// leaking. Verified by Shutdown returning quickly and no goroutines
+// blocking the test harness.
+func TestCurator_CancelProject_KillsActiveSession(t *testing.T) {
+	database := newTestDB(t)
+	projectID := seedProject(t, database, "active")
+
+	hub := websocket.NewHub()
+	c := New(database, hub, "")
+	t.Cleanup(c.Shutdown)
+
+	// SendMessage spawns the per-project goroutine if absent. The
+	// goroutine will try to invoke claude — that'll fail fast on
+	// CI / dev boxes without claude on PATH, but the failure is
+	// masked by the immediate CancelProject anyway.
+	if _, err := c.SendMessage(projectID, "hello"); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	c.CancelProject(projectID)
+
+	// Wait a moment for the goroutine to observe ctx.Done and exit.
+	// The contract is "tears down deterministically", not "instantly,"
+	// but it should be sub-second.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		c.mu.Lock()
+		_, stillThere := c.sessions[projectID]
+		c.mu.Unlock()
+		if !stillThere {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Errorf("session for project %s still in map after CancelProject", projectID)
+}
+
+// TestCurator_CrossProjectParallel checks the multiplexing contract:
+// SendMessage to two different projects spawns two goroutines, and
+// canceling one doesn't stop the other. We use the post-cancel
+// session map to assert state without depending on agentproc actually
+// running.
+func TestCurator_CrossProjectParallel(t *testing.T) {
+	database := newTestDB(t)
+	projectA := seedProject(t, database, "A")
+	projectB := seedProject(t, database, "B")
+
+	c := New(database, nil, "")
+	t.Cleanup(c.Shutdown)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); _, _ = c.SendMessage(projectA, "hi from A") }()
+	go func() { defer wg.Done(); _, _ = c.SendMessage(projectB, "hi from B") }()
+	wg.Wait()
+
+	c.mu.Lock()
+	bothPresent := c.sessions[projectA] != nil && c.sessions[projectB] != nil
+	c.mu.Unlock()
+	if !bothPresent {
+		t.Error("both projects should have an active session goroutine")
+	}
+
+	c.CancelProject(projectA)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		c.mu.Lock()
+		_, aGone := c.sessions[projectA]
+		_, bStill := c.sessions[projectB]
+		c.mu.Unlock()
+		if !aGone && bStill {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Error("project A should be evicted, project B should remain")
+}
+
+func TestKnowledgeDir_RequiresProjectID(t *testing.T) {
+	if _, err := KnowledgeDir(""); err == nil {
+		t.Error("empty project id should error")
+	}
+}
+
+func TestBuildSystemPrompt_IncludesProjectName(t *testing.T) {
+	got := buildSystemPrompt("My Project")
+	if got == "" {
+		t.Fatal("empty system prompt")
+	}
+	if !contains(got, "My Project") {
+		t.Errorf("system prompt missing project name: %q", got)
+	}
+}
+
+func TestBuildSystemPrompt_FallbackForEmptyName(t *testing.T) {
+	got := buildSystemPrompt("")
+	if got == "" {
+		t.Fatal("empty system prompt for empty name")
+	}
+	// The fallback shouldn't look like a templating artifact ("project ''").
+	if contains(got, `""`) {
+		t.Errorf("fallback leaks empty quotes: %q", got)
+	}
+}
+
+func contains(s, substr string) bool {
+	return len(substr) == 0 || (len(s) >= len(substr) && stringIndex(s, substr) >= 0)
+}
+
+func stringIndex(s, substr string) int {
+	for i := 0; i+len(substr) <= len(s); i++ {
+		if s[i:i+len(substr)] == substr {
+			return i
+		}
+	}
+	return -1
+}

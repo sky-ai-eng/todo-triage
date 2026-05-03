@@ -7,10 +7,10 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
+	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -25,10 +25,10 @@ import (
 // optional — a project starts as an empty shell named by the user
 // and gets filled in over time (description, pinned repos, summary).
 type createProjectRequest struct {
-	Name              string   `json:"name"`
-	Description       string   `json:"description"`
-	PinnedRepos       []string `json:"pinned_repos"`
-	DesignerSessionID string   `json:"designer_session_id"` // optional; usually set by SKY-216 not the user
+	Name             string   `json:"name"`
+	Description      string   `json:"description"`
+	PinnedRepos      []string `json:"pinned_repos"`
+	CuratorSessionID string   `json:"curator_session_id"` // optional; usually set by the runtime, not the user
 }
 
 // patchProjectRequest is the PATCH body shape. Pointers distinguish
@@ -36,12 +36,12 @@ type createProjectRequest struct {
 // uses *[]string so a client can clear it with [] without colliding
 // with the absent case.
 type patchProjectRequest struct {
-	Name              *string   `json:"name"`
-	Description       *string   `json:"description"`
-	PinnedRepos       *[]string `json:"pinned_repos"`
-	SummaryMD         *string   `json:"summary_md"`
-	SummaryStale      *bool     `json:"summary_stale"`
-	DesignerSessionID *string   `json:"designer_session_id"`
+	Name             *string   `json:"name"`
+	Description      *string   `json:"description"`
+	PinnedRepos      *[]string `json:"pinned_repos"`
+	SummaryMD        *string   `json:"summary_md"`
+	SummaryStale     *bool     `json:"summary_stale"`
+	CuratorSessionID *string   `json:"curator_session_id"`
 }
 
 func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
@@ -62,10 +62,10 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id, err := db.CreateProject(s.db, domain.Project{
-		Name:              name,
-		Description:       req.Description,
-		PinnedRepos:       pinned,
-		DesignerSessionID: req.DesignerSessionID,
+		Name:             name,
+		Description:      req.Description,
+		PinnedRepos:      pinned,
+		CuratorSessionID: req.CuratorSessionID,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -146,8 +146,8 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 	if req.SummaryStale != nil {
 		updated.SummaryStale = *req.SummaryStale
 	}
-	if req.DesignerSessionID != nil {
-		updated.DesignerSessionID = *req.DesignerSessionID
+	if req.CuratorSessionID != nil {
+		updated.CuratorSessionID = *req.CuratorSessionID
 	}
 
 	if err := db.UpdateProject(s.db, updated); err != nil {
@@ -164,6 +164,19 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+
+	// Stop any in-flight Curator chat for this project BEFORE the DB
+	// delete: the goroutine writes terminal cancelled status into
+	// curator_requests rows, which the FK cascade is about to drop.
+	// Doing it in the right order means a user who deletes a project
+	// mid-chat sees a deterministic terminal state on every row
+	// rather than relying on cascade behavior to handle in-flight
+	// rows. No-op when the curator runtime hasn't been wired (test
+	// harnesses, fresh-install before first message).
+	if s.curator != nil {
+		s.curator.CancelProject(id)
+	}
+
 	if err := db.DeleteProject(s.db, id); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "project not found"})
@@ -173,15 +186,11 @@ func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Best-effort on-disk cleanup. The Curator runtime (SKY-216)
-	// hasn't shipped, so today this dir likely doesn't exist for
-	// any project — but the contract is "delete clears local
-	// state" so we walk through it now to keep that contract
-	// consistent once that runtime starts populating files. The
-	// DB delete is the source of truth and a stale on-disk dir is
-	// recoverable (next run that needs that path will recreate or
-	// surface the issue), so a cleanup failure surfaces as a
-	// non-fatal warning rather than a 5xx.
+	// Best-effort on-disk cleanup. The DB delete is the source of
+	// truth and a stale on-disk dir is recoverable (next run that
+	// needs that path will recreate or surface the issue), so a
+	// cleanup failure surfaces as a non-fatal warning rather than
+	// a 5xx.
 	//
 	// Two failure modes both produce the same X-Cleanup-Warning so
 	// the client always learns that on-disk state may be stale:
@@ -193,7 +202,7 @@ func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 	// logged server-side; the header is a generic message so we
 	// don't leak filesystem layout to the client.
 	const cleanupWarning = "on-disk cleanup of project knowledge dir failed; check server logs"
-	dir, dirErr := projectKnowledgeDir(id)
+	dir, dirErr := curator.KnowledgeDir(id)
 	switch {
 	case dirErr != nil:
 		log.Printf("[projects] cannot resolve knowledge dir for project %s; on-disk cleanup skipped: %v", id, dirErr)
@@ -206,21 +215,6 @@ func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
-}
-
-// projectKnowledgeDir returns ~/.triagefactory/projects/<id>/. The
-// Curator runtime (SKY-216) is the producer; this resolver lives
-// here because the delete handler is the only consumer until that
-// ticket lands.
-func projectKnowledgeDir(id string) (string, error) {
-	if id == "" {
-		return "", errors.New("project id is required")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, ".triagefactory", "projects", id), nil
 }
 
 // validatePinnedRepos validates the "owner/repo" slug shape AND

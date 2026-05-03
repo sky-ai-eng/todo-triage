@@ -26,6 +26,14 @@ func BuildArgs(opts RunOptions) []string {
 	if opts.AllowedTools != "" {
 		args = append(args, "--allowedTools", opts.AllowedTools)
 	}
+	if opts.SystemPrompt != "" {
+		// --append-system-prompt is additive: it sits after Claude
+		// Code's default system prompt rather than replacing it. The
+		// curator runtime uses this for the project-context prompt;
+		// the delegate runtime currently leaves it unset so the
+		// envelope (mission text) carries all role-shaping content.
+		args = append(args, "--append-system-prompt", opts.SystemPrompt)
+	}
 	if opts.MaxTurns > 0 {
 		args = append(args, "--max-turns", strconv.Itoa(opts.MaxTurns))
 	}

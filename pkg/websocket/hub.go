@@ -12,10 +12,18 @@ import (
 )
 
 // Event is a message sent to connected clients over the websocket.
+//
+// RunID and ProjectID are optional discriminators frontend listeners
+// filter on. RunID identifies events from a single delegated run
+// (agent_message / agent_run_update); ProjectID identifies events
+// from a project's Curator session (curator_message /
+// curator_request_update). Events that broadcast to the whole UI
+// (tasks_updated, scoring_*) leave both empty.
 type Event struct {
-	Type  string `json:"type"` // "agent_message" | "agent_run_update" | "tasks_updated" | "scoring_started" | "scoring_completed"
-	RunID string `json:"run_id,omitempty"`
-	Data  any    `json:"data"`
+	Type      string `json:"type"`
+	RunID     string `json:"run_id,omitempty"`
+	ProjectID string `json:"project_id,omitempty"`
+	Data      any    `json:"data"`
 }
 
 // Hub manages websocket connections and broadcasts events to all clients.

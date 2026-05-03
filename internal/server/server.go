@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/config"
+	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
@@ -24,6 +25,7 @@ type Server struct {
 	static             fs.FS
 	ws                 *websocket.Hub
 	spawner            *delegate.Spawner
+	curator            *curator.Curator
 	ghClient           *ghclient.Client
 	jiraClient         *jira.Client
 	jiraInProgressRule config.JiraStatusRule // full rule — Members for guards, Canonical for writes
@@ -79,13 +81,20 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/agent/runs", s.handleAgentRuns)
 
 	// Projects (SKY-215). Pure CRUD over the projects table; the
-	// Curator runtime that populates designer_session_id and
-	// summary_md lands in later tickets.
+	// Curator runtime that populates curator_session_id lands in
+	// SKY-216 and the summary_md regenerator in SKY-220.
 	s.mux.HandleFunc("POST /api/projects", s.handleProjectCreate)
 	s.mux.HandleFunc("GET /api/projects", s.handleProjectList)
 	s.mux.HandleFunc("GET /api/projects/{id}", s.handleProjectGet)
 	s.mux.HandleFunc("PATCH /api/projects/{id}", s.handleProjectUpdate)
 	s.mux.HandleFunc("DELETE /api/projects/{id}", s.handleProjectDelete)
+
+	// Curator chat per project (SKY-216). The Curator package owns the
+	// long-lived CC session lifecycle; these endpoints are the API
+	// the Projects page (SKY-217) will hit.
+	s.mux.HandleFunc("POST /api/projects/{id}/curator/messages", s.handleCuratorSend)
+	s.mux.HandleFunc("GET /api/projects/{id}/curator/messages", s.handleCuratorHistory)
+	s.mux.HandleFunc("DELETE /api/projects/{id}/curator/messages/in-flight", s.handleCuratorCancel)
 
 	// Websocket
 	s.mux.HandleFunc("GET /api/ws", s.ws.HandleWS)
@@ -180,6 +189,15 @@ func (s *Server) SetStatic(f fs.FS) {
 // SetSpawner sets the delegation spawner for agent runs.
 func (s *Server) SetSpawner(sp *delegate.Spawner) {
 	s.spawner = sp
+}
+
+// SetCurator wires the Curator runtime into the server so the
+// /api/projects/{id}/curator/* endpoints can dispatch messages and
+// the project-delete handler can cancel in-flight chats. Wired
+// post-construction (mirrors SetSpawner) so main.go can build the
+// Curator after the websocket hub is constructed.
+func (s *Server) SetCurator(c *curator.Curator) {
+	s.curator = c
 }
 
 // SetOnGitHubChanged registers a callback for GitHub config changes (creds, URL, repos).

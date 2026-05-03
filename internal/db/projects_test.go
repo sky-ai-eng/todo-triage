@@ -11,10 +11,10 @@ import (
 func TestCreateGetProject_Roundtrip(t *testing.T) {
 	database := newTestDB(t)
 	id, err := CreateProject(database, domain.Project{
-		Name:              "Triage Factory",
-		Description:       "Local-first triage UI",
-		PinnedRepos:       []string{"sky-ai-eng/triage-factory", "sky-ai-eng/sky"},
-		DesignerSessionID: "sess-123",
+		Name:             "Triage Factory",
+		Description:      "Local-first triage UI",
+		PinnedRepos:      []string{"sky-ai-eng/triage-factory", "sky-ai-eng/sky"},
+		CuratorSessionID: "sess-123",
 	})
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -36,8 +36,8 @@ func TestCreateGetProject_Roundtrip(t *testing.T) {
 	if got.Description != "Local-first triage UI" {
 		t.Errorf("description = %q", got.Description)
 	}
-	if got.DesignerSessionID != "sess-123" {
-		t.Errorf("session id = %q", got.DesignerSessionID)
+	if got.CuratorSessionID != "sess-123" {
+		t.Errorf("session id = %q", got.CuratorSessionID)
 	}
 	if len(got.PinnedRepos) != 2 || got.PinnedRepos[0] != "sky-ai-eng/triage-factory" {
 		t.Errorf("pinned_repos = %v", got.PinnedRepos)

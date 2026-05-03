@@ -36,9 +36,17 @@ type RunOptions struct {
 	Message string
 
 	// AllowedTools is the comma-joined --allowedTools value. Callers
-	// build this themselves (see internal/delegate.BuildAllowedTools)
-	// — different runtimes have different threat models.
+	// build this themselves (see internal/delegate.BuildAllowedTools
+	// and internal/curator.BuildAllowedTools) — different runtimes
+	// have different threat models.
 	AllowedTools string
+
+	// SystemPrompt, if non-empty, is passed as --append-system-prompt.
+	// Sits after Claude Code's default system prompt rather than
+	// replacing it; useful for runtime-specific role-shaping (the
+	// curator's "you are the Curator for project X" prompt) without
+	// clobbering CC's safety / tool-use defaults.
+	SystemPrompt string
 
 	// MaxTurns sets --max-turns. Zero omits the flag.
 	MaxTurns int
