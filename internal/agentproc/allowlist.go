@@ -147,12 +147,16 @@ func BuildAllowedTools(selfBin string) string {
 		"Bash(bunzip2 *)", "Bash(bzip2 *)",
 		"Bash(xz *)", "Bash(unxz *)",
 
-		// Filesystem ops - mkdir/touch/cp/mv/ln are the common ones agents
-		// need for staging test fixtures or scratch dirs. rm deliberately
-		// omitted - the Write/Edit tools handle file replacement, and `rm`
-		// with an absolute path is a common shape in deletion attacks.
+		// Filesystem ops. Write/Edit cover most cases; rm/rmdir are here
+		// because the curator legitimately deletes obsolete knowledge
+		// notes, and refusing it just forces the agent to use awkward
+		// workarounds (rename to .bak, move to /tmp via mv) that don't
+		// actually close any threat. The agent already has mv * and
+		// Write on absolute paths, so blanket rm doesn't open a new
+		// channel — it just stops blocking the legitimate uses.
 		"Bash(mkdir *)", "Bash(touch *)",
 		"Bash(cp *)", "Bash(mv *)", "Bash(ln *)",
+		"Bash(rm *)", "Bash(rmdir *)",
 
 		// Go tooling - explicit subcommand list. `go run` and `go install`
 		// deliberately omitted: the former executes arbitrary Go source,
@@ -204,7 +208,6 @@ func BuildAllowedTools(selfBin string) string {
 		//   - python, python3, node, ruby, perl, php, deno, osascript - arbitrary
 		//     interpreter execution via -c / -e flags
 		//   - sudo, su, doas - privilege escalation
-		//   - rm - destructive, tool-routed alternatives exist (Edit/Write)
 		//   - chmod, chown - permission escalation surface; agents don't need it
 		//   - kill, killall, pkill - could target other processes on the machine
 		//   - env (no args) - prints environment including any secrets

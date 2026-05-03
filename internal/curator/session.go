@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
@@ -254,6 +255,16 @@ func (s *projectSession) dispatch(requestID string) {
 		}
 	}
 
+	// Allow the rm guard (and other path-scoped tool checks) to reach
+	// the knowledge-base + repos subtrees explicitly. By default Claude
+	// Code's rm policy treats the cwd as the sole allowed dir; without
+	// these the agent can read/write files via Edit/Write but cannot
+	// delete obsolete knowledge notes.
+	addDirs := []string{
+		filepath.Join(cwd, "knowledge-base"),
+		filepath.Join(cwd, "repos"),
+	}
+
 	outcome, runErr := agentproc.Run(msgCtx, agentproc.RunOptions{
 		Cwd:          cwd,
 		Model:        model,
@@ -261,6 +272,7 @@ func (s *projectSession) dispatch(requestID string) {
 		Message:      message,
 		SystemPrompt: systemPrompt,
 		AllowedTools: agentproc.BuildAllowedTools(selfBin),
+		AddDirs:      addDirs,
 		ExtraEnv: []string{
 			"TRIAGE_FACTORY_CURATOR_PROJECT_ID=" + s.projectID,
 			"TRIAGE_FACTORY_CURATOR_REQUEST_ID=" + requestID,

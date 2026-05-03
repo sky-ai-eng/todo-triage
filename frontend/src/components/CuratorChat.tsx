@@ -1,0 +1,713 @@
+import { useEffect, useMemo, useRef, useState } from 'react'
+import Markdown from 'react-markdown'
+import { Send, Square, ChevronDown, ChevronRight, AlertCircle, RotateCcw } from 'lucide-react'
+import { useCuratorChat } from '../hooks/useCuratorChat'
+import { linkifyMarkdown, type LinkifyContext } from '../lib/linkify'
+import { toast } from './Toast/toastStore'
+import type { CuratorMessage, CuratorRequestWithMessages, ToolCall } from '../types'
+
+// CuratorChat renders the streamed conversation for one project on
+// the right column of /projects/:id. Backend wiring lives in the
+// useCuratorChat hook; this file owns layout + per-message rendering.
+//
+// Design notes:
+//   - Same visual primitives as AgentCard (status colors, tool-call
+//     vocabulary, monospace timestamps) but with breathing room — the
+//     panel is for active conversation, not transcript review.
+//   - Tool calls collapse by default; the latest one auto-expands
+//     while the request is still running. The user can manually
+//     toggle either direction.
+//   - Hidden subtype="context_change" rows (SKY-224 audit anchors)
+//     are filtered out — they exist to inform the agent, not the
+//     user.
+
+interface Props {
+  projectId: string
+}
+
+export default function CuratorChat({ projectId }: Props) {
+  const chat = useCuratorChat(projectId)
+
+  // Per-mount fetch of the Jira base URL for the linkifier. Earlier
+  // versions cached at module scope, but that turned a transient fetch
+  // failure into a session-permanent one (`null` was indistinguishable
+  // from "not configured" so subsequent mounts skipped the retry) and
+  // also meant a settings save during the same SPA session wouldn't
+  // surface until a full page reload. /api/settings is cheap; per-mount
+  // is fine. AbortController gates the setter against unmount/remount
+  // so a slow response can't land on a stale view.
+  const [jiraBaseURL, setJiraBaseURL] = useState<string | undefined>(undefined)
+  useEffect(() => {
+    const ac = new AbortController()
+    fetch('/api/settings', { signal: ac.signal })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (ac.signal.aborted) return
+        setJiraBaseURL(d?.jira?.base_url || undefined)
+      })
+      .catch(() => {
+        // Linkifier degrades gracefully — Jira refs render as plain
+        // text until a future remount succeeds. No toast: the user
+        // didn't ask for anything that depends on this.
+      })
+    return () => ac.abort()
+  }, [])
+  const linkifyCtx: LinkifyContext = useMemo(() => ({ jiraBaseURL }), [jiraBaseURL])
+
+  const scrollRef = useRef<HTMLDivElement>(null)
+  // Auto-scroll on new content. We track the "latest message id" so a
+  // bare status flip (no new content) doesn't yank the viewport. When
+  // the user has scrolled up to read history, we suppress auto-scroll
+  // until they hit bottom again — otherwise the agent's stream would
+  // fight the user's scroll.
+  const lastMessageKey = useMemo(() => {
+    let last = ''
+    for (const r of chat.requests) {
+      if (r.messages.length > 0) {
+        last = `${r.id}:${r.messages[r.messages.length - 1].id}`
+      } else {
+        last = `${r.id}:0`
+      }
+    }
+    return last
+  }, [chat.requests])
+
+  const [autoScroll, setAutoScroll] = useState(true)
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    if (autoScroll) {
+      el.scrollTop = el.scrollHeight
+    }
+  }, [lastMessageKey, autoScroll])
+
+  // Composer state lives here so the cancel button can reach it (we
+  // don't clear the textarea on cancel — the user may want to re-send).
+  const [draft, setDraft] = useState('')
+  const composerRef = useRef<HTMLTextAreaElement>(null)
+  const sending = useRef(false)
+
+  const submit = async () => {
+    if (sending.current) return
+    if (!draft.trim()) return
+    if (chat.inFlight) return
+    sending.current = true
+    const text = draft
+    setDraft('')
+    // Force-pin to the bottom on send. If the user was scrolled up
+    // reading older history when they hit submit, they want to see
+    // the message they just sent — the autoScroll-from-distance
+    // heuristic alone wouldn't unstick that case.
+    setAutoScroll(true)
+    try {
+      await chat.send(text)
+    } finally {
+      sending.current = false
+      composerRef.current?.focus()
+    }
+  }
+
+  const onCancel = async () => {
+    await chat.cancel()
+  }
+
+  const onScroll = () => {
+    const el = scrollRef.current
+    if (!el) return
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+    setAutoScroll(distanceFromBottom < 80)
+  }
+
+  return (
+    <section
+      className="
+        relative overflow-hidden rounded-2xl border border-border-glass
+        bg-gradient-to-br from-white/70 via-white/50 to-white/35
+        shadow-sm shadow-black/[0.03] backdrop-blur-xl
+        lg:sticky lg:top-24 lg:h-[calc(100vh-12rem)]
+        flex flex-col
+      "
+    >
+      {/* Decorative diffuse highlight — same vocabulary as the other Cards */}
+      <span
+        aria-hidden
+        className="pointer-events-none absolute -left-8 -top-8 h-24 w-24 rounded-full bg-white/30 blur-2xl"
+      />
+
+      <ChatHeader chat={chat} />
+
+      <div
+        ref={scrollRef}
+        onScroll={onScroll}
+        className="relative flex-1 overflow-y-auto px-5 py-4 space-y-6"
+      >
+        {chat.loading ? (
+          <div className="text-[12px] text-text-tertiary">Loading conversation…</div>
+        ) : chat.loadError ? (
+          <div className="rounded-lg border border-dismiss/20 bg-dismiss/5 px-3 py-2 text-[12px] text-dismiss flex items-start gap-2">
+            <AlertCircle size={14} className="shrink-0 mt-0.5" />
+            <span>{chat.loadError}</span>
+          </div>
+        ) : chat.requests.length === 0 ? (
+          <EmptyState />
+        ) : (
+          chat.requests.map((req, i) => (
+            <RequestBlock
+              key={req.id}
+              request={req}
+              linkifyCtx={linkifyCtx}
+              isLatest={i === chat.requests.length - 1}
+            />
+          ))
+        )}
+      </div>
+
+      <Composer
+        draft={draft}
+        onDraftChange={setDraft}
+        onSubmit={submit}
+        onCancel={onCancel}
+        inFlight={!!chat.inFlight}
+        cancellable={!!chat.inFlight && !chat.inFlight.id.startsWith('optimistic-')}
+        textareaRef={composerRef}
+        sendError={chat.sendError}
+        totalCostUSD={chat.totalCostUSD}
+      />
+    </section>
+  )
+}
+
+function ChatHeader({ chat }: { chat: ReturnType<typeof useCuratorChat> }) {
+  const status = chat.inFlight?.status ?? 'idle'
+  const tone =
+    status === 'running'
+      ? 'text-delegate'
+      : status === 'queued'
+        ? 'text-snooze'
+        : status === 'failed'
+          ? 'text-dismiss'
+          : status === 'cancelled'
+            ? 'text-text-tertiary'
+            : 'text-claim'
+  const dot =
+    status === 'running'
+      ? '●'
+      : status === 'queued'
+        ? '◌'
+        : status === 'failed'
+          ? '✗'
+          : status === 'cancelled'
+            ? '◼'
+            : '○'
+  const label = status === 'idle' ? 'Idle' : status[0].toUpperCase() + status.slice(1)
+
+  const onReset = async () => {
+    // Confirm only when there's actual transcript to lose. Empty
+    // sessions resetting on a phantom click would just be friction.
+    const hasHistory = chat.requests.length > 0
+    if (hasHistory) {
+      const ok = confirm(
+        'Reset the Curator chat?\n\nThis clears the session and deletes message history. The next message starts a brand-new conversation.',
+      )
+      if (!ok) return
+    }
+    const result = await chat.reset()
+    if (!result.ok && result.error) {
+      // 409 conflicts get warning tone (recoverable — the user just
+      // needs to cancel the in-flight turn first); other failures
+      // (network, 500) are real errors. Either way it's the toast
+      // store, not alert() — alert is blocking + unstyled.
+      if (result.conflict) {
+        toast.warning(result.error)
+      } else {
+        toast.error(result.error)
+      }
+    }
+  }
+
+  return (
+    <header className="relative px-5 pt-4 pb-3 border-b border-border-subtle/60">
+      <div className="flex items-center justify-between">
+        <h2 className="text-[13px] font-semibold tracking-tight text-text-primary uppercase">
+          Curator
+        </h2>
+        <div className="flex items-center gap-3 text-[11px]">
+          <span className={`inline-flex items-center gap-1 ${tone}`}>
+            <span aria-hidden>{dot}</span>
+            <span>{label}</span>
+            {status === 'running' && (
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-delegate animate-pulse ml-0.5" />
+            )}
+          </span>
+          {chat.totalCostUSD > 0 && (
+            <span className="text-text-tertiary tabular-nums">${chat.totalCostUSD.toFixed(3)}</span>
+          )}
+          <button
+            type="button"
+            onClick={onReset}
+            disabled={!!chat.inFlight}
+            aria-label="Reset chat"
+            title={
+              chat.inFlight
+                ? 'Cancel the current turn before resetting'
+                : 'Start a fresh conversation (clears session + history)'
+            }
+            className="
+              inline-flex items-center justify-center
+              h-6 w-6 rounded-full
+              text-text-tertiary hover:text-text-primary hover:bg-black/[0.04]
+              disabled:opacity-30 disabled:cursor-not-allowed
+              transition-colors
+            "
+          >
+            <RotateCcw size={11} />
+          </button>
+        </div>
+      </div>
+    </header>
+  )
+}
+
+function EmptyState() {
+  return (
+    <div className="h-full flex items-center justify-center px-2">
+      <div className="text-center max-w-xs">
+        <div className="text-[15px] font-medium tracking-tight text-text-primary mb-2">
+          A new conversation.
+        </div>
+        <div className="text-[12px] text-text-tertiary leading-relaxed">
+          The Curator has the project in view — pinned repos, trackers, knowledge.
+          <br />
+          Ask anything.
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// RequestBlock renders one user→assistant exchange: the user bubble,
+// then the streamed assistant turns underneath.
+function RequestBlock({
+  request,
+  linkifyCtx,
+  isLatest,
+}: {
+  request: CuratorRequestWithMessages
+  linkifyCtx: LinkifyContext
+  isLatest: boolean
+}) {
+  // Filter out hidden context-change audit rows. They exist on the
+  // server side to inform the agent's next turn, not the user.
+  const visibleMessages = useMemo(
+    () => request.messages.filter((m) => m.subtype !== 'context_change'),
+    [request.messages],
+  )
+
+  // Pair tool results to their tool_use calls. Mirrors AgentCard's
+  // pairing so the visual relationship is the same — call up top,
+  // result nested underneath.
+  const toolResults = useMemo(() => {
+    const map = new Map<string, CuratorMessage>()
+    for (const m of visibleMessages) {
+      if (m.role === 'tool' && m.tool_call_id) {
+        map.set(m.tool_call_id, m)
+      }
+    }
+    return map
+  }, [visibleMessages])
+
+  // Compute the latest tool_call id across the request so RequestBlock
+  // can auto-expand exactly that one card. New tool call arrives →
+  // recompute → previous latest collapses cleanly. The user can still
+  // override either way.
+  const latestToolCallID = useMemo(() => {
+    let last = ''
+    for (const m of visibleMessages) {
+      if (m.role === 'assistant' && m.tool_calls?.length) {
+        last = m.tool_calls[m.tool_calls.length - 1].id
+      }
+    }
+    return last
+  }, [visibleMessages])
+
+  const isTerminal =
+    request.status === 'done' || request.status === 'cancelled' || request.status === 'failed'
+
+  const [userToggle, setUserToggle] = useState<Map<string, boolean>>(new Map())
+  const isExpanded = (id: string) => {
+    if (userToggle.has(id)) return userToggle.get(id) === true
+    return id === latestToolCallID && !isTerminal
+  }
+  const toggle = (id: string, currentlyExpanded: boolean) => {
+    setUserToggle((prev) => {
+      const next = new Map(prev)
+      next.set(id, !currentlyExpanded)
+      return next
+    })
+  }
+
+  // Show the streaming placeholder if the request is queued, OR if
+  // it's running but no assistant content has arrived yet. Once the
+  // first assistant message lands, the shimmer is replaced.
+  const hasAssistantContent = visibleMessages.some((m) => m.role === 'assistant')
+  const showShimmer = !isTerminal && !hasAssistantContent
+
+  return (
+    <article className="space-y-3">
+      {request.user_input && <UserBubble text={request.user_input} />}
+
+      {request.error_msg && request.status === 'failed' && (
+        <div className="rounded-lg border border-dismiss/20 bg-dismiss/5 px-3 py-2 text-[12px] text-dismiss flex items-start gap-2">
+          <AlertCircle size={12} className="shrink-0 mt-0.5" />
+          <span>{request.error_msg}</span>
+        </div>
+      )}
+
+      {showShimmer && <StreamingShimmer />}
+
+      {visibleMessages.map((msg) => {
+        if (msg.role === 'tool') return null // rendered nested under tool_use
+        if (msg.role !== 'assistant' && msg.role !== 'system') return null
+        return (
+          <AssistantTurn
+            key={msg.id}
+            message={msg}
+            toolResults={toolResults}
+            isExpanded={isExpanded}
+            onToggle={toggle}
+            linkifyCtx={linkifyCtx}
+          />
+        )
+      })}
+
+      {/* Soft cancellation marker */}
+      {request.status === 'cancelled' && (
+        <div className="text-[11px] text-text-tertiary italic">Cancelled.</div>
+      )}
+
+      {/* Trailing pulse when running but content is already underway */}
+      {request.status === 'running' && hasAssistantContent && isLatest && (
+        <div className="flex items-center gap-1.5 text-[11px] text-text-tertiary">
+          <span className="inline-block w-1.5 h-1.5 rounded-full bg-delegate animate-pulse" />
+          <span>thinking…</span>
+        </div>
+      )}
+    </article>
+  )
+}
+
+function UserBubble({ text }: { text: string }) {
+  return (
+    <div className="flex justify-end">
+      <div
+        className="
+          max-w-[85%] rounded-2xl rounded-tr-md
+          bg-accent-soft/70 border border-accent/15
+          px-3.5 py-2 text-[13px] text-text-primary
+          whitespace-pre-wrap leading-relaxed
+        "
+      >
+        {text}
+      </div>
+    </div>
+  )
+}
+
+function AssistantTurn({
+  message,
+  toolResults,
+  isExpanded,
+  onToggle,
+  linkifyCtx,
+}: {
+  message: CuratorMessage
+  toolResults: Map<string, CuratorMessage>
+  isExpanded: (id: string) => boolean
+  onToggle: (id: string, currentlyExpanded: boolean) => void
+  linkifyCtx: LinkifyContext
+}) {
+  const linkified = useMemo(
+    () => (message.content ? linkifyMarkdown(message.content, linkifyCtx) : ''),
+    [message.content, linkifyCtx],
+  )
+
+  return (
+    <div className="space-y-2">
+      {linkified && (
+        <div
+          className="
+            text-[13px] text-text-primary leading-relaxed
+            prose prose-sm max-w-none
+            prose-p:my-2 prose-pre:my-2 prose-ul:my-2 prose-ol:my-2
+            prose-code:bg-black/[0.04] prose-code:px-1 prose-code:py-0.5 prose-code:rounded
+            prose-code:text-[12px] prose-code:font-mono prose-code:text-text-primary
+            prose-pre:bg-black/[0.04] prose-pre:text-text-primary prose-pre:rounded-lg
+            prose-a:text-accent prose-a:no-underline hover:prose-a:underline
+          "
+        >
+          <Markdown
+            components={{
+              a: ({ href, children }) => (
+                <a href={href} target="_blank" rel="noopener noreferrer">
+                  {children}
+                </a>
+              ),
+            }}
+          >
+            {linkified}
+          </Markdown>
+        </div>
+      )}
+
+      {message.tool_calls?.map((tc) => {
+        const result = toolResults.get(tc.id)
+        const expanded = isExpanded(tc.id)
+        return (
+          <ToolCallCard
+            key={tc.id}
+            toolCall={tc}
+            result={result}
+            expanded={expanded}
+            onToggle={() => onToggle(tc.id, expanded)}
+          />
+        )
+      })}
+    </div>
+  )
+}
+
+function ToolCallCard({
+  toolCall,
+  result,
+  expanded,
+  onToggle,
+}: {
+  toolCall: ToolCall
+  result?: CuratorMessage
+  expanded: boolean
+  onToggle: () => void
+}) {
+  const label = formatToolCall(toolCall.name, toolCall.input)
+  const resultPreview = result ? formatToolResult(toolCall, result) : null
+  const isError = !!result?.is_error
+
+  return (
+    <div
+      className={`
+        rounded-lg border overflow-hidden
+        ${isError ? 'border-dismiss/30 bg-dismiss/5' : 'border-border-subtle bg-black/[0.02]'}
+      `}
+    >
+      <button
+        type="button"
+        onClick={onToggle}
+        className="
+          w-full flex items-center gap-2 px-3 py-1.5
+          text-left text-[12px]
+          hover:bg-black/[0.02] transition-colors
+        "
+        aria-expanded={expanded}
+      >
+        {expanded ? (
+          <ChevronDown size={11} className="shrink-0 text-text-tertiary" />
+        ) : (
+          <ChevronRight size={11} className="shrink-0 text-text-tertiary" />
+        )}
+        <span className={`flex-1 truncate ${isError ? 'text-dismiss' : 'text-text-secondary'}`}>
+          {label}
+        </span>
+        {resultPreview && !expanded && (
+          <span className="text-[11px] text-text-tertiary truncate max-w-[40%] shrink-0">
+            {resultPreview}
+          </span>
+        )}
+        {!result && (
+          <span className="inline-flex items-center gap-1 text-[10px] text-text-tertiary shrink-0">
+            <span className="inline-block w-1.5 h-1.5 rounded-full bg-delegate animate-pulse" />
+            running
+          </span>
+        )}
+      </button>
+      {expanded && (
+        <div className="px-3 pb-2 pt-1 space-y-2 border-t border-border-subtle/60">
+          <ToolDetail label="Args" content={formatJSONInput(toolCall.input)} />
+          {result && (
+            <ToolDetail
+              label={isError ? 'Error' : 'Result'}
+              content={result.content || '(empty)'}
+              tone={isError ? 'error' : undefined}
+            />
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ToolDetail({ label, content, tone }: { label: string; content: string; tone?: 'error' }) {
+  // Defensive truncation: an unbounded grep result (or a Read against
+  // a 50k-line file) would otherwise blow the panel out. Users can
+  // always view the full output via the agent's worktree if needed.
+  const MAX = 4000
+  const truncated = content.length > MAX ? content.slice(0, MAX) + '\n…' : content
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wider text-text-tertiary mb-1">{label}</div>
+      <pre
+        className={`
+          text-[11px] leading-snug whitespace-pre-wrap break-words font-mono
+          max-h-64 overflow-auto
+          ${tone === 'error' ? 'text-dismiss' : 'text-text-secondary'}
+        `}
+      >
+        {truncated}
+      </pre>
+    </div>
+  )
+}
+
+function StreamingShimmer() {
+  return (
+    <div className="space-y-2 animate-pulse">
+      <div className="h-3 rounded-full bg-black/[0.05] w-3/4" />
+      <div className="h-3 rounded-full bg-black/[0.05] w-2/3" />
+      <div className="h-3 rounded-full bg-black/[0.05] w-1/2" />
+    </div>
+  )
+}
+
+function Composer({
+  draft,
+  onDraftChange,
+  onSubmit,
+  onCancel,
+  inFlight,
+  cancellable,
+  textareaRef,
+  sendError,
+  totalCostUSD: _totalCostUSD,
+}: {
+  draft: string
+  onDraftChange: (s: string) => void
+  onSubmit: () => void
+  onCancel: () => void
+  inFlight: boolean
+  cancellable: boolean
+  textareaRef: React.RefObject<HTMLTextAreaElement | null>
+  sendError: string | null
+  totalCostUSD: number
+}) {
+  // Auto-resize. We measure scrollHeight on every value change and
+  // clamp to 6 rows worth (~144px) so the composer doesn't eat the
+  // transcript on long drafts.
+  useEffect(() => {
+    const el = textareaRef.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = Math.min(el.scrollHeight, 144) + 'px'
+  }, [draft, textareaRef])
+
+  // Enter submits, Shift+Enter inserts a newline. ⌘/Ctrl+Enter also
+  // submits — kept as an alternate so muscle memory from chat clients
+  // that use the modifier path still works.
+  const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      onSubmit()
+    }
+  }
+
+  const buttonInactive = inFlight ? !cancellable : !draft.trim()
+
+  return (
+    <div className="relative px-4 pt-3 pb-4 border-t border-border-subtle/60">
+      {sendError && (
+        <div className="mb-2 rounded-lg border border-dismiss/20 bg-dismiss/5 px-2.5 py-1.5 text-[11px] text-dismiss flex items-start gap-1.5">
+          <AlertCircle size={11} className="shrink-0 mt-0.5" />
+          <span>{sendError}</span>
+        </div>
+      )}
+      <div
+        className="
+          flex items-center gap-2 rounded-xl border border-border-subtle
+          bg-white/70 px-3 py-2
+          focus-within:border-accent transition-colors
+        "
+      >
+        <textarea
+          ref={textareaRef}
+          value={draft}
+          onChange={(e) => onDraftChange(e.target.value)}
+          onKeyDown={onKeyDown}
+          placeholder={inFlight ? 'Curator is working…' : 'Message the Curator…'}
+          rows={1}
+          className="
+            flex-1 resize-none bg-transparent text-[13px] text-text-primary
+            placeholder:text-text-tertiary leading-relaxed
+            focus:outline-none
+          "
+        />
+        <button
+          type="button"
+          onClick={inFlight ? onCancel : onSubmit}
+          disabled={buttonInactive}
+          aria-label={inFlight ? 'Cancel running turn' : 'Send message'}
+          className={`
+            shrink-0 inline-flex items-center justify-center
+            h-8 w-8 rounded-full transition-colors
+            disabled:opacity-30 disabled:cursor-not-allowed
+            ${
+              inFlight
+                ? 'bg-dismiss/10 text-dismiss hover:bg-dismiss/20'
+                : 'bg-accent text-white hover:opacity-90'
+            }
+          `}
+        >
+          {inFlight ? <Square size={12} fill="currentColor" /> : <Send size={13} />}
+        </button>
+      </div>
+      <div className="mt-1.5 flex items-center justify-between text-[10px] text-text-tertiary">
+        <span>
+          <kbd className="font-mono">↵</kbd> send · <kbd className="font-mono">⇧↵</kbd> newline
+        </span>
+      </div>
+    </div>
+  )
+}
+
+// --- Tool-call vocabulary (mirrors AgentCard.formatToolCall but keeps
+// curator-side knowledge of the tools the curator actually uses) ---
+
+function formatToolCall(name: string, input: Record<string, unknown>): string {
+  if (name === 'Read') return `Reading ${basename(String(input.file_path || ''))}`
+  if (name === 'Write') return `Writing ${basename(String(input.file_path || ''))}`
+  if (name === 'Edit') return `Editing ${basename(String(input.file_path || ''))}`
+  if (name === 'Glob') return `Searching for ${String(input.pattern || 'files')}`
+  if (name === 'Grep') return `Searching for "${String(input.pattern || '').slice(0, 40)}"`
+  if (name === 'Bash') {
+    const cmd = String(input.command || '')
+    const trimmed = cmd.length > 80 ? cmd.slice(0, 77) + '…' : cmd
+    return `Running: ${trimmed}`
+  }
+  return name
+}
+
+function formatToolResult(_tc: ToolCall, result: CuratorMessage): string {
+  const text = result.content || ''
+  if (!text) return result.is_error ? 'error' : '✓'
+  const oneLine = text.split('\n')[0]
+  return oneLine.length > 60 ? oneLine.slice(0, 57) + '…' : oneLine
+}
+
+function formatJSONInput(input: Record<string, unknown>): string {
+  try {
+    return JSON.stringify(input, null, 2)
+  } catch {
+    return String(input)
+  }
+}
+
+function basename(path: string): string {
+  const parts = path.split('/')
+  return parts[parts.length - 1] || path
+}

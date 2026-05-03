@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -11,6 +12,12 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
+
+// ErrCuratorInFlight is returned by ResetCuratorForProject when a
+// queued or running request exists at the moment of the reset call.
+// The HTTP handler maps this to 409 so the client can prompt the
+// user to cancel first.
+var ErrCuratorInFlight = errors.New("curator request in flight")
 
 // CreateCuratorRequest inserts a queued request and returns its id.
 // The HTTP handler returns 202 + this id immediately; the per-project
@@ -339,6 +346,58 @@ func scanCuratorMessageRow(rows *sql.Rows) (domain.CuratorMessage, error) {
 		m.CacheCreationTokens = &v
 	}
 	return m, nil
+}
+
+// ResetCuratorForProject wipes every curator artifact for a project so
+// the next user message starts a brand-new Claude Code session: clears
+// curator_session_id on the project row, deletes pending-context rows
+// for the project (any session), and deletes every curator_request for
+// the project (cascading to curator_messages via FK).
+//
+// Refuses if there's an in-flight (queued/running) request — the
+// caller should cancel first. The in-flight check + the deletes run
+// inside one TX so a concurrent SendMessage cannot slip a new request
+// into the gap between the check and the wipe.
+//
+// Atomic: either everything is wiped or nothing is. Empty-string
+// session id wouldn't satisfy the curator_pending_context partial
+// unique constraint, so we explicitly write NULL.
+func ResetCuratorForProject(database *sql.DB, projectID string) error {
+	tx, err := database.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var inflight int
+	if err := tx.QueryRow(`
+		SELECT COUNT(*) FROM curator_requests
+		 WHERE project_id = ? AND status IN ('queued', 'running')
+	`, projectID).Scan(&inflight); err != nil {
+		return fmt.Errorf("count inflight: %w", err)
+	}
+	if inflight > 0 {
+		return ErrCuratorInFlight
+	}
+
+	now := time.Now().UTC()
+	if _, err := tx.Exec(`
+		UPDATE projects SET curator_session_id = NULL, updated_at = ?
+		 WHERE id = ?
+	`, now, projectID); err != nil {
+		return fmt.Errorf("clear session id: %w", err)
+	}
+	if _, err := tx.Exec(`
+		DELETE FROM curator_pending_context WHERE project_id = ?
+	`, projectID); err != nil {
+		return fmt.Errorf("delete pending context: %w", err)
+	}
+	if _, err := tx.Exec(`
+		DELETE FROM curator_requests WHERE project_id = ?
+	`, projectID); err != nil {
+		return fmt.Errorf("delete requests: %w", err)
+	}
+	return tx.Commit()
 }
 
 // DeleteCuratorMessagesBySubtype removes every curator_messages row

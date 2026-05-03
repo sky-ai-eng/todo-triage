@@ -396,3 +396,95 @@ func TestInsertCuratorMessage_RoundtripsToolCallsAndTokens(t *testing.T) {
 		t.Errorf("input tokens: %+v", got.InputTokens)
 	}
 }
+
+func TestResetCuratorForProject_WipesEverythingAndClearsSession(t *testing.T) {
+	// Reset: wipe pending-context, wipe requests (cascading messages),
+	// clear curator_session_id. The next message starts fresh, which
+	// is the whole point — `--resume` binds the original session's
+	// flags so changes to the allowlist or envelope only take effect
+	// against a brand-new session.
+	database := newTestDB(t)
+	projectID := seedProjectForCurator(t, database)
+
+	if err := SetProjectCuratorSessionID(database, projectID, "stale-session"); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	requestID, err := CreateCuratorRequest(database, projectID, "first turn")
+	if err != nil {
+		t.Fatalf("seed request: %v", err)
+	}
+	// Force-finish the request so the in-flight check passes. The
+	// reset must work on a project with terminal history.
+	if _, err := CompleteCuratorRequest(database, requestID, "done", "", 0, 0, 0); err != nil {
+		t.Fatalf("finish request: %v", err)
+	}
+	if _, err := InsertCuratorMessage(database, &domain.CuratorMessage{
+		RequestID: requestID,
+		Role:      "assistant",
+		Content:   "hello back",
+	}); err != nil {
+		t.Fatalf("seed msg: %v", err)
+	}
+	if err := InsertPendingContext(database, projectID, "stale-session", "pinned_repos", `[]`); err != nil {
+		t.Fatalf("seed pending: %v", err)
+	}
+
+	if err := ResetCuratorForProject(database, projectID); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+
+	// curator_session_id back to NULL → reads as empty string.
+	proj, err := GetProject(database, projectID)
+	if err != nil {
+		t.Fatalf("get project: %v", err)
+	}
+	if proj.CuratorSessionID != "" {
+		t.Errorf("session id = %q, want cleared", proj.CuratorSessionID)
+	}
+
+	// All curator_requests for this project gone → cascades messages.
+	requests, err := ListCuratorRequestsByProject(database, projectID)
+	if err != nil {
+		t.Fatalf("list requests: %v", err)
+	}
+	if len(requests) != 0 {
+		t.Errorf("expected 0 requests after reset, got %d", len(requests))
+	}
+	msgs, err := ListCuratorMessagesByRequest(database, requestID)
+	if err != nil {
+		t.Fatalf("list msgs: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Errorf("expected messages cascaded, got %d", len(msgs))
+	}
+
+	// Pending-context rows for the wiped session also gone.
+	pending, err := ListPendingContext(database, projectID)
+	if err != nil {
+		t.Fatalf("list pending: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Errorf("expected pending wiped, got %d", len(pending))
+	}
+}
+
+func TestResetCuratorForProject_RefusesWhenInFlight(t *testing.T) {
+	database := newTestDB(t)
+	projectID := seedProjectForCurator(t, database)
+	if _, err := CreateCuratorRequest(database, projectID, "running…"); err != nil {
+		t.Fatalf("seed req: %v", err)
+	}
+	// Default status from CreateCuratorRequest is "queued" — that's
+	// in-flight by the reset's definition, exactly what should block.
+
+	err := ResetCuratorForProject(database, projectID)
+	if err == nil || err != ErrCuratorInFlight {
+		t.Errorf("expected ErrCuratorInFlight, got %v", err)
+	}
+
+	// Verify nothing was wiped — the TX rolled back atomically.
+	requests, _ := ListCuratorRequestsByProject(database, projectID)
+	if len(requests) != 1 {
+		t.Errorf("requests should not have been deleted: got %d", len(requests))
+	}
+}

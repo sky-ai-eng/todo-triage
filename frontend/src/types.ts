@@ -65,6 +65,50 @@ export interface ToolCall {
   input: Record<string, unknown>
 }
 
+// CuratorMessage / CuratorRequest mirror the Go domain types in
+// internal/domain/curator.go. The Go structs carry json tags so the
+// wire shape is snake_case — diverging from AgentMessage, which is
+// PascalCase because its Go struct has no tags. Don't try to unify.
+export interface CuratorMessage {
+  id: number
+  request_id: string
+  role: string // "assistant" | "user" | "tool" | "system"
+  subtype: string // "" | "context_change" | "yield_request" | ...
+  content: string
+  tool_calls?: ToolCall[]
+  tool_call_id?: string
+  is_error?: boolean
+  metadata?: Record<string, unknown>
+  model?: string
+  input_tokens?: number
+  output_tokens?: number
+  cache_read_tokens?: number
+  cache_creation_tokens?: number
+  created_at: string
+}
+
+export type CuratorRequestStatus = 'queued' | 'running' | 'done' | 'cancelled' | 'failed'
+
+export interface CuratorRequest {
+  id: string
+  project_id: string
+  status: CuratorRequestStatus
+  user_input: string
+  error_msg?: string
+  cost_usd: number
+  duration_ms: number
+  num_turns: number
+  started_at?: string
+  finished_at?: string
+  created_at: string
+}
+
+// History endpoint envelope: each request carries its message stream
+// inline. Frontend dedupes incoming WS messages against this.
+export interface CuratorRequestWithMessages extends CuratorRequest {
+  messages: CuratorMessage[]
+}
+
 export interface TriageEvent {
   id?: number
   event_type: string
@@ -301,6 +345,14 @@ export interface FactorySnapshot {
 export type WSEvent =
   | { type: 'agent_run_update'; run_id: string; data: { status: string } }
   | { type: 'agent_message'; run_id: string; data: AgentMessage }
+  | { type: 'curator_message'; project_id: string; data: CuratorMessage }
+  | {
+      type: 'curator_request_update'
+      project_id: string
+      data: { request_id: string; status: CuratorRequestStatus }
+    }
+  | { type: 'project_knowledge_updated'; project_id: string; data: null }
+  | { type: 'curator_reset'; project_id: string; data: null }
   | { type: 'event'; data: DomainEvent }
   | { type: 'tasks_updated'; data: Record<string, never> }
   | { type: 'scoring_started'; data: { task_ids: string[] } }

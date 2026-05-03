@@ -127,6 +127,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/projects/{id}/curator/messages", s.handleCuratorSend)
 	s.mux.HandleFunc("GET /api/projects/{id}/curator/messages", s.handleCuratorHistory)
 	s.mux.HandleFunc("DELETE /api/projects/{id}/curator/messages/in-flight", s.handleCuratorCancel)
+	s.mux.HandleFunc("POST /api/projects/{id}/curator/reset", s.handleCuratorReset)
 
 	// Websocket
 	s.mux.HandleFunc("GET /api/ws", s.ws.HandleWS)
