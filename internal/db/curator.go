@@ -204,11 +204,10 @@ func CancelOrphanedRunningCuratorRequests(database *sql.DB) (int64, error) {
 }
 
 // SetProjectCuratorSessionID persists the captured Claude Code
-// session_id on the project row. Called once per project — the very
-// first message kicks off a fresh CC session, captures the id, and
-// every subsequent message resumes against it. Idempotent at the DB
-// level (UPDATE-by-id), but the curator runtime gates further calls
-// behind an in-memory flag to avoid a redundant write per resume.
+// session_id on the project row. The first message kicks off a fresh
+// CC session and captures the id; subsequent messages can resume
+// against the persisted session id. This helper always performs the
+// UPDATE by project id; callers may choose when to invoke it.
 func SetProjectCuratorSessionID(database *sql.DB, projectID, sessionID string) error {
 	_, err := database.Exec(`
 		UPDATE projects SET curator_session_id = ?, updated_at = ?
