@@ -86,7 +86,7 @@ func (c *Curator) SendMessage(projectID, content string) (string, error) {
 		// Queue is full — should not happen at the per-project depth
 		// we configure, but if it ever does, fail the row up-front
 		// rather than blocking the HTTP handler.
-		_ = db.CompleteCuratorRequest(c.database, requestID, "failed", "curator queue full", 0, 0, 0)
+		_, _ = db.CompleteCuratorRequest(c.database, requestID, "failed", "curator queue full", 0, 0, 0)
 		c.broadcastRequestUpdate(projectID, requestID, "failed")
 		return "", errors.New("curator queue is full")
 	}

@@ -76,7 +76,7 @@ func TestMarkCuratorRequestCancelledIfActive_TerminalRowsLeftAlone(t *testing.T)
 	projectID := seedProjectForCurator(t, database)
 
 	id, _ := CreateCuratorRequest(database, projectID, "x")
-	if err := CompleteCuratorRequest(database, id, "done", "", 0.42, 1500, 3); err != nil {
+	if _, err := CompleteCuratorRequest(database, id, "done", "", 0.42, 1500, 3); err != nil {
 		t.Fatalf("complete: %v", err)
 	}
 
@@ -144,7 +144,7 @@ func TestInFlightCuratorRequestForProject_NoneReturnsNil(t *testing.T) {
 	database := newTestDB(t)
 	projectID := seedProjectForCurator(t, database)
 	id, _ := CreateCuratorRequest(database, projectID, "x")
-	_ = CompleteCuratorRequest(database, id, "done", "", 0, 0, 0)
+	_, _ = CompleteCuratorRequest(database, id, "done", "", 0, 0, 0)
 
 	got, err := InFlightCuratorRequestForProject(database, projectID)
 	if err != nil {
@@ -155,11 +155,13 @@ func TestInFlightCuratorRequestForProject_NoneReturnsNil(t *testing.T) {
 	}
 }
 
-func TestCancelOrphanedRunningCuratorRequests_FlipsOnlyRunningRows(t *testing.T) {
-	// Pin the startup recovery contract: rows in `running` get
-	// cancelled (their goroutine is gone with the previous process);
-	// queued rows are left alone (the new process can pick them up);
-	// terminal rows are untouched.
+func TestCancelOrphanedNonTerminalCuratorRequests_FlipsQueuedAndRunning(t *testing.T) {
+	// Pin the new startup recovery contract: BOTH queued and running
+	// rows get cancelled because neither can survive a process
+	// restart in a useful state. Terminal rows are untouched. The
+	// previous contract left queued rows alone "for the next process
+	// to pick up," but that contract was never actually wired —
+	// queued rows would have dangled forever.
 	database := newTestDB(t)
 	projectID := seedProjectForCurator(t, database)
 
@@ -169,14 +171,14 @@ func TestCancelOrphanedRunningCuratorRequests_FlipsOnlyRunningRows(t *testing.T)
 	queuedID, _ := CreateCuratorRequest(database, projectID, "queued")
 
 	doneID, _ := CreateCuratorRequest(database, projectID, "done")
-	_ = CompleteCuratorRequest(database, doneID, "done", "", 0.1, 100, 1)
+	_, _ = CompleteCuratorRequest(database, doneID, "done", "", 0.1, 100, 1)
 
-	n, err := CancelOrphanedRunningCuratorRequests(database)
+	n, err := CancelOrphanedNonTerminalCuratorRequests(database)
 	if err != nil {
 		t.Fatalf("recovery: %v", err)
 	}
-	if n != 1 {
-		t.Errorf("flipped %d rows, want 1", n)
+	if n != 2 {
+		t.Errorf("flipped %d rows, want 2 (running + queued)", n)
 	}
 
 	getStatus := func(id string) string {
@@ -186,11 +188,55 @@ func TestCancelOrphanedRunningCuratorRequests_FlipsOnlyRunningRows(t *testing.T)
 	if got := getStatus(runningID); got != "cancelled" {
 		t.Errorf("running row status = %q, want cancelled", got)
 	}
-	if got := getStatus(queuedID); got != "queued" {
-		t.Errorf("queued row status = %q, want queued (untouched)", got)
+	if got := getStatus(queuedID); got != "cancelled" {
+		t.Errorf("queued row status = %q, want cancelled", got)
 	}
 	if got := getStatus(doneID); got != "done" {
 		t.Errorf("done row status = %q, want done (untouched)", got)
+	}
+}
+
+// TestCompleteCuratorRequest_DoesNotClobberCancelled is the load-
+// bearing race-protection test: a row that was cancelled (e.g. by
+// the user via the DELETE endpoint) while the goroutine was running
+// agentproc must NOT be silently flipped back to done by the
+// goroutine's terminal write. The status filter on the UPDATE is
+// what enforces this.
+func TestCompleteCuratorRequest_DoesNotClobberCancelled(t *testing.T) {
+	database := newTestDB(t)
+	projectID := seedProjectForCurator(t, database)
+
+	id, _ := CreateCuratorRequest(database, projectID, "x")
+	_ = MarkCuratorRequestRunning(database, id)
+
+	// Mimic the cancel handler racing ahead of the goroutine's
+	// completion write.
+	flipped, err := MarkCuratorRequestCancelledIfActive(database, id, "user cancelled")
+	if err != nil || !flipped {
+		t.Fatalf("seed cancel: flipped=%v err=%v", flipped, err)
+	}
+
+	// Now the goroutine tries to write done. Must be a no-op.
+	flipped, err = CompleteCuratorRequest(database, id, "done", "", 0.5, 1000, 2)
+	if err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if flipped {
+		t.Error("CompleteCuratorRequest flipped a cancelled row — clobbered the user's cancel")
+	}
+
+	got, _ := GetCuratorRequest(database, id)
+	if got.Status != "cancelled" {
+		t.Errorf("post-race status = %q, want cancelled", got.Status)
+	}
+	if got.ErrorMsg != "user cancelled" {
+		t.Errorf("error_msg = %q, want 'user cancelled'", got.ErrorMsg)
+	}
+	// Accounting from the racing completion call must not have
+	// landed: the row is cancelled, not done, and a half-cancelled
+	// half-completed row would be confusing in the UI.
+	if got.CostUSD != 0 || got.NumTurns != 0 {
+		t.Errorf("accounting leaked into cancelled row: %+v", got)
 	}
 }
 

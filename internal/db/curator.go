@@ -53,19 +53,33 @@ func MarkCuratorRequestRunning(database *sql.DB, id string) error {
 	return nil
 }
 
-// CompleteCuratorRequest writes a terminal status and accounting.
-// Status is one of done | cancelled | failed. Caller passes 0 for
-// any field that wasn't observed (e.g., a failure with no result
-// event). Idempotent in the sense that double-write is harmless —
-// last writer wins — but the per-project goroutine is the sole caller
-// in normal flow.
-func CompleteCuratorRequest(database *sql.DB, id, status, errMsg string, costUSD float64, durationMs, numTurns int) error {
-	_, err := database.Exec(`
+// CompleteCuratorRequest writes a terminal status and accounting,
+// but ONLY if the row is still non-terminal. Status is one of
+// done | cancelled | failed. Caller passes 0 for any field that
+// wasn't observed (e.g., a failure with no result event).
+//
+// Returns true if the flip happened. The status filter is the
+// single source of truth for "terminal state is final": the
+// goroutine that actually ran agentproc and the cancel handler
+// can race to write the row, and either order produces the same
+// outcome — the first writer wins, the second is a no-op. Without
+// this filter, a user-cancel that landed during agentproc.Run
+// could be silently overwritten by the goroutine's natural
+// completion write seconds later.
+//
+// Per-project goroutine is the sole caller in normal flow; the
+// guard exists for the rare cancel-vs-completion interleaving.
+func CompleteCuratorRequest(database *sql.DB, id, status, errMsg string, costUSD float64, durationMs, numTurns int) (bool, error) {
+	res, err := database.Exec(`
 		UPDATE curator_requests
 		SET status = ?, error_msg = ?, cost_usd = ?, duration_ms = ?, num_turns = ?, finished_at = ?
-		WHERE id = ?
+		WHERE id = ? AND status NOT IN ('done', 'cancelled', 'failed')
 	`, status, nullIfEmpty(errMsg), costUSD, durationMs, numTurns, time.Now().UTC(), id)
-	return err
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
 
 // MarkCuratorRequestCancelledIfActive flips any non-terminal row to
@@ -152,11 +166,13 @@ func InFlightCuratorRequestForProject(database *sql.DB, projectID string) (*doma
 }
 
 // QueuedCuratorRequestsForProject returns queued rows in FIFO order.
-// Used at curator startup to recover work that was enqueued before a
-// crash, so a user-posted message isn't silently lost across a
-// restart. Running rows from a previous process are out of scope
-// here — a separate startup pass marks them cancelled because we
-// can't resume an interrupted agentproc invocation.
+// Used by Curator.CancelProject as a defensive sweep so a project-
+// delete that races a never-picked-up queued row still flips that
+// row to a terminal state before the project FK cascade fires.
+// Cross-process recovery is out of scope: process-restart cancels
+// every non-terminal row at startup (CancelOrphanedNonTerminalCuratorRequests),
+// so by the time anything calls this helper, only rows enqueued
+// during the current process lifetime can be observed.
 func QueuedCuratorRequestsForProject(database *sql.DB, projectID string) ([]domain.CuratorRequest, error) {
 	rows, err := database.Query(`
 		SELECT id, project_id, status, user_input, error_msg,
@@ -184,19 +200,26 @@ func QueuedCuratorRequestsForProject(database *sql.DB, projectID string) ([]doma
 	return out, rows.Err()
 }
 
-// CancelOrphanedRunningCuratorRequests is the startup recovery pass:
-// any rows left in `running` from a previous process are stranded —
-// the agentproc goroutine that owned them is gone with the process,
-// and we can't resume mid-stream. Flip them to cancelled so the UI
-// shows a deterministic terminal state and the per-project queue
-// can drain cleanly. Idempotent.
-func CancelOrphanedRunningCuratorRequests(database *sql.DB) (int64, error) {
+// CancelOrphanedNonTerminalCuratorRequests is the startup recovery
+// pass: any rows left non-terminal from a previous process are
+// stranded — running rows lost their goroutine + agentproc
+// subprocess at process exit (we can't resume mid-stream), and
+// queued rows lost the goroutine that was supposed to pick them up.
+//
+// Auto-replaying a stale queued row would be more surprising than
+// dropping it: the user's mental model after a restart is "the
+// app started fresh," and a chat message that suddenly starts
+// streaming a reply seconds later — possibly referencing a
+// project state that's since changed — would feel like a bug.
+// Cancelling both classes lets the user re-send if they actually
+// wanted that message processed. Idempotent.
+func CancelOrphanedNonTerminalCuratorRequests(database *sql.DB) (int64, error) {
 	res, err := database.Exec(`
 		UPDATE curator_requests
 		SET status = 'cancelled',
-		    error_msg = COALESCE(error_msg, 'process restarted mid-run'),
+		    error_msg = COALESCE(error_msg, 'process restarted'),
 		    finished_at = COALESCE(finished_at, ?)
-		WHERE status = 'running'
+		WHERE status IN ('queued', 'running')
 	`, time.Now().UTC())
 	if err != nil {
 		return 0, err

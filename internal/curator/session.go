@@ -69,6 +69,18 @@ func (s *projectSession) run() {
 // dispatch processes one queued request. Owns the row's lifecycle
 // from queued → running → terminal; broadcasts each transition so
 // the Projects page can update without re-fetching.
+//
+// Cancel ordering: msgCtx and inFlightCancel are registered BEFORE
+// MarkCuratorRequestRunning so that by the time any external observer
+// can see the row in `running` state, the cancel handle is already
+// armed. Without this, a cancel that landed in the window between
+// "row is running" and "inFlightCancel registered" would see a nil
+// cancel handle and be a no-op — the goroutine would then run
+// agentproc to completion, and even though the cancel handler also
+// flips the row at the DB level, the goroutine's terminal write
+// could clobber it. The SQL filter on CompleteCuratorRequest
+// belt-and-suspenders that, but registering early closes the race
+// window in the first place.
 func (s *projectSession) dispatch(requestID string) {
 	if err := s.ctx.Err(); err != nil {
 		// Shutdown raced ahead of the dequeue — flip the row to
@@ -76,6 +88,23 @@ func (s *projectSession) dispatch(requestID string) {
 		s.markCancelled(requestID, "process shutting down")
 		return
 	}
+
+	// Per-message ctx is a child of the session ctx. SIGKILL of the
+	// in-flight subprocess goes through this; cancelInFlight fires
+	// it from outside the goroutine.
+	msgCtx, msgCancel := context.WithCancel(s.ctx)
+	s.inFlightMu.Lock()
+	s.inFlightCancel = msgCancel
+	s.inFlightRequestID = requestID
+	s.inFlightMu.Unlock()
+
+	defer func() {
+		s.inFlightMu.Lock()
+		s.inFlightCancel = nil
+		s.inFlightRequestID = ""
+		s.inFlightMu.Unlock()
+		msgCancel()
+	}()
 
 	if err := db.MarkCuratorRequestRunning(s.curator.database, requestID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -91,6 +120,14 @@ func (s *projectSession) dispatch(requestID string) {
 		return
 	}
 	s.curator.broadcastRequestUpdate(s.projectID, requestID, "running")
+
+	// Cancel could have fired during MarkRunning's DB call. Check
+	// before doing any further work so we don't pointlessly load
+	// the project / spawn claude on a cancelled request.
+	if msgCtx.Err() != nil {
+		s.markCancelled(requestID, "user cancelled")
+		return
+	}
 
 	req, err := db.GetCuratorRequest(s.curator.database, requestID)
 	if err != nil {
@@ -121,23 +158,6 @@ func (s *projectSession) dispatch(requestID string) {
 	s.curator.mu.Lock()
 	model := s.curator.model
 	s.curator.mu.Unlock()
-
-	// Per-message ctx is a child of the session ctx. SIGKILL of the
-	// in-flight subprocess goes through this; cancelInFlight fires
-	// it from outside the goroutine.
-	msgCtx, msgCancel := context.WithCancel(s.ctx)
-	s.inFlightMu.Lock()
-	s.inFlightCancel = msgCancel
-	s.inFlightRequestID = requestID
-	s.inFlightMu.Unlock()
-
-	defer func() {
-		s.inFlightMu.Lock()
-		s.inFlightCancel = nil
-		s.inFlightRequestID = ""
-		s.inFlightMu.Unlock()
-		msgCancel()
-	}()
 
 	// Pre-flight model check before we spawn claude. The Curator
 	// constructor takes "" until config loads (mirroring Spawner),
@@ -194,11 +214,22 @@ func (s *projectSession) dispatch(requestID string) {
 		status = "failed"
 		errMsg = outcome.Result.Result
 	}
-	if err := db.CompleteCuratorRequest(
+	flipped, err := db.CompleteCuratorRequest(
 		s.curator.database, requestID, status, errMsg,
 		outcome.Result.CostUSD, outcome.Result.DurationMs, outcome.Result.NumTurns,
-	); err != nil {
+	)
+	if err != nil {
 		log.Printf("[curator] warning: complete request %s: %v", requestID, err)
+		return
+	}
+	if !flipped {
+		// The row was already terminal — most likely a user cancel
+		// landed during agentproc.Run and the handler beat us to the
+		// DB. Don't broadcast a status change that doesn't match the
+		// row's actual state; the cancel handler already broadcast
+		// cancelled.
+		log.Printf("[curator] request %s already terminal, skipping completion broadcast (intended status: %s)", requestID, status)
+		return
 	}
 	s.curator.broadcastRequestUpdate(s.projectID, requestID, status)
 }
@@ -264,8 +295,15 @@ func (s *projectSession) markCancelled(requestID, reason string) {
 }
 
 func (s *projectSession) failRequest(requestID, errMsg string) {
-	if err := db.CompleteCuratorRequest(s.curator.database, requestID, "failed", errMsg, 0, 0, 0); err != nil {
+	flipped, err := db.CompleteCuratorRequest(s.curator.database, requestID, "failed", errMsg, 0, 0, 0)
+	if err != nil {
 		log.Printf("[curator] warning: fail request %s: %v", requestID, err)
+		return
+	}
+	if !flipped {
+		// Cancel raced ahead of the failure write. Cancelled wins;
+		// the handler already broadcast that.
+		return
 	}
 	s.curator.broadcastRequestUpdate(s.projectID, requestID, "failed")
 }

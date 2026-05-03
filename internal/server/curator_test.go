@@ -108,7 +108,7 @@ func TestHandleCuratorHistory_ReturnsRequestsWithMessages(t *testing.T) {
 	srv, _, projectID := curatorTestSetup(t)
 
 	id1, _ := db.CreateCuratorRequest(srv.db, projectID, "first")
-	_ = db.CompleteCuratorRequest(srv.db, id1, "done", "", 0.01, 100, 1)
+	_, _ = db.CompleteCuratorRequest(srv.db, id1, "done", "", 0.01, 100, 1)
 	if _, err := db.InsertCuratorMessage(srv.db, &domain.CuratorMessage{
 		RequestID: id1,
 		Role:      "assistant",
@@ -119,7 +119,7 @@ func TestHandleCuratorHistory_ReturnsRequestsWithMessages(t *testing.T) {
 	}
 
 	id2, _ := db.CreateCuratorRequest(srv.db, projectID, "second")
-	_ = db.CompleteCuratorRequest(srv.db, id2, "done", "", 0.02, 200, 2)
+	_, _ = db.CompleteCuratorRequest(srv.db, id2, "done", "", 0.02, 200, 2)
 
 	rr := doJSON(t, srv, http.MethodGet, "/api/projects/"+projectID+"/curator/messages", nil)
 	if rr.Code != http.StatusOK {

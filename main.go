@@ -366,15 +366,20 @@ func main() {
 	spawner := delegate.NewSpawner(database, nil, wsHub, "")
 	srv.SetSpawner(spawner)
 
-	// Curator runtime (SKY-216) — per-project chat sessions. Stranded
-	// "running" rows from a previous process can't be resumed
-	// mid-stream, so flip them to cancelled before any user can
-	// interact with them. The model arg is empty until config loads;
-	// curator.UpdateCredentials hot-swaps the same way Spawner does.
-	if n, err := db.CancelOrphanedRunningCuratorRequests(database); err != nil {
+	// Curator runtime (SKY-216) — per-project chat sessions. Any
+	// rows left non-terminal from a previous process are stranded:
+	// running rows lost their goroutine + agentproc subprocess,
+	// queued rows lost the goroutine that was supposed to pick them
+	// up. Cancel both classes so the user can re-send if they
+	// actually wanted that message processed. Auto-replaying a
+	// stale queued message after a restart would surprise the user
+	// more than dropping it. The model arg is empty until config
+	// loads; curator.UpdateCredentials hot-swaps the same way
+	// Spawner does.
+	if n, err := db.CancelOrphanedNonTerminalCuratorRequests(database); err != nil {
 		log.Printf("[curator] startup recovery failed: %v", err)
 	} else if n > 0 {
-		log.Printf("[curator] cancelled %d orphaned running curator requests from prior process", n)
+		log.Printf("[curator] cancelled %d orphaned non-terminal curator requests from prior process", n)
 	}
 	curatorRuntime := curator.New(database, wsHub, "")
 	srv.SetCurator(curatorRuntime)
