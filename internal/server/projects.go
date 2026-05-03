@@ -770,7 +770,8 @@ func (s *Server) handleProjectKnowledgeFile(w http.ResponseWriter, r *http.Reque
 	defer f.Close()
 
 	w.Header().Set("Content-Type", detectMimeType(filepath.Base(full)))
-	w.Header().Set("Content-Disposition", "inline; filename="+strconv.Quote(filepath.Base(full)))
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Disposition", "attachment; filename="+strconv.Quote(filepath.Base(full)))
 	http.ServeContent(w, r, filepath.Base(full), linfo.ModTime(), f)
 }
 
