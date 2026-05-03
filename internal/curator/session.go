@@ -93,8 +93,12 @@ func (s *projectSession) dispatch(requestID string) {
 	s.curator.broadcastRequestUpdate(s.projectID, requestID, "running")
 
 	req, err := db.GetCuratorRequest(s.curator.database, requestID)
-	if err != nil || req == nil {
+	if err != nil {
 		s.failRequest(requestID, fmt.Sprintf("load request: %v", err))
+		return
+	}
+	if req == nil {
+		s.failRequest(requestID, "request not found")
 		return
 	}
 
