@@ -129,19 +129,25 @@ func (s *projectSession) dispatch(requestID string) {
 
 	systemPrompt := buildSystemPrompt(project.Name)
 
-	outcome, runErr := agentproc.Run(msgCtx, agentproc.RunOptions{
-		Cwd:          cwd,
-		Model:        model,
-		SessionID:    project.CuratorSessionID,
-		Message:      req.UserInput,
-		SystemPrompt: systemPrompt,
-		AllowedTools: BuildAllowedTools(),
-		ExtraEnv: []string{
-			"TRIAGE_FACTORY_CURATOR_PROJECT_ID=" + s.projectID,
-			"TRIAGE_FACTORY_CURATOR_REQUEST_ID=" + requestID,
-		},
-		TraceID: requestID,
-	}, newRequestSink(s.curator, s.projectID, requestID))
+	outcome, runErr := func() (agentproc.RunOutcome, error) {
+		if model == "" {
+			return agentproc.RunOutcome{}, errors.New("curator AI model is not configured")
+		}
+
+		return agentproc.Run(msgCtx, agentproc.RunOptions{
+			Cwd:          cwd,
+			Model:        model,
+			SessionID:    project.CuratorSessionID,
+			Message:      req.UserInput,
+			SystemPrompt: systemPrompt,
+			AllowedTools: BuildAllowedTools(),
+			ExtraEnv: []string{
+				"TRIAGE_FACTORY_CURATOR_PROJECT_ID=" + s.projectID,
+				"TRIAGE_FACTORY_CURATOR_REQUEST_ID=" + requestID,
+			},
+			TraceID: requestID,
+		}, newRequestSink(s.curator, s.projectID, requestID))
+	}()
 
 	// Cancellation observed → terminal cancelled status. Use msgCtx
 	// rather than s.ctx so a project-wide shutdown that fires
