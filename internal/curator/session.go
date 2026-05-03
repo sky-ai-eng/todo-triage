@@ -109,7 +109,11 @@ func (s *projectSession) dispatch(requestID string) {
 	}
 
 	project, err := db.GetProject(s.curator.database, s.projectID)
-	if err != nil || project == nil {
+	if err != nil {
+		s.failRequest(requestID, fmt.Sprintf("load project: %v", err))
+		return
+	}
+	if project == nil {
 		s.failRequest(requestID, "project missing")
 		return
 	}
