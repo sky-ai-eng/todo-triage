@@ -240,6 +240,72 @@ func TestSetProjectCuratorSessionID_PersistsOnProjectRow(t *testing.T) {
 	}
 }
 
+func TestListCuratorMessagesByRequestIDs_GroupsByRequest(t *testing.T) {
+	// Pin the batched-fetch contract: messages are returned in a map
+	// keyed by request_id, each list ordered chronologically. This is
+	// what lets the history handler render N requests with a single
+	// IN-list query instead of N per-request round trips.
+	database := newTestDB(t)
+	projectID := seedProjectForCurator(t, database)
+
+	r1, _ := CreateCuratorRequest(database, projectID, "first")
+	r2, _ := CreateCuratorRequest(database, projectID, "second")
+	r3, _ := CreateCuratorRequest(database, projectID, "third — no replies")
+
+	// Two messages on r1, one on r2, none on r3.
+	for _, content := range []string{"r1-a", "r1-b"} {
+		if _, err := InsertCuratorMessage(database, &domain.CuratorMessage{
+			RequestID: r1, Role: "assistant", Subtype: "text", Content: content,
+		}); err != nil {
+			t.Fatalf("seed r1 msg %q: %v", content, err)
+		}
+	}
+	if _, err := InsertCuratorMessage(database, &domain.CuratorMessage{
+		RequestID: r2, Role: "assistant", Subtype: "text", Content: "r2-a",
+	}); err != nil {
+		t.Fatalf("seed r2 msg: %v", err)
+	}
+
+	got, err := ListCuratorMessagesByRequestIDs(database, []string{r1, r2, r3})
+	if err != nil {
+		t.Fatalf("batch fetch: %v", err)
+	}
+
+	if len(got[r1]) != 2 {
+		t.Errorf("r1: got %d messages, want 2", len(got[r1]))
+	}
+	if got[r1][0].Content != "r1-a" || got[r1][1].Content != "r1-b" {
+		t.Errorf("r1 ordering wrong: %+v", got[r1])
+	}
+	if len(got[r2]) != 1 || got[r2][0].Content != "r2-a" {
+		t.Errorf("r2: got %+v, want one r2-a", got[r2])
+	}
+	// r3 had no messages — must NOT be present in the map. Callers
+	// substitute an empty slice when rendering JSON; checking for
+	// "missing key === no messages" keeps the helper allocation-free
+	// for empty-stream requests.
+	if _, ok := got[r3]; ok {
+		t.Errorf("r3 should be absent from map (no messages), got %+v", got[r3])
+	}
+}
+
+func TestListCuratorMessagesByRequestIDs_EmptyInputReturnsEmptyMap(t *testing.T) {
+	// The handler iterates the result by request id; a nil map
+	// would force every caller to nil-check before lookup. Pin the
+	// non-nil empty contract.
+	database := newTestDB(t)
+	got, err := ListCuratorMessagesByRequestIDs(database, nil)
+	if err != nil {
+		t.Fatalf("empty fetch: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected non-nil empty map for nil input")
+	}
+	if len(got) != 0 {
+		t.Errorf("expected empty map, got %v", got)
+	}
+}
+
 func TestInsertCuratorMessage_RoundtripsToolCallsAndTokens(t *testing.T) {
 	database := newTestDB(t)
 	projectID := seedProjectForCurator(t, database)

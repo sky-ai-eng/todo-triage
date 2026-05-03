@@ -91,12 +91,25 @@ func (s *Server) handleCuratorHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Batch the message fetch into one IN-list query keyed by every
+	// request id rather than looping per-request — a project with a
+	// long chat history would otherwise pay an N+1 round-trip per
+	// page load.
+	requestIDs := make([]string, len(requests))
+	for i, req := range requests {
+		requestIDs[i] = req.ID
+	}
+	messagesByRequest, err := db.ListCuratorMessagesByRequestIDs(s.db, requestIDs)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
 	out := make([]curatorRequestJSON, 0, len(requests))
 	for _, req := range requests {
-		messages, err := db.ListCuratorMessagesByRequest(s.db, req.ID)
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			return
+		messages := messagesByRequest[req.ID]
+		if messages == nil {
+			messages = []domain.CuratorMessage{}
 		}
 		out = append(out, curatorRequestJSON{
 			CuratorRequest: req,

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -255,13 +256,76 @@ func InsertCuratorMessage(database *sql.DB, msg *domain.CuratorMessage) (int64, 
 	return result.LastInsertId()
 }
 
+// curatorMessageColumns is the SELECT list shared by every helper
+// that reads from curator_messages, so scanCuratorMessageRow stays
+// tied to a single column ordering.
+const curatorMessageColumns = `
+	id, request_id, role, content, subtype, tool_calls, tool_call_id, is_error, metadata,
+	model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at
+`
+
+// scanCuratorMessageRow reads one curator_messages row from a Rows
+// cursor — shared between the per-request and batched helpers so the
+// nullable-column / JSON-decoding plumbing lives in one place.
+func scanCuratorMessageRow(rows *sql.Rows) (domain.CuratorMessage, error) {
+	var (
+		m             domain.CuratorMessage
+		toolCallsJSON sql.NullString
+		metadataJSON  sql.NullString
+		toolCallID    sql.NullString
+		model         sql.NullString
+		inputTokens   sql.NullInt64
+		outputTokens  sql.NullInt64
+		cacheRead     sql.NullInt64
+		cacheCreation sql.NullInt64
+	)
+	if err := rows.Scan(
+		&m.ID, &m.RequestID, &m.Role, &m.Content, &m.Subtype,
+		&toolCallsJSON, &toolCallID, &m.IsError, &metadataJSON,
+		&model, &inputTokens, &outputTokens, &cacheRead, &cacheCreation,
+		&m.CreatedAt,
+	); err != nil {
+		return domain.CuratorMessage{}, err
+	}
+	if toolCallsJSON.Valid {
+		if err := json.Unmarshal([]byte(toolCallsJSON.String), &m.ToolCalls); err != nil {
+			return domain.CuratorMessage{}, fmt.Errorf("unmarshal tool_calls: %w", err)
+		}
+	}
+	if metadataJSON.Valid {
+		if err := json.Unmarshal([]byte(metadataJSON.String), &m.Metadata); err != nil {
+			return domain.CuratorMessage{}, fmt.Errorf("unmarshal metadata: %w", err)
+		}
+	}
+	m.ToolCallID = toolCallID.String
+	m.Model = model.String
+	if inputTokens.Valid {
+		v := int(inputTokens.Int64)
+		m.InputTokens = &v
+	}
+	if outputTokens.Valid {
+		v := int(outputTokens.Int64)
+		m.OutputTokens = &v
+	}
+	if cacheRead.Valid {
+		v := int(cacheRead.Int64)
+		m.CacheReadTokens = &v
+	}
+	if cacheCreation.Valid {
+		v := int(cacheCreation.Int64)
+		m.CacheCreationTokens = &v
+	}
+	return m, nil
+}
+
 // ListCuratorMessagesByRequest returns the agent-side stream rows for
-// a request in chronological order. Used by the GET history endpoint
-// to compose user_input + agent reply pairs.
+// a request in chronological order. Used by the websocket replay path
+// and tests; the GET history handler uses the batched
+// ListCuratorMessagesByRequestIDs to avoid an N+1 over the request
+// list.
 func ListCuratorMessagesByRequest(database *sql.DB, requestID string) ([]domain.CuratorMessage, error) {
 	rows, err := database.Query(`
-		SELECT id, request_id, role, content, subtype, tool_calls, tool_call_id, is_error, metadata,
-		       model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at
+		SELECT `+curatorMessageColumns+`
 		FROM curator_messages
 		WHERE request_id = ?
 		ORDER BY created_at ASC, id ASC
@@ -273,56 +337,75 @@ func ListCuratorMessagesByRequest(database *sql.DB, requestID string) ([]domain.
 
 	out := []domain.CuratorMessage{}
 	for rows.Next() {
-		var (
-			m             domain.CuratorMessage
-			toolCallsJSON sql.NullString
-			metadataJSON  sql.NullString
-			toolCallID    sql.NullString
-			model         sql.NullString
-			inputTokens   sql.NullInt64
-			outputTokens  sql.NullInt64
-			cacheRead     sql.NullInt64
-			cacheCreation sql.NullInt64
-		)
-		if err := rows.Scan(
-			&m.ID, &m.RequestID, &m.Role, &m.Content, &m.Subtype,
-			&toolCallsJSON, &toolCallID, &m.IsError, &metadataJSON,
-			&model, &inputTokens, &outputTokens, &cacheRead, &cacheCreation,
-			&m.CreatedAt,
-		); err != nil {
+		m, err := scanCuratorMessageRow(rows)
+		if err != nil {
 			return nil, err
-		}
-		if toolCallsJSON.Valid {
-			if err := json.Unmarshal([]byte(toolCallsJSON.String), &m.ToolCalls); err != nil {
-				return nil, fmt.Errorf("unmarshal tool_calls: %w", err)
-			}
-		}
-		if metadataJSON.Valid {
-			if err := json.Unmarshal([]byte(metadataJSON.String), &m.Metadata); err != nil {
-				return nil, fmt.Errorf("unmarshal metadata: %w", err)
-			}
-		}
-		m.ToolCallID = toolCallID.String
-		m.Model = model.String
-		if inputTokens.Valid {
-			v := int(inputTokens.Int64)
-			m.InputTokens = &v
-		}
-		if outputTokens.Valid {
-			v := int(outputTokens.Int64)
-			m.OutputTokens = &v
-		}
-		if cacheRead.Valid {
-			v := int(cacheRead.Int64)
-			m.CacheReadTokens = &v
-		}
-		if cacheCreation.Valid {
-			v := int(cacheCreation.Int64)
-			m.CacheCreationTokens = &v
 		}
 		out = append(out, m)
 	}
 	return out, rows.Err()
+}
+
+// ListCuratorMessagesByRequestIDs returns the agent-side stream rows
+// for a batch of request ids, grouped by request_id. The history
+// handler calls this with every request id from
+// ListCuratorRequestsByProject so the whole chat history loads in
+// two queries instead of the N+1 the per-request helper would
+// produce on a long-running project.
+//
+// Empty input returns an empty map (not nil) so callers can do a
+// uniform map lookup without a nil-check.
+//
+// Chunking matches ListRecentEventsByEntity: SQLite's default
+// SQLITE_LIMIT_VARIABLE_NUMBER is 999 on older builds, 32766 on
+// modern ones, but staying at 500 keeps the IN-list comfortably
+// inside both. Per-project chat counts are practically far below
+// the chunk size; the loop is here for safety, not load.
+func ListCuratorMessagesByRequestIDs(database *sql.DB, requestIDs []string) (map[string][]domain.CuratorMessage, error) {
+	out := make(map[string][]domain.CuratorMessage)
+	if len(requestIDs) == 0 {
+		return out, nil
+	}
+	const chunkSize = 500
+	for start := 0; start < len(requestIDs); start += chunkSize {
+		end := start + chunkSize
+		if end > len(requestIDs) {
+			end = len(requestIDs)
+		}
+		chunk := requestIDs[start:end]
+
+		placeholders := make([]string, len(chunk))
+		args := make([]any, len(chunk))
+		for i, id := range chunk {
+			placeholders[i] = "?"
+			args[i] = id
+		}
+
+		query := `
+			SELECT ` + curatorMessageColumns + `
+			FROM curator_messages
+			WHERE request_id IN (` + strings.Join(placeholders, ",") + `)
+			ORDER BY created_at ASC, id ASC
+		`
+		rows, err := database.Query(query, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			m, err := scanCuratorMessageRow(rows)
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+			out[m.RequestID] = append(out[m.RequestID], m)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return out, nil
 }
 
 func scanCuratorRequest(row rowScanner) (*domain.CuratorRequest, error) {
