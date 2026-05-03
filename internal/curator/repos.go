@@ -28,6 +28,9 @@ import (
 // AFTER pinning. Same handling — log + skip.
 func materializePinnedRepos(ctx context.Context, database *sql.DB, projectID, projectDir string, pinnedRepos []string) {
 	for _, slug := range pinnedRepos {
+		if ctx.Err() != nil {
+			return
+		}
 		owner, repo, ok := splitOwnerRepo(slug)
 		if !ok {
 			log.Printf("[curator] project %s: malformed pinned repo %q (skipping)", projectID, slug)
