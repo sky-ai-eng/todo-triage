@@ -62,37 +62,58 @@ func BuildAllowedTools(selfBin string) string {
 		// We therefore enumerate the common subcommands the agent needs for
 		// local history inspection and branch manipulation, while excluding
 		// config/credential plumbing and other host-affecting surfaces.
-		"Bash(git add *)",
-		"Bash(git apply *)",
-		"Bash(git bisect *)",
-		"Bash(git blame *)",
+		//
+		// Each subcommand has a parallel `git -C * <sub>` form. The Curator
+		// runtime materializes a worktree per pinned repo at
+		// <projectDir>/repos/<owner>-<repo>/, and the agent navigates them
+		// with `git -C ./repos/<x> log` rather than `cd`-ing — that's the
+		// stateless pattern an LLM is way better at maintaining across
+		// turns. We deliberately don't add a catchall `Bash(git -C *)`:
+		// `git -C /tmp config --global ...` is equivalent to `git config
+		// --global ...` (the `-C` only sets cwd, not config scope), and
+		// global config writes are exactly what this allowlist is supposed
+		// to keep out.
+		"Bash(git add *)", "Bash(git -C * add *)",
+		"Bash(git apply *)", "Bash(git -C * apply *)",
+		"Bash(git bisect *)", "Bash(git -C * bisect *)",
+		"Bash(git blame *)", "Bash(git -C * blame *)",
 		"Bash(git branch)", "Bash(git branch *)",
-		"Bash(git checkout *)",
-		"Bash(git cherry-pick *)",
-		"Bash(git clean *)",
-		"Bash(git commit *)",
+		"Bash(git -C * branch)", "Bash(git -C * branch *)",
+		"Bash(git checkout *)", "Bash(git -C * checkout *)",
+		"Bash(git cherry-pick *)", "Bash(git -C * cherry-pick *)",
+		"Bash(git clean *)", "Bash(git -C * clean *)",
+		"Bash(git commit *)", "Bash(git -C * commit *)",
 		"Bash(git diff)", "Bash(git diff *)",
-		"Bash(git fetch *)",
-		"Bash(git grep *)",
-		"Bash(git init *)",
+		"Bash(git -C * diff)", "Bash(git -C * diff *)",
+		"Bash(git fetch *)", "Bash(git -C * fetch *)",
+		"Bash(git grep *)", "Bash(git -C * grep *)",
+		"Bash(git init *)", "Bash(git -C * init *)",
 		"Bash(git log)", "Bash(git log *)",
-		"Bash(git merge *)",
-		"Bash(git mv *)",
-		"Bash(git pull *)",
-		"Bash(git push *)",
-		"Bash(git rebase *)",
+		"Bash(git -C * log)", "Bash(git -C * log *)",
+		"Bash(git merge *)", "Bash(git -C * merge *)",
+		"Bash(git mv *)", "Bash(git -C * mv *)",
+		"Bash(git pull *)", "Bash(git -C * pull *)",
+		"Bash(git push *)", "Bash(git -C * push *)",
+		"Bash(git rebase *)", "Bash(git -C * rebase *)",
 		"Bash(git reflog)", "Bash(git reflog *)",
+		"Bash(git -C * reflog)", "Bash(git -C * reflog *)",
 		"Bash(git remote)", "Bash(git remote *)",
-		"Bash(git reset *)",
-		"Bash(git restore *)",
+		"Bash(git -C * remote)", "Bash(git -C * remote *)",
+		"Bash(git reset *)", "Bash(git -C * reset *)",
+		"Bash(git restore *)", "Bash(git -C * restore *)",
 		"Bash(git rev-parse)", "Bash(git rev-parse *)",
-		"Bash(git rm *)",
+		"Bash(git -C * rev-parse)", "Bash(git -C * rev-parse *)",
+		"Bash(git rm *)", "Bash(git -C * rm *)",
 		"Bash(git show)", "Bash(git show *)",
+		"Bash(git -C * show)", "Bash(git -C * show *)",
 		"Bash(git stash)", "Bash(git stash *)",
+		"Bash(git -C * stash)", "Bash(git -C * stash *)",
 		"Bash(git status)", "Bash(git status *)",
-		"Bash(git switch *)",
+		"Bash(git -C * status)", "Bash(git -C * status *)",
+		"Bash(git switch *)", "Bash(git -C * switch *)",
 		"Bash(git tag)", "Bash(git tag *)",
-		"Bash(git worktree *)",
+		"Bash(git -C * tag)", "Bash(git -C * tag *)",
+		"Bash(git worktree *)", "Bash(git -C * worktree *)",
 
 		// File inspection - read-only. Keep these non-interactive in headless
 		// runs; use cat/head/tail instead of pagers like less/more.
