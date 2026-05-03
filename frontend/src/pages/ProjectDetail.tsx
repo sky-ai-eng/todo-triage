@@ -263,12 +263,15 @@ function ProjectHeader({
             </button>
           </div>
         ) : (
-          <h1
-            className="text-2xl font-semibold tracking-tight text-text-primary cursor-pointer group inline-flex items-center gap-2"
-            onClick={beginEditName}
-          >
-            {project.name}
-            <Pencil size={12} className="text-text-tertiary opacity-0 group-hover:opacity-100" />
+          <h1 className="text-2xl font-semibold tracking-tight text-text-primary">
+            <button
+              type="button"
+              onClick={beginEditName}
+              className="group inline-flex items-center gap-2 text-inherit cursor-pointer"
+            >
+              {project.name}
+              <Pencil size={12} className="text-text-tertiary opacity-0 group-hover:opacity-100" />
+            </button>
           </h1>
         )}
       </div>
