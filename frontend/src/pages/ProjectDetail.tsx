@@ -539,8 +539,9 @@ function RepoChip({ slug, onRemove }: { slug: string; onRemove: () => void }) {
         className="
           ml-1 inline-flex items-center justify-center
           h-3.5 w-3.5 rounded-full
-          opacity-0 group-hover:opacity-100
+          opacity-0 group-hover:opacity-100 focus-visible:opacity-100
           text-text-tertiary hover:text-dismiss hover:bg-dismiss/10
+          focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-dismiss/40
           transition-[opacity,color]
         "
       >
