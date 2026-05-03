@@ -72,7 +72,7 @@ func TestEnsureCuratorWorktree_RefreshResetsAgentEdits(t *testing.T) {
 	}
 
 	// makeTestUpstream's seed commit is empty — write a tracked file
-	// to the worktree, commit-amend it locally to mimic the
+	// to the worktree, commit and push it locally to mimic the
 	// upstream having a real file, then have the "agent" edit it.
 	tracked := filepath.Join(wt, "README.md")
 	if err := os.WriteFile(tracked, []byte("upstream content\n"), 0o644); err != nil {
