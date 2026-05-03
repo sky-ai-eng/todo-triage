@@ -29,7 +29,7 @@ type Curator struct {
 	closed bool
 }
 
-// New constructs a Curator. Call CancelOrphanedRunningCuratorRequests
+// New constructs a Curator. Call db.CancelOrphanedNonTerminalCuratorRequests
 // at startup before constructing — see main.go wiring.
 func New(database *sql.DB, wsHub *websocket.Hub, model string) *Curator {
 	return &Curator{
