@@ -447,7 +447,7 @@ function AssistantTurn({
           <Markdown
             components={{
               a: ({ href, children }) => (
-                <a href={href} target="_blank" rel="noreferrer">
+                <a href={href} target="_blank" rel="noopener noreferrer">
                   {children}
                 </a>
               ),
