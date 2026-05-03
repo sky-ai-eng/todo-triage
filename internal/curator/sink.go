@@ -53,12 +53,17 @@ func (s *requestSink) OnSession(sessionID string) error {
 		s.onceMu.Unlock()
 		return nil
 	}
-	s.sessionState.persisted = true
 	s.onceMu.Unlock()
 
 	if err := db.SetProjectCuratorSessionID(s.curator.database, s.projectID, sessionID); err != nil {
 		return fmt.Errorf("persist curator session_id: %w", err)
 	}
+
+	s.onceMu.Lock()
+	if !s.sessionState.persisted {
+		s.sessionState.persisted = true
+	}
+	s.onceMu.Unlock()
 	return nil
 }
 
