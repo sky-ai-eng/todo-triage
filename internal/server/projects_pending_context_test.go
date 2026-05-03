@@ -151,6 +151,37 @@ func TestProjectPatch_CoalescesRepeatedPATCHes(t *testing.T) {
 	}
 }
 
+// TestPinnedReposSetEqual_DedupesBothSides exercises the set-equality
+// helper directly. It must treat duplicates as no-ops on both sides
+// — ["a","a"] and ["a"] represent the same set, even though their
+// lengths differ. The validator currently doesn't dedupe, so any
+// length-only short-circuit here would queue spurious pending rows
+// for PATCHes that "remove" duplicates.
+func TestPinnedReposSetEqual_DedupesBothSides(t *testing.T) {
+	cases := []struct {
+		name string
+		a, b []string
+		want bool
+	}{
+		{"identical", []string{"a", "b"}, []string{"a", "b"}, true},
+		{"reorder", []string{"a", "b"}, []string{"b", "a"}, true},
+		{"dedup_left", []string{"a", "a"}, []string{"a"}, true},
+		{"dedup_right", []string{"a"}, []string{"a", "a"}, true},
+		{"dedup_both_diff_counts", []string{"a", "a", "b"}, []string{"a", "b", "b"}, true},
+		{"actually_different", []string{"a", "b"}, []string{"a", "c"}, false},
+		{"superset", []string{"a", "b"}, []string{"a"}, false},
+		{"empty_vs_empty", nil, []string{}, true},
+		{"empty_vs_nonempty", nil, []string{"a"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := pinnedReposSetEqual(tc.a, tc.b); got != tc.want {
+				t.Errorf("pinnedReposSetEqual(%v, %v) = %v, want %v", tc.a, tc.b, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestProjectPatch_NoQueueOnPureReorder verifies that pinned_repos is
 // treated as a set on both sides of the diff: a PATCH that only
 // reorders the existing list should not queue a row, since the

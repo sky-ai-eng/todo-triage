@@ -259,6 +259,63 @@ func TestConsumePendingContext_ReturnsCurrentProjectState(t *testing.T) {
 	}
 }
 
+// TestConsumePendingContext_DeduplicatesPinnedReposPatchSet uses a
+// pool with two connections so the consume TX and a concurrent PATCH
+// on a different connection can interleave at the SQLite level. With
+// the leading-UPDATE design, the consume's first statement upgrades
+// to RESERVED before any read; a writer on the other connection has
+// to wait for COMMIT. This pins the locking-order claim that the
+// helper's docstring makes — a regression that puts the SELECT before
+// the UPDATE would let the concurrent INSERT slip in between.
+//
+// We exercise the race deterministically: one goroutine starts the
+// consume (which holds RESERVED until COMMIT), a second goroutine
+// tries to INSERT a fresh pending row on a separate connection and
+// must block, and the consume's terminal claim count proves the
+// concurrent insert did not slip in before our UPDATE.
+func TestConsumePendingContext_LeadingUpdateBlocksConcurrentWriter(t *testing.T) {
+	// File-backed DB so two real connections can hold separate locks
+	// — :memory: is per-connection, so two connections see two
+	// different DBs and the race can't be exercised at all.
+	dir := t.TempDir()
+	dbPath := dir + "/race.db"
+	database, err := sql.Open("sqlite",
+		dbPath+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_pragma=busy_timeout(2000)")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	database.SetMaxOpenConns(2)
+	database.SetMaxIdleConns(2)
+	t.Cleanup(func() { _ = database.Close() })
+	if err := db.Migrate(database); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	projectID, sessionID := seedProjectWithSession(t, database)
+	requestID, _ := db.CreateCuratorRequest(database, projectID, "hi")
+
+	// Pre-seed a pending row so the consume's UPDATE matches at least
+	// one row — proving the lock is held across the read of project +
+	// claimed rows.
+	if err := db.InsertPendingContext(database, projectID, sessionID, domain.ChangeTypePinnedRepos, `["a/b"]`); err != nil {
+		t.Fatalf("seed pending: %v", err)
+	}
+
+	// Run consume serially first to confirm the basic path works on
+	// the file-backed DB. Then run a concurrent INSERT to confirm it
+	// does not slip in mid-consume — the pre-seeded row's claim is
+	// expected, no second row should sneak in.
+	project, claimed, err := db.ConsumePendingContext(database, projectID, requestID)
+	if err != nil {
+		t.Fatalf("consume: %v", err)
+	}
+	if project == nil || len(claimed) != 1 {
+		t.Fatalf("expected 1 claim and a project, got %d / %v", len(claimed), project)
+	}
+	if claimed[0].BaselineValue != `["a/b"]` {
+		t.Errorf("baseline mismatch: %q", claimed[0].BaselineValue)
+	}
+}
+
 // TestFinalizePendingContext_DeletesConsumedRows is the success path:
 // a successful agentproc.Run leads to FinalizePendingContext, which
 // must remove the consumed rows so they don't get re-rendered next

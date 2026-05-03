@@ -537,25 +537,33 @@ func queuePendingContextChanges(database *sql.DB, before, after domain.Project) 
 }
 
 // pinnedReposSetEqual compares two pinned-repo slices as sets — order
-// is irrelevant. The diff renderer in the curator package treats
-// pinned_repos as a set (added/removed semantics), so a PATCH that only
-// reorders the list produces no rendered diff. Without the set-equal
-// check here we'd queue a pending row that goes through claim/render/
-// finalize and produces an empty note — wasted I/O and a noisy audit
-// trail. nil and empty are equivalent.
+// AND multiplicity are irrelevant. The diff renderer in the curator
+// package treats pinned_repos as a set (added/removed semantics), so
+// a PATCH that only reorders OR re-emits the same elements with
+// duplicates collapsed (e.g. ["a","a"] → ["a"]) produces no rendered
+// diff; without dedup-aware equality here we'd queue a pending row
+// that goes through claim/render/finalize and produces an empty note,
+// which is wasted I/O and a noisy audit trail.
+//
+// validatePinnedRepoShape currently does not dedupe, so duplicates
+// can in principle land in the column. Comparing as sets here means
+// the queue-side check stays correct even if the validator never
+// tightens; if the validator does tighten in the future, the dedup
+// here is a cheap no-op.
 func pinnedReposSetEqual(a, b []string) bool {
-	if len(a) != len(b) {
+	aset := make(map[string]struct{}, len(a))
+	for _, v := range a {
+		aset[v] = struct{}{}
+	}
+	bset := make(map[string]struct{}, len(b))
+	for _, v := range b {
+		bset[v] = struct{}{}
+	}
+	if len(aset) != len(bset) {
 		return false
 	}
-	if len(a) == 0 {
-		return true
-	}
-	aSorted := append([]string(nil), a...)
-	bSorted := append([]string(nil), b...)
-	sort.Strings(aSorted)
-	sort.Strings(bSorted)
-	for i := range aSorted {
-		if aSorted[i] != bSorted[i] {
+	for k := range aset {
+		if _, ok := bset[k]; !ok {
 			return false
 		}
 	}

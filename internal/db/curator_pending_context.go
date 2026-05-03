@@ -49,22 +49,34 @@ func InsertPendingContext(database *sql.DB, projectID, sessionID, changeType, ba
 // the row's baseline lines up with the value the diff is computed
 // against.
 //
-// Locking semantics: the first statement in the TX is the UPDATE,
-// which causes SQLite to upgrade to a RESERVED lock immediately, so
-// any concurrent PATCH that's also a writer waits for COMMIT. The
-// follow-up SELECTs inside the TX therefore see a consistent picture.
+// Locking semantics: the FIRST statement in the TX is the UPDATE,
+// which causes SQLite to upgrade to a RESERVED lock before evaluating
+// its WHERE clause (so concurrent writers wait for COMMIT regardless
+// of how many rows the UPDATE actually matches). Putting the UPDATE
+// first matters: a deferred-mode TX whose first statement is a SELECT
+// only acquires SHARED, leaving a window for a concurrent PATCH on a
+// different connection to UPDATE projects + INSERT pending and COMMIT
+// before our follow-up writes — the very race this helper is meant to
+// close. The session-scoping check is inlined as a correlated subquery
+// (`= (SELECT curator_session_id FROM projects WHERE id = ?)`) so we
+// don't need a separate read-of-session-then-write-with-session
+// sequence. Reads of the project + claimed rows that follow inside
+// the same TX therefore see a consistent post-claim snapshot.
+//
 // The pool is sized to MaxOpenConns=1 in production so concurrent TXs
-// are serialized at the Go layer too, but the TX-local consistency
-// matters for correctness regardless of pool size.
+// are serialized at the Go layer too, but TX-level correctness is
+// load-bearing regardless of pool size — tests open in-memory DBs
+// with their own pool config.
 //
 // Session id is read from the project row inside the TX rather than
 // taken as a parameter so the consume scopes to whatever session is
 // currently set on the project, even if the caller has a stale view
-// of it. An empty session id (project never chatted with) yields a
-// no-op consume — the next dispatch's static envelope renders fresh
-// values directly. Returns (nil project, nil rows, nil error) when
-// the project no longer exists; the caller decides whether to fail
-// the request.
+// of it. The subquery returns NULL when the project has no session
+// yet (curator_session_id stored as NULL via nullIfEmpty), and a
+// `pending.curator_session_id = NULL` comparison is always false in
+// SQL — so a session-less project naturally produces a no-op consume.
+// Returns (nil project, empty rows, nil error) when the project no
+// longer exists; the caller decides whether to fail the request.
 func ConsumePendingContext(database *sql.DB, projectID, requestID string) (*domain.Project, []domain.CuratorPendingContext, error) {
 	tx, err := database.Begin()
 	if err != nil {
@@ -72,6 +84,24 @@ func ConsumePendingContext(database *sql.DB, projectID, requestID string) (*doma
 	}
 	defer tx.Rollback()
 
+	now := time.Now().UTC()
+	// FIRST statement: the UPDATE. Forces RESERVED lock acquisition
+	// before any read, closing the consume-vs-PATCH race documented
+	// above. Session scoping is inlined via subquery so we don't have
+	// to read the project first (which would acquire only SHARED).
+	if _, err := tx.Exec(`
+		UPDATE curator_pending_context
+		   SET consumed_at = ?, consumed_by_request_id = ?
+		 WHERE project_id = ?
+		   AND curator_session_id = (SELECT curator_session_id FROM projects WHERE id = ?)
+		   AND consumed_at IS NULL
+	`, now, requestID, projectID, projectID); err != nil {
+		return nil, nil, fmt.Errorf("claim pending rows: %w", err)
+	}
+
+	// Now safe to read project + claimed rows under the held RESERVED
+	// lock — concurrent writers cannot interleave between these reads
+	// and our preceding UPDATE.
 	project, err := scanProject(tx.QueryRow(`
 		SELECT id, name, description, summary_md, summary_stale, curator_session_id, pinned_repos, jira_project_key, linear_project_key, created_at, updated_at
 		FROM projects WHERE id = ?
@@ -80,31 +110,10 @@ func ConsumePendingContext(database *sql.DB, projectID, requestID string) (*doma
 		return nil, nil, fmt.Errorf("read project: %w", err)
 	}
 	if project == nil {
-		// Project disappeared between the dispatch's earlier checks and
-		// here. The caller will surface this as a request failure; we
-		// return cleanly so the deferred Rollback fires without noise.
+		// Project vanished — the UPDATE's subquery returned NULL so it
+		// claimed nothing. Return cleanly; the caller will surface this
+		// as a request failure.
 		return nil, []domain.CuratorPendingContext{}, nil
-	}
-	if project.CuratorSessionID == "" {
-		// No session yet — there cannot be any pending rows, since the
-		// PATCH handler short-circuits on empty session id. Skip the
-		// UPDATE/SELECT entirely and return the fresh project so the
-		// caller can still use it for envelope rendering.
-		if err := tx.Commit(); err != nil {
-			return nil, nil, err
-		}
-		return project, []domain.CuratorPendingContext{}, nil
-	}
-
-	now := time.Now().UTC()
-	if _, err := tx.Exec(`
-		UPDATE curator_pending_context
-		   SET consumed_at = ?, consumed_by_request_id = ?
-		 WHERE project_id = ?
-		   AND curator_session_id = ?
-		   AND consumed_at IS NULL
-	`, now, requestID, projectID, project.CuratorSessionID); err != nil {
-		return nil, nil, fmt.Errorf("claim pending rows: %w", err)
 	}
 
 	rows, err := tx.Query(`
