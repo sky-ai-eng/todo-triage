@@ -24,14 +24,14 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
   const [linearKey, setLinearKey] = useState('')
   const [submitting, setSubmitting] = useState(false)
 
-  // Escape closes; matches the rest of the codebase's modal pattern.
+  // Escape closes unless a create request is in flight.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
+      if (e.key === 'Escape' && !submitting) onClose()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
+  }, [onClose, submitting])
 
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
