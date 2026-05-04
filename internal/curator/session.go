@@ -265,6 +265,16 @@ func (s *projectSession) dispatch(requestID string) {
 		filepath.Join(cwd, "repos"),
 	}
 
+	// Materialize the project's spec-authorship prompt as a Claude Code
+	// skill at <cwd>/.claude/skills/ticket-spec/SKILL.md. Written fresh
+	// on every dispatch so prompt edits + per-project re-targeting both
+	// take effect on the next turn without a session reset (SKY-221).
+	// Failure is non-fatal: the user's chat turn should still answer
+	// even if skill writing hits a permission glitch.
+	if err := materializeSpecSkill(s.curator.database, project, cwd); err != nil {
+		log.Printf("[curator] warning: materialize spec skill for project %s: %v", s.projectID, err)
+	}
+
 	outcome, runErr := agentproc.Run(msgCtx, agentproc.RunOptions{
 		Cwd:          cwd,
 		Model:        model,

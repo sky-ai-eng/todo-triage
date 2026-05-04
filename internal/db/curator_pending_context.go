@@ -103,7 +103,7 @@ func ConsumePendingContext(database *sql.DB, projectID, requestID string) (*doma
 	// lock — concurrent writers cannot interleave between these reads
 	// and our preceding UPDATE.
 	project, err := scanProject(tx.QueryRow(`
-		SELECT id, name, description, summary_md, summary_stale, curator_session_id, pinned_repos, jira_project_key, linear_project_key, created_at, updated_at
+		SELECT id, name, description, summary_md, summary_stale, curator_session_id, pinned_repos, jira_project_key, linear_project_key, spec_authorship_prompt_id, created_at, updated_at
 		FROM projects WHERE id = ?
 	`, projectID))
 	if err != nil {

@@ -72,6 +72,20 @@ func seedDefaultPrompts(database *sql.DB) {
 		log.Printf("[seed] warning: failed to seed fix-review-feedback prompt: %v", err)
 	}
 
+	// Default Curator spec-authorship skill (SKY-221). The Curator
+	// materializes whichever prompt a project points at as a literal
+	// Claude Code skill on each dispatch; new projects start pointing
+	// at this one. Users override per-project via the Projects page.
+	err = db.SeedPrompt(database, domain.Prompt{
+		ID:     domain.SystemTicketSpecPromptID,
+		Name:   "Curator: Ticket as a Spec",
+		Body:   ai.TicketSpecPromptTemplate,
+		Source: "system",
+	})
+	if err != nil {
+		log.Printf("[seed] warning: failed to seed ticket-spec prompt: %v", err)
+	}
+
 	// --- Default triggers --------------------------------------------------
 	// All shipped disabled. System triggers are reference examples users
 	// opt into (or disable and replace with their own variations). Predicates

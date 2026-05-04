@@ -19,6 +19,7 @@ import type { Project, KnowledgeFile, KnowledgeUploadResult, ProjectExportPrevie
 import { readError } from '../lib/api'
 import { toast } from '../components/Toast/toastStore'
 import TrackerProjectPickers from '../components/TrackerProjectPickers'
+import CuratorSkillPicker from '../components/CuratorSkillPicker'
 import CuratorChat from '../components/CuratorChat'
 import { useWebSocket } from '../hooks/useWebSocket'
 
@@ -888,6 +889,12 @@ function IntegrationsPanel({
         onJiraChange={handleJiraChange}
         onLinearChange={handleLinearChange}
       />
+      <div className="mt-5 pt-5 border-t border-border-subtle">
+        <CuratorSkillPicker
+          value={project.spec_authorship_prompt_id}
+          onChange={(spec_authorship_prompt_id) => onPatch({ spec_authorship_prompt_id })}
+        />
+      </div>
     </Card>
   )
 }

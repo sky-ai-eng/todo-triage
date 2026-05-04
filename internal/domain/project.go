@@ -32,7 +32,21 @@ type Project struct {
 	// JiraProjectKey — both can be set on the same project. Linear
 	// integration is future work; until it ships, validation rejects
 	// any non-empty value at the API layer.
-	LinearProjectKey string    `json:"linear_project_key"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	LinearProjectKey string `json:"linear_project_key"`
+	// SpecAuthorshipPromptID points at the prompt the Curator
+	// materializes as a Claude Code skill (`.claude/skills/ticket-spec/`)
+	// when authoring tickets for this project. Empty = use the seeded
+	// system default ("system-ticket-spec"). Per-project rather than
+	// global so a user with mixed teams can give each its own
+	// editorial standard. SKY-221.
+	SpecAuthorshipPromptID string    `json:"spec_authorship_prompt_id"`
+	CreatedAt              time.Time `json:"created_at"`
+	UpdatedAt              time.Time `json:"updated_at"`
 }
+
+// SystemTicketSpecPromptID is the deterministic ID of the seeded
+// default spec-authorship prompt. Curator dispatch falls back to
+// this ID whenever a project's SpecAuthorshipPromptID is empty.
+// Kept as a const so the seed site, the DB defaulting on insert,
+// and the curator runtime all reference one source of truth.
+const SystemTicketSpecPromptID = "system-ticket-spec"

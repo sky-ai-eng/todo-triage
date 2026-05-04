@@ -201,6 +201,12 @@ export interface Project {
   pinned_repos: string[]
   jira_project_key: string
   linear_project_key: string
+  /** Per-project Curator spec-authorship skill (SKY-221). Empty string =
+   *  use the seeded `system-ticket-spec` default. The Curator dispatch
+   *  materializes whichever prompt this points at as a literal Claude
+   *  Code skill at `<cwd>/.claude/skills/ticket-spec/SKILL.md` on every
+   *  turn — changes apply immediately without a session reset. */
+  spec_authorship_prompt_id: string
   created_at: string
   updated_at: string
 }

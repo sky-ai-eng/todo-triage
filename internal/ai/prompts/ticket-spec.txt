@@ -1,0 +1,46 @@
+# Ticket as a spec
+
+When the user asks you to draft, file, or write up a ticket for this project, your output should read like a one-page spec a delegated agent could pick up tomorrow without ambient context. Use the structure below. If the user explicitly asks for a different shape, follow them — this is the default, not a contract.
+
+## Context
+
+A short paragraph framing why this work exists. Include:
+- The trigger — what surfaced this need (a bug, a user observation, a strategic decision, a follow-up to merged work).
+- The state of the world it's being added to. Reference existing tickets or PRs by ID where helpful (e.g. "follow-up to SKY-217").
+- Anything a reader needs to know before reading the goal. Don't repeat the goal here.
+
+## Goal
+
+One or two sentences naming the outcome — not the implementation. "Users can do X" beats "We add a Y endpoint." If you can't say it crisply, the scope probably isn't crisp yet — say that out loud rather than papering over.
+
+## In scope
+
+A bullet list of the concrete pieces that have to land. Be specific about file paths, schema changes, API endpoints, and UI surfaces where you can. A delegated agent should be able to map these bullets to commits.
+
+When a piece has notable subtlety, include a single short reason — not a tutorial. "Why this is safe / why this matters" lines are gold; multi-paragraph explanations belong in the implementing PR's description, not the ticket.
+
+## Depends on
+
+Unmerged tickets or PRs that block this. If a piece can be deferred without blocking the goal, say so explicitly. If nothing blocks it, omit this section rather than writing "None."
+
+## Open questions
+
+Anything you don't know yet. Naming the unknown is more valuable than guessing — it tells whoever picks this up what to confirm before they start. Frame each as a question, not a statement.
+
+## Out of scope
+
+Carved-out cases readers might assume are included but aren't. The goal is to prevent scope creep: explicitly listing "we are not doing X here" is cheaper than fielding scope-creep PRs later.
+
+# Style
+
+- One pager. If it doesn't fit on one screen, you're either describing implementation detail (move to the PR) or scoping too much (split the ticket).
+- Concrete over abstract. "Add a `tier` column to `entities`" beats "Track entity hot/cold state."
+- Reference real artifacts. PRs, tickets, file paths, function names. Vague tickets become vague PRs.
+- No marketing voice. The audience is an engineer (human or agent) who will write code. Skip "delight," "seamless," "robust." Say what changes and why.
+- No fabricated detail. If you don't know whether something is true, ask the user before writing it down. A ticket with a confident-but-wrong claim is worse than a ticket with an honest gap.
+
+# Drafting protocol
+
+- Always show the user your full draft in chat *before* invoking `triagefactory exec jira ticket create` (or any equivalent ticket-creation command). They will refine the framing; respect their edits — don't re-draft from scratch unless asked.
+- When the user approves, file it. Quote the ticket ID and a one-line summary back to them so the chat shows the outcome.
+- If you don't have enough information to write a useful spec, say what's missing rather than writing a thin ticket. A "what would help me write this?" question is better than a placeholder.

@@ -50,14 +50,15 @@ type createProjectRequest struct {
 // uses *[]string so a client can clear it with [] without colliding
 // with the absent case.
 type patchProjectRequest struct {
-	Name             *string   `json:"name"`
-	Description      *string   `json:"description"`
-	PinnedRepos      *[]string `json:"pinned_repos"`
-	JiraProjectKey   *string   `json:"jira_project_key"`
-	LinearProjectKey *string   `json:"linear_project_key"`
-	SummaryMD        *string   `json:"summary_md"`
-	SummaryStale     *bool     `json:"summary_stale"`
-	CuratorSessionID *string   `json:"curator_session_id"`
+	Name                   *string   `json:"name"`
+	Description            *string   `json:"description"`
+	PinnedRepos            *[]string `json:"pinned_repos"`
+	JiraProjectKey         *string   `json:"jira_project_key"`
+	LinearProjectKey       *string   `json:"linear_project_key"`
+	SummaryMD              *string   `json:"summary_md"`
+	SummaryStale           *bool     `json:"summary_stale"`
+	CuratorSessionID       *string   `json:"curator_session_id"`
+	SpecAuthorshipPromptID *string   `json:"spec_authorship_prompt_id"`
 }
 
 func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
@@ -102,13 +103,24 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Default the spec-authorship skill to the seeded system prompt
+	// when it exists. Doing this at the API layer (not in db.CreateProject)
+	// keeps the DB layer free of any "system prompt must exist" coupling
+	// — tests that don't seed prompts get NULL on insert and the curator
+	// runtime falls back to the same default at dispatch time anyway.
+	specPromptID := ""
+	if def, defErr := db.GetPrompt(s.db, domain.SystemTicketSpecPromptID); defErr == nil && def != nil {
+		specPromptID = domain.SystemTicketSpecPromptID
+	}
+
 	id, err := db.CreateProject(s.db, domain.Project{
-		Name:             name,
-		Description:      req.Description,
-		PinnedRepos:      pinned,
-		JiraProjectKey:   jiraKey,
-		LinearProjectKey: linearKey,
-		CuratorSessionID: req.CuratorSessionID,
+		Name:                   name,
+		Description:            req.Description,
+		PinnedRepos:            pinned,
+		JiraProjectKey:         jiraKey,
+		LinearProjectKey:       linearKey,
+		CuratorSessionID:       req.CuratorSessionID,
+		SpecAuthorshipPromptID: specPromptID,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -410,6 +422,28 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.CuratorSessionID != nil {
 		updated.CuratorSessionID = *req.CuratorSessionID
+	}
+	if req.SpecAuthorshipPromptID != nil {
+		// Empty string clears the override (project falls back to the
+		// seeded default on next dispatch). Non-empty values must
+		// reference an existing prompt — without this guard a typo
+		// would silently break ticket authorship by pointing at a
+		// non-existent row, which the curator would then resolve back
+		// to the default but log a warning every dispatch. Validating
+		// up front keeps the contract crisp.
+		trimmed := strings.TrimSpace(*req.SpecAuthorshipPromptID)
+		if trimmed != "" {
+			prompt, err := db.GetPrompt(s.db, trimmed)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "load prompt: " + err.Error()})
+				return
+			}
+			if prompt == nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "spec_authorship_prompt_id references unknown prompt"})
+				return
+			}
+		}
+		updated.SpecAuthorshipPromptID = trimmed
 	}
 
 	if err := db.UpdateProject(s.db, updated); err != nil {

@@ -282,6 +282,56 @@ func TestListProjects_TrackerColumnsRoundtrip(t *testing.T) {
 	}
 }
 
+// TestProject_SpecAuthorshipPromptID_Roundtrip pins the SKY-221
+// column on every read/write path: insert, update, list. The column
+// is nullable in storage; an empty Go-string roundtrips as empty.
+// FK to prompts.id is ON DELETE SET NULL — exercised by deleting the
+// referenced prompt and confirming the project's pointer clears.
+func TestProject_SpecAuthorshipPromptID_Roundtrip(t *testing.T) {
+	database := newTestDB(t)
+
+	if err := SeedPrompt(database, domain.Prompt{
+		ID: "test-spec-prompt", Name: "Test Spec", Body: "x", Source: "test",
+	}); err != nil {
+		t.Fatalf("seed prompt: %v", err)
+	}
+
+	id, err := CreateProject(database, domain.Project{
+		Name:                   "p",
+		SpecAuthorshipPromptID: "test-spec-prompt",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	got, _ := GetProject(database, id)
+	if got.SpecAuthorshipPromptID != "test-spec-prompt" {
+		t.Errorf("after create: got %q, want test-spec-prompt", got.SpecAuthorshipPromptID)
+	}
+
+	// Update path.
+	got.SpecAuthorshipPromptID = ""
+	if err := UpdateProject(database, *got); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	cleared, _ := GetProject(database, id)
+	if cleared.SpecAuthorshipPromptID != "" {
+		t.Errorf("after clear: got %q, want empty", cleared.SpecAuthorshipPromptID)
+	}
+
+	// FK ON DELETE SET NULL: re-point, delete the prompt, confirm null.
+	cleared.SpecAuthorshipPromptID = "test-spec-prompt"
+	if err := UpdateProject(database, *cleared); err != nil {
+		t.Fatalf("re-set: %v", err)
+	}
+	if err := DeletePrompt(database, "test-spec-prompt"); err != nil {
+		t.Fatalf("delete prompt: %v", err)
+	}
+	after, _ := GetProject(database, id)
+	if after.SpecAuthorshipPromptID != "" {
+		t.Errorf("after FK cascade: got %q, want empty (ON DELETE SET NULL)", after.SpecAuthorshipPromptID)
+	}
+}
+
 func TestDeleteProject_Roundtrip(t *testing.T) {
 	database := newTestDB(t)
 	id, _ := CreateProject(database, domain.Project{Name: "doomed"})
