@@ -1,13 +1,34 @@
 package tracker
 
 import (
+	"time"
+
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
+
+// staleRefreshFloor caps how long an open PR can sit on a skipped
+// refresh before we force a full fetch regardless of the other gate
+// signals. Bounds the worst case for events that don't bump
+// PullRequest.updatedAt — most importantly workflow re-runs that
+// add a brand-new check_run on an unchanged head SHA. Without this
+// floor, once the prior run is terminal and the PR is otherwise
+// quiet, ci_failed / ci_passed for the re-run would never surface
+// until some unrelated PR mutation eventually triggered a refresh.
+//
+// 10 minutes trades ~10x cost reduction at 1-minute polling for at
+// most a 10-minute lag on workflow-rerun CI events. Tunable knob if
+// real users care about tighter freshness; the right answer at that
+// point is webhooks.
+const staleRefreshFloor = 10 * time.Minute
 
 // shouldSkipRefresh reports whether a tracked open PR can keep its
 // stored snapshot for this poll cycle (no follow-up RefreshPRs call
 // needed). Skipping means we trust the stored snapshot through this
 // cycle and emit no events for the entity.
+//
+// age is how long it's been since this entity was last fully refreshed
+// (typically time.Since(*entity.LastPolledAt), with nil treated as
+// "very stale"). The caller computes it; tests pass it directly.
 //
 // Why this is safe in the common case:
 //
@@ -34,14 +55,18 @@ import (
 // the first refresh fills it in and the gate engages on subsequent
 // cycles.
 //
-// What it deliberately doesn't catch: a workflow re-run that adds a
-// brand-new check_run on an unchanged head SHA without bumping PR
-// updatedAt and without leaving anything in-flight from a prior run
-// in the stored snapshot. That's a real but narrow case; we'll catch
-// it on the next legitimate updatedAt change, at most one cycle late.
-// If it ever becomes a real complaint, the fix is a max-staleness
-// floor that forces a refresh every N minutes regardless.
-func shouldSkipRefresh(stored, fresh domain.PRSnapshot) bool {
+// Why the staleness floor is necessary: a workflow re-run on an
+// unchanged head SHA can add a brand-new check_run after the prior
+// run already reached "completed". updatedAt doesn't bump on the
+// re-run's start OR completion; in-flight CI doesn't fire because
+// the previously-stored snapshot had everything terminal. Without
+// the floor, the gate would skip the new run forever — the failure
+// or success of that re-run would never be emitted before merge.
+// The floor caps the worst case at staleRefreshFloor.
+func shouldSkipRefresh(stored, fresh domain.PRSnapshot, age time.Duration) bool {
+	if age > staleRefreshFloor {
+		return false
+	}
 	if stored.UpdatedAt == "" || fresh.UpdatedAt == "" {
 		return false
 	}

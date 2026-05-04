@@ -168,8 +168,15 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, userTe
 		// Open path: gate against discovery's fresh snapshot if we have one.
 		// Entities not in this cycle's discovery (rare — e.g. a PR you've
 		// stopped being a reviewer on) fall through to refresh, which is the
-		// safe default.
-		if fresh, ok := discoveredBySourceID[e.SourceID]; ok && shouldSkipRefresh(snap, fresh) {
+		// safe default. age is "time since last full refresh" — nil pointer
+		// treated as very stale so first-time skip decisions force a fetch.
+		var age time.Duration
+		if e.LastPolledAt != nil {
+			age = time.Since(*e.LastPolledAt)
+		} else {
+			age = 24 * time.Hour
+		}
+		if fresh, ok := discoveredBySourceID[e.SourceID]; ok && shouldSkipRefresh(snap, fresh, age) {
 			skippedOpen++
 			continue
 		}
