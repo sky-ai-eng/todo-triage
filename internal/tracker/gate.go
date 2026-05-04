@@ -64,13 +64,12 @@ func shouldSkipRefresh(stored, fresh domain.PRSnapshot) bool {
 }
 
 // hasInFlightCI reports whether the snapshot contains any check_run
-// in a non-terminal state. GitHub's check_run.status takes values
-// "queued" | "in_progress" | "completed"; only "completed" is
-// terminal, and only once it lands does conclusion get populated.
+// in a non-terminal state. Only "completed" is terminal; any other
+// status should be treated as still in flight until GitHub reports
+// completion and populates conclusion.
 func hasInFlightCI(snap domain.PRSnapshot) bool {
 	for _, cr := range snap.CheckRuns {
-		switch cr.Status {
-		case "queued", "in_progress":
+		if cr.Status != "completed" {
 			return true
 		}
 	}
