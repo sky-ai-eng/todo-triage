@@ -92,11 +92,17 @@ export default function CuratorChat({ project, onPatch }: Props) {
 
   const handleSpecSelect = async (promptId: string) => {
     setPickerOpen(false)
-    if (promptId === project.spec_authorship_prompt_id) return
-    const ok = await onPatch({ spec_authorship_prompt_id: promptId })
-    if (ok === false) {
-      toast.error('Failed to update Curator spec skill')
-    }
+    // Compare against the effective id (project's choice OR the inherited
+    // default), not the raw stored field. If the project is inheriting
+    // the seeded default and the user picks the same prompt the picker
+    // already shows as active, no PATCH is needed — sending one would
+    // silently flip the project from "inherit default" to "explicitly
+    // pin this id," a semantic change with no current behavior delta
+    // but one that prevents future default swaps from picking it up.
+    if (promptId === effectiveSpecPromptID) return
+    // Failure toast lives in ProjectDetail's patch() (handles both HTTP
+    // and network errors). Toasting here too would double-fire.
+    await onPatch({ spec_authorship_prompt_id: promptId })
   }
 
   // Per-mount fetch of the Jira base URL for the linkifier. Earlier
