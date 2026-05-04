@@ -82,7 +82,7 @@ If you don't know the right files, say so — don't guess. An empty pointers sec
 Hard limits the executor must respect. Examples:
 
 - Performance budgets (`p99 latency must remain under 200ms`)
-- Compatibility (`must continue to compile against Go 1.23`)
+- Compatibility (`must continue to compile against the repo's current Go version`)
 - Security (`no secrets in logs; no new third-party dependencies without approval`)
 - Files or directories that are off-limits (`do not modify generated code under internal/db/sqlc/`)
 - Database migrations must be forward-only and idempotent
