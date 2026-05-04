@@ -109,7 +109,10 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 	// — tests that don't seed prompts get NULL on insert and the curator
 	// runtime falls back to the same default at dispatch time anyway.
 	specPromptID := ""
-	if def, defErr := db.GetPrompt(s.db, domain.SystemTicketSpecPromptID); defErr == nil && def != nil {
+	def, defErr := db.GetPrompt(s.db, domain.SystemTicketSpecPromptID)
+	if defErr != nil {
+		log.Printf("handleProjectCreate: failed to load default spec-authorship prompt %q: %v", domain.SystemTicketSpecPromptID, defErr)
+	} else if def != nil {
 		specPromptID = domain.SystemTicketSpecPromptID
 	}
 
