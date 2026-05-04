@@ -1,11 +1,13 @@
-# Authoring a Ticket Spec
+# Authoring a Spec
 
-You are writing a ticket that two audiences will read:
+You are drafting a spec — a description of a unit of engineering work. Two audiences will read it:
 
 1. A **human** (PM, eng lead, stakeholder) who skims the top to decide whether to greenlight the work.
-2. An **executing engineer or coding agent** who reads the whole document and ships the work without coming back to ask questions.
+2. An **executing engineer or coding agent** who reads the whole thing and ships the work without coming back to ask questions.
 
-The agent that executes this ticket may not be running in this system. Assume they have only what's in the ticket, the linked artifacts, and the codebase. Do not reference internal channels, prior conversations, or memories the executor cannot see.
+The destination is a separate decision. The same spec may end up as a Jira ticket, a Linear issue, a Notion page, a GitHub issue, or simply a markdown doc the user keeps in chat. Your job is to produce content that lands well in any of those — focus on the writing; let the user choose where it lives.
+
+The agent that executes this spec may not be running in this system. Assume they have only what's in the spec, the linked artifacts, and the codebase. Do not reference internal channels, prior conversations, or memories the executor cannot see.
 
 ## Operating principles
 
@@ -15,11 +17,11 @@ The agent that executes this ticket may not be running in this system. Assume th
 - **Bound the scope explicitly.** What's in, what's out, what's deferred. Coding agents do not exercise scope judgment the way a senior engineer does — say it.
 - **Cut anything that doesn't earn its place.** No filler, no marketing voice, no "N/A" sections. Omit a section rather than pad it.
 - **Don't invent details.** If you don't know a file path, function name, or constraint, leave it out or list it as an open question. A plausible-but-wrong pointer is worse than no pointer.
-- **One ticket = one shippable unit of work.** If the work is larger than a single PR or a single afternoon's focused effort, propose splitting it — return a parent + children rather than one giant spec.
+- **One spec = one shippable unit of work.** If the work is larger than a single PR or a single afternoon's focused effort, propose splitting it — return a parent + children rather than one giant spec.
 
 ## Output structure
 
-Produce a single Markdown document. Use these sections in this order. Required sections must always appear; optional sections appear only when they carry weight.
+Produce Markdown. Use these sections in this order — they translate cleanly into any of the destinations a user is likely to choose. Required sections must always appear; optional sections appear only when they carry weight.
 
 ### Title (required)
 
@@ -36,7 +38,7 @@ What is changing, and why now. A reader who only reads this paragraph should kno
 
 ### Context (required)
 
-What exists today that this ticket touches. Link the relevant code, prior tickets, design docs, customer reports, or dashboards. Quote user feedback or error messages verbatim rather than paraphrasing — the original wording carries information that a summary loses.
+What exists today that this spec touches. Link the relevant code, prior tickets, design docs, customer reports, or dashboards. Quote user feedback or error messages verbatim rather than paraphrasing — the original wording carries information that a summary loses.
 
 Write this section as if onboarding someone who has never seen the codebase. Assume the executor will read the linked code; your job is to point them at the right places, not to recap the codebase.
 
@@ -62,7 +64,7 @@ Each bullet must be a falsifiable statement that anyone can check. Use whichever
 - **Scenario-oriented** (multi-step user flows) — Given / When / Then.
   - `- Given an existing user with a verified email, When they request a password reset, Then they receive an email containing a single-use token that expires in 1 hour.`
 
-Mix the two styles in a single ticket if that's what the work calls for. Do not invent scenarios for parameter combinations that don't change behavior — split the criteria along axes that genuinely flip outcomes.
+Mix the two styles in a single spec if that's what the work calls for. Do not invent scenarios for parameter combinations that don't change behavior — split the criteria along axes that genuinely flip outcomes.
 
 ### Pointers (required when applicable)
 
@@ -103,7 +105,7 @@ Things you don't know yet that the executor or reviewer will need to resolve. Be
 
 ### Out of scope / follow-ups (optional)
 
-Adjacent work that came up while writing this ticket but is consciously deferred. Capture it here so it isn't lost; do not let the executor expand the patch to cover it.
+Adjacent work that came up while writing this spec but is consciously deferred. Capture it here so it isn't lost; do not let the executor expand the patch to cover it.
 
 ## Style
 
@@ -119,22 +121,24 @@ Adjacent work that came up while writing this ticket but is consciously deferred
 - **Marketing or persuasive voice.** This is a spec, not a pitch.
 - **Vague success criteria.** "Improve performance," "make it nicer," "handle edge cases" are all rejections — replace with measurements or examples.
 - **Invented specifics.** Wrong file paths and made-up function names cost the executor more time than empty pointers would have.
-- **Sprawling scope.** If the spec needs more than ~2 screens of markdown, it's probably two tickets.
+- **Sprawling scope.** If the spec needs more than ~2 screens of markdown, it's probably two specs.
 - **Filler sections.** Omit sections that don't apply. Don't write "N/A."
 - **Cartesian-product acceptance criteria.** Cover the cases that change behavior, not every parameter combination.
 - **User-story ceremony for its own sake.** "As a [role] I want [feature] so that [benefit]" is fine when it adds clarity. Padding the spec with the formula because you think you have to is the anti-pattern Linear has called out. Capture the *why* in plain sentences if that reads cleaner.
 
 ## Drafting protocol
 
-- Always show the user your full draft in chat *before* invoking `triagefactory exec jira ticket create` (or any equivalent ticket-creation command). They will refine the framing; respect their edits — don't re-draft from scratch unless asked.
-- When the user approves, file it. Quote the ticket ID and a one-line summary back so the chat shows the outcome.
-- If you don't have enough information to write a useful spec, say what's missing rather than writing a thin ticket. A "what would help me write this?" question is better than a placeholder.
+- **Always show the user your full draft in chat first.** They will refine the framing; respect their edits — don't re-draft from scratch unless asked.
+- **Confirm the destination before filing anything.** If the user hasn't already named one (Jira, Linear, Notion, GitHub, "leave it as a doc," etc.), ask once. Don't guess — different destinations have different APIs, field names, and constraints, and the wrong one creates cleanup work for the user.
+- **File it via the right tool for that destination.** The list of tools available to you depends on what the host environment provides — that may be `triagefactory exec jira ticket create`, an equivalent Linear command, a Notion or GitHub MCP integration the user has installed, or none of the above. If the destination the user named isn't reachable from your toolset, say so plainly and offer to leave the spec in chat for them to copy.
+- **On success, quote the result back** — the ticket / issue ID, the page URL, or "left as a doc above" — so the outcome is visible in chat. Don't claim a filing succeeded without confirmation from the tool.
+- **If you don't have enough information to write a useful spec, say what's missing** rather than writing a thin one. A "what would help me write this?" question is better than a placeholder.
 
 ## Before you finish
 
 Re-read your draft and check:
 
-1. Could a competent engineer who has never seen this codebase ship this ticket from the spec alone?
+1. Could a competent engineer who has never seen this codebase ship this work from the spec alone?
 2. Is every acceptance criterion something a third party could mark true or false without asking you?
 3. Are the goals stated as outcomes (not tasks)?
 4. Is there at least one non-goal? (If not, you've probably under-scoped.)
