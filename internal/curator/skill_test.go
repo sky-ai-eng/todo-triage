@@ -148,3 +148,38 @@ func TestMaterializeSpecSkill_NoPromptDoesNotError(t *testing.T) {
 		t.Error("expected no SKILL.md written when no prompt resolved")
 	}
 }
+
+// TestMaterializeSpecSkill_NoPromptClearsStaleFile pins the new
+// regression: a previous dispatch wrote SKILL.md, then the user
+// emptied the configured prompt's body (or deleted both the project
+// override and the system default). The next dispatch must remove the
+// stale file so the agent doesn't keep applying outdated guidance.
+func TestMaterializeSpecSkill_NoPromptClearsStaleFile(t *testing.T) {
+	database := newTestDB(t)
+	if err := db.SeedPrompt(database, domain.Prompt{
+		ID: "v1", Name: "v1", Body: "active body", Source: "user",
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	cwd := t.TempDir()
+	project := &domain.Project{ID: "p1", SpecAuthorshipPromptID: "v1"}
+	if err := materializeSpecSkill(database, project, cwd); err != nil {
+		t.Fatalf("first dispatch: %v", err)
+	}
+	skillPath := filepath.Join(cwd, ".claude", "skills", "ticket-spec", "SKILL.md")
+	if _, err := os.Stat(skillPath); err != nil {
+		t.Fatalf("expected SKILL.md after first dispatch: %v", err)
+	}
+
+	// User repoints the project at a non-existent prompt and there's
+	// no system default seeded. Resolution should fail through to the
+	// no-prompt branch.
+	project.SpecAuthorshipPromptID = "ghost"
+	if err := materializeSpecSkill(database, project, cwd); err != nil {
+		t.Fatalf("second dispatch: %v", err)
+	}
+	if _, err := os.Stat(skillPath); !os.IsNotExist(err) {
+		t.Errorf("expected stale SKILL.md to be removed when no prompt resolves, stat err=%v", err)
+	}
+}

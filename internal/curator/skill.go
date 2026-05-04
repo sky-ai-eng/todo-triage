@@ -23,9 +23,11 @@ const skillDirName = "ticket-spec"
 // containing the body of the project's effective spec-authorship prompt.
 // Resolution order: project's `spec_authorship_prompt_id`, then the
 // seeded `domain.SystemTicketSpecPromptID`. Either path falling through
-// to a missing/empty prompt logs a warning and skips the write rather
-// than failing the dispatch — the Curator should still answer the
-// user's message even without the skill, just without that capability.
+// to a missing/empty prompt logs a warning and removes any prior
+// SKILL.md rather than failing the dispatch — the Curator should still
+// answer the user's message even without the skill, and a stale file
+// from a previous resolution would otherwise keep feeding the agent
+// out-of-date guidance.
 //
 // We always overwrite. The prompt body can change between turns (the
 // user edits it on the Prompts page or swaps which prompt the project
@@ -40,16 +42,23 @@ func materializeSpecSkill(database *sql.DB, project *domain.Project, cwd string)
 	if err != nil {
 		return err
 	}
+	dir := filepath.Join(cwd, ".claude", "skills", skillDirName)
+	path := filepath.Join(dir, "SKILL.md")
+
 	if prompt == nil || strings.TrimSpace(prompt.Body) == "" {
-		log.Printf("[curator] no spec-authorship prompt resolved for project %s; skipping skill materialization", project.ID)
+		// No usable prompt — clear any stale SKILL.md from a previous
+		// dispatch so the agent doesn't keep applying guidance that no
+		// longer matches the project's current configuration.
+		log.Printf("[curator] no spec-authorship prompt resolved for project %s; clearing stale skill if any", project.ID)
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove stale SKILL.md: %w", err)
+		}
 		return nil
 	}
 
-	dir := filepath.Join(cwd, ".claude", "skills", skillDirName)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create skill dir: %w", err)
 	}
-	path := filepath.Join(dir, "SKILL.md")
 	contents := renderSkillFile(prompt.Name, prompt.Body)
 	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
 		return fmt.Errorf("write SKILL.md: %w", err)

@@ -45,8 +45,15 @@ type Project struct {
 }
 
 // SystemTicketSpecPromptID is the deterministic ID of the seeded
-// default spec-authorship prompt. Curator dispatch falls back to
-// this ID whenever a project's SpecAuthorshipPromptID is empty.
-// Kept as a const so the seed site, the DB defaulting on insert,
-// and the curator runtime all reference one source of truth.
+// default spec-authorship prompt. Three sites consume it:
+//
+//   - the seed step in main.go (writes the row).
+//   - the project-create HTTP handler, which auto-points new projects
+//     at this ID when the prompt exists. The DB layer itself stores
+//     whatever it's handed (NULL when the field is empty); defaulting
+//     lives at the API layer to keep the schema free of any "system
+//     prompt must exist" coupling that would break tests.
+//   - the curator dispatch path, which falls back to this ID at skill
+//     materialization time when a project's SpecAuthorshipPromptID is
+//     empty (covers projects created before the seed landed).
 const SystemTicketSpecPromptID = "system-ticket-spec"

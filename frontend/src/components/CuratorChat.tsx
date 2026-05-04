@@ -323,16 +323,6 @@ function ChatHeader({
           Curator
         </h2>
         <div className="flex items-center gap-2 text-[11px]">
-          <span className={`inline-flex items-center gap-1 ${tone}`}>
-            <span aria-hidden>{dot}</span>
-            <span>{label}</span>
-            {status === 'running' && (
-              <span className="inline-block w-1.5 h-1.5 rounded-full bg-delegate animate-pulse ml-0.5" />
-            )}
-          </span>
-          {chat.totalCostUSD > 0 && (
-            <span className="text-text-tertiary tabular-nums">${chat.totalCostUSD.toFixed(3)}</span>
-          )}
           <button
             type="button"
             onClick={onOpenSkillPicker}
@@ -343,12 +333,22 @@ function ChatHeader({
               h-6 px-2 rounded-full
               text-text-secondary hover:text-text-primary hover:bg-black/[0.04]
               border border-border-subtle/70
-              transition-colors max-w-[180px]
+              transition-colors
             "
           >
             <BookOpen size={11} className="shrink-0" />
-            <span className="truncate">{skillButtonLabel}</span>
+            <span>Spec skill</span>
           </button>
+          <span className={`inline-flex items-center gap-1 ${tone}`}>
+            <span aria-hidden>{dot}</span>
+            <span>{label}</span>
+            {status === 'running' && (
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-delegate animate-pulse ml-0.5" />
+            )}
+          </span>
+          {chat.totalCostUSD > 0 && (
+            <span className="text-text-tertiary tabular-nums">${chat.totalCostUSD.toFixed(3)}</span>
+          )}
           <button
             type="button"
             onClick={onReset}
