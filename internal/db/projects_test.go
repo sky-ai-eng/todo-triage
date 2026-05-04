@@ -283,8 +283,8 @@ func TestListProjects_TrackerColumnsRoundtrip(t *testing.T) {
 }
 
 // TestProject_SpecAuthorshipPromptID_Roundtrip pins the SKY-221
-// column on every read/write path: insert, update, list. The column
-// is nullable in storage; an empty Go-string roundtrips as empty.
+// column on the create/get and update/get paths. The column is
+// nullable in storage; an empty Go-string roundtrips as empty.
 // FK to prompts.id is ON DELETE SET NULL — exercised by deleting the
 // referenced prompt and confirming the project's pointer clears.
 func TestProject_SpecAuthorshipPromptID_Roundtrip(t *testing.T) {
