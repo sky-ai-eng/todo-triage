@@ -53,11 +53,12 @@ export default function CuratorChat({ project, onPatch }: Props) {
   const chat = useCuratorChat(projectId)
   const navigate = useNavigate()
 
-  // Lazy-fetch the prompts list so the header button can show the
-  // active prompt's name without waiting for the picker to open. Same
+  // Lazy-fetch the prompts list so the header control can resolve the
+  // active prompt's name for supporting UI (for example the button's
+  // tooltip/title) without waiting for the picker to open. Same
   // per-mount AbortController pattern as the linkifier's settings
-  // fetch — module-scope caching here would freeze the active-name
-  // display past edits made on the /prompts page.
+  // fetch — module-scope caching here would freeze the resolved
+  // active-name metadata past edits made on the /prompts page.
   const [prompts, setPrompts] = useState<Prompt[]>([])
   const refetchPrompts = useMemo(
     () => () => {
