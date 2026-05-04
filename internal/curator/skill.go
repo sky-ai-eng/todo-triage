@@ -100,7 +100,7 @@ func resolveSpecPrompt(database *sql.DB, project *domain.Project) (*domain.Promp
 // heuristic — the user can edit *what* a well-specced ticket means
 // without also having to write a Claude-Code-flavored skill descriptor.
 func renderSkillFile(promptName, body string) string {
-	const description = "Apply when the user asks you to draft, file, or write up a ticket for this project. Defines the format and standards for well-specced tickets."
+	const description = "Author a software ticket / spec that a human reviewer can skim and an autonomous coding agent can execute. Use whenever the user asks to draft a ticket, issue, spec, or work item for engineering work."
 	var b strings.Builder
 	b.WriteString("---\n")
 	b.WriteString("name: ")

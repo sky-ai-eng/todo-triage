@@ -1,46 +1,142 @@
-# Ticket as a spec
+# Authoring a Ticket Spec
 
-When the user asks you to draft, file, or write up a ticket for this project, your output should read like a one-page spec a delegated agent could pick up tomorrow without ambient context. Use the structure below. If the user explicitly asks for a different shape, follow them — this is the default, not a contract.
+You are writing a ticket that two audiences will read:
 
-## Context
+1. A **human** (PM, eng lead, stakeholder) who skims the top to decide whether to greenlight the work.
+2. An **executing engineer or coding agent** who reads the whole document and ships the work without coming back to ask questions.
 
-A short paragraph framing why this work exists. Include:
-- The trigger — what surfaced this need (a bug, a user observation, a strategic decision, a follow-up to merged work).
-- The state of the world it's being added to. Reference existing tickets or PRs by ID where helpful (e.g. "follow-up to SKY-217").
-- Anything a reader needs to know before reading the goal. Don't repeat the goal here.
+The agent that executes this ticket may not be running in this system. Assume they have only what's in the ticket, the linked artifacts, and the codebase. Do not reference internal channels, prior conversations, or memories the executor cannot see.
 
-## Goal
+## Operating principles
 
-One or two sentences naming the outcome — not the implementation. "Users can do X" beats "We add a Y endpoint." If you can't say it crisply, the scope probably isn't crisp yet — say that out loud rather than papering over.
+- Describe the work from the **outside in**. State what changes for the user, the API surface, the system's observable behavior — not the diff. Implementation choices belong to the executor.
+- Be **specific to the point of being checkable**. Name files. Quote error messages. Provide example inputs and expected outputs. Vague specs produce wrong code.
+- **Verifiability is the highest-leverage thing you write.** If the executor can't tell whether they're done, neither can anyone else. Anthropic's own guidance flags this as the single biggest improvement most spec authors can make.
+- **Bound the scope explicitly.** What's in, what's out, what's deferred. Coding agents do not exercise scope judgment the way a senior engineer does — say it.
+- **Cut anything that doesn't earn its place.** No filler, no marketing voice, no "N/A" sections. Omit a section rather than pad it.
+- **Don't invent details.** If you don't know a file path, function name, or constraint, leave it out or list it as an open question. A plausible-but-wrong pointer is worse than no pointer.
+- **One ticket = one shippable unit of work.** If the work is larger than a single PR or a single afternoon's focused effort, propose splitting it — return a parent + children rather than one giant spec.
 
-## In scope
+## Output structure
 
-A bullet list of the concrete pieces that have to land. Be specific about file paths, schema changes, API endpoints, and UI surfaces where you can. A delegated agent should be able to map these bullets to commits.
+Produce a single Markdown document. Use these sections in this order. Required sections must always appear; optional sections appear only when they carry weight.
 
-When a piece has notable subtlety, include a single short reason — not a tutorial. "Why this is safe / why this matters" lines are gold; multi-paragraph explanations belong in the implementing PR's description, not the ticket.
+### Title (required)
 
-## Depends on
+One line. Start with an imperative verb where possible. Name the surface area in the title itself so it's scannable in a list.
 
-Unmerged tickets or PRs that block this. If a piece can be deferred without blocking the goal, say so explicitly. If nothing blocks it, omit this section rather than writing "None."
+- Good: `Add idempotency keys to the /v1/charges endpoint`
+- Good: `Fix race in WorktreeManager.Cleanup when two pollers exit simultaneously`
+- Bad: `Charges improvements`
+- Bad: `Bug`
 
-## Open questions
+### Summary (required, 1–3 sentences)
 
-Anything you don't know yet. Naming the unknown is more valuable than guessing — it tells whoever picks this up what to confirm before they start. Frame each as a question, not a statement.
+What is changing, and why now. A reader who only reads this paragraph should know whether to keep reading. No marketing voice. No "we should consider" — state the change.
 
-## Out of scope
+### Context (required)
 
-Carved-out cases readers might assume are included but aren't. The goal is to prevent scope creep: explicitly listing "we are not doing X here" is cheaper than fielding scope-creep PRs later.
+What exists today that this ticket touches. Link the relevant code, prior tickets, design docs, customer reports, or dashboards. Quote user feedback or error messages verbatim rather than paraphrasing — the original wording carries information that a summary loses.
 
-# Style
+Write this section as if onboarding someone who has never seen the codebase. Assume the executor will read the linked code; your job is to point them at the right places, not to recap the codebase.
 
-- One pager. If it doesn't fit on one screen, you're either describing implementation detail (move to the PR) or scoping too much (split the ticket).
-- Concrete over abstract. "Add a `tier` column to `entities`" beats "Track entity hot/cold state."
-- Reference real artifacts. PRs, tickets, file paths, function names. Vague tickets become vague PRs.
-- No marketing voice. The audience is an engineer (human or agent) who will write code. Skip "delight," "seamless," "robust." Say what changes and why.
-- No fabricated detail. If you don't know whether something is true, ask the user before writing it down. A ticket with a confident-but-wrong claim is worse than a ticket with an honest gap.
+### Goals (required)
 
-# Drafting protocol
+A bulleted list of outcomes. Outcome-focused, not task-focused.
+
+- Good: `- Webhook deliveries retry up to 5 times with exponential backoff before being dead-lettered.`
+- Bad: `- Add a retry loop in deliverWebhook().` (this prescribes implementation)
+
+### Non-goals (required)
+
+A bulleted list of things the executor must **not** treat as part of this work, even though they're adjacent and might seem like natural extensions. This is the single most effective anti-scope-creep mechanism. Examples of legitimate non-goals: "alerting changes," "migration of existing rows," "UI changes for the admin panel," "support for the deprecated v0 API."
+
+If you cannot name a single non-goal, you have probably under-scoped — work backwards from "what would a helpful agent be tempted to also fix?" and write those down.
+
+### Acceptance criteria (required)
+
+Each bullet must be a falsifiable statement that anyone can check. Use whichever of these two formats fits the criterion:
+
+- **Rule-oriented** (simple, system-level checks) — a plain bulleted assertion.
+  - `- The endpoint returns 409 when called with a previously-seen Idempotency-Key and a different request body.`
+- **Scenario-oriented** (multi-step user flows) — Given / When / Then.
+  - `- Given an existing user with a verified email, When they request a password reset, Then they receive an email containing a single-use token that expires in 1 hour.`
+
+Mix the two styles in a single ticket if that's what the work calls for. Do not invent scenarios for parameter combinations that don't change behavior — split the criteria along axes that genuinely flip outcomes.
+
+### Pointers (required when applicable)
+
+Concrete starting points for the executor. Include any of these that you know:
+
+- File paths and symbol names: `internal/webhooks/dispatcher.go: deliver()`
+- Existing patterns to mirror: `Follow the retry pattern used in internal/poller/github.go`
+- Related PRs, tickets, or commits
+- Relevant external docs (link to current versions; agents will otherwise default to whatever they were trained on)
+
+If you don't know the right files, say so — don't guess. An empty pointers section is honest; a wrong one wastes the executor's time.
+
+### Constraints (required when applicable)
+
+Hard limits the executor must respect. Examples:
+
+- Performance budgets (`p99 latency must remain under 200ms`)
+- Compatibility (`must continue to compile against Go 1.23`)
+- Security (`no secrets in logs; no new third-party dependencies without approval`)
+- Files or directories that are off-limits (`do not modify generated code under internal/db/sqlc/`)
+- Database migrations must be forward-only and idempotent
+
+### How to verify (required when work is verifiable)
+
+The exact commands, test invocations, or manual steps that prove the work is done. This is distinct from acceptance criteria: AC says *what's true*, verification says *how to prove it*.
+
+```
+go test ./internal/webhooks/...
+./scripts/lint.sh
+# Manually: trigger a webhook from the admin panel; observe 5 retries in the runs table
+```
+
+If part of the work isn't programmatically verifiable (visual changes, copy edits), say so explicitly and describe the human check.
+
+### Open questions (optional)
+
+Things you don't know yet that the executor or reviewer will need to resolve. Better to surface than hide. Each question should name who can answer it if known.
+
+### Out of scope / follow-ups (optional)
+
+Adjacent work that came up while writing this ticket but is consciously deferred. Capture it here so it isn't lost; do not let the executor expand the patch to cover it.
+
+## Style
+
+- Plain language, active voice. No filler ("In order to," "It should be noted that").
+- Short sentences. Lists over paragraphs where the structure is list-like.
+- Code, file paths, and command invocations in fenced blocks or inline backticks.
+- Quote external sources (user feedback, error messages, log lines) verbatim.
+- No emojis unless the codebase already uses them.
+
+## What to avoid
+
+- **Implementation prescription.** Don't dictate the diff. Describe behavior; leave the how to the executor.
+- **Marketing or persuasive voice.** This is a spec, not a pitch.
+- **Vague success criteria.** "Improve performance," "make it nicer," "handle edge cases" are all rejections — replace with measurements or examples.
+- **Invented specifics.** Wrong file paths and made-up function names cost the executor more time than empty pointers would have.
+- **Sprawling scope.** If the spec needs more than ~2 screens of markdown, it's probably two tickets.
+- **Filler sections.** Omit sections that don't apply. Don't write "N/A."
+- **Cartesian-product acceptance criteria.** Cover the cases that change behavior, not every parameter combination.
+- **User-story ceremony for its own sake.** "As a [role] I want [feature] so that [benefit]" is fine when it adds clarity. Padding the spec with the formula because you think you have to is the anti-pattern Linear has called out. Capture the *why* in plain sentences if that reads cleaner.
+
+## Drafting protocol
 
 - Always show the user your full draft in chat *before* invoking `triagefactory exec jira ticket create` (or any equivalent ticket-creation command). They will refine the framing; respect their edits — don't re-draft from scratch unless asked.
-- When the user approves, file it. Quote the ticket ID and a one-line summary back to them so the chat shows the outcome.
+- When the user approves, file it. Quote the ticket ID and a one-line summary back so the chat shows the outcome.
 - If you don't have enough information to write a useful spec, say what's missing rather than writing a thin ticket. A "what would help me write this?" question is better than a placeholder.
+
+## Before you finish
+
+Re-read your draft and check:
+
+1. Could a competent engineer who has never seen this codebase ship this ticket from the spec alone?
+2. Is every acceptance criterion something a third party could mark true or false without asking you?
+3. Are the goals stated as outcomes (not tasks)?
+4. Is there at least one non-goal? (If not, you've probably under-scoped.)
+5. Are file/symbol references real, or did you invent any?
+6. Is there marketing voice, "should consider" hedging, or filler? Cut it.
