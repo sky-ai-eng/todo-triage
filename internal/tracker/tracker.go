@@ -59,6 +59,15 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, userTe
 		log.Printf("[tracker] GitHub discovery error: %v", err)
 	}
 
+	// Build a SourceID-keyed lookup of discovery snapshots so Phase 2 can
+	// gate refresh on (updatedAt, headSHA) without a second round-trip.
+	// Discovery already returns both fields via prDiscoveryFragment; the
+	// only cost here is the map allocation.
+	discoveredBySourceID := make(map[string]domain.PRSnapshot, len(discovered))
+	for _, d := range discovered {
+		discoveredBySourceID[ghSourceID(d.Snapshot.Repo, d.Snapshot.Number)] = d.Snapshot
+	}
+
 	for _, d := range discovered {
 		// Ensure the NodeID is stored in the snapshot so entity-based refresh
 		// can extract it without a separate column.
@@ -130,12 +139,18 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, userTe
 	}
 
 	// Classify by snapshot state (open vs terminal) for query cost tiering.
+	// Open entities also pass through the updatedAt-gate using the discovery
+	// snapshot we already have in hand — quiet PRs (unchanged updatedAt and
+	// SHA, no in-flight CI) skip the refresh entirely. See gate.go for the
+	// safety reasoning. Terminal items always refresh because the set is
+	// small and the cheap fragment is used; gate doesn't apply.
 	type entityWithSnap struct {
 		entity domain.Entity
 		snap   domain.PRSnapshot
 		nodeID string
 	}
 	var openItems, terminalItems []entityWithSnap
+	skippedOpen := 0
 
 	for _, e := range entities {
 		var snap domain.PRSnapshot
@@ -148,12 +163,32 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, userTe
 		item := entityWithSnap{entity: e, snap: snap, nodeID: snap.NodeID}
 		if snap.Merged || snap.State == "CLOSED" || snap.State == "MERGED" {
 			terminalItems = append(terminalItems, item)
-		} else {
-			openItems = append(openItems, item)
+			continue
 		}
+		// Open path: gate against discovery's fresh snapshot if we have one.
+		// Entities not in this cycle's discovery (rare — e.g. a PR you've
+		// stopped being a reviewer on) fall through to refresh, which is the
+		// safe default. age is "time since last full refresh" — nil pointer
+		// treated as very stale so first-time skip decisions force a fetch.
+		var age time.Duration
+		if e.LastPolledAt != nil {
+			age = time.Since(*e.LastPolledAt)
+		} else {
+			age = 24 * time.Hour
+		}
+		if fresh, ok := discoveredBySourceID[e.SourceID]; ok && shouldSkipRefresh(snap, fresh, age) {
+			skippedOpen++
+			continue
+		}
+		openItems = append(openItems, item)
 	}
 
 	if len(openItems) == 0 && len(terminalItems) == 0 {
+		log.Printf("[tracker] GitHub refresh: %d discovered, %d entities, %d skipped (quiet), 0 refreshed, 0 events",
+			len(discovered), len(entities), skippedOpen)
+		if len(entities) > 0 {
+			t.EmitPollComplete("github", startedAt, len(entities), 0)
+		}
 		return 0, nil
 	}
 
@@ -218,8 +253,8 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, userTe
 		}
 	}
 
-	log.Printf("[tracker] GitHub refresh: %d discovered, %d entities, %d refreshed, %d events",
-		len(discovered), len(entities), len(refreshed), eventsEmitted)
+	log.Printf("[tracker] GitHub refresh: %d discovered, %d entities, %d skipped (quiet), %d refreshed, %d events",
+		len(discovered), len(entities), skippedOpen, len(refreshed), eventsEmitted)
 
 	if len(entities) > 0 {
 		t.EmitPollComplete("github", startedAt, len(entities), eventsEmitted)
