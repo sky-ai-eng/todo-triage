@@ -13,7 +13,7 @@ func seedDefaultPrompts(database *sql.DB) {
 	// Default PR review prompt — manual only. The user picks when to
 	// review a PR; no automation makes sense for reviewing (including
 	// reviewing one's own draft — that's just running this prompt by hand).
-	err := db.SeedPrompt(database, domain.Prompt{
+	err := db.SeedOrUpdateSystemPrompt(database, domain.Prompt{
 		ID:     "system-pr-review",
 		Name:   "PR Code Review",
 		Body:   ai.PRReviewPromptTemplate,
@@ -25,7 +25,7 @@ func seedDefaultPrompts(database *sql.DB) {
 
 	// Merge conflict resolution prompt — auto-fired on merge conflicts on
 	// the user's own PRs via the matching trigger below.
-	err = db.SeedPrompt(database, domain.Prompt{
+	err = db.SeedOrUpdateSystemPrompt(database, domain.Prompt{
 		ID:     "system-conflict-resolution",
 		Name:   "Merge Conflict Resolution",
 		Body:   ai.ConflictResolutionPromptTemplate,
@@ -36,7 +36,7 @@ func seedDefaultPrompts(database *sql.DB) {
 	}
 
 	// CI fix prompt — auto-fired on CI failures via prompt_trigger.
-	err = db.SeedPrompt(database, domain.Prompt{
+	err = db.SeedOrUpdateSystemPrompt(database, domain.Prompt{
 		ID:     "system-ci-fix",
 		Name:   "CI Fix",
 		Body:   ai.CIFixPromptTemplate,
@@ -48,7 +48,7 @@ func seedDefaultPrompts(database *sql.DB) {
 
 	// Jira implementation prompt — auto-fired on issues assigned to the
 	// user via the matching trigger below.
-	err = db.SeedPrompt(database, domain.Prompt{
+	err = db.SeedOrUpdateSystemPrompt(database, domain.Prompt{
 		ID:     "system-jira-implement",
 		Name:   "Jira Issue Implementation",
 		Body:   ai.JiraImplementPromptTemplate,
@@ -62,7 +62,7 @@ func seedDefaultPrompts(database *sql.DB) {
 	// Same action regardless of whether the reviewer is the user
 	// (self-review loop) or someone else (normal code review): read the
 	// review, fix what's right, push back on what isn't, push to branch.
-	err = db.SeedPrompt(database, domain.Prompt{
+	err = db.SeedOrUpdateSystemPrompt(database, domain.Prompt{
 		ID:     "system-fix-review-feedback",
 		Name:   "Fix Review Feedback",
 		Body:   ai.FixReviewFeedbackPromptTemplate,
@@ -76,7 +76,7 @@ func seedDefaultPrompts(database *sql.DB) {
 	// materializes whichever prompt a project points at as a literal
 	// Claude Code skill on each dispatch; new projects start pointing
 	// at this one. Users override per-project via the Projects page.
-	err = db.SeedPrompt(database, domain.Prompt{
+	err = db.SeedOrUpdateSystemPrompt(database, domain.Prompt{
 		ID:     domain.SystemTicketSpecPromptID,
 		Name:   "Curator: Ticket as a Spec",
 		Body:   ai.TicketSpecPromptTemplate,

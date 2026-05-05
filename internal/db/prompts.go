@@ -1,12 +1,72 @@
 package db
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
+
+
+// SeedOrUpdateSystemPrompt inserts a shipped prompt if missing, or updates it
+// when the shipped body changes and the local row has not been user-modified.
+// Version state is recorded in system_prompt_versions for idempotent reseeding.
+func SeedOrUpdateSystemPrompt(db *sql.DB, p domain.Prompt) error {
+	if p.Source == "" {
+		p.Source = "system"
+	}
+	now := time.Now()
+	h := sha256.Sum256([]byte(p.Body))
+	hash := hex.EncodeToString(h[:])
+
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	var exists int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM prompts WHERE id = ?`, p.ID).Scan(&exists); err != nil {
+		return fmt.Errorf("check prompt existence: %w", err)
+	}
+	if exists == 0 {
+		if _, err := tx.Exec(`
+			INSERT INTO prompts (id, name, body, source, usage_count, user_modified, created_at, updated_at)
+			VALUES (?, ?, ?, ?, 0, 0, ?, ?)
+		`, p.ID, p.Name, p.Body, p.Source, now, now); err != nil {
+			return err
+		}
+	} else {
+		var userModified int
+		if err := tx.QueryRow(`SELECT user_modified FROM prompts WHERE id = ?`, p.ID).Scan(&userModified); err != nil {
+			return fmt.Errorf("read user_modified: %w", err)
+		}
+		if userModified == 0 {
+			if _, err := tx.Exec(`
+				UPDATE prompts
+				SET name = ?, body = ?, source = ?, updated_at = ?
+				WHERE id = ?
+			`, p.Name, p.Body, p.Source, now, p.ID); err != nil {
+				return err
+			}
+		}
+	}
+
+	if _, err := tx.Exec(`
+		INSERT INTO system_prompt_versions (prompt_id, content_hash, applied_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT(prompt_id) DO UPDATE SET
+			content_hash = excluded.content_hash,
+			applied_at = excluded.applied_at
+	`, p.ID, hash, now); err != nil {
+		return fmt.Errorf("upsert system prompt version: %w", err)
+	}
+
+	return tx.Commit()
+}
 
 // SeedPrompt inserts a prompt if it doesn't exist.
 func SeedPrompt(db *sql.DB, p domain.Prompt) error {
@@ -78,7 +138,7 @@ func CreatePrompt(db *sql.DB, p domain.Prompt) error {
 // UpdatePrompt updates a prompt's name and body.
 func UpdatePrompt(db *sql.DB, id, name, body string) error {
 	_, err := db.Exec(`
-		UPDATE prompts SET name = ?, body = ?, updated_at = ? WHERE id = ?
+		UPDATE prompts SET name = ?, body = ?, user_modified = 1, updated_at = ? WHERE id = ?
 	`, name, body, time.Now(), id)
 	return err
 }
