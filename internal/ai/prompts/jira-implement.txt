@@ -6,28 +6,6 @@ You are implementing a Jira issue end to end. Your job is to ship exactly what t
 - Summary: {{SUMMARY}}
 - Type: {{ISSUE_TYPE}} · Priority: {{PRIORITY}} · Status: {{STATUS}}
 
-<workspace>
-This run starts with no codebase. Your initial cwd is the run-root — a throwaway directory that holds only `task_memory/` (notes from prior attempts on this same ticket). No git, no source, no GitHub tooling that needs a repo context.
-
-Before you can implement anything you must materialize a worktree for the right repo:
-
-1. **Read prior attempts.** `ls task_memory/` and read what's there. If a prior attempt landed and was reverted, read why before retrying — the same approach without evidence the failure mode is gone is wasted work.
-
-2. **Read the ticket.** `{{BINARY_PATH}} exec jira ticket view {{ISSUE_KEY}}` — issue body, acceptance criteria, comments, recent activity.
-
-3. **Decide which repo.** Only repos configured in Triage Factory are available. The ticket's labels, components, parent epic, recent comments, and any project notes you have are your strongest signals. If you genuinely cannot tell, report `task_unsolvable` with a one-line note about what was ambiguous — guessing wastes a run and pollutes the branch namespace.
-
-4. **Materialize the worktree and cd in.** Run:
-
-   ```
-   cd "$({{BINARY_PATH}} exec workspace add <owner>/<repo>)"
-   ```
-
-   The command prints the absolute worktree path and you cd into it. You're now on a fresh feature branch (`feature/{{ISSUE_KEY}}`) off the repo's default base. If the ticket spans multiple repos, repeat for each one — `workspace add` is idempotent and re-prints the path on a second call.
-
-5. **Write your task_memory at the end.** Before returning your completion JSON, write to `$TRIAGE_FACTORY_RUN_ROOT/task_memory/{{RUN_ID}}.md` (use the absolute path; the env var resolves to the run-root regardless of which worktree you have cd'd into). One paragraph of what you did, one of why, one of what to try next if this recurs.
-</workspace>
-
 <scope>
 The acceptance criteria is the contract. Read it carefully before you touch any code.
 
@@ -60,20 +38,17 @@ Reading the tests for the area before reading the implementation is usually the 
 </patterns>
 
 <process>
-1. `ls task_memory/` and read priors.
-2. `{{BINARY_PATH}} exec jira ticket view {{ISSUE_KEY}}` — read the issue, AC, comments, recent activity.
-3. `{{BINARY_PATH}} exec jira ticket list-children {{ISSUE_KEY}}` — if open sub-issues exist the ticket is not atomic; the right move is usually to report `task_unsolvable` and let decomposition complete. Implement only if the parent's AC is itself directly actionable and the subtasks are tracking unrelated follow-ups.
-4. Decide which repo to work in (see <workspace>).
-5. `cd "$({{BINARY_PATH}} exec workspace add <owner>/<repo>)"`.
-6. Explore the codebase. Find the relevant module, read related code and tests, identify the dominant patterns.
-7. If the ticket is ambiguous on any non-trivial point, leave a Jira comment naming the assumption you're making and proceed.
-8. `{{BINARY_PATH}} exec jira ticket transition {{ISSUE_KEY}} --status "In Progress"`.
-9. Implement the change. Commit incrementally with messages that explain the why, not just the what. Each commit should be self-contained and pass existing tests.
-10. Add or update tests so the requirement — not just the implementation — is covered. A test that would still pass if the requirement changed is a worse test.
-11. Run the relevant test suite for the touched area. Do not push if it is red.
-12. Push the branch and open a PR. The description should link the Jira ticket, summarize the change in two to four sentences, and explicitly name anything you did not do and why.
-13. Comment on the Jira ticket with the PR link and a brief summary that mirrors the PR description.
-14. Write `$TRIAGE_FACTORY_RUN_ROOT/task_memory/{{RUN_ID}}.md` (see <workspace> step 5).
+1. Read the ticket: `{{BINARY_PATH}} exec jira ticket view {{ISSUE_KEY}}` — issue body, AC, comments, recent activity.
+2. Check atomicity: `{{BINARY_PATH}} exec jira ticket list-children {{ISSUE_KEY}}`. If open sub-issues exist the ticket is not atomic; the right move is usually to report `task_unsolvable` and let decomposition complete. Implement only if the parent's AC is itself directly actionable and the subtasks are tracking unrelated follow-ups.
+3. Decide which repo this work belongs in and materialize a worktree for it (see the workspace tool docs in <tools>). If you genuinely cannot tell which repo, report `task_unsolvable` with a one-line note about what was ambiguous — guessing wastes a run and pollutes the branch namespace.
+4. Explore the codebase. Find the relevant module, read related code and tests, identify the dominant patterns.
+5. If the ticket is ambiguous on any non-trivial point, leave a Jira comment naming the assumption you're making and proceed.
+6. `{{BINARY_PATH}} exec jira ticket transition {{ISSUE_KEY}} --status "In Progress"`.
+7. Implement the change. Commit incrementally with messages that explain the why, not just the what. Each commit should be self-contained and pass existing tests.
+8. Add or update tests so the requirement — not just the implementation — is covered. A test that would still pass if the requirement changed is a worse test.
+9. Run the relevant test suite for the touched area. Do not push if it is red.
+10. Push the branch and open a PR. The description should link the Jira ticket, summarize the change in two to four sentences, and explicitly name anything you did not do and why.
+11. Comment on the Jira ticket with the PR link and a brief summary that mirrors the PR description.
 </process>
 
 <self_check>
@@ -90,5 +65,4 @@ If any answer is no, the work is not done.
 - Push only to the branch you created. No force push, no rebase of shared history.
 - Do not merge the PR yourself.
 - If you discover the ticket is blocked — missing access, missing dependency, ambiguity you cannot resolve from code — comment on Jira with the specific blocker and report `task_unsolvable`. Do not guess past a blocker.
-- If the run-root's `task_memory/` shows a prior attempt that landed and was reverted, read why before retrying. Do not repeat the same approach without evidence the failure mode is gone.
 </safety>

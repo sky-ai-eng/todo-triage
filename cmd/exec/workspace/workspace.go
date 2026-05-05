@@ -24,8 +24,15 @@ import (
 // HelpText is the help block for `workspace` commands, surfaced both
 // from `workspace --help` and the top-level `exec --help`.
 const HelpText = `Workspace Commands:
+  workspace list                 Print configured + materialized repos for this run (JSON)
   workspace add <owner/repo>     Materialize a per-repo worktree for this run; prints absolute path
-  workspace list                 List worktrees materialized for this run (JSON)
+
+Discovery:
+  Run 'workspace list' first when you're not sure which repo a Jira
+  ticket belongs to. Output has two sections:
+    - "available": configured repos you could materialize via 'add'
+    - "materialized": worktrees you've already added for this run, with
+      absolute paths and feature branches
 
 Usage notes:
   - Run id is read from $TRIAGE_FACTORY_RUN_ID (set by the delegation spawner).
@@ -35,8 +42,8 @@ Usage notes:
     idempotent and print the existing path.
   - 'add' is rejected for GitHub PR runs (their worktree is materialized
     eagerly from the PR's repo and cannot be replaced mid-run).
-  - The owner/repo must already be configured in Triage Factory (visible
-    on the Settings page); the command rejects unconfigured repos.`
+  - 'add' rejects unconfigured repos with a "not configured" error; use
+    'list' to enumerate options before guessing.`
 
 // Handle dispatches workspace subcommands.
 func Handle(database *db.DB, args []string) {

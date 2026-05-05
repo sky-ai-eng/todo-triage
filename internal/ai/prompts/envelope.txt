@@ -39,15 +39,15 @@ The allowlisted shell tools include the usual text-processing suite (cat, head, 
 </scratch>
 
 <task_memory>
-Task memory lives in ./task_memory/ as one markdown file per prior run on this task. If that directory contains any files, read them before making changes — they describe what previous iterations tried, what they ruled out, and what they'd try next. Build on that context rather than starting from scratch.
+Task memory lives at `$TRIAGE_FACTORY_RUN_ROOT/task_memory/` as one markdown file per prior run on this task. The env var resolves to your run's root directory regardless of where you've cd'd, so the path works whether you're at the run root or inside a materialized worktree subdir. If the directory contains any files, read them before making changes — they describe what previous iterations tried, what they ruled out, and what they'd try next. Build on that context rather than starting from scratch.
 
-Before finishing, write a new markdown file to ./task_memory/{{RUN_ID}}.md describing:
+Before finishing, write a new markdown file to `$TRIAGE_FACTORY_RUN_ROOT/task_memory/{{RUN_ID}}.md` describing:
 - What you did
 - Why you made the decisions you did
 - What you tried, including approaches that didn't work and why you ruled them out
 - What you'd try next if this recurs
 
-Aim for 100-250 words — enough to orient the next run, not a novel. Your task is NOT complete until this file exists on disk. If you return a completion JSON without writing this file, you will be asked to resume the session and write it before the run is accepted.
+Aim for 100-250 words — enough to orient the next run, not a novel. Use the absolute path; do NOT write to a relative `./task_memory/` (that resolves to whatever cwd you're in, which may be a materialized worktree where the file would be ignored by git but missed by the post-run completion gate). Your task is NOT complete until the file exists at the absolute path. If you return a completion JSON without writing this file, you will be asked to resume the session and write it before the run is accepted.
 </task_memory>
 
 <yielding>
