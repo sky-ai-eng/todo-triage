@@ -157,10 +157,11 @@ export default function PendingPROverlay({ runID, open, onClose }: Props) {
   const handleUpdateTitle = useCallback(
     async (title: string) => {
       if (!prId) return
-      const p = patchPR(prId, { title })
+      const normalizedTitle = title.trim()
+      const p = patchPR(prId, { title: normalizedTitle })
       lastSavePromise.current = p
       await p
-      setPR((prev) => (prev ? { ...prev, title } : prev))
+      setPR((prev) => (prev ? { ...prev, title: normalizedTitle } : prev))
     },
     [prId, patchPR],
   )
