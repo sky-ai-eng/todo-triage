@@ -79,7 +79,10 @@ export default function PendingPROverlay({ runID, open, onClose }: Props) {
     ;(async () => {
       try {
         const prRes = await fetch(`/api/agent/runs/${runID}/pending-pr`)
-        if (!prRes.ok) throw new Error('Failed to load pending PR')
+        if (!prRes.ok) {
+          const data = await prRes.json().catch(() => ({}))
+          throw new Error(data.error || `Failed to load pending PR (${prRes.status})`)
+        }
         const prData: PendingPR = await prRes.json()
         if (cancelled) return
         setPR(prData)
@@ -89,7 +92,16 @@ export default function PendingPROverlay({ runID, open, onClose }: Props) {
         setDraft(prData.draft)
 
         const diffRes = await fetch(`/api/pending-prs/${prData.id}/diff`)
-        if (!diffRes.ok) throw new Error('Failed to load diff')
+        if (!diffRes.ok) {
+          // Server returns JSON {"error": "..."} on 502 (e.g.
+          // "couldn't find remote ref" when the agent skipped
+          // git push). Surface that body verbatim so the user
+          // sees the actual reason instead of a generic
+          // "Failed to load diff" — the backend already produces
+          // an actionable message, no point swallowing it.
+          const data = await diffRes.json().catch(() => ({}))
+          throw new Error(data.error || `Failed to load diff (${diffRes.status})`)
+        }
         const diffText = await diffRes.text()
         if (cancelled) return
         setFiles(parseDiff(diffText))

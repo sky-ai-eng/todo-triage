@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -461,11 +462,23 @@ func (s *Server) finalizeRequeue(taskID string, task *domain.Task) {
 func (s *Server) cleanupPendingApprovalRun(taskID string, outcome discardOutcome) {
 	runID, err := db.PendingApprovalRunIDForTask(s.db, taskID)
 	if err != nil {
-		log.Printf("[review-discard] pending_approval lookup for task %s failed: %v", taskID, err)
+		log.Printf("[approval-discard] pending_approval lookup for task %s failed: %v", taskID, err)
 		return
 	}
 	if runID == "" {
 		return
+	}
+
+	// Detect which side-table held the row BEFORE deleting, so the
+	// stop_reason and human_content can name the right kind.
+	// Without this, a discarded PR ends up tagged "review_discarded_
+	// by_user" — confusing in the UI and breaks any downstream
+	// logic keyed on stop_reason that needs to tell the two apart.
+	kind := "review"
+	if pr, err := db.PendingPRByRunID(s.db, runID); err != nil {
+		log.Printf("[approval-discard] PendingPRByRunID lookup for run %s failed: %v", runID, err)
+	} else if pr != nil {
+		kind = "pr"
 	}
 
 	// Write the discard outcome to run_memory.human_content BEFORE
@@ -474,9 +487,9 @@ func (s *Server) cleanupPendingApprovalRun(taskID string, outcome discardOutcome
 	// alongside the existing agent_content (the agent's self-
 	// report) — so it can recalibrate. Format mirrors the SKY-205
 	// submit-time block so the parsing contract is uniform.
-	humanContent := buildDiscardHumanContent(outcome)
+	humanContent := buildDiscardHumanContent(outcome, kind)
 	if err := db.UpdateRunMemoryHumanContent(s.db, runID, humanContent); err != nil {
-		log.Printf("[review-discard] human_content write for run %s failed: %v", runID, err)
+		log.Printf("[approval-discard] human_content write for run %s failed: %v", runID, err)
 	}
 
 	// Tear down the pending review by run_id directly. Older shape
@@ -499,7 +512,7 @@ func (s *Server) cleanupPendingApprovalRun(taskID string, outcome discardOutcome
 	// idempotent on re-entry (UPDATE overwrites with the same or
 	// refined verdict).
 	if err := db.DeletePendingReviewByRunID(s.db, runID); err != nil {
-		log.Printf("[review-discard] DeletePendingReviewByRunID for run %s failed (run held in pending_approval for retry): %v", runID, err)
+		log.Printf("[approval-discard] DeletePendingReviewByRunID for run %s failed (run held in pending_approval for retry): %v", runID, err)
 		return
 	}
 	// Same hold-for-retry semantics for the pending-PR side table.
@@ -509,17 +522,26 @@ func (s *Server) cleanupPendingApprovalRun(taskID string, outcome discardOutcome
 	// so we attempt both deletes. Both are idempotent no-ops when no
 	// row exists, so calling unconditionally is safe.
 	if err := db.DeletePendingPRByRunID(s.db, runID); err != nil {
-		log.Printf("[review-discard] DeletePendingPRByRunID for run %s failed (run held in pending_approval for retry): %v", runID, err)
+		log.Printf("[approval-discard] DeletePendingPRByRunID for run %s failed (run held in pending_approval for retry): %v", runID, err)
 		return
+	}
+
+	// Discriminating stop_reason: review vs PR. Existing review
+	// callers / tests still see "review_discarded_by_user"; PR
+	// discards become a distinct value so downstream queries can
+	// tell them apart.
+	stopReason := "review_discarded_by_user"
+	if kind == "pr" {
+		stopReason = "pr_discarded_by_user"
 	}
 
 	// Flip the run row terminal. ok=false here means the row was
 	// already cancelled by a concurrent path (idempotent re-call,
 	// rare race) — skip the broadcast in that case so we don't
 	// double-fire.
-	ok, err := db.MarkAgentRunDiscarded(s.db, runID, "review_discarded_by_user")
+	ok, err := db.MarkAgentRunDiscarded(s.db, runID, stopReason)
 	if err != nil {
-		log.Printf("[review-discard] MarkAgentRunDiscarded %s failed: %v", runID, err)
+		log.Printf("[approval-discard] MarkAgentRunDiscarded %s failed: %v", runID, err)
 		return
 	}
 	if !ok {
@@ -534,7 +556,7 @@ func (s *Server) cleanupPendingApprovalRun(taskID string, outcome discardOutcome
 }
 
 // buildDiscardHumanContent renders the post-run human verdict
-// recorded when the user rejects an agent-prepared review. The
+// recorded when the user rejects an agent-prepared approval. The
 // four shapes — requeued, dismissed, completed, claimed — give
 // the next agent on this entity different recalibration signals:
 //
@@ -544,23 +566,42 @@ func (s *Server) cleanupPendingApprovalRun(taskID string, outcome discardOutcome
 //     walked away from the entity entirely).
 //   - completed: "you reached the right ballpark but I resolved
 //     this myself" (the human accepted the task as done without
-//     applying the agent's prepared review).
+//     applying the agent's prepared review/PR).
 //   - claimed: "I'll handle this myself" (the human took over the
 //     task; the entity is still being worked on, just by hand).
-func buildDiscardHumanContent(outcome discardOutcome) string {
+//
+// kind is "review" or "pr" — picks the right artifact noun so the
+// next agent reading memory sees text that matches what was
+// actually discarded (a review verdict vs a queued PR). Defaults
+// to review wording for any unknown value.
+func buildDiscardHumanContent(outcome discardOutcome, kind string) string {
+	artifact := "review"
+	verdictNoun := "verdict"
+	if kind == "pr" {
+		artifact = "PR"
+		verdictNoun = "PR"
+	}
 	switch outcome {
 	case discardOutcomeDismissed:
-		return "**Outcome:** Human discarded the prepared review and dismissed the task entirely.\n" +
-			"**Implication:** The verdict you proposed was not accepted, and the human chose to walk away from this entity rather than re-queue it. Future runs on similar entities should reconsider whether the situation warrants action at all."
+		return fmt.Sprintf(
+			"**Outcome:** Human discarded the prepared %s and dismissed the task entirely.\n"+
+				"**Implication:** The %s you proposed was not accepted, and the human chose to walk away from this entity rather than re-queue it. Future runs on similar entities should reconsider whether the situation warrants action at all.",
+			artifact, verdictNoun)
 	case discardOutcomeCompleted:
-		return "**Outcome:** Human marked the task complete without submitting the prepared review.\n" +
-			"**Implication:** The human acknowledged the task as resolved but chose not to apply your verdict to the entity. They likely handled it manually or via a different framing. Future runs should consider whether the agent's path was the right one or whether the human's resolution implies a gap in the prompt's approach."
+		return fmt.Sprintf(
+			"**Outcome:** Human marked the task complete without submitting the prepared %s.\n"+
+				"**Implication:** The human acknowledged the task as resolved but chose not to apply your %s to the entity. They likely handled it manually or via a different framing. Future runs should consider whether the agent's path was the right one or whether the human's resolution implies a gap in the prompt's approach.",
+			artifact, verdictNoun)
 	case discardOutcomeClaimed:
-		return "**Outcome:** Human discarded the prepared review and claimed the task to handle it themselves.\n" +
-			"**Implication:** The verdict you proposed was not accepted. The human took over to work the entity manually rather than apply your review or re-queue it for another agent attempt — a sign that automation wasn't the right fit for this case."
+		return fmt.Sprintf(
+			"**Outcome:** Human discarded the prepared %s and claimed the task to handle it themselves.\n"+
+				"**Implication:** The %s you proposed was not accepted. The human took over to work the entity manually rather than apply your %s or re-queue it for another agent attempt — a sign that automation wasn't the right fit for this case.",
+			artifact, verdictNoun, artifact)
 	default: // discardOutcomeRequeued
-		return "**Outcome:** Human discarded the prepared review without submitting it; task returned to the triage queue.\n" +
-			"**Implication:** The verdict you proposed was not accepted. Reconsider whether this entity warrants any review at all, or whether a different framing is needed."
+		return fmt.Sprintf(
+			"**Outcome:** Human discarded the prepared %s without submitting it; task returned to the triage queue.\n"+
+				"**Implication:** The %s you proposed was not accepted. Reconsider whether this entity warrants any %s at all, or whether a different framing is needed.",
+			artifact, verdictNoun, artifact)
 	}
 }
 

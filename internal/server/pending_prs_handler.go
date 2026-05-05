@@ -111,6 +111,13 @@ func (s *Server) handlePendingPRUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := db.UpdatePendingPRTitleBody(s.db, id, title, body); err != nil {
+		if errors.Is(err, db.ErrPendingPRSubmitted) {
+			// 409 Conflict so the overlay can show the user a clean
+			// "submission in flight, your edit was dropped" message
+			// instead of a green "saved" toast over a no-op.
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "this PR is already being submitted — your edit didn't apply"})
+			return
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}

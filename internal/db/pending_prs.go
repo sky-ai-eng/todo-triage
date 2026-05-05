@@ -105,11 +105,26 @@ func GetPendingPR(database *sql.DB, id string) (*domain.PendingPR, error) {
 	return &p, nil
 }
 
+// ErrPendingPRSubmitted is returned by UpdatePendingPRTitleBody when
+// the row's submitted_at is non-NULL — the submit guard already
+// claimed the row and a CreatePR call is in flight (or has already
+// landed) using the values that were in the row at submit time. A
+// PATCH after that point can't change what GitHub sees, so silently
+// returning success would tell the user "edit saved" when GitHub is
+// about to open the PR with the pre-edit values.
+var ErrPendingPRSubmitted = errors.New("pending PR is already being submitted; edit dropped")
+
 // UpdatePendingPRTitleBody is the human-edit path: the user's
 // edits to title/body via the overlay PATCH endpoint. Originals stay
 // frozen via COALESCE so the human-feedback diff retains the agent's
 // draft as the baseline. Mirror of SetPendingReviewSubmission's
 // COALESCE pattern.
+//
+// `submitted_at IS NULL` gates the UPDATE so a PATCH that races a
+// concurrent submit can't silently land after the submit captured
+// the row. The handler maps ErrPendingPRSubmitted to a 409 so the
+// browser shows "PR is being opened, your edit didn't apply" rather
+// than a green "saved" toast covering a dropped edit.
 func UpdatePendingPRTitleBody(database *sql.DB, id, title, body string) error {
 	res, err := database.Exec(
 		`UPDATE pending_prs
@@ -117,7 +132,7 @@ func UpdatePendingPRTitleBody(database *sql.DB, id, title, body string) error {
 		        body = ?,
 		        original_title = COALESCE(original_title, ?),
 		        original_body = COALESCE(original_body, ?)
-		  WHERE id = ?`,
+		  WHERE id = ? AND submitted_at IS NULL`,
 		title, nullIfEmpty(body), title, nullIfEmpty(body), id,
 	)
 	if err != nil {
@@ -128,7 +143,25 @@ func UpdatePendingPRTitleBody(database *sql.DB, id, title, body string) error {
 		return err
 	}
 	if n == 0 {
-		return fmt.Errorf("pending PR %s not found", id)
+		// Disambiguate "row not found" from "row exists but already
+		// submitted" so the caller can give the user the right
+		// reason. A second SELECT is cheap relative to the cost of
+		// a misleading toast.
+		var submittedAt sql.NullTime
+		err := database.QueryRow(`SELECT submitted_at FROM pending_prs WHERE id = ?`, id).Scan(&submittedAt)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("pending PR %s not found", id)
+			}
+			return err
+		}
+		if submittedAt.Valid {
+			return ErrPendingPRSubmitted
+		}
+		// Row exists, submitted_at is NULL, but UPDATE matched zero
+		// rows. Shouldn't happen — surface as a generic error rather
+		// than silently lying about success.
+		return fmt.Errorf("pending PR %s update matched 0 rows but row state is consistent; investigate", id)
 	}
 	return nil
 }

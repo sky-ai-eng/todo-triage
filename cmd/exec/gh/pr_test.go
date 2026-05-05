@@ -236,3 +236,60 @@ func TestGetDiffLines_406BinaryFile(t *testing.T) {
 		t.Errorf("expected lines 1,2 commentable for main.go, got %v", result["main.go"])
 	}
 }
+
+// TestStripClaudeCodeCitation pins the rules for trimming Claude
+// Code's auto-citation off PR bodies before they hit the queue.
+// The TF footer (added at submit time) is the prominent
+// attribution; letting Claude Code's citation through would crowd
+// it out and double-bill the PR.
+func TestStripClaudeCodeCitation(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "typical Claude Code PR body",
+			in:   "Summary of changes.\n\n## Test plan\n- run tests\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n",
+			want: "Summary of changes.\n\n## Test plan\n- run tests",
+		},
+		{
+			name: "no citation: passthrough",
+			in:   "Summary of changes.\n\n## Test plan\n- run tests\n",
+			want: "Summary of changes.\n\n## Test plan\n- run tests\n",
+		},
+		{
+			name: "citation alone",
+			in:   "🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+			want: "",
+		},
+		{
+			name: "trailing whitespace before citation",
+			in:   "Body.\n\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n\n",
+			want: "Body.",
+		},
+		{
+			name: "mid-body citation: leave alone",
+			in:   "Citing 🤖 Generated with [Claude Code](https://claude.com/claude-code) in context.\n\nFinal sentence.",
+			want: "Citing 🤖 Generated with [Claude Code](https://claude.com/claude-code) in context.\n\nFinal sentence.",
+		},
+		{
+			name: "citation without leading emoji",
+			in:   "Body.\n\nGenerated with [Claude Code](https://claude.com/claude-code)",
+			want: "Body.",
+		},
+		{
+			name: "empty body",
+			in:   "",
+			want: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := stripClaudeCodeCitation(tc.in)
+			if got != tc.want {
+				t.Errorf("stripClaudeCodeCitation:\n--- got ---\n%q\n--- want ---\n%q", got, tc.want)
+			}
+		})
+	}
+}

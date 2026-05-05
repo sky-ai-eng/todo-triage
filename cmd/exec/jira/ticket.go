@@ -31,15 +31,37 @@ var ticketHelp = map[string]string{
 	"list-priorities":  "jira ticket list-priorities",
 }
 
-// hasHelpFlag returns true if any arg is --help or -h. Per-action
-// help dispatch trips on this BEFORE the action body runs so the
-// agent can run e.g. `jira ticket view --help` without the leading
-// arg being misread as the issue key.
+// hasHelpFlag returns true if --help or -h appears as a standalone
+// flag (not as the value of a preceding --xxx flag). Per-action help
+// dispatch trips on this BEFORE the action body runs so the agent
+// can run e.g. `jira ticket view --help` without the leading arg
+// being misread as the issue key.
+//
+// The "preceding flag" exclusion is what makes
+// `jira ticket comment KEY --body "--help"` execute the comment
+// instead of printing help — the literal "--help" is the body's
+// value, not a help request. Same for a JQL search whose query
+// happens to contain --help. Assumption: jira ticket has no boolean
+// flags. If one is added, --xxxBool --help would be misread as the
+// boolean's value; the assumption is enforced by ticketHelp listing
+// only value-taking flags. Adding a boolean would require revisiting
+// this helper.
 func hasHelpFlag(args []string) bool {
-	for _, a := range args {
-		if a == "--help" || a == "-h" {
-			return true
+	for i, a := range args {
+		if a != "--help" && a != "-h" {
+			continue
 		}
+		if i > 0 {
+			prev := args[i-1]
+			// A `--xxx` arg is treated as a value-taking flag and
+			// the current --help is its value, not a help request.
+			// `--help` itself doesn't claim a value, so an earlier
+			// `--help` doesn't shadow this one.
+			if strings.HasPrefix(prev, "--") && prev != "--help" {
+				continue
+			}
+		}
+		return true
 	}
 	return false
 }

@@ -432,6 +432,17 @@ func prCreate(client *ghclient.Client, database *db.DB, args []string) {
 		body = string(data)
 	}
 
+	// Strip Claude Code's auto-appended citation line. Claude Code
+	// (the agent harness) routinely tacks "🤖 Generated with [Claude
+	// Code](https://claude.com/claude-code)" onto every PR body it
+	// produces. Triage Factory's footer (added by the server at
+	// submit time) already attributes the work — letting the
+	// upstream Claude Code citation through would visually crowd
+	// out the TF citation and double-bill the PR. Strip before
+	// queuing so the user never sees it in the preview, even if the
+	// agent forgot to remove it.
+	body = stripClaudeCodeCitation(body)
+
 	owner, repo := ownerRepo(args)
 
 	// If --head wasn't supplied, derive from the current branch. The
@@ -785,4 +796,38 @@ func exitOnErr(err error) {
 func exitErr(msg string) {
 	fmt.Fprintln(os.Stderr, msg)
 	os.Exit(1)
+}
+
+// claudeCodeCitationFragment matches the citation Claude Code
+// auto-appends to every PR body it produces. We match on the
+// markdown-link substring rather than the full "🤖 Generated with
+// ..." prefix so the strip survives the agent reformatting the
+// emoji or surrounding text. The link target is stable.
+const claudeCodeCitationFragment = "Generated with [Claude Code](https://claude.com/claude-code)"
+
+// stripClaudeCodeCitation drops the trailing line containing the
+// Claude Code citation, plus any whitespace separating it from the
+// preceding content. Returns body unchanged when the last
+// non-whitespace line doesn't contain the citation — including the
+// case where the citation appears mid-body, since that's content
+// the user wrote intentionally.
+func stripClaudeCodeCitation(body string) string {
+	trimmed := strings.TrimRight(body, " \t\n\r")
+	if trimmed == "" {
+		return body
+	}
+	lastNL := strings.LastIndex(trimmed, "\n")
+	var lastLine string
+	if lastNL == -1 {
+		lastLine = trimmed
+	} else {
+		lastLine = trimmed[lastNL+1:]
+	}
+	if !strings.Contains(lastLine, claudeCodeCitationFragment) {
+		return body
+	}
+	if lastNL == -1 {
+		return ""
+	}
+	return strings.TrimRight(trimmed[:lastNL], " \t\n\r")
 }
