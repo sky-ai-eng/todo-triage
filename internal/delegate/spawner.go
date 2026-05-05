@@ -293,7 +293,21 @@ func (s *Spawner) Takeover(runID, baseDir string) (*TakeoverResult, error) {
 		return nil, fmt.Errorf("%w: run %s has no session id yet — wait until the agent has started", ErrTakeoverInvalidState, runID)
 	}
 	if run.WorktreePath == "" {
-		return nil, fmt.Errorf("%w: run %s has no worktree to take over (Jira lazy runs materialize per-repo worktrees on demand and aren't yet supported for takeover)", ErrTakeoverInvalidState, runID)
+		return nil, fmt.Errorf("%w: run %s has no worktree path; cannot take over", ErrTakeoverInvalidState, runID)
+	}
+	// Jira lazy runs DO populate worktree_path (with the run-root, so
+	// yield/resume can reuse it as the resume cwd). Takeover for those
+	// would require copying the full run-root tree including all
+	// per-repo worktrees as subdirs, plus rewriting any absolute paths
+	// the agent recorded in its session — out of scope for now. Reject
+	// explicitly via a task-source check rather than papering over with
+	// an empty-path heuristic.
+	task, err := db.GetTask(s.database, run.TaskID)
+	if err != nil {
+		return nil, fmt.Errorf("load task for takeover gate: %w", err)
+	}
+	if task != nil && task.EntitySource == "jira" {
+		return nil, fmt.Errorf("%w: run %s is a Jira lazy delegation; multi-worktree takeover is not yet supported (use the user-respond / yield-resume flow instead)", ErrTakeoverInvalidState, runID)
 	}
 
 	// Atomically: confirm the run is still active, confirm we haven't
@@ -652,10 +666,22 @@ func (s *Spawner) setupGitHub(ctx context.Context, runID string, task domain.Tas
 // only ./task_memory/ (populated by materializePriorMemories below).
 // Both gh and jira tool surfaces are exposed since the agent will
 // need both to implement and ship a PR.
+//
+// runs.worktree_path is set to the run-root. Yield/resume reads this
+// field as the cwd to resume the session in (`claude --resume` keys
+// session storage by cwd-encoded ~/.claude/projects/<encoded>, and we
+// passed cwd=runRoot to the original agentproc.Run). Even though Jira
+// runs don't have a single "the worktree" the way GitHub PR runs do,
+// the run-root IS the agent's session cwd, which is the load-bearing
+// invariant for resume. Takeover guards against Jira runs explicitly
+// further down.
 func (s *Spawner) setupJira(ctx context.Context, runID string, task domain.Task, ghClient *ghclient.Client) (runConfig, error) {
 	runRoot, err := worktree.MakeRunRoot(runID)
 	if err != nil {
 		return runConfig{}, fmt.Errorf("create run root: %w", err)
+	}
+	if _, err := s.database.Exec(`UPDATE runs SET worktree_path = ? WHERE id = ?`, runRoot, runID); err != nil {
+		log.Printf("[delegate] warning: failed to set worktree_path for Jira run %s: %v — yield/resume will reject this run", runID, err)
 	}
 	return runConfig{
 		scope:    fmt.Sprintf("Jira issue: %s", task.EntitySourceID),
@@ -1265,6 +1291,18 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, runID, sessionID, cwd, 
 	extraEnv := []string{
 		"TRIAGE_FACTORY_RUN_ID=" + runID,
 		"TRIAGE_FACTORY_REVIEW_PREVIEW=1",
+		// Mirror runAgent's TRIAGE_FACTORY_RUN_ROOT setting. The resume
+		// cwd IS the original run-root (runAgent passed runRoot as the
+		// agentproc Cwd; for GitHub PR runs the worktree IS the run-root,
+		// for Jira lazy runs the run-root is the throwaway parent of
+		// per-repo worktrees). Without this, the memory-gate retry
+		// message — which now references $TRIAGE_FACTORY_RUN_ROOT/task_memory/
+		// for absolute-path resilience across `cd`s — would resolve to
+		// an empty string in the resumed shell and the agent couldn't
+		// follow the retry instructions. Same env shape as the initial
+		// invocation so the agent sees a consistent environment across
+		// every prompt of the conversation.
+		"TRIAGE_FACTORY_RUN_ROOT=" + cwd,
 	}
 	// Preserve the initial run's GitHub repo context so gh subcommands
 	// in the resumed session keep their implicit --repo default. Without

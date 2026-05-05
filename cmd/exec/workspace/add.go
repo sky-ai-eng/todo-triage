@@ -25,14 +25,12 @@ import (
 type addDeps struct {
 	createWorktree func(ctx context.Context, owner, repo, cloneURL, baseBranch, featureBranch, runID, runRoot string) (string, error)
 	removeWorktree func(path, runID string) error
-	statPath       func(path string) (os.FileInfo, error)
 }
 
 func defaultAddDeps() addDeps {
 	return addDeps{
 		createWorktree: worktree.CreateForBranchInRoot,
 		removeWorktree: worktree.RemoveAt,
-		statPath:       os.Stat,
 	}
 }
 
@@ -103,32 +101,28 @@ func materializeWorkspace(database *db.DB, runID, ownerRepoArg string, deps addD
 		return "", fmt.Errorf("%w (run task source is %q)", errNotJiraRun, task.EntitySource)
 	}
 
-	// Idempotent re-add — but only if the on-disk worktree still exists.
-	// Startup orphan sweep can remove the directory without touching the
-	// row, so a stale row must be dropped (not honored) before we try to
-	// reserve a fresh one.
+	// Idempotent re-add. If a row exists for this (run, repo), trust it
+	// and return its path — the row is the authoritative reservation.
+	//
+	// We deliberately do NOT stat-and-drop the row when its on-disk path
+	// is missing: the missing-dir window includes the case where another
+	// `workspace add` has just reserved the row and its createWorktree is
+	// still in flight. Dropping the row in that window would defeat the
+	// PK-based serialization and let both processes proceed to create the
+	// same target directory. Better to return a path that's about to
+	// exist than to undo the reservation.
+	//
+	// The startup-cleanup-leaves-stale-row scenario this would otherwise
+	// have protected against doesn't actually arise: runs don't resume
+	// across server restarts, so no agent process invokes workspace add
+	// for a run whose dir was wiped post-crash. Genuinely stale rows
+	// outlive only their original run and are unreachable.
 	existing, err := db.GetRunWorktreeByRepo(database.Conn, runID, repoID)
 	if err != nil {
 		return "", fmt.Errorf("workspace add: lookup existing worktree: %w", err)
 	}
 	if existing != nil {
-		info, statErr := deps.statPath(existing.Path)
-		switch {
-		case statErr == nil && info.IsDir():
-			return existing.Path, nil
-		case statErr == nil && !info.IsDir():
-			log.Printf("workspace add: dropping stale row for run %s repo %s: path is not a directory: %s", runID, repoID, existing.Path)
-			if delErr := db.DeleteRunWorktree(database.Conn, runID, repoID); delErr != nil {
-				return "", fmt.Errorf("workspace add: delete stale worktree row: %w", delErr)
-			}
-		case errors.Is(statErr, os.ErrNotExist):
-			log.Printf("workspace add: dropping stale row for run %s repo %s: path missing: %s", runID, repoID, existing.Path)
-			if delErr := db.DeleteRunWorktree(database.Conn, runID, repoID); delErr != nil {
-				return "", fmt.Errorf("workspace add: delete stale worktree row: %w", delErr)
-			}
-		default:
-			return "", fmt.Errorf("workspace add: stat existing worktree path %q: %w", existing.Path, statErr)
-		}
+		return existing.Path, nil
 	}
 
 	profile, err := db.GetRepoProfile(database.Conn, repoID)

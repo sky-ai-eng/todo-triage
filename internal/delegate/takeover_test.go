@@ -89,6 +89,43 @@ func seedRun(t *testing.T, database *sql.DB, runID, sessionID, worktreePath stri
 	}
 }
 
+// seedJiraRun is the Jira variant of seedRun. The task's entity is
+// jira-sourced so Takeover's task-source gate (added with the lazy
+// delegation rewrite) sees a Jira run rather than a GitHub PR run.
+func seedJiraRun(t *testing.T, database *sql.DB, runID, sessionID, worktreePath string) {
+	t.Helper()
+	entity, _, err := db.FindOrCreateEntity(database, "jira", "SKY-"+runID, "issue", "T-"+runID, "https://x/"+runID)
+	if err != nil {
+		t.Fatalf("create jira entity: %v", err)
+	}
+	eventID, err := db.RecordEvent(database, domain.Event{
+		EventType:    domain.EventJiraIssueAssigned,
+		EntityID:     &entity.ID,
+		MetadataJSON: `{}`,
+	})
+	if err != nil {
+		t.Fatalf("record event: %v", err)
+	}
+	task, _, err := db.FindOrCreateTask(database, entity.ID, domain.EventJiraIssueAssigned, runID, eventID, 0.5)
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	if existing, _ := db.GetPrompt(database, "test-prompt"); existing == nil {
+		if err := db.CreatePrompt(database, domain.Prompt{ID: "test-prompt", Name: "T", Body: "x", Source: "user"}); err != nil {
+			t.Fatalf("create prompt: %v", err)
+		}
+	}
+	if err := db.CreateAgentRun(database, domain.AgentRun{
+		ID: runID, TaskID: task.ID, PromptID: "test-prompt",
+		Status: "running", Model: "claude-sonnet-4-6", WorktreePath: worktreePath,
+	}); err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE runs SET status = 'running', session_id = ?, worktree_path = ? WHERE id = ?`, sessionID, worktreePath, runID); err != nil {
+		t.Fatalf("update run: %v", err)
+	}
+}
+
 // newSpawnerWithActiveCancel returns a spawner with one fake "active"
 // run registered in the cancels map — Takeover's atomic active-check
 // requires this to pass before doing any other work.
@@ -144,8 +181,12 @@ func TestTakeover_NoSessionID(t *testing.T) {
 	}
 }
 
-// TestTakeover_NoWorktreePath: the no-repo Jira case — there's no
-// worktree to take over, so the operation doesn't make sense.
+// TestTakeover_NoWorktreePath: defensive — a run that for some reason
+// has no worktree_path on its row (setup error, schema oddity) can't
+// be taken over. Jira lazy runs DO populate worktree_path with the
+// run-root (so yield/resume can reuse it as the resume cwd); the
+// Jira-specific rejection happens at the next gate (task-source
+// check, see TestTakeover_RejectsJiraLazyRun).
 func TestTakeover_NoWorktreePath(t *testing.T) {
 	database := newTakeoverTestDB(t)
 	seedRun(t, database, "run-no-wt", "sess-1", "")
@@ -154,6 +195,25 @@ func TestTakeover_NoWorktreePath(t *testing.T) {
 	_, err := s.Takeover("run-no-wt", "/tmp/dest")
 	if !errors.Is(err, ErrTakeoverInvalidState) {
 		t.Errorf("err = %v, want ErrTakeoverInvalidState", err)
+	}
+}
+
+// TestTakeover_RejectsJiraLazyRun: Jira lazy delegations populate
+// runs.worktree_path (with the run-root) so yield/resume works, but
+// they're not yet supported for takeover — multi-worktree relocation
+// requires `git worktree move` per materialized worktree (SKY-234).
+// Until that lands, refuse explicitly via the task-source check.
+func TestTakeover_RejectsJiraLazyRun(t *testing.T) {
+	database := newTakeoverTestDB(t)
+	seedJiraRun(t, database, "run-jira", "sess-1", "/tmp/runs/run-jira")
+	s := newSpawnerWithActiveCancel(database, "run-jira")
+
+	_, err := s.Takeover("run-jira", "/tmp/dest")
+	if !errors.Is(err, ErrTakeoverInvalidState) {
+		t.Errorf("err = %v, want ErrTakeoverInvalidState", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "Jira lazy delegation") {
+		t.Errorf("err = %v, expected message identifying Jira lazy delegation", err)
 	}
 }
 

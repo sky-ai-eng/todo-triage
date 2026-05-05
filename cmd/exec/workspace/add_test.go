@@ -4,13 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"io/fs"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -144,25 +141,9 @@ func expectedPath(runID, owner, repo string) string {
 	return filepath.Join(worktree.RunRoot(runID), owner, repo)
 }
 
-// fakeFileInfo implements os.FileInfo just enough for the stat stub.
-type fakeFileInfo struct {
-	name  string
-	mode  os.FileMode
-	isDir bool
-}
-
-func (f *fakeFileInfo) Name() string       { return f.name }
-func (f *fakeFileInfo) Size() int64        { return 0 }
-func (f *fakeFileInfo) Mode() os.FileMode  { return f.mode }
-func (f *fakeFileInfo) ModTime() time.Time { return time.Time{} }
-func (f *fakeFileInfo) IsDir() bool        { return f.isDir }
-func (f *fakeFileInfo) Sys() any           { return nil }
-
-// stubCalls records create/remove/stat invocations and returns canned
-// responses. The default stat behavior returns ErrNotExist (path doesn't
-// exist) — appropriate for tests where no prior worktree should appear
-// live; tests covering idempotent re-add or stale-row handling override
-// statResponse.
+// stubCalls records create/remove invocations and returns canned
+// responses. createPath="" lets the create stub default to the
+// deterministic production path, so most tests don't need to set it.
 type stubCalls struct {
 	mu sync.Mutex
 
@@ -173,16 +154,6 @@ type stubCalls struct {
 
 	removeCalls int
 	removePaths []string
-
-	// statResponse maps absolute path → (info, err). Paths not in the
-	// map default to (nil, os.ErrNotExist) so the orchestration's
-	// "path missing → drop stale row" branch is the default behavior.
-	statResponse map[string]statReply
-}
-
-type statReply struct {
-	info os.FileInfo
-	err  error
 }
 
 type createCall struct {
@@ -214,14 +185,6 @@ func (s *stubCalls) deps() addDeps {
 			s.removeCalls++
 			s.removePaths = append(s.removePaths, path)
 			return nil
-		},
-		statPath: func(path string) (os.FileInfo, error) {
-			s.mu.Lock()
-			defer s.mu.Unlock()
-			if r, ok := s.statResponse[path]; ok {
-				return r.info, r.err
-			}
-			return nil, &fs.PathError{Op: "stat", Path: path, Err: os.ErrNotExist}
 		},
 	}
 }
@@ -376,13 +339,7 @@ func TestMaterializeWorkspace_IdempotentSecondAdd(t *testing.T) {
 	seedRepoProfile(t, database, "sky", "core", "https://x", "main")
 	wantPath := expectedPath("r1", "sky", "core")
 
-	// Tell the stat stub the worktree dir exists (the precheck will hit
-	// it on the second call once the row's been inserted).
-	statResp := map[string]statReply{
-		wantPath: {info: &fakeFileInfo{name: "core", isDir: true}},
-	}
-
-	stub := &stubCalls{statResponse: statResp}
+	stub := &stubCalls{}
 
 	if _, err := materializeWorkspace(database, "r1", "sky/core", stub.deps()); err != nil {
 		t.Fatalf("first add: %v", err)
@@ -391,8 +348,8 @@ func TestMaterializeWorkspace_IdempotentSecondAdd(t *testing.T) {
 		t.Fatalf("first add createCalls = %d, want 1", stub.createCalls)
 	}
 
-	// Second add: GetRunWorktreeByRepo returns the row, statPath says
-	// the dir exists, so we short-circuit before reservation/create.
+	// Second add: GetRunWorktreeByRepo returns the row, so we
+	// short-circuit before reservation/create.
 	path2, err := materializeWorkspace(database, "r1", "sky/core", stub.deps())
 	if err != nil {
 		t.Fatalf("second add: %v", err)
@@ -401,39 +358,10 @@ func TestMaterializeWorkspace_IdempotentSecondAdd(t *testing.T) {
 		t.Errorf("idempotent path = %q, want %q", path2, wantPath)
 	}
 	if stub.createCalls != 1 {
-		t.Errorf("createWorktree called %d times across two adds; second add should short-circuit on live precheck", stub.createCalls)
+		t.Errorf("createWorktree called %d times across two adds; second add should short-circuit on the precheck", stub.createCalls)
 	}
 	if stub.removeCalls != 0 {
 		t.Errorf("removeWorktree called on idempotent re-add")
-	}
-}
-
-func TestMaterializeWorkspace_StaleRowDroppedAndReserved(t *testing.T) {
-	database := newTestDB(t)
-	seedJiraRun(t, database, "r1", "SKY-1")
-	seedRepoProfile(t, database, "sky", "core", "https://x", "main")
-	wantPath := expectedPath("r1", "sky", "core")
-
-	// Pre-insert a row (e.g. from a prior crashed run that left state
-	// behind) AND tell the stat stub the path doesn't exist.
-	if _, _, err := db.InsertRunWorktree(database.Conn, db.RunWorktree{
-		RunID: "r1", RepoID: "sky/core",
-		Path: wantPath, FeatureBranch: "feature/SKY-1",
-	}); err != nil {
-		t.Fatalf("seed stale row: %v", err)
-	}
-	stub := &stubCalls{} // default statPath returns ErrNotExist
-
-	path, err := materializeWorkspace(database, "r1", "sky/core", stub.deps())
-	if err != nil {
-		t.Fatalf("materializeWorkspace: %v", err)
-	}
-	if path != wantPath {
-		t.Errorf("path = %q, want %q", path, wantPath)
-	}
-	// Stale row was dropped, then re-reserved + created.
-	if stub.createCalls != 1 {
-		t.Errorf("createCalls = %d, want 1 (stale row should not block re-reservation)", stub.createCalls)
 	}
 }
 
@@ -452,15 +380,8 @@ func TestMaterializeWorkspace_RaceLossAtReservation(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed winner row: %v", err)
 	}
-	// Mark the winner's path as a live directory so the precheck sees
-	// it as a valid idempotent re-add. (Without this, the stale-row
-	// branch would drop the winner's row — unintended in the race
-	// scenario, where the winner is mid-create or just-created.)
-	stub := &stubCalls{
-		statResponse: map[string]statReply{
-			winnerPath: {info: &fakeFileInfo{name: "winner", isDir: true}},
-		},
-	}
+
+	stub := &stubCalls{}
 
 	path, err := materializeWorkspace(database, "r1", "sky/core", stub.deps())
 	if err != nil {
@@ -473,28 +394,21 @@ func TestMaterializeWorkspace_RaceLossAtReservation(t *testing.T) {
 		t.Errorf("createCalls = %d, want 0; loser must NOT touch git", stub.createCalls)
 	}
 	if stub.removeCalls != 0 {
-		t.Errorf("removeCalls = %d, want 0; loser has nothing to remove with the new flow", stub.removeCalls)
+		t.Errorf("removeCalls = %d, want 0; loser has nothing to remove", stub.removeCalls)
 	}
 }
 
-func TestMaterializeWorkspace_RaceLossAtReservationWithMissingWinnerDir(t *testing.T) {
-	// Edge case of the race: the winner inserted the row but its
-	// createWorktree is still in flight, so the winner's path doesn't
-	// exist on disk yet. The loser races through:
-	//   - Precheck: row exists, but stat says path missing → drop
-	//     the row as "stale," fall through to reservation.
-	//   - Reservation: INSERT succeeds (row was just deleted).
-	//   - Create: runs.
-	// Net effect: BOTH processes wind up trying to create the same
-	// dir, and the second's `git worktree add` fails. The DB state
-	// reflects whichever one completed createWorktree successfully.
-	//
-	// We don't try to fix this edge — the create-in-flight window is
-	// brief, and the worktree library's lockRepo serializes the bare
-	// operations within a process. Across processes this remains a
-	// known limitation tracked by the test below: we DO fall through
-	// to recreate, and the bare's per-repo lock + the OS-level "dir
-	// already exists" semantics handle the conflict.
+func TestMaterializeWorkspace_TrustsReservationEvenWhenDirMissing(t *testing.T) {
+	// Regression test for the in-flight-winner race the prior
+	// stat-based stale-row branch reintroduced: when a concurrent
+	// `workspace add` has reserved the row but its createWorktree is
+	// still in flight, the on-disk path doesn't exist yet. The loser
+	// must NOT delete the row and re-reserve — that would let both
+	// processes proceed to create the same target dir, defeating the
+	// PK-based serialization. Instead, return the winner's path; the
+	// agent's subsequent `cd` succeeds once the winner's create
+	// completes (or fails loudly if the winner errors out, in which
+	// case the winner releases the reservation and a retry succeeds).
 	database := newTestDB(t)
 	seedJiraRun(t, database, "r1", "SKY-1")
 	seedRepoProfile(t, database, "sky", "core", "https://x", "main")
@@ -506,7 +420,9 @@ func TestMaterializeWorkspace_RaceLossAtReservationWithMissingWinnerDir(t *testi
 	}); err != nil {
 		t.Fatalf("seed winner row: %v", err)
 	}
-	// Stat says missing → loser drops the row and re-reserves.
+	// The on-disk dir at winnerPath does NOT exist (we never created
+	// it; production stat would return ErrNotExist). Production code
+	// must still trust the row.
 	stub := &stubCalls{}
 
 	path, err := materializeWorkspace(database, "r1", "sky/core", stub.deps())
@@ -514,10 +430,19 @@ func TestMaterializeWorkspace_RaceLossAtReservationWithMissingWinnerDir(t *testi
 		t.Fatalf("materializeWorkspace: %v", err)
 	}
 	if path != winnerPath {
-		t.Errorf("path = %q, want %q", path, winnerPath)
+		t.Errorf("path = %q, want %q (winner's path returned even though dir missing)", path, winnerPath)
 	}
-	if stub.createCalls != 1 {
-		t.Errorf("createCalls = %d, want 1 (loser fell through and ran create)", stub.createCalls)
+	if stub.createCalls != 0 {
+		t.Errorf("createCalls = %d, want 0; loser must not create when a reservation already exists", stub.createCalls)
+	}
+	// And the row must still be present — the loser must not have
+	// deleted it.
+	row, err := db.GetRunWorktreeByRepo(database.Conn, "r1", "sky/core")
+	if err != nil {
+		t.Fatalf("GetRunWorktreeByRepo: %v", err)
+	}
+	if row == nil {
+		t.Fatal("winner's reservation row was deleted by the loser; expected it to remain")
 	}
 }
 
