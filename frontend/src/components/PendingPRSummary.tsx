@@ -62,31 +62,47 @@ export default function PendingPRSummary({
   // about why the row hasn't appeared to update yet.
   const [savingTitle, setSavingTitle] = useState(false)
   const [savingBody, setSavingBody] = useState(false)
+  // Per-field error state so the user sees *why* the save failed
+  // (e.g. "title cannot be empty") instead of silently exiting edit
+  // mode while the server still holds the old value.
+  const [titleError, setTitleError] = useState<string | null>(null)
+  const [bodyError, setBodyError] = useState<string | null>(null)
 
   const saveTitle = async () => {
     setSavingTitle(true)
+    setTitleError(null)
     try {
       await onUpdateTitle(titleDraft)
       setEditingTitle(false)
+    } catch (err) {
+      // Stay in edit mode so the user can fix the input and retry.
+      // Throwing means the parent's optimistic update never fired,
+      // so server and client stay in sync at the old value.
+      setTitleError(err instanceof Error ? err.message : String(err))
     } finally {
       setSavingTitle(false)
     }
   }
   const cancelTitle = () => {
     setTitleDraft(title)
+    setTitleError(null)
     setEditingTitle(false)
   }
   const saveBody = async () => {
     setSavingBody(true)
+    setBodyError(null)
     try {
       await onUpdateBody(bodyDraft)
       setEditingBody(false)
+    } catch (err) {
+      setBodyError(err instanceof Error ? err.message : String(err))
     } finally {
       setSavingBody(false)
     }
   }
   const cancelBody = () => {
     setBodyDraft(body)
+    setBodyError(null)
     setEditingBody(false)
   }
   const saving = savingTitle || savingBody
@@ -125,6 +141,7 @@ export default function PendingPRSummary({
                 if (e.key === 'Escape') cancelTitle()
               }}
             />
+            {titleError && <p className="text-[11px] text-dismiss px-1">{titleError}</p>}
             <div className="flex items-center gap-2 justify-end">
               <button
                 onClick={cancelTitle}
@@ -171,6 +188,7 @@ export default function PendingPRSummary({
               placeholder="PR body (markdown supported)..."
               autoFocus
             />
+            {bodyError && <p className="text-[11px] text-dismiss px-1">{bodyError}</p>}
             <div className="flex items-center gap-2 justify-end">
               <button
                 onClick={cancelBody}

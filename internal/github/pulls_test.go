@@ -364,8 +364,9 @@ func TestCreatePR_DraftFlagPropagated(t *testing.T) {
 
 // TestCreatePR_422_BaseMissing pins the surfacing-the-message contract
 // for the most common GitHub error: caller specified a base that
-// doesn't exist on the upstream. The server should pass that message
-// through to the user via the submit handler's 502 response.
+// doesn't exist on the upstream. The nested errors[].message must
+// land in the returned error (rather than just the raw JSON blob)
+// so the user sees the actionable reason in the submit-handler's 502.
 func TestCreatePR_422_BaseMissing(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnprocessableEntity)
@@ -377,5 +378,33 @@ func TestCreatePR_422_BaseMissing(t *testing.T) {
 	_, _, err := c.CreatePR("o", "r", "h", "develop", "T", "B", false)
 	if err == nil {
 		t.Fatal("expected error for 422, got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "Validation Failed") {
+		t.Errorf("expected error to surface 'Validation Failed', got %q", msg)
+	}
+	if !strings.Contains(msg, "base 'develop' is not a valid branch") {
+		t.Errorf("expected error to surface nested message, got %q", msg)
+	}
+}
+
+// TestCreatePR_422_FieldErr covers the other common 422 shape:
+// errors[].field+code instead of errors[].message (e.g. invalid
+// head ref). Field-level errors should still be readable.
+func TestCreatePR_422_FieldErr(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = w.Write([]byte(`{"message":"Validation Failed","errors":[{"resource":"PullRequest","code":"invalid","field":"head"}]}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	c := clientAgainst(srv.URL)
+	_, _, err := c.CreatePR("o", "r", "ghost-branch", "main", "T", "B", false)
+	if err == nil {
+		t.Fatal("expected error for 422, got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "head") || !strings.Contains(msg, "invalid") {
+		t.Errorf("expected error to mention invalid head field, got %q", msg)
 	}
 }

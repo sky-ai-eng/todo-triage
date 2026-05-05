@@ -112,38 +112,47 @@ export default function PendingPROverlay({ runID, open, onClose }: Props) {
   // the underlying PATCH promise so PendingPRSummary can await it
   // before clearing edit-mode state, and so handleSubmit can await
   // any in-flight save before opening the PR.
+  //
+  // We DON'T do optimistic updates here. The pre-fix version set
+  // pr.title eagerly and swallowed PATCH failures, so a 400 ("title
+  // cannot be empty") or transient 500 left the local cache showing
+  // the new title while the server still had the old one — clicking
+  // Open PR would then submit the stale server value, silently
+  // dropping the user's edit. Pessimistic update + throw-on-!ok lets
+  // PendingPRSummary keep the user in edit mode and surface the
+  // error.
+  const patchPR = useCallback(async (id: string, body: object) => {
+    const res = await fetch(`/api/pending-prs/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}))
+      throw new Error(data.error || `Save failed (${res.status})`)
+    }
+  }, [])
+
   const handleUpdateTitle = useCallback(
     async (title: string) => {
       if (!prId) return
-      setPR((prev) => (prev ? { ...prev, title } : prev))
-      const p = (async () => {
-        await fetch(`/api/pending-prs/${prId}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ title }),
-        })
-      })()
+      const p = patchPR(prId, { title })
       lastSavePromise.current = p
       await p
+      setPR((prev) => (prev ? { ...prev, title } : prev))
     },
-    [prId],
+    [prId, patchPR],
   )
 
   const handleUpdateBody = useCallback(
     async (body: string) => {
       if (!prId) return
-      setPR((prev) => (prev ? { ...prev, body } : prev))
-      const p = (async () => {
-        await fetch(`/api/pending-prs/${prId}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ body }),
-        })
-      })()
+      const p = patchPR(prId, { body })
       lastSavePromise.current = p
       await p
+      setPR((prev) => (prev ? { ...prev, body } : prev))
     },
-    [prId],
+    [prId, patchPR],
   )
 
   // draft is the user-facing checkbox state. The submit POST sends

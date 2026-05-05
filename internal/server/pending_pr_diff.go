@@ -67,10 +67,25 @@ func livePRDiff(ctx context.Context, owner, repo, baseBranch, headBranch string)
 	}
 
 	if len(diffOut) > livePRDiffMaxBytes {
-		// Truncate at the cap and append a marker on its own line so
-		// the frontend's parseDiff sees a complete final hunk and
-		// the user sees the marker alongside the content.
-		return string(diffOut[:livePRDiffMaxBytes]) + "\n\n... [diff truncated at " + humanBytes(livePRDiffMaxBytes) + "]\n", nil
+		// react-diff-view's parseDiff is unforgiving about half-cut
+		// hunks: a "@@ -1,5 +1,5 @@" header followed by 3 of 5
+		// expected lines fails the parse and the overlay goes
+		// blank — exactly the multi-MB diff case the cap is meant
+		// to protect against. Truncate at the last "\ndiff --git "
+		// boundary inside the cap so the returned text contains
+		// only intact per-file blocks.
+		cut := bytes.LastIndex(diffOut[:livePRDiffMaxBytes], []byte("\ndiff --git "))
+		if cut <= 0 {
+			// First file alone overruns the cap. Return only the
+			// truncation marker — parseDiff sees no diff blocks but
+			// also doesn't choke. The user sees a clear "too
+			// large" message rather than a corrupted render.
+			return "[diff truncated: first file exceeds " + humanBytes(livePRDiffMaxBytes) + "]\n", nil
+		}
+		// +1 to keep the leading newline of the boundary as part
+		// of the preserved content so the appended marker starts
+		// on its own line.
+		return string(diffOut[:cut+1]) + "[diff truncated at " + humanBytes(livePRDiffMaxBytes) + "; later files omitted]\n", nil
 	}
 	return string(diffOut), nil
 }
@@ -138,9 +153,14 @@ func humanBytes(n int) string {
 // OriginalBody are nil (legacy rows from before the columns
 // existed) we omit the per-field detail rather than synthesizing a
 // false "no change" — the formatter has to know the difference.
+//
+// No leading "## Human feedback (post-run)" heading: db.materializeMemory
+// prepends it via humanFeedbackHeader when joining agent_content
+// + human_content, so baking it in here would double the heading
+// in the agent-readable file. Mirrors FormatHumanFeedback in
+// review_diff.go.
 func FormatHumanFeedbackPR(pr *domain.PendingPR, finalTitle, finalBody string) string {
 	var b strings.Builder
-	b.WriteString("## Human feedback (post-run)\n\n")
 
 	titleChanged := pr.OriginalTitle != nil && *pr.OriginalTitle != finalTitle
 	bodyChanged := pr.OriginalBody != nil && *pr.OriginalBody != finalBody
