@@ -129,6 +129,41 @@ func TestSeedOrUpdateSystemPrompt_OverwritesLegacyPromptWithoutVersionRow(t *tes
 	}
 }
 
+func TestSeedOrUpdateSystemPrompt_UpdatesOnMetadataChange(t *testing.T) {
+	database := newTestDB(t)
+
+	if err := SeedOrUpdateSystemPrompt(database, domain.Prompt{ID: "system-m", Name: "Old Name", Body: "same body", Source: "system"}); err != nil {
+		t.Fatalf("seed v1: %v", err)
+	}
+	var hashBefore string
+	if err := database.QueryRow(`SELECT content_hash FROM system_prompt_versions WHERE prompt_id = 'system-m'`).Scan(&hashBefore); err != nil {
+		t.Fatalf("read version row: %v", err)
+	}
+
+	// Sleep so any churn would produce a strictly-greater timestamp.
+	time.Sleep(5 * time.Millisecond)
+
+	if err := SeedOrUpdateSystemPrompt(database, domain.Prompt{ID: "system-m", Name: "New Name", Body: "same body", Source: "system"}); err != nil {
+		t.Fatalf("seed with renamed name: %v", err)
+	}
+
+	p, err := GetPrompt(database, "system-m")
+	if err != nil {
+		t.Fatalf("get prompt: %v", err)
+	}
+	if p.Name != "New Name" {
+		t.Fatalf("name=%q want New Name; metadata-only change should be applied", p.Name)
+	}
+
+	var hashAfter string
+	if err := database.QueryRow(`SELECT content_hash FROM system_prompt_versions WHERE prompt_id = 'system-m'`).Scan(&hashAfter); err != nil {
+		t.Fatalf("read version row after: %v", err)
+	}
+	if hashAfter == hashBefore {
+		t.Fatalf("content_hash unchanged after name change; hash must cover metadata")
+	}
+}
+
 // Reseeding identical content must be a true no-op: prompts.updated_at is
 // what the UI orders by, so bumping it on every startup would constantly
 // shuffle system prompts to the top. system_prompt_versions.applied_at is

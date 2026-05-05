@@ -20,7 +20,10 @@ func SeedOrUpdateSystemPrompt(db *sql.DB, p domain.Prompt) error {
 		p.Source = "system"
 	}
 	now := time.Now()
-	h := sha256.Sum256([]byte(p.Body))
+	// Include name and source in the hash so shipped renames/re-sourcing trigger
+	// an update even when the body is unchanged. Null bytes prevent collisions
+	// between different field combinations.
+	h := sha256.Sum256([]byte(p.Name + "\x00" + p.Body + "\x00" + p.Source))
 	hash := hex.EncodeToString(h[:])
 
 	tx, err := db.Begin()
