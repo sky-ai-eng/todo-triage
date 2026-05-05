@@ -31,6 +31,17 @@ type listOutput struct {
 
 type listAvailable struct {
 	Repo string `json:"repo"`
+	// Description is the upstream-sourced one-liner from the repo's
+	// profile (GitHub repo metadata, captured during profiling). Helps
+	// the agent disambiguate between configured repos when the ticket
+	// text doesn't make the target obvious. Empty for repos whose
+	// profiling hasn't run yet (skeleton rows in repo_profiles).
+	//
+	// We deliberately omit profile_text — it's multi-KB of LLM-
+	// generated prose, would burn meaningful context on every list
+	// call, and can be stale (regenerated only on GitHub config
+	// change). Description is the cheap, authoritative signal.
+	Description string `json:"description,omitempty"`
 }
 
 type listMaterialized struct {
@@ -71,7 +82,11 @@ func listWorkspaces(database *db.DB, runID string) (listOutput, error) {
 		return listOutput{}, fmt.Errorf("%w (run task source is %q)", errNotJiraRun, task.EntitySource)
 	}
 
-	configured, err := db.GetConfiguredRepoNames(database.Conn)
+	// Use GetAllRepoProfiles (not GetConfiguredRepoNames) so we can
+	// surface each repo's description in the JSON output. The
+	// description is the agent's cheapest disambiguation signal when
+	// the ticket text doesn't make the target repo obvious.
+	configured, err := db.GetAllRepoProfiles(database.Conn)
 	if err != nil {
 		return listOutput{}, fmt.Errorf("workspace list: load configured repos: %w", err)
 	}
@@ -96,11 +111,14 @@ func listWorkspaces(database *db.DB, runID string) (listOutput, error) {
 	// be a no-op via the idempotency check, but having `available`
 	// reflect "what's still unmaterialized" is the more useful framing).
 	available := make([]listAvailable, 0, len(configured))
-	for _, name := range configured {
-		if _, alreadyAdded := materializedSet[name]; alreadyAdded {
+	for _, p := range configured {
+		if _, alreadyAdded := materializedSet[p.ID]; alreadyAdded {
 			continue
 		}
-		available = append(available, listAvailable{Repo: name})
+		available = append(available, listAvailable{
+			Repo:        p.ID,
+			Description: p.Description,
+		})
 	}
 
 	return listOutput{Available: available, Materialized: materialized}, nil

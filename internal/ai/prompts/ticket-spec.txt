@@ -66,16 +66,17 @@ Each bullet must be a falsifiable statement that anyone can check. Use whichever
 
 Mix the two styles in a single spec if that's what the work calls for. Do not invent scenarios for parameter combinations that don't change behavior — split the criteria along axes that genuinely flip outcomes.
 
-### Pointers (required when applicable)
+### Pointers (required)
 
-Concrete starting points for the executor. Include any of these that you know:
+Concrete starting points for the executor. The first bullet is mandatory; the rest are required when applicable.
 
+- **Target repo** (always, when the work touches code): name the repo in `owner/name` form, even if the title implies it. Coding agents pick which checkout to materialize before they can read a single file; an unambiguous repo name saves them from guessing or stalling. If the work spans more than one repo, list each in the order the executor should approach them.
 - File paths and symbol names: `internal/webhooks/dispatcher.go: deliver()`
 - Existing patterns to mirror: `Follow the retry pattern used in internal/poller/github.go`
 - Related PRs, tickets, or commits
 - Relevant external docs (link to current versions; agents will otherwise default to whatever they were trained on)
 
-If you don't know the right files, say so — don't guess. An empty pointers section is honest; a wrong one wastes the executor's time.
+If you don't know the right files, say so — don't guess. An empty pointers section is honest; a wrong one wastes the executor's time. The target-repo line is the one exception: if the spec describes engineering work, you must name the repo before calling the spec done.
 
 ### Constraints (required when applicable)
 
@@ -143,4 +144,5 @@ Re-read your draft and check:
 3. Are the goals stated as outcomes (not tasks)?
 4. Is there at least one non-goal? (If not, you've probably under-scoped.)
 5. Are file/symbol references real, or did you invent any?
-6. Is there marketing voice, "should consider" hedging, or filler? Cut it.
+6. **Is the target repo named in `owner/name` form somewhere in the spec?** If the work touches code and you can't point to a repo, the spec isn't ready.
+7. Is there marketing voice, "should consider" hedging, or filler? Cut it.

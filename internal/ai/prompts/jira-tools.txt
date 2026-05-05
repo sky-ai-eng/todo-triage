@@ -16,7 +16,7 @@ Jira runs start with no codebase. Your initial cwd is the run-root — a throwaw
 
 Discovery:
 - `{{BINARY_PATH}} exec workspace list` — JSON inventory with two sections:
-  - `available`: configured repos you could `add` but haven't yet
+  - `available`: configured repos you could `add` but haven't yet, each with a `description` field (one-line upstream metadata, e.g. "Core API service") that's your strongest disambiguation signal when the ticket alone isn't conclusive
   - `materialized`: worktrees you've already added for this run, with their absolute paths and feature branches
   Run this first when the ticket text doesn't make the target repo obvious. The `available` section is your universe of options; `add` rejects anything outside it.
 

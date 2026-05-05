@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 func TestListWorkspaces_MissingRunID(t *testing.T) {
@@ -114,5 +115,58 @@ func TestListWorkspaces_ScopedToRun(t *testing.T) {
 	// owner/shared should be available for r1 since r1 hasn't materialized it.
 	if len(out.Available) != 1 || out.Available[0].Repo != "owner/shared" {
 		t.Errorf("r1 available = %+v, want one entry for owner/shared", out.Available)
+	}
+}
+
+func TestListWorkspaces_AvailableSurfacesDescription(t *testing.T) {
+	// Repo profiles carry a one-line description from upstream metadata
+	// (GitHub's repo description). The agent uses it to disambiguate
+	// between configured repos when the ticket text doesn't make the
+	// target obvious. profile_text (the LLM-generated full profile) is
+	// deliberately NOT exposed — too verbose for a per-call discovery
+	// surface.
+	database := newTestDB(t)
+	seedJiraRun(t, database, "r1", "SKY-1")
+
+	if err := db.UpsertRepoProfile(database.Conn, domain.RepoProfile{
+		ID: "owner/alpha", Owner: "owner", Repo: "alpha",
+		Description:   "Core API service",
+		ProfileText:   "Long LLM-generated profile text that should NOT appear in workspace list output...",
+		CloneURL:      "https://x",
+		DefaultBranch: "main",
+	}); err != nil {
+		t.Fatalf("upsert alpha: %v", err)
+	}
+	// Skeleton row (no profile yet → no description). Should still
+	// appear in available with an empty/omitted description.
+	if err := db.UpsertRepoProfile(database.Conn, domain.RepoProfile{
+		ID: "owner/skeleton", Owner: "owner", Repo: "skeleton",
+		CloneURL: "https://x", DefaultBranch: "main",
+	}); err != nil {
+		t.Fatalf("upsert skeleton: %v", err)
+	}
+
+	out, err := listWorkspaces(database, "r1")
+	if err != nil {
+		t.Fatalf("listWorkspaces: %v", err)
+	}
+
+	byRepo := make(map[string]listAvailable, len(out.Available))
+	for _, a := range out.Available {
+		byRepo[a.Repo] = a
+	}
+	alpha, ok := byRepo["owner/alpha"]
+	if !ok {
+		t.Fatalf("owner/alpha missing from available: %+v", out.Available)
+	}
+	if alpha.Description != "Core API service" {
+		t.Errorf("alpha.Description = %q, want %q", alpha.Description, "Core API service")
+	}
+	skel, ok := byRepo["owner/skeleton"]
+	if !ok {
+		t.Fatalf("owner/skeleton missing from available: %+v", out.Available)
+	}
+	if skel.Description != "" {
+		t.Errorf("skeleton.Description = %q, want empty", skel.Description)
 	}
 }
