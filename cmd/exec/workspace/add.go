@@ -88,13 +88,25 @@ func materializeWorkspace(database *db.DB, runID, ownerRepoArg string, deps addD
 		return "", fmt.Errorf("%w (run task source is %q)", errNotJiraRun, task.EntitySource)
 	}
 
-	// Idempotent re-add: short-circuit before touching git or profiles.
+	// Idempotent re-add: reuse an existing worktree only if the recorded path
+	// still exists on disk. Startup cleanup can remove worktree directories
+	// without clearing run_worktrees rows, so stale records must be ignored.
 	existing, err := db.GetRunWorktreeByRepo(database.Conn, runID, repoID)
 	if err != nil {
 		return "", fmt.Errorf("workspace add: lookup existing worktree: %w", err)
 	}
 	if existing != nil {
-		return existing.Path, nil
+		info, statErr := os.Stat(existing.Path)
+		switch {
+		case statErr == nil && info.IsDir():
+			return existing.Path, nil
+		case statErr == nil && !info.IsDir():
+			log.Printf("workspace add: ignoring stale worktree record for run %s repo %s: path is not a directory: %s", runID, repoID, existing.Path)
+		case errors.Is(statErr, os.ErrNotExist):
+			log.Printf("workspace add: ignoring stale worktree record for run %s repo %s: path missing: %s", runID, repoID, existing.Path)
+		default:
+			return "", fmt.Errorf("workspace add: stat existing worktree path %q: %w", existing.Path, statErr)
+		}
 	}
 
 	profile, err := db.GetRepoProfile(database.Conn, repoID)
