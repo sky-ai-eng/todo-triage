@@ -60,3 +60,40 @@ func TestSeedOrUpdateSystemPrompt_PreservesUserModifiedPrompt(t *testing.T) {
 		t.Fatalf("name=%q want Custom", p.Name)
 	}
 }
+
+func TestSeedOrUpdateSystemPrompt_PreservesLegacyEditedPromptWithoutVersionRow(t *testing.T) {
+	database := newTestDB(t)
+
+	if _, err := database.Exec(
+		`INSERT INTO prompts (id, name, body, source) VALUES (?, ?, ?, ?)`,
+		"system-z",
+		"Legacy Custom",
+		"legacy custom body",
+		"system",
+	); err != nil {
+		t.Fatalf("insert legacy prompt: %v", err)
+	}
+
+	if err := SeedOrUpdateSystemPrompt(database, domain.Prompt{ID: "system-z", Name: "Z", Body: "v2", Source: "system"}); err != nil {
+		t.Fatalf("seed v2: %v", err)
+	}
+
+	p, err := GetPrompt(database, "system-z")
+	if err != nil {
+		t.Fatalf("get prompt: %v", err)
+	}
+	if p.Body != "legacy custom body" {
+		t.Fatalf("body=%q want legacy custom body", p.Body)
+	}
+	if p.Name != "Legacy Custom" {
+		t.Fatalf("name=%q want Legacy Custom", p.Name)
+	}
+
+	var count int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM system_prompt_versions WHERE prompt_id = 'system-z'`).Scan(&count); err != nil {
+		t.Fatalf("count version rows: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("version rows=%d want 0 for legacy prompt without prior version tracking", count)
+	}
+}
