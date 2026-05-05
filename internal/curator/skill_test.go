@@ -200,7 +200,7 @@ func TestMaterializeJiraFormattingSkill_WritesBuiltInSkill(t *testing.T) {
 		t.Fatalf("materialize jira formatting skill: %v", err)
 	}
 
-	data, err := os.ReadFile(filepath.Join(cwd, ".claude", "skills", "jira-formatting", "SKILL.md"))
+	data, err := os.ReadFile(filepath.Join(cwd, ".claude", "skills", jiraFormattingSkillDirName, "SKILL.md"))
 	if err != nil {
 		t.Fatalf("read SKILL.md: %v", err)
 	}
