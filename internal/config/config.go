@@ -118,10 +118,10 @@ func (c JiraConfig) Ready(pat, url string) bool {
 func Default() Config {
 	return Config{
 		GitHub: GitHubConfig{
-			PollInterval: 60 * time.Second,
+			PollInterval: 5 * time.Minute,
 		},
 		Jira: JiraConfig{
-			PollInterval: 60 * time.Second,
+			PollInterval: 5 * time.Minute,
 		},
 		Server: ServerConfig{
 			Port: 3000,

@@ -338,7 +338,7 @@ func main() {
 	// poller fires OnError on every failure (raw signal), but we only
 	// refresh the user-facing toast every errorToastMinInterval. Without
 	// throttling, a persistent failure (expired PAT, network outage) would
-	// generate a sticky error toast every poll cycle (default 60s) until
+	// generate a sticky error toast every poll cycle (default 5m) until
 	// the user manually dismissed each one — badly spammy on the UI.
 	const errorToastMinInterval = 5 * time.Minute
 	var (
