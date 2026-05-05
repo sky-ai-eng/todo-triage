@@ -896,11 +896,22 @@ func createBranchWorktreeAt(ctx context.Context, owner, repo, cloneURL, baseBran
 		return "", err
 	}
 
-	// Fetch the base branch
+	// Fetch the base branch into the remote-tracking ref rather than
+	// the local branch ref. The Curator's per-project worktrees
+	// (EnsureCuratorWorktree) check out the base branch as a real local
+	// branch in <projectDir>/repos/<owner>/<repo>/; if we fetched with
+	// `+refs/heads/<b>:refs/heads/<b>`, git would refuse with "fatal:
+	// refusing to fetch into branch '<b>' checked out at '<path>'"
+	// because that local branch ref is live in the curator's worktree.
+	// Fetching into refs/remotes/origin/<b> sidesteps the conflict and
+	// matches the pattern EnsureCuratorWorktree already uses (see
+	// internal/worktree/curator.go:93-100). The new feature branch is
+	// then created off the just-fetched remote-tracking ref.
 	if baseBranch == "" {
 		baseBranch = detectDefaultBranch(ctx, bareDir)
 	}
-	baseRef := fmt.Sprintf("+refs/heads/%s:refs/heads/%s", baseBranch, baseBranch)
+	remoteRef := "refs/remotes/origin/" + baseBranch
+	baseRef := fmt.Sprintf("+refs/heads/%s:%s", baseBranch, remoteRef)
 	start := time.Now()
 	if err := gitRunCtx(ctx, bareDir, "fetch", "origin", baseRef); err != nil {
 		return "", fmt.Errorf("fetch base branch %s: %w", baseBranch, err)
@@ -908,14 +919,14 @@ func createBranchWorktreeAt(ctx context.Context, owner, repo, cloneURL, baseBran
 	log.Printf("[worktree] fetch %s completed in %s", baseBranch, time.Since(start).Round(time.Millisecond))
 
 	// Create worktree — reuse the branch if it already exists (re-delegation),
-	// otherwise create a new one off the base.
+	// otherwise create a new one off the just-fetched remote-tracking ref.
 	if branchExists(bareDir, featureBranch) {
 		// Branch exists from a previous run — check it out
 		if err := gitRunCtx(ctx, bareDir, "worktree", "add", wtDir, featureBranch); err != nil {
 			return "", fmt.Errorf("worktree add existing branch: %w", err)
 		}
 	} else {
-		if err := gitRunCtx(ctx, bareDir, "worktree", "add", "-b", featureBranch, wtDir, "refs/heads/"+baseBranch); err != nil {
+		if err := gitRunCtx(ctx, bareDir, "worktree", "add", "-b", featureBranch, wtDir, remoteRef); err != nil {
 			return "", fmt.Errorf("worktree add new branch: %w", err)
 		}
 	}

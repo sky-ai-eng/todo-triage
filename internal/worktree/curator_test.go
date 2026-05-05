@@ -122,6 +122,66 @@ func TestEnsureCuratorWorktree_RefreshResetsAgentEdits(t *testing.T) {
 	}
 }
 
+// TestCreateForBranchInRoot_CoexistsWithCuratorWorktree is the
+// regression test for the "fatal: refusing to fetch into branch
+// 'refs/heads/main' checked out at <curator path>" bug. The Curator
+// materializes a per-project worktree with `main` checked out as a
+// real local branch; a subsequent CreateForBranchInRoot call against
+// the same bare must NOT collide with that checkout.
+//
+// Pre-fix: createBranchWorktreeAt fetched with refspec
+// `+refs/heads/main:refs/heads/main`, which forces git to update the
+// checked-out local ref and is refused. Now it fetches into
+// refs/remotes/origin/main and branches off that ref. This test
+// exercises the exact two-step sequence (curator first, workspace
+// add second) the user hit in the wild.
+func TestCreateForBranchInRoot_CoexistsWithCuratorWorktree(t *testing.T) {
+	withTestHome(t)
+	upstream := makeTestUpstream(t)
+
+	if _, err := EnsureBareClone(context.Background(), "owner", "repoX", upstream); err != nil {
+		t.Fatalf("seed bare: %v", err)
+	}
+
+	// Step 1: Curator materializes its per-project worktree with
+	// main checked out as a local branch. After this, the bare's
+	// refs/heads/main is "checked out" at the curator's path.
+	projectDir := filepath.Join(t.TempDir(), "proj")
+	if _, err := EnsureCuratorWorktree(context.Background(), "owner", "repoX", "main", projectDir); err != nil {
+		t.Fatalf("curator setup: %v", err)
+	}
+
+	// Step 2: A delegated Jira agent runs `workspace add owner/repoX`,
+	// which invokes CreateForBranchInRoot against the same bare. With
+	// the old refspec this returned a fetch error; with the new one
+	// (refs/remotes/origin/main) it succeeds.
+	runRoot := filepath.Join(t.TempDir(), "run-1")
+	if err := os.MkdirAll(runRoot, 0o755); err != nil {
+		t.Fatalf("mkdir runRoot: %v", err)
+	}
+	wtPath, err := CreateForBranchInRoot(
+		context.Background(),
+		"owner", "repoX",
+		upstream, "main", "feature/SKY-100",
+		"run-1", runRoot,
+	)
+	if err != nil {
+		t.Fatalf("CreateForBranchInRoot collided with curator's main checkout: %v", err)
+	}
+
+	// Sanity: the new worktree exists and is on the feature branch.
+	if _, err := os.Stat(filepath.Join(wtPath, ".git")); err != nil {
+		t.Errorf("expected .git in feature worktree, got %v", err)
+	}
+	out, err := exec.Command("git", "-C", wtPath, "rev-parse", "--abbrev-ref", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("rev-parse: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != "feature/SKY-100" {
+		t.Errorf("HEAD = %q, want feature/SKY-100", got)
+	}
+}
+
 func TestEnsureCuratorWorktree_RejectsMissingBare(t *testing.T) {
 	// Pin: validatePinnedRepos is supposed to enforce existence at
 	// the API layer. If somehow a curator dispatch reaches this

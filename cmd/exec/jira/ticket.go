@@ -10,6 +10,40 @@ import (
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
 )
 
+// ticketHelp maps each ticket subcommand to its usage line. Mirrored
+// in jira.HelpText (the master overview); the per-action lookup here
+// powers `jira ticket <action> --help`. Drift between the two is
+// caught manually for now — they live in adjacent files and any
+// rename has to touch both.
+var ticketHelp = map[string]string{
+	"view":             "jira ticket view <key>",
+	"transition":       "jira ticket transition <key> --status <status>",
+	"list-transitions": "jira ticket list-transitions <key>",
+	"comment":          "jira ticket comment <key> --body <text>",
+	"assign":           "jira ticket assign <key>",
+	"unassign":         "jira ticket unassign <key>",
+	"create":           "jira ticket create <project> --type <type> --summary <text> [--description <text>] [--parent <key>] [--priority <priority>]",
+	"set-parent":       "jira ticket set-parent <key> --parent <parent_key>",
+	"set-priority":     "jira ticket set-priority <key> --priority <priority>",
+	"search":           "jira ticket search --jql <jql> [--fields <f1,f2,...>] [--max <N>]",
+	"list-children":    "jira ticket list-children <key>",
+	"list-types":       "jira ticket list-types <project>",
+	"list-priorities":  "jira ticket list-priorities",
+}
+
+// hasHelpFlag returns true if any arg is --help or -h. Per-action
+// help dispatch trips on this BEFORE the action body runs so the
+// agent can run e.g. `jira ticket view --help` without the leading
+// arg being misread as the issue key.
+func hasHelpFlag(args []string) bool {
+	for _, a := range args {
+		if a == "--help" || a == "-h" {
+			return true
+		}
+	}
+	return false
+}
+
 func handleTicket(client *jiraclient.Client, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: triagefactory exec jira ticket <action> [flags]")
@@ -17,6 +51,18 @@ func handleTicket(client *jiraclient.Client, args []string) {
 
 	action := args[0]
 	flags := args[1:]
+
+	// Per-action --help: print just that action's usage and exit cleanly,
+	// without invoking the action body (which would otherwise try to
+	// interpret --help as an issue key / project / etc.).
+	if hasHelpFlag(flags) {
+		if h, ok := ticketHelp[action]; ok {
+			fmt.Printf("usage: triagefactory exec %s\n", h)
+			return
+		}
+		// Unknown action with --help — fall through to the unknown-action
+		// error below so the user sees that the action itself is wrong.
+	}
 
 	switch action {
 	case "view":

@@ -20,6 +20,41 @@ echo "  removed database"
 rm -f ~/.triagefactory/config.yaml
 echo "  removed config"
 
+# Project knowledge dirs — the Curator materializes per-project repo
+# worktrees at ~/.triagefactory/projects/<id>/repos/<owner>/<repo>/
+# (and writes knowledge/summary files alongside). Project rows just
+# got wiped with the database, so the disk state is orphaned. Worse:
+# each repo subdir is a registered worktree of the bare clone in
+# ~/.triagefactory/repos/, holding its branch as "checked out." A
+# subsequent run that tries to `git fetch` that branch (e.g. the
+# delegate path's `workspace add`) fails with "refusing to fetch into
+# branch ... checked out at <stale path>" until the registrations
+# get pruned. Wiping projects/ now and re-pruning each bare's
+# worktrees/ tracker below closes that loop.
+if [ -d ~/.triagefactory/projects ]; then
+  rm -rf ~/.triagefactory/projects
+  echo "  removed projects dir"
+fi
+
+# Prune stale worktree registrations from every preserved bare. The
+# bare clones themselves (~/.triagefactory/repos/) stay — they're
+# expensive to refetch and not part of the first-run flow — but their
+# internal worktrees/ tracker now points at directories we just
+# deleted (projects/, takeovers/, /tmp/triagefactory-runs/). Pruning
+# is idempotent and cheap. Without this, the next `git worktree add`
+# / `git fetch` against any of these bares would hit the stale-
+# registration errors described in the projects-dir comment above.
+if [ -d ~/.triagefactory/repos ]; then
+  pruned=0
+  while IFS= read -r bare; do
+    git -C "$bare" worktree prune 2>/dev/null || true
+    pruned=$((pruned + 1))
+  done < <(find ~/.triagefactory/repos -type d -name '*.git' 2>/dev/null)
+  if [ "$pruned" -gt 0 ]; then
+    echo "  pruned worktrees from $pruned bare clone(s)"
+  fi
+fi
+
 # Takeovers — interactive-resume working copies created by the
 # "Take over" flow. After a DB wipe their corresponding run rows are
 # gone, so the dirs are orphaned. We also wipe each takeover's
