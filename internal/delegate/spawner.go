@@ -719,9 +719,18 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 			if err != nil {
 				log.Printf("[delegate] run %s: list run_worktrees for cleanup: %v", runID, err)
 			} else {
+				// Use a detached context so cleanup is not skipped if the
+				// agent ctx has already been canceled.
+				cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
 				for _, w := range rows {
-					if rmErr := worktree.RemoveAt(w.Path, runID); rmErr != nil {
+					rmErr := worktree.RemoveAt(w.Path, runID)
+					if rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
 						log.Printf("[delegate] run %s: remove worktree %s: %v", runID, w.Path, rmErr)
+						continue
+					}
+					if _, delErr := s.database.ExecContext(cleanupCtx, "DELETE FROM run_worktrees WHERE run_id = ? AND path = ?", runID, w.Path); delErr != nil {
+						log.Printf("[delegate] run %s: delete run_worktrees row for %s: %v", runID, w.Path, delErr)
 					}
 				}
 			}
