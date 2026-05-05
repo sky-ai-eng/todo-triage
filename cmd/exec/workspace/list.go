@@ -39,24 +39,45 @@ type listMaterialized struct {
 	Branch string `json:"branch"`
 }
 
-// runList prints the JSON inventory of repos the agent can or has added
-// for the current run. Diagnostic + discovery surface — the spawner's
-// cleanup is the source of truth for actual on-disk state, but the
-// agent uses this to decide which repo(s) to materialize when the
-// ticket text alone isn't conclusive.
-func runList(database *db.DB, args []string) {
-	runID := os.Getenv("TRIAGE_FACTORY_RUN_ID")
+// listWorkspaces is the orchestration body of `workspace list`,
+// extracted from runList so it returns errors instead of os.Exit-ing.
+// Mirrors the runAdd / materializeWorkspace split for testability.
+//
+// Jira-only, mirroring materializeWorkspace. GitHub PR runs have a
+// single eagerly-materialized worktree and don't use the workspace
+// surface at all; surfacing configured-repo discovery on those runs
+// would advertise a path the agent can't take and contradict the docs
+// in jira-tools.txt.
+func listWorkspaces(database *db.DB, runID string) (listOutput, error) {
 	if runID == "" {
-		exitErr("workspace list: TRIAGE_FACTORY_RUN_ID not set; this command must be invoked by the delegated agent")
+		return listOutput{}, errMissingRunID
+	}
+
+	run, err := db.GetAgentRun(database.Conn, runID)
+	if err != nil {
+		return listOutput{}, fmt.Errorf("workspace list: load run: %w", err)
+	}
+	if run == nil {
+		return listOutput{}, fmt.Errorf("%w: %s", errRunNotFound, runID)
+	}
+	task, err := db.GetTask(database.Conn, run.TaskID)
+	if err != nil {
+		return listOutput{}, fmt.Errorf("workspace list: load task: %w", err)
+	}
+	if task == nil {
+		return listOutput{}, fmt.Errorf("%w: %s", errTaskNotFound, run.TaskID)
+	}
+	if task.EntitySource != "jira" {
+		return listOutput{}, fmt.Errorf("%w (run task source is %q)", errNotJiraRun, task.EntitySource)
 	}
 
 	configured, err := db.GetConfiguredRepoNames(database.Conn)
 	if err != nil {
-		exitErr("workspace list: load configured repos: " + err.Error())
+		return listOutput{}, fmt.Errorf("workspace list: load configured repos: %w", err)
 	}
 	rows, err := db.GetRunWorktrees(database.Conn, runID)
 	if err != nil {
-		exitErr("workspace list: load materialized worktrees: " + err.Error())
+		return listOutput{}, fmt.Errorf("workspace list: load materialized worktrees: %w", err)
 	}
 
 	materializedSet := make(map[string]struct{}, len(rows))
@@ -82,7 +103,15 @@ func runList(database *db.DB, args []string) {
 		available = append(available, listAvailable{Repo: name})
 	}
 
-	out := listOutput{Available: available, Materialized: materialized}
+	return listOutput{Available: available, Materialized: materialized}, nil
+}
+
+// runList is the CLI entrypoint: env → listWorkspaces → stdout/stderr.
+func runList(database *db.DB, args []string) {
+	out, err := listWorkspaces(database, os.Getenv("TRIAGE_FACTORY_RUN_ID"))
+	if err != nil {
+		exitErr(err.Error())
+	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(out); err != nil {

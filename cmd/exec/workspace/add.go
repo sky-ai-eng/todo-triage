@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
@@ -25,14 +26,34 @@ import (
 type addDeps struct {
 	createWorktree func(ctx context.Context, owner, repo, cloneURL, baseBranch, featureBranch, runID, runRoot string) (string, error)
 	removeWorktree func(path, runID string) error
+	statPath       func(path string) (os.FileInfo, error)
+	now            func() time.Time
 }
 
 func defaultAddDeps() addDeps {
 	return addDeps{
 		createWorktree: worktree.CreateForBranchInRoot,
 		removeWorktree: worktree.RemoveAt,
+		statPath:       os.Stat,
+		now:            time.Now,
 	}
 }
+
+// staleReservationAge is the grace window during which a row whose
+// on-disk path doesn't exist yet is treated as an in-flight winner
+// rather than a stale reservation. Sized to outlast the slowest
+// legitimate create — a fresh bare clone of a multi-GB monorepo can
+// take a couple of minutes; 5 minutes gives that ~3x headroom while
+// still un-jamming runs whose `workspace add` was killed mid-create
+// (process kill, SIGTERM at server stop, machine restart) before the
+// row was either updated or released.
+//
+// Concurrency context: this complements the PK-based reservation. A
+// loser arriving during the genuine in-flight window (created_at <
+// staleReservationAge ago) returns the winner's path and lets the
+// agent's `cd` succeed once the create lands. A loser arriving long
+// after the row was abandoned reclaims the slot.
+const staleReservationAge = 5 * time.Minute
 
 // validation errors returned by materializeWorkspace. Callers translate
 // these into stderr messages + non-zero exit; tests assert on identity.
@@ -101,28 +122,65 @@ func materializeWorkspace(database *db.DB, runID, ownerRepoArg string, deps addD
 		return "", fmt.Errorf("%w (run task source is %q)", errNotJiraRun, task.EntitySource)
 	}
 
-	// Idempotent re-add. If a row exists for this (run, repo), trust it
-	// and return its path — the row is the authoritative reservation.
+	// Idempotent re-add. If a row exists for this (run, repo), prefer
+	// its path — the row is the authoritative reservation.
 	//
-	// We deliberately do NOT stat-and-drop the row when its on-disk path
-	// is missing: the missing-dir window includes the case where another
-	// `workspace add` has just reserved the row and its createWorktree is
-	// still in flight. Dropping the row in that window would defeat the
-	// PK-based serialization and let both processes proceed to create the
-	// same target directory. Better to return a path that's about to
-	// exist than to undo the reservation.
+	// Two scenarios where the on-disk path may NOT exist when the row
+	// does:
 	//
-	// The startup-cleanup-leaves-stale-row scenario this would otherwise
-	// have protected against doesn't actually arise: runs don't resume
-	// across server restarts, so no agent process invokes workspace add
-	// for a run whose dir was wiped post-crash. Genuinely stale rows
+	//  - In-flight winner: another `workspace add` invocation reserved
+	//    the row moments ago and its createWorktree is still running.
+	//    Dropping the row here would defeat the PK serialization and
+	//    let both processes create the same target dir. We tolerate
+	//    this by returning the reserved path; the agent's `cd` succeeds
+	//    once the winner's create lands.
+	//
+	//  - Killed mid-create: the original creator was killed (SIGTERM,
+	//    process supervisor reaping, machine restart) after
+	//    InsertRunWorktree returned but before CreateForBranchInRoot
+	//    completed. The row has no live owner; subsequent retries
+	//    looping forever on a never-realized path is the wrong answer.
+	//
+	// The two are distinguishable by row age: in-flight creates finish
+	// inside the `staleReservationAge` window; killed-mid-create rows
+	// outlive it. Pre-staleness, trust the row. Past staleness with
+	// the path still missing, drop the row and re-reserve.
+	//
+	// The startup-cleanup-leaves-stale-row scenario doesn't matter for
+	// this gate either way: runs don't resume across server restarts,
+	// so no agent process invokes workspace add for a row whose dir was
+	// wiped post-crash. Genuinely stale rows
 	// outlive only their original run and are unreachable.
 	existing, err := db.GetRunWorktreeByRepo(database.Conn, runID, repoID)
 	if err != nil {
 		return "", fmt.Errorf("workspace add: lookup existing worktree: %w", err)
 	}
 	if existing != nil {
-		return existing.Path, nil
+		_, statErr := deps.statPath(existing.Path)
+		switch {
+		case statErr == nil:
+			// Path exists on disk — live worktree, return it.
+			return existing.Path, nil
+		case errors.Is(statErr, os.ErrNotExist):
+			age := deps.now().Sub(existing.CreatedAt)
+			if age < staleReservationAge {
+				// In-flight winner: another invocation reserved the row
+				// and is currently creating the worktree. Return its
+				// path; agent's cd succeeds once the create lands.
+				return existing.Path, nil
+			}
+			// Stale: reservation outlived its creator without a
+			// completed worktree. Drop and fall through to re-reserve.
+			log.Printf("workspace add: dropping stale reservation for run %s repo %s (path %s missing, row age %s exceeds threshold %s)",
+				runID, repoID, existing.Path, age, staleReservationAge)
+			if delErr := db.DeleteRunWorktree(database.Conn, runID, repoID); delErr != nil {
+				return "", fmt.Errorf("workspace add: delete stale reservation: %w", delErr)
+			}
+		default:
+			// Stat error other than NotExist (permissions, IO error).
+			// Surface rather than guess at semantics.
+			return "", fmt.Errorf("workspace add: stat reserved worktree path %q: %w", existing.Path, statErr)
+		}
 	}
 
 	profile, err := db.GetRepoProfile(database.Conn, repoID)

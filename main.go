@@ -451,7 +451,11 @@ func main() {
 		setAnnouncePending("github")
 		setAnnouncePending("jira")
 
-		profileGate.Invalidate()
+		// Don't Invalidate the profile gate. Scoring no longer reads
+		// repo profiles (LLM repo-match was removed when lazy Jira
+		// worktrees landed), so the gate has no consumer; flipping it
+		// back to false in the GitHub-disabled branch — which doesn't
+		// Signal again — would silently freeze scoring forever.
 		pollerMgr.StopAll()
 
 		cfg, _ := config.Load()

@@ -4,10 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -143,9 +146,15 @@ func expectedPath(runID, owner, repo string) string {
 	return filepath.Join(worktree.RunRoot(runID), owner, repo)
 }
 
-// stubCalls records create/remove invocations and returns canned
-// responses. createPath="" lets the create stub default to the
-// deterministic production path, so most tests don't need to set it.
+// stubCalls records create/remove/stat invocations and returns canned
+// responses. Defaults are tuned for "happy first add against an empty
+// run":
+//   - createPath="" → create stub returns the deterministic production
+//     path so most tests don't need to set it.
+//   - statPath defaults to ErrNotExist (no path is "live" until a test
+//     puts something in liveDirs).
+//   - now defaults to time.Now (real clock); tests that exercise the
+//     stale-reservation gate override fixedNow.
 type stubCalls struct {
 	mu sync.Mutex
 
@@ -156,11 +165,32 @@ type stubCalls struct {
 
 	removeCalls int
 	removePaths []string
+
+	// liveDirs is the set of paths the stat stub treats as existing
+	// directories (returns a non-nil FileInfo, no error). Anything
+	// else returns ErrNotExist.
+	liveDirs map[string]struct{}
+
+	// fixedNow, if non-zero, is what `now()` returns. Used to drive the
+	// stale-reservation age gate without sleeping in tests.
+	fixedNow time.Time
 }
 
 type createCall struct {
 	owner, repo, cloneURL, baseBranch, featureBranch, runID, runRoot string
 }
+
+// fakeFileInfo is the minimal os.FileInfo the stat stub returns for a
+// "live" path. Only IsDir() is consulted by the orchestration today,
+// but the rest of the surface stays present for forward compatibility.
+type fakeFileInfo struct{ name string }
+
+func (f fakeFileInfo) Name() string       { return f.name }
+func (f fakeFileInfo) Size() int64        { return 0 }
+func (f fakeFileInfo) Mode() os.FileMode  { return os.ModeDir | 0o755 }
+func (f fakeFileInfo) ModTime() time.Time { return time.Time{} }
+func (f fakeFileInfo) IsDir() bool        { return true }
+func (f fakeFileInfo) Sys() any           { return nil }
 
 func (s *stubCalls) deps() addDeps {
 	return addDeps{
@@ -187,6 +217,20 @@ func (s *stubCalls) deps() addDeps {
 			s.removeCalls++
 			s.removePaths = append(s.removePaths, path)
 			return nil
+		},
+		statPath: func(path string) (os.FileInfo, error) {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			if _, ok := s.liveDirs[path]; ok {
+				return fakeFileInfo{name: filepath.Base(path)}, nil
+			}
+			return nil, &fs.PathError{Op: "stat", Path: path, Err: os.ErrNotExist}
+		},
+		now: func() time.Time {
+			if !s.fixedNow.IsZero() {
+				return s.fixedNow
+			}
+			return time.Now()
 		},
 	}
 }
@@ -445,6 +489,122 @@ func TestMaterializeWorkspace_TrustsReservationEvenWhenDirMissing(t *testing.T) 
 	}
 	if row == nil {
 		t.Fatal("winner's reservation row was deleted by the loser; expected it to remain")
+	}
+}
+
+func TestMaterializeWorkspace_LiveDirShortCircuitsAgeCheck(t *testing.T) {
+	// When the reserved path exists on disk, the row is honored
+	// regardless of age — we don't need the time-based gate to defend
+	// the in-flight-winner case once the create is observably done.
+	database := newTestDB(t)
+	seedJiraRun(t, database, "r1", "SKY-1")
+	seedRepoProfile(t, database, "sky", "core", "https://x", "main")
+	wantPath := expectedPath("r1", "sky", "core")
+
+	if _, _, err := db.InsertRunWorktree(database.Conn, db.RunWorktree{
+		RunID: "r1", RepoID: "sky/core",
+		Path: wantPath, FeatureBranch: "feature/SKY-1",
+	}); err != nil {
+		t.Fatalf("seed row: %v", err)
+	}
+
+	stub := &stubCalls{
+		liveDirs: map[string]struct{}{wantPath: {}},
+		// Force `now` far enough ahead that the row would be "stale" by
+		// the threshold — but it shouldn't matter because the path
+		// exists and we short-circuit before the age check.
+		fixedNow: time.Now().Add(staleReservationAge + time.Hour),
+	}
+
+	path, err := materializeWorkspace(database, "r1", "sky/core", stub.deps())
+	if err != nil {
+		t.Fatalf("materializeWorkspace: %v", err)
+	}
+	if path != wantPath {
+		t.Errorf("path = %q, want %q", path, wantPath)
+	}
+	if stub.createCalls != 0 {
+		t.Errorf("createCalls = %d, want 0; live row should short-circuit", stub.createCalls)
+	}
+}
+
+func TestMaterializeWorkspace_StaleReservationReclaimed(t *testing.T) {
+	// killed-mid-create scenario: a previous `workspace add` won the
+	// row but its CreateForBranchInRoot got killed before completing,
+	// so the path doesn't exist on disk and the row is older than the
+	// staleReservationAge threshold. A subsequent retry must drop the
+	// row and re-reserve — without this, the agent's `cd` fails forever.
+	database := newTestDB(t)
+	seedJiraRun(t, database, "r1", "SKY-1")
+	seedRepoProfile(t, database, "sky", "core", "https://x", "main")
+	wantPath := expectedPath("r1", "sky", "core")
+
+	// Seed the stale row (path won't exist on disk; default stub
+	// statPath returns ErrNotExist for everything not in liveDirs).
+	if _, _, err := db.InsertRunWorktree(database.Conn, db.RunWorktree{
+		RunID: "r1", RepoID: "sky/core",
+		Path: wantPath, FeatureBranch: "feature/SKY-1",
+	}); err != nil {
+		t.Fatalf("seed stale row: %v", err)
+	}
+
+	stub := &stubCalls{
+		fixedNow: time.Now().Add(staleReservationAge + time.Minute),
+	}
+
+	path, err := materializeWorkspace(database, "r1", "sky/core", stub.deps())
+	if err != nil {
+		t.Fatalf("materializeWorkspace: %v", err)
+	}
+	if path != wantPath {
+		t.Errorf("path = %q, want %q", path, wantPath)
+	}
+	if stub.createCalls != 1 {
+		t.Errorf("createCalls = %d, want 1; stale reservation should not block recreate", stub.createCalls)
+	}
+	// And a fresh row exists post-reclaim.
+	row, err := db.GetRunWorktreeByRepo(database.Conn, "r1", "sky/core")
+	if err != nil || row == nil {
+		t.Fatalf("expected fresh row after reclaim; got row=%v err=%v", row, err)
+	}
+}
+
+func TestMaterializeWorkspace_FreshRowMissingDirIsInFlight(t *testing.T) {
+	// Mirror of the staleReservation test, but with the row JUST
+	// inserted (within the threshold). The orchestration should NOT
+	// reclaim — the row is presumed to belong to an in-flight winner.
+	database := newTestDB(t)
+	seedJiraRun(t, database, "r1", "SKY-1")
+	seedRepoProfile(t, database, "sky", "core", "https://x", "main")
+	wantPath := expectedPath("r1", "sky", "core")
+
+	if _, _, err := db.InsertRunWorktree(database.Conn, db.RunWorktree{
+		RunID: "r1", RepoID: "sky/core",
+		Path: wantPath, FeatureBranch: "feature/SKY-1",
+	}); err != nil {
+		t.Fatalf("seed in-flight row: %v", err)
+	}
+
+	// Force `now` to be well within the threshold (real time may have
+	// drifted since the seed; pin to a value tied to the row's
+	// created_at via a re-read).
+	row, err := db.GetRunWorktreeByRepo(database.Conn, "r1", "sky/core")
+	if err != nil || row == nil {
+		t.Fatalf("re-read row: %v", err)
+	}
+	stub := &stubCalls{
+		fixedNow: row.CreatedAt.Add(staleReservationAge / 2),
+	}
+
+	path, err := materializeWorkspace(database, "r1", "sky/core", stub.deps())
+	if err != nil {
+		t.Fatalf("materializeWorkspace: %v", err)
+	}
+	if path != wantPath {
+		t.Errorf("path = %q, want %q (fresh row honored even with missing dir)", path, wantPath)
+	}
+	if stub.createCalls != 0 {
+		t.Errorf("createCalls = %d, want 0; fresh row must not be reclaimed", stub.createCalls)
 	}
 }
 
