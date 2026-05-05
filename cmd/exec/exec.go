@@ -97,5 +97,5 @@ func isHelp(args []string) bool {
 }
 
 func printHelp() {
-	fmt.Printf("Usage: triagefactory exec <service> <resource> <action> [flags]\n\n%s\n\n%s\n\n%s\n\nAll commands print JSON to stdout on success, errors to stderr.\n", gh.HelpText, jiraexec.HelpText, workspace.HelpText)
+	fmt.Printf("Usage: triagefactory exec <command> [args]\n\n%s\n\n%s\n\n%s\n\nCommands print their result to stdout on success and errors to stderr. Most commands print JSON; workspace add prints a raw path.\n", gh.HelpText, jiraexec.HelpText, workspace.HelpText)
 }
