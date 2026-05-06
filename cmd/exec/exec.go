@@ -48,7 +48,10 @@ func Handle(args []string) {
 	if err := config.MigrateLegacyYAML(conn); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: legacy config import: %v\n", err)
 	}
-	cfg, _ := config.Load()
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: loading config: %v (proceeding with defaults)\n", err)
+	}
 	database := &db.DB{Conn: conn}
 
 	cmd := args[0]
