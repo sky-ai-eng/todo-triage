@@ -25,7 +25,7 @@ var sshPreflightCache = struct {
 const sshPreflightFailureTTL = 60 * time.Second
 
 type sshPreflightEntry struct {
-	err      error     // nil = success
+	err      error // nil = success
 	cachedAt time.Time
 }
 
