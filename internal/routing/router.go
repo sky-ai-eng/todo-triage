@@ -139,6 +139,7 @@ func (r *Router) HandleEvent(evt domain.Event) {
 	// triggers match the event, because close-signal events (ci_check_passed,
 	// review_submitted, review_request_removed) are not task-creating events.
 	r.runInlineCloseChecks(evt, entityID)
+	r.ws.Broadcast(websocket.Event{Type: "tasks_updated", Data: map[string]any{}})
 
 	// became_atomic is the belated-discovery path for parents whose
 	// subtasks just closed. Only create a task when none exists on the
