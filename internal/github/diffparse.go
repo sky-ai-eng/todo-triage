@@ -248,7 +248,8 @@ func ValidateCommentRange(hunks map[string][]Hunk, path string, line int, startL
 
 	startHunk := findHunk(fileHunks, *startLine)
 	if startHunk < 0 {
-		return "start_line " + strconv.Itoa(*startLine) + " in '" + path + "' is not part of the diff"
+		return "start_line " + strconv.Itoa(*startLine) + " in '" + path +
+			"' is not part of the diff (hunks for '" + path + "': " + formatHunks(fileHunks) + ")"
 	}
 
 	if startHunk != lineHunk {
