@@ -36,7 +36,7 @@ var envKeys = map[string]string{
 type Credentials struct {
 	GitHubURL       string
 	GitHubPAT       string
-	GitHubUsername   string
+	GitHubUsername  string
 	JiraURL         string
 	JiraPAT         string
 	JiraDisplayName string
