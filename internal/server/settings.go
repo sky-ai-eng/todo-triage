@@ -118,14 +118,14 @@ func (s *Server) handleSettingsGet(w http.ResponseWriter, r *http.Request) {
 	resp := settingsResponse{
 		GitHub: githubSettings{
 			Enabled:       creds.GitHubPAT != "",
-			BaseURL:       cfg.GitHub.BaseURL,
+			BaseURL:       creds.GitHubURL,
 			HasToken:      creds.GitHubPAT != "",
 			PollInterval:  cfg.GitHub.PollInterval.String(),
 			CloneProtocol: defaultedCloneProtocol(cfg.GitHub.CloneProtocol),
 		},
 		Jira: jiraSettings{
 			Enabled:      creds.JiraPAT != "",
-			BaseURL:      cfg.Jira.BaseURL,
+			BaseURL:      creds.JiraURL,
 			HasToken:     creds.JiraPAT != "",
 			PollInterval: cfg.Jira.PollInterval.String(),
 			Projects:     cfg.Jira.Projects,
