@@ -119,6 +119,7 @@ func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 		"github":       creds.GitHubPAT != "",
 		"jira":         creds.JiraPAT != "",
 		"github_repos": repoCount,
+		"env_provided": auth.EnvProvided(),
 	}
 
 	if creds.GitHubURL != "" {

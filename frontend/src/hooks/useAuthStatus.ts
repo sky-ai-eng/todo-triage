@@ -7,6 +7,7 @@ interface AuthStatus {
   github_url?: string
   jira_url?: string
   github_repos?: number
+  env_provided?: string[]
   loading: boolean
 }
 

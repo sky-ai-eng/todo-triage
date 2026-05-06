@@ -1,9 +1,10 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { CheckCircle2, ChevronRight } from 'lucide-react'
 import RepoPickerModal, { type GitHubRepo } from '../components/RepoPickerModal'
 import CarryOverList from '../components/CarryOverList'
 import JiraStatusRule, { type JiraStatusRuleValue } from '../components/JiraStatusRule'
+import { useAuthStatus } from '../hooks/useAuthStatus'
 
 interface JiraStatus {
   id: string
@@ -16,7 +17,9 @@ type Step = 'github' | 'repos' | 'integrations' | 'jira-creds' | 'jira-config' |
 
 export default function Setup() {
   const navigate = useNavigate()
+  const authStatus = useAuthStatus()
   const [step, setStep] = useState<Step>('github')
+  const [initDone, setInitDone] = useState(false)
 
   // GitHub (mandatory)
   const [githubForm, setGithubForm] = useState({ url: '', pat: '' })
@@ -48,6 +51,24 @@ export default function Setup() {
 
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+
+  const envProvided = authStatus.env_provided ?? []
+  const githubFromEnv = envProvided.includes('github')
+  const jiraFromEnv = envProvided.includes('jira')
+
+  useEffect(() => {
+    if (authStatus.loading || initDone) return
+    setInitDone(true)
+
+    if (authStatus.github) {
+      setStep('repos')
+    }
+    if (authStatus.jira && authStatus.jira_url) {
+      setJiraConnected(true)
+      setJiraForm((f) => ({ ...f, url: authStatus.jira_url! }))
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authStatus.loading])
 
   // --- Step 1: GitHub credentials ---
   const canSubmitGitHub = githubForm.url.trim() !== '' && githubForm.pat.trim() !== ''
@@ -221,6 +242,10 @@ export default function Setup() {
 
   const backFromJiraConfig = async () => {
     setError('')
+    if (jiraFromEnv) {
+      setStep('integrations')
+      return
+    }
     // Disconnect Jira — clear stored credentials so the user must
     // re-enter at least the PAT to reconnect.
     try {
@@ -244,6 +269,14 @@ export default function Setup() {
 
   const updateJira = (field: string) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setJiraForm((f) => ({ ...f, [field]: e.target.value }))
+
+  if (authStatus.loading) {
+    return (
+      <div className="min-h-screen bg-surface flex items-center justify-center">
+        <p className="text-text-tertiary text-sm">Loading...</p>
+      </div>
+    )
+  }
 
   return (
     <div className="min-h-screen bg-surface flex items-center justify-center p-4">
@@ -309,7 +342,7 @@ export default function Setup() {
           onClose={() => {
             /* cannot skip */
           }}
-          onBack={() => setStep('github')}
+          onBack={githubFromEnv ? undefined : () => setStep('github')}
           cachedRepos={cachedRepos}
           onReposFetched={setCachedRepos}
           inline
@@ -334,7 +367,7 @@ export default function Setup() {
               type="button"
               onClick={() => {
                 setError('')
-                setStep('jira-creds')
+                setStep(jiraFromEnv || jiraConnected ? 'jira-config' : 'jira-creds')
               }}
               className="w-full flex items-center justify-between px-4 py-3 rounded-xl border border-border-subtle bg-white/50 hover:border-accent/30 transition-colors text-left"
             >
