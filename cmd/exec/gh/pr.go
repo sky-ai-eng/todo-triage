@@ -296,6 +296,19 @@ func prAddReviewComment(database *db.DB, args []string) {
 			if !lineSet[line] {
 				exitErr(fmt.Sprintf("line %d in '%s' is not part of the diff. Comment on lines that appear in the diff output.", line, file))
 			}
+			// Without hunk metadata we can't enforce same-hunk membership
+			// (the residual 422 case the SubmitReview backstop covers), but
+			// these two cheap checks always apply when --start-line is set
+			// and don't need hunk info — without them the legacy/corrupted
+			// path would skip start_line validation entirely.
+			if startLine != nil {
+				if *startLine > line {
+					exitErr(fmt.Sprintf("start_line %d must be ≤ line %d", *startLine, line))
+				}
+				if !lineSet[*startLine] {
+					exitErr(fmt.Sprintf("start_line %d in '%s' is not part of the diff. Comment on lines that appear in the diff output.", *startLine, file))
+				}
+			}
 		}
 	}
 
