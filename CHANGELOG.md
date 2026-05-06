@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.7.1](https://github.com/sky-ai-eng/triage-factory/compare/v1.7.0...v1.7.1) (2026-05-06)
+
+
+### Bug Fixes
+
+* Use creds overlay for settings page ([#110](https://github.com/sky-ai-eng/triage-factory/issues/110)) ([a4eac22](https://github.com/sky-ai-eng/triage-factory/commit/a4eac2239dc1c167c31ebcb211986ded5dce08b3))
+
 ## [1.7.0](https://github.com/sky-ai-eng/triage-factory/compare/v1.6.1...v1.7.0) (2026-05-06)
 
 
