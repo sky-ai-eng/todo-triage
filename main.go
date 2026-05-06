@@ -296,7 +296,7 @@ func main() {
 		kind := "other"
 		if cfg, cErr := config.Load(); cErr == nil && cfg.GitHub.CloneProtocol == "ssh" {
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			if perr := worktree.PreflightSSH(ctx, "git@github.com"); perr != nil {
+			if perr := worktree.CachedPreflightSSH(ctx, "git@github.com"); perr != nil {
 				kind = "ssh"
 				log.Printf("[clone-status] %s/%s SSH preflight also failed → kind=ssh: %v", owner, repo, perr)
 			} else {

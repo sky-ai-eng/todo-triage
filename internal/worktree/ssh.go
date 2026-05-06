@@ -5,7 +5,36 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"sync"
+	"time"
 )
+
+// sshPreflightCache holds a per-host cached result so a burst of simultaneous
+// clone failures (e.g. during bootstrap with many repos) triggers at most one
+// live SSH probe rather than N sequential 15-second probes.
+//
+// Cache policy: a success result is kept for the process lifetime (SSH key
+// configuration doesn't change without a restart). A failure result expires
+// after sshPreflightFailureTTL so the user can fix their SSH setup and have
+// the new state detected on the next clone cycle.
+var sshPreflightCache = struct {
+	mu      sync.Mutex
+	entries map[string]sshPreflightEntry
+}{entries: make(map[string]sshPreflightEntry)}
+
+const sshPreflightFailureTTL = 60 * time.Second
+
+type sshPreflightEntry struct {
+	err      error     // nil = success
+	cachedAt time.Time
+}
+
+func (e sshPreflightEntry) valid() bool {
+	if e.err == nil {
+		return true // success cached for process lifetime
+	}
+	return time.Since(e.cachedAt) < sshPreflightFailureTTL
+}
 
 // PreflightSSH runs a non-interactive `ssh -T <host>` against the given
 // host (typically "git@github.com") to verify that the user has a
@@ -56,4 +85,30 @@ func PreflightSSH(ctx context.Context, host string) error {
 	}
 	// No error and no greeting — unusual; treat as failure with the raw output.
 	return fmt.Errorf("ssh preflight against %s did not return GitHub auth greeting; output: %s", host, combined)
+}
+
+// CachedPreflightSSH is identical to PreflightSSH but de-duplicates probes
+// across concurrent callers and caches the result: successes are kept for the
+// process lifetime, failures for sshPreflightFailureTTL (60 s) so a user who
+// fixes their SSH setup gets re-detected on the next clone cycle without
+// restarting the process.
+func CachedPreflightSSH(ctx context.Context, host string) error {
+	if host == "" {
+		host = "git@github.com"
+	}
+
+	sshPreflightCache.mu.Lock()
+	if e, ok := sshPreflightCache.entries[host]; ok && e.valid() {
+		sshPreflightCache.mu.Unlock()
+		return e.err
+	}
+	sshPreflightCache.mu.Unlock()
+
+	err := PreflightSSH(ctx, host)
+
+	sshPreflightCache.mu.Lock()
+	sshPreflightCache.entries[host] = sshPreflightEntry{err: err, cachedAt: time.Now()}
+	sshPreflightCache.mu.Unlock()
+
+	return err
 }
