@@ -1,8 +1,7 @@
 // Package config holds the user-editable settings struct and persists
 // it to a singleton row in the SQLite DB (~/.triagefactory/triagefactory.db,
 // table `settings`). Init must be called once at startup with an open
-// DB handle before any Load/Save call — it also runs the one-shot
-// import of any pre-DB ~/.triagefactory/config.yaml.
+// DB handle before any Load/Save call.
 package config
 
 import (
