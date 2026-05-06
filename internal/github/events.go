@@ -47,9 +47,18 @@ func (c *Client) ListUserRepos() ([]UserRepo, error) {
 type RepoMeta struct {
 	DefaultBranch string `json:"default_branch"`
 	CloneURL      string `json:"clone_url"`
+	SSHURL        string `json:"ssh_url"`
 }
 
-// GetRepoMeta fetches the default branch and clone URL for a repository.
+// PreferredCloneURL returns the SSH URL if available, otherwise the HTTPS clone URL.
+func (m *RepoMeta) PreferredCloneURL() string {
+	if m.SSHURL != "" {
+		return m.SSHURL
+	}
+	return m.CloneURL
+}
+
+// GetRepoMeta fetches the default branch and clone URLs for a repository.
 func (c *Client) GetRepoMeta(owner, repo string) (*RepoMeta, error) {
 	data, err := c.Get(fmt.Sprintf("/repos/%s/%s", owner, repo))
 	if err != nil {

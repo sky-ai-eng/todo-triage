@@ -175,7 +175,7 @@ func (p projectBundleGitHubProbe) CloneURLForRepo(_ context.Context, owner, repo
 	if meta == nil {
 		return "", errors.New("repo metadata is missing")
 	}
-	return meta.CloneURL, nil
+	return meta.PreferredCloneURL(), nil
 }
 
 const (

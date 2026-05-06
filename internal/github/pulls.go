@@ -91,13 +91,13 @@ func (c *Client) GetPR(owner, repo string, number int, verbose bool) (*PRView, e
 		pr.HeadRef = strVal(head, "ref")
 		pr.HeadSHA = strVal(head, "sha")
 		if headRepo, ok := head["repo"].(map[string]any); ok {
-			pr.CloneURL = strVal(headRepo, "clone_url")
+			pr.CloneURL = preferSSH(headRepo)
 		}
 	}
 	if base, ok := raw["base"].(map[string]any); ok {
 		pr.BaseRef = strVal(base, "ref")
 		if baseRepo, ok := base["repo"].(map[string]any); ok {
-			pr.BaseCloneURL = strVal(baseRepo, "clone_url")
+			pr.BaseCloneURL = preferSSH(baseRepo)
 		}
 	}
 
@@ -598,6 +598,13 @@ func (c *Client) SearchReviewRequested(username string) ([]map[string]any, error
 }
 
 // --- helpers ---
+
+func preferSSH(repo map[string]any) string {
+	if v := strVal(repo, "ssh_url"); v != "" {
+		return v
+	}
+	return strVal(repo, "clone_url")
+}
 
 func strVal(m map[string]any, key string) string {
 	if v, ok := m[key].(string); ok {

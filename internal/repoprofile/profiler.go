@@ -107,7 +107,7 @@ func (p *Profiler) Run(ctx context.Context, repos []string, force bool) error {
 			log.Printf("[repoprofile] %s: get repo meta: %v", name, err)
 		} else {
 			defaultBranch = meta.DefaultBranch
-			cloneURL = meta.CloneURL
+			cloneURL = meta.PreferredCloneURL()
 		}
 
 		prof := domain.RepoProfile{
