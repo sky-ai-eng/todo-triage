@@ -122,17 +122,26 @@ type Outcome struct {
 //     mid-stream, subprocess crashed, or ctx cancelled. Outcome.Stderr
 //     is populated when the subprocess produced any.
 func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
+	// Derived ctx so the stream-error path can SIGKILL the process
+	// group via cmd.Cancel without affecting the caller's ctx. Without
+	// this, a stream read failure (cap exceeded, malformed mid-stream)
+	// would leave the subprocess alive with bytes still to write; the
+	// kernel stdout pipe fills, the subprocess blocks on write, and
+	// cmd.Wait below deadlocks indefinitely.
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	// exec.CommandContext owns the cancel watcher: it spawns a goroutine
-	// at Start time that selects on ctx.Done() vs. an internal "wait
+	// at Start time that selects on runCtx.Done() vs. an internal "wait
 	// finished" channel, and exits whichever fires first. That's
 	// important here because the subprocess may exit naturally well
-	// before ctx ever cancels — without this binding, a stray goroutine
-	// would block on <-ctx.Done() and, when ctx finally cancelled,
+	// before runCtx ever cancels — without this binding, a stray goroutine
+	// would block on <-runCtx.Done() and, when runCtx finally cancelled,
 	// SIGKILL whatever process happened to be reusing the original
 	// pgid. The Cancel hook below customizes the kill to target the
 	// process group (Setpgid is set), so child processes the agent
 	// spawned go down with it.
-	cmd := exec.CommandContext(ctx, "claude", BuildArgs(opts)...)
+	cmd := exec.CommandContext(runCtx, "claude", BuildArgs(opts)...)
 	cmd.Dir = opts.Cwd
 	cmd.Env = append(os.Environ(), opts.ExtraEnv...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -140,7 +149,7 @@ func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
 		// Process is non-nil here because the watcher only fires after
 		// Start has succeeded. ESRCH is fine — it just means the
 		// process group already exited on its own between Wait
-		// returning and the cancel watcher reading ctx.Done(),
+		// returning and the cancel watcher reading runCtx.Done(),
 		// which is a race exec handles internally.
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
@@ -159,6 +168,14 @@ func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
 
 	stream := NewStreamState()
 	result, streamErr := consumeStream(stdout, sink, stream, opts.TraceID)
+
+	// If the stream reader bailed before a terminal result, the
+	// subprocess is likely still running and may have more data to
+	// write. Kill the process group now so cmd.Wait below doesn't
+	// block forever on a stuck pipe write.
+	if streamErr != nil && result == nil {
+		cancel()
+	}
 
 	waitErr := cmd.Wait()
 
@@ -186,6 +203,13 @@ func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
 	return outcome, nil
 }
 
+// maxStreamLineBytes caps a single NDJSON line. Well above any
+// legitimate tool_result (Claude truncates Read/Bash output internally
+// long before this) but low enough that a wedged or misbehaving
+// subprocess that streams without ever emitting a newline gets
+// surfaced as a clear stream error instead of growing the heap.
+const maxStreamLineBytes = 64 * 1024 * 1024
+
 // consumeStream scans NDJSON output, drives the Sink, and returns the
 // first `result` event it sees. Sink errors are logged and skipped so
 // a transient DB hiccup on one row doesn't abandon the whole run.
@@ -194,39 +218,95 @@ func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
 // at stream close — any mid-run consumer (the future curator UI, a
 // memory-gate retry, a takeover) can read it without waiting for the
 // stream to complete.
+//
+// Reader choice: a bounded readLine loop instead of bufio.Scanner
+// because each NDJSON line is one whole stream event, and a single
+// tool_result event (a Read of a big file, large Bash output, a fat
+// structured artifact) can easily exceed Scanner's old 1 MB per-token
+// ceiling. When that ceiling was hit the run aborted with no terminal
+// `result` captured, even though the subprocess kept emitting valid
+// JSON we just couldn't fit. The new bound (maxStreamLineBytes) is
+// generous enough that legitimate events pass through but a runaway /
+// newline-less stream still fails fast rather than OOMing the process.
 func consumeStream(stdout io.Reader, sink Sink, stream *StreamState, traceID string) (*Result, error) {
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
+	reader := bufio.NewReader(stdout)
 
 	sessionDelivered := false
 
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
+	for {
+		line, readErr := readLine(reader, maxStreamLineBytes)
+		// readLine returns whatever bytes it has alongside the error on
+		// EOF (or the full line + nil err on a clean newline). Process
+		// the bytes before reacting to the error so a final unterminated
+		// event isn't dropped.
+		if len(line) > 0 {
+			messages, result := stream.ParseLine(line, traceID)
 
-		messages, result := stream.ParseLine(line, traceID)
-
-		if !sessionDelivered {
-			if sid := stream.SessionID(); sid != "" {
-				if err := sink.OnSession(sid); err != nil {
-					log.Printf("[agentproc] sink.OnSession failed: %v", err)
+			if !sessionDelivered {
+				if sid := stream.SessionID(); sid != "" {
+					if err := sink.OnSession(sid); err != nil {
+						log.Printf("[agentproc] sink.OnSession failed: %v", err)
+					}
+					sessionDelivered = true
 				}
-				sessionDelivered = true
+			}
+
+			for _, msg := range messages {
+				if err := sink.OnMessage(msg); err != nil {
+					log.Printf("[agentproc] sink.OnMessage failed: %v", err)
+					continue
+				}
+			}
+
+			if result != nil {
+				return result, nil
 			}
 		}
 
-		for _, msg := range messages {
-			if err := sink.OnMessage(msg); err != nil {
-				log.Printf("[agentproc] sink.OnMessage failed: %v", err)
-				continue
+		if readErr != nil {
+			if readErr == io.EOF {
+				return nil, nil
 			}
-		}
-
-		if result != nil {
-			return result, nil
+			return nil, readErr
 		}
 	}
-	return nil, scanner.Err()
+}
+
+// readLine reads up to and including the next '\n', returning the line
+// without the trailing newline. If a single line exceeds maxBytes,
+// readLine stops reading and returns an error so the caller surfaces
+// the stuck-stream case without OOMing on a runaway subprocess.
+//
+// Implemented over ReadSlice so we can check the accumulated size each
+// time bufio's internal buffer fills — bufio.Reader.ReadBytes itself
+// has no per-line cap and would grow its buffer until it ran out of
+// memory.
+func readLine(r *bufio.Reader, maxBytes int) ([]byte, error) {
+	var buf []byte
+	for {
+		chunk, err := r.ReadSlice('\n')
+		if len(buf)+len(chunk) > maxBytes {
+			return nil, fmt.Errorf("stream line exceeded %d bytes; subprocess may be emitting unbounded output", maxBytes)
+		}
+		// ReadSlice's chunk shares bufio's internal buffer and is
+		// invalidated by the next read, so always copy out.
+		if err == nil {
+			n := len(chunk)
+			if n > 0 && chunk[n-1] == '\n' {
+				chunk = chunk[:n-1]
+			}
+			buf = append(buf, chunk...)
+			return buf, nil
+		}
+		if err == bufio.ErrBufferFull {
+			buf = append(buf, chunk...)
+			continue
+		}
+		// Real error (EOF or otherwise). Return whatever partial line
+		// we have so an EOF-terminated final event still gets parsed.
+		if len(chunk) > 0 {
+			buf = append(buf, chunk...)
+		}
+		return buf, err
+	}
 }
