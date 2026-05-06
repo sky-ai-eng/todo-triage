@@ -31,7 +31,7 @@ The repo-root `.claude/settings.json` registers a `PostToolUse` hook that runs `
 
 ## Architecture
 
-Triage Factory is a **single Go binary** (HTTP server + pollers + delegated-agent spawner) with a **React SPA embedded via `go:embed`** (see `embed.go`). State lives entirely on the user's machine: SQLite at `~/.triagefactory/triagefactory.db`, YAML config at `~/.triagefactory/config.yaml`, credentials in the OS keychain (`internal/auth`).
+Triage Factory is a **single Go binary** (HTTP server + pollers + delegated-agent spawner) with a **React SPA embedded via `go:embed`** (see `embed.go`). State lives entirely on the user's machine: SQLite at `~/.triagefactory/triagefactory.db` (user settings persist in the `settings` row — `internal/config` reads/writes via `config.Init(db)` at startup), credentials in the OS keychain (`internal/auth`). Pre-DB installs had a `~/.triagefactory/config.yaml`; on startup, `config.Init(db)` initializes DB-backed settings, then `config.MigrateLegacyYAML` separately imports the legacy YAML on first launch and removes the file.
 
 ### The binary has two modes
 

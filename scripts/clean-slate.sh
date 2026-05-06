@@ -16,9 +16,12 @@ echo "Cleaning Triage Factory local state..."
 rm -f ~/.triagefactory/triagefactory.db ~/.triagefactory/triagefactory.db-wal ~/.triagefactory/triagefactory.db-shm
 echo "  removed database"
 
-# Config
-rm -f ~/.triagefactory/config.yaml
-echo "  removed config"
+# Config (settings now live in the DB above; this only removes a stale
+# pre-DB config.yaml left behind by ancient installs).
+if [ -f ~/.triagefactory/config.yaml ]; then
+  rm -f ~/.triagefactory/config.yaml
+  echo "  removed legacy config.yaml"
+fi
 
 # Project knowledge dirs — the Curator materializes per-project repo
 # worktrees at ~/.triagefactory/projects/<id>/repos/<owner>/<repo>/

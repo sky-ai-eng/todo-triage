@@ -71,26 +71,9 @@ Run `./triagefactory exec --help` for the full subcommand list.
 
 ## Configuration
 
-Config lives at `~/.triagefactory/config.yaml` and can be edited via the Settings page or directly:
+Settings are stored in the SQLite DB at `~/.triagefactory/triagefactory.db` (table `settings`, single row holding a YAML blob) and edited exclusively via the Settings page. The poll interval defaults to 5 minutes for both GitHub and Jira; configurable values are 30s, 1m, 2m, 5m.
 
-```yaml
-github:
-  base_url: "https://github.com"
-  poll_interval: 1m
-
-jira:
-  base_url: "https://jira.yourcompany.com"
-  poll_interval: 2m
-  projects: [PROJ, INFRA]
-  pickup_statuses: [Open, Ready for Development]
-  in_progress_status: "In Progress"
-
-ai:
-  model: sonnet
-
-server:
-  port: 3000
-```
+Earlier releases used a YAML file at `~/.triagefactory/config.yaml`. On first launch after upgrading, the contents are imported into the DB and the file is removed; the poll interval is reset to the new 5m default as part of that import.
 
 ### Jira setup
 

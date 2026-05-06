@@ -6,6 +6,9 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/sky-ai-eng/triage-factory/internal/config"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 )
 
 func TestResolvedTakeoversDir_Default(t *testing.T) {
@@ -29,13 +32,29 @@ func TestResolvedTakeoversDir_ConfigOverride(t *testing.T) {
 	t.Setenv("HOME", home)
 
 	dataDir := filepath.Join(home, ".triagefactory")
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll(%q): %v", dataDir, err)
+
+	// Settings live in the DB now — open + migrate + Init, then Save the
+	// override so resolvedTakeoversDir's downstream config.Load() sees it.
+	conn, err := db.Open()
+	if err != nil {
+		t.Fatalf("db.Open(): %v", err)
 	}
-	cfgPath := filepath.Join(dataDir, "config.yaml")
-	cfg := "server:\n  takeover_dir: ~/custom-takeovers\n"
-	if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil {
-		t.Fatalf("WriteFile(%q): %v", cfgPath, err)
+	if err := db.Migrate(conn); err != nil {
+		conn.Close()
+		t.Fatalf("db.Migrate(): %v", err)
+	}
+	if err := config.Init(conn); err != nil {
+		conn.Close()
+		t.Fatalf("config.Init(): %v", err)
+	}
+	cfg := config.Default()
+	cfg.Server.TakeoverDir = "~/custom-takeovers"
+	if err := config.Save(cfg); err != nil {
+		conn.Close()
+		t.Fatalf("config.Save(): %v", err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatalf("conn.Close(): %v", err)
 	}
 
 	got, err := resolvedTakeoversDir(dataDir)

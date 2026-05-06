@@ -138,7 +138,7 @@ func (s *Server) handleDashboardPRDraft(w http.ResponseWriter, r *http.Request) 
 	// Patch the local entity snapshot to match the state we just pushed to
 	// GitHub. Without this, the frontend's subsequent fetchAll() reads the
 	// stale pre-mutation snapshot and the card snaps back to its old column
-	// until the next poll cycle (30-60s later).
+	// until the next poll cycle (up to several minutes later).
 	//
 	// TODO(SKY-193): we deliberately don't fire a synthetic pr:ready_for_review
 	// / pr:converted_to_draft event here — the user's UI click is its own

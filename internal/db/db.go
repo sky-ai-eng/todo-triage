@@ -26,7 +26,12 @@ func Open() (*sql.DB, error) {
 		return nil, err
 	}
 
-	dbPath := filepath.Join(dir, "triagefactory.db")
+	return OpenAt(filepath.Join(dir, "triagefactory.db"))
+}
+
+// OpenAt returns a connection to the SQLite database at the given path.
+// The directory must already exist.
+func OpenAt(dbPath string) (*sql.DB, error) {
 	// busy_timeout(5000) is the safety net: modernc.org/sqlite returns
 	// SQLITE_BUSY immediately on lock contention unless this is set,
 	// unlike mattn/go-sqlite3 which had implicit driver-level retries.

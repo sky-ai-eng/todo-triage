@@ -1191,14 +1191,13 @@ func TestProjectKnowledgeDelete_RemovesFile(t *testing.T) {
 // write a config.yaml with a Jira project, and confirm the create
 // flow stores the key and read-back returns it.
 func TestProjectCreate_AcceptsTrackerKeys(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	t.Setenv("HOME", t.TempDir())
+	s := newTestServer(t)
 	cfg := config.Default()
 	cfg.Jira.Projects = []string{"SKY"}
 	if err := config.Save(cfg); err != nil {
 		t.Fatalf("save config: %v", err)
 	}
-	s := newTestServer(t)
 
 	rec := doJSON(t, s, http.MethodPost, "/api/projects", map[string]any{
 		"name":             "Tracked",

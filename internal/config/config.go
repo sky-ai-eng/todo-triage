@@ -1,14 +1,25 @@
+// Package config holds the user-editable settings struct and persists
+// it to a singleton row in the SQLite DB (~/.triagefactory/triagefactory.db,
+// table `settings`). Init must be called once at startup with an open
+// DB handle before any Load/Save call.
 package config
 
 import (
+	"database/sql"
+	"errors"
+	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
-// Config represents ~/.triagefactory/config.yaml.
+// Config is the persisted settings shape. YAML tags are retained for the
+// blob serialization stored in the settings row (and for the legacy
+// config.yaml that the importer reads on first run).
 type Config struct {
 	GitHub GitHubConfig `yaml:"github"`
 	Jira   JiraConfig   `yaml:"jira"`
@@ -118,10 +129,10 @@ func (c JiraConfig) Ready(pat, url string) bool {
 func Default() Config {
 	return Config{
 		GitHub: GitHubConfig{
-			PollInterval: 60 * time.Second,
+			PollInterval: 5 * time.Minute,
 		},
 		Jira: JiraConfig{
-			PollInterval: 60 * time.Second,
+			PollInterval: 5 * time.Minute,
 		},
 		Server: ServerConfig{
 			Port: 3000,
@@ -135,55 +146,147 @@ func Default() Config {
 	}
 }
 
-// configPath returns the path to ~/.triagefactory/config.yaml.
-func configPath() (string, error) {
+// Package-level DB handle used by Load/Save. Set once via Init at
+// startup. A package singleton lets the 25+ existing call sites keep
+// the no-arg Load()/Save() signatures rather than threading *sql.DB
+// through every layer.
+var (
+	pkgMu sync.RWMutex
+	pkgDB *sql.DB
+)
+
+// ErrNotInitialized is returned by Load/Save when called before Init.
+// In production this is a startup-ordering bug (Init must run after
+// db.Migrate); in tests it's a hint to set up a temp DB.
+var ErrNotInitialized = errors.New("config: Init not called")
+
+// Init wires the package against an open, migrated DB handle.
+// Subsequent calls replace the handle (useful for tests). Does NOT
+// touch the filesystem — see MigrateLegacyYAML for the one-shot import
+// of any pre-DB ~/.triagefactory/config.yaml. Production entry points
+// call both; tests should only call Init so they don't read or delete
+// the developer's real YAML file.
+func Init(db *sql.DB) error {
+	if db == nil {
+		return errors.New("config.Init: nil db")
+	}
+	pkgMu.Lock()
+	pkgDB = db
+	pkgMu.Unlock()
+	return nil
+}
+
+// MigrateLegacyYAML runs the one-shot migration from
+// ~/.triagefactory/config.yaml into the settings row. It exits early
+// when (a) the row already exists, or (b) no YAML file is present
+// (fresh install — defaults will apply). On a successful import it
+// also forces both poll intervals to the new 5m default — the whole
+// point of pulling the trigger here is to bring everyone onto the
+// less-aggressive cadence regardless of what they had saved.
+//
+// Idempotent: subsequent runs see a populated row and return nil.
+func MigrateLegacyYAML(db *sql.DB) error {
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM settings WHERE id = 1`).Scan(&n); err != nil {
+		return fmt.Errorf("probe settings row: %w", err)
+	}
+	if n > 0 {
+		return nil
+	}
+
+	path, err := legacyYAMLPath()
+	if err != nil {
+		return err
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		log.Printf("[config] read %s: %v (skipping import; defaults will apply until you save settings)", path, err)
+		return nil
+	}
+
+	cfg := Default()
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		log.Printf("[config] parse %s: %v (skipping import; defaults will apply until you save settings)", path, err)
+		return nil
+	}
+
+	cfg.GitHub.PollInterval = 5 * time.Minute
+	cfg.Jira.PollInterval = 5 * time.Minute
+
+	out, err := yaml.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("marshal cfg: %w", err)
+	}
+	if _, err := db.Exec(`INSERT INTO settings (id, data) VALUES (1, ?)`, string(out)); err != nil {
+		return fmt.Errorf("insert settings: %w", err)
+	}
+
+	if err := os.Remove(path); err != nil {
+		log.Printf("[config] imported %s into DB but couldn't remove the file: %v (safe to delete manually)", path, err)
+	} else {
+		log.Printf("[config] imported %s into DB and removed the file (poll intervals reset to 5m)", path)
+	}
+	return nil
+}
+
+// Load reads the settings row, falling back to Default() when no row
+// exists yet. Unmarshal errors return the partially-populated struct
+// alongside the error so callers can degrade gracefully if they want.
+func Load() (Config, error) {
+	pkgMu.RLock()
+	db := pkgDB
+	pkgMu.RUnlock()
+	if db == nil {
+		return Default(), ErrNotInitialized
+	}
+
+	var blob string
+	err := db.QueryRow(`SELECT data FROM settings WHERE id = 1`).Scan(&blob)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Default(), nil
+	}
+	if err != nil {
+		return Default(), fmt.Errorf("read settings: %w", err)
+	}
+
+	cfg := Default()
+	if err := yaml.Unmarshal([]byte(blob), &cfg); err != nil {
+		return cfg, fmt.Errorf("unmarshal settings: %w", err)
+	}
+	return cfg, nil
+}
+
+// Save upserts the settings row.
+func Save(cfg Config) error {
+	pkgMu.RLock()
+	db := pkgDB
+	pkgMu.RUnlock()
+	if db == nil {
+		return ErrNotInitialized
+	}
+
+	out, err := yaml.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(
+		`INSERT INTO settings (id, data, updated_at) VALUES (1, ?, CURRENT_TIMESTAMP)
+		 ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = CURRENT_TIMESTAMP`,
+		string(out),
+	)
+	return err
+}
+
+// legacyYAMLPath is the pre-DB config location. Only referenced by the
+// import path — new state writes to the settings table.
+func legacyYAMLPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
 	return filepath.Join(home, ".triagefactory", "config.yaml"), nil
-}
-
-// Load reads the config from disk, falling back to defaults for missing fields.
-func Load() (Config, error) {
-	cfg := Default()
-
-	path, err := configPath()
-	if err != nil {
-		return cfg, err
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return cfg, nil // no config file yet, use defaults
-		}
-		return cfg, err
-	}
-
-	// Unmarshal on top of defaults — only overrides fields present in the file
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return cfg, err
-	}
-
-	return cfg, nil
-}
-
-// Save writes the config to disk, creating the directory if needed.
-func Save(cfg Config) error {
-	path, err := configPath()
-	if err != nil {
-		return err
-	}
-
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return err
-	}
-
-	data, err := yaml.Marshal(cfg)
-	if err != nil {
-		return err
-	}
-
-	return os.WriteFile(path, data, 0644)
 }

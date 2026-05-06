@@ -3,10 +3,9 @@ package server
 import (
 	"encoding/json"
 	"net/http"
-	"os"
-	"path/filepath"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/config"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -229,16 +228,11 @@ func TestProjectPatch_QueuesJiraChange(t *testing.T) {
 	id, _ := seedProjectWithSessionForPatch(t, s)
 
 	// Seed a configured Jira project so validateTrackerKeys accepts
-	// the value when the PATCH handler does its config.Load(). Setting
-	// HOME redirects ~ to the temp dir, where the config loader looks.
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	if err := os.MkdirAll(filepath.Join(home, ".triagefactory"), 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(home, ".triagefactory", "config.yaml"),
-		[]byte("jira:\n  projects:\n    - SKY\n"), 0o644); err != nil {
-		t.Fatalf("write config: %v", err)
+	// the value when the PATCH handler does its config.Load().
+	cfg := config.Default()
+	cfg.Jira.Projects = []string{"SKY"}
+	if err := config.Save(cfg); err != nil {
+		t.Fatalf("save config: %v", err)
 	}
 
 	rec := doJSON(t, s, http.MethodPatch, "/api/projects/"+id, map[string]any{

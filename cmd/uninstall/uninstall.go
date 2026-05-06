@@ -36,6 +36,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/config"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 )
 
 // Handle dispatches the uninstall subcommand.
@@ -294,6 +295,35 @@ func removeClaudeProjectsForTakeovers(takeoversDir, home string) (int, error) {
 
 func resolvedTakeoversDir(dataDir string) (string, error) {
 	fallback := filepath.Join(dataDir, "takeovers")
+
+	// Settings now live in the DB, so we have to open + init it before
+	// config.Load() can answer. Probe for the file first so a fresh
+	// machine (no DB) doesn't materialize state we're about to delete.
+	dbPath := filepath.Join(dataDir, "triagefactory.db")
+	if _, err := os.Stat(dbPath); err != nil {
+		if os.IsNotExist(err) {
+			return fallback, nil
+		}
+		return fallback, err
+	}
+	conn, err := db.OpenAt(dbPath)
+	if err != nil {
+		return fallback, err
+	}
+	defer conn.Close()
+	if err := db.Migrate(conn); err != nil {
+		return fallback, err
+	}
+	if err := config.Init(conn); err != nil {
+		return fallback, err
+	}
+	// Best-effort import — if the user is uninstalling without ever
+	// having started the server, their pre-DB YAML may still hold the
+	// takeover_dir override. We're about to delete the DB anyway, so
+	// the import side effect is harmless.
+	if err := config.MigrateLegacyYAML(conn); err != nil {
+		return fallback, err
+	}
 
 	cfg, err := config.Load()
 	if err != nil {

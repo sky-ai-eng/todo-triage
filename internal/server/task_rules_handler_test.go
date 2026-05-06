@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/config"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	_ "modernc.org/sqlite"
@@ -32,6 +33,12 @@ func newTestServer(t *testing.T) *Server {
 	}
 	if err := db.SeedEventTypes(database); err != nil {
 		t.Fatalf("seed events: %v", err)
+	}
+	// Settings handlers go through config.Load/Save, which require an
+	// initialized package handle. We deliberately skip MigrateLegacyYAML
+	// so tests don't read or delete the developer's real config.yaml.
+	if err := config.Init(database); err != nil {
+		t.Fatalf("config init: %v", err)
 	}
 	return New(database)
 }

@@ -190,6 +190,17 @@ func main() {
 		log.Fatalf("failed to migrate database: %v", err)
 	}
 
+	// Wire the config package against the DB and run the one-shot
+	// import of any pre-DB ~/.triagefactory/config.yaml. Must happen
+	// after Migrate (settings table is created there) and before any
+	// config.Load / Save call.
+	if err := config.Init(database); err != nil {
+		log.Fatalf("failed to initialize config: %v", err)
+	}
+	if err := config.MigrateLegacyYAML(database); err != nil {
+		log.Printf("[config] legacy YAML import: %v (continuing with defaults)", err)
+	}
+
 	addr := fmt.Sprintf(":%d", port)
 	fmt.Printf("Triage Factory running at http://localhost%s\n", addr)
 
@@ -338,7 +349,7 @@ func main() {
 	// poller fires OnError on every failure (raw signal), but we only
 	// refresh the user-facing toast every errorToastMinInterval. Without
 	// throttling, a persistent failure (expired PAT, network outage) would
-	// generate a sticky error toast every poll cycle (default 60s) until
+	// generate a sticky error toast every poll cycle (default 5m) until
 	// the user manually dismissed each one — badly spammy on the UI.
 	const errorToastMinInterval = 5 * time.Minute
 	var (
