@@ -25,11 +25,8 @@ func newTestDB(t *testing.T) *sql.DB {
 	database.SetMaxOpenConns(1)
 	database.SetMaxIdleConns(1)
 	t.Cleanup(func() { database.Close() })
-	if err := db.Migrate(database); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	if err := db.SeedEventTypes(database); err != nil {
-		t.Fatalf("seed events: %v", err)
+	if err := db.BootstrapSchemaForTest(database); err != nil {
+		t.Fatalf("bootstrap schema: %v", err)
 	}
 	return database
 }

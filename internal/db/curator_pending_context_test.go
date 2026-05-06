@@ -18,8 +18,8 @@ func newPendingContextDB(t *testing.T) *sql.DB {
 	database.SetMaxOpenConns(1)
 	database.SetMaxIdleConns(1)
 	t.Cleanup(func() { _ = database.Close() })
-	if err := db.Migrate(database); err != nil {
-		t.Fatalf("migrate: %v", err)
+	if err := db.BootstrapSchemaForTest(database); err != nil {
+		t.Fatalf("bootstrap schema: %v", err)
 	}
 	return database
 }
@@ -287,8 +287,8 @@ func TestConsumePendingContext_LeadingUpdateBlocksConcurrentWriter(t *testing.T)
 	database.SetMaxOpenConns(2)
 	database.SetMaxIdleConns(2)
 	t.Cleanup(func() { _ = database.Close() })
-	if err := db.Migrate(database); err != nil {
-		t.Fatalf("migrate: %v", err)
+	if err := db.BootstrapSchemaForTest(database); err != nil {
+		t.Fatalf("bootstrap schema: %v", err)
 	}
 	projectID, sessionID := seedProjectWithSession(t, database)
 	requestID, _ := db.CreateCuratorRequest(database, projectID, "hi")

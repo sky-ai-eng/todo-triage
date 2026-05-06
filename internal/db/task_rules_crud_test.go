@@ -20,17 +20,13 @@ func newTestDB(t *testing.T) *sql.DB {
 	}
 	// Force single connection — SQLite :memory: is per-connection, so a
 	// pooled second connection would get a blank database without the
-	// schema from Migrate.
+	// schema from BootstrapSchemaForTest.
 	database.SetMaxOpenConns(1)
 	database.SetMaxIdleConns(1)
 	t.Cleanup(func() { database.Close() })
 
-	if err := Migrate(database); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	// Seed events_catalog so FK constraints on task_rules.event_type hold.
-	if err := SeedEventTypes(database); err != nil {
-		t.Fatalf("seed events: %v", err)
+	if err := BootstrapSchemaForTest(database); err != nil {
+		t.Fatalf("bootstrap schema: %v", err)
 	}
 	return database
 }
