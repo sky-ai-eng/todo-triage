@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.7.0](https://github.com/sky-ai-eng/triage-factory/compare/v1.6.1...v1.7.0) (2026-05-06)
+
+
+### Features
+
+* **auth:** support TRIAGE_FACTORY_* env vars as credential source ([#105](https://github.com/sky-ai-eng/triage-factory/issues/105)) ([1186013](https://github.com/sky-ai-eng/triage-factory/commit/1186013c0e78649ea8f9a32ab9d0e4dd079cae7d))
+* **github:** add SSH/HTTPS toggle for bare-clone setup ([#109](https://github.com/sky-ai-eng/triage-factory/issues/109)) ([873aad3](https://github.com/sky-ai-eng/triage-factory/commit/873aad3455d68d3c2bd3be61e2d8307e66bb7520))
+
+
+### Performance Improvements
+
+* **test:** cache schema bundle for in-memory test DBs ([#107](https://github.com/sky-ai-eng/triage-factory/issues/107)) ([1fe8696](https://github.com/sky-ai-eng/triage-factory/commit/1fe8696916114fca46419ab79890cfba4ae16a7f))
+
 ## [1.6.1](https://github.com/sky-ai-eng/triage-factory/compare/v1.6.0...v1.6.1) (2026-05-06)
 
 
