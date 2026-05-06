@@ -366,14 +366,27 @@ func ensureBareCloneLocked(ctx context.Context, owner, repo, cloneURL string) (b
 	// Fire the post-clone callback exactly once per call so consumers
 	// (main.go's hook → repo_profiles + websocket) see one event per
 	// attempt regardless of whether we hit the fresh-clone branch or
-	// the existing-bare repair branch. Logging the failure here as
-	// well guarantees stderr coverage even if no callback is wired
-	// (tests, future CLI tools, etc.).
+	// the existing-bare repair branch. Logging the failure here
+	// synchronously guarantees stderr coverage even if no callback is
+	// wired (tests, future CLI tools, etc.).
+	//
+	// The callback ITSELF runs in a goroutine because the per-repo
+	// mutex acquired by EnsureBareClone / CreateForPR /
+	// createBranchWorktreeAt is still held when this defer fires
+	// (their `defer mu.Unlock()` runs after this defer in their own
+	// frames). main.go's callback can do up to ~15s of work on the
+	// failure path (DB write + WS broadcast + a bounded-by-15s SSH
+	// preflight to classify the failure kind). Holding the per-repo
+	// lock through that would block concurrent worktree operations
+	// and the live-PR-diff endpoint for the same repo. The callback
+	// is observability-only — no caller depends on it completing
+	// before they see results — and fireCloneResult recovers panics,
+	// so detaching it is safe.
 	defer func() {
 		if err != nil {
 			log.Printf("[worktree] ensureBareClone %s/%s: %v", owner, repo, err)
 		}
-		fireCloneResult(owner, repo, err)
+		go fireCloneResult(owner, repo, err)
 	}()
 
 	bareDir, err = cloneBareIfMissing(ctx, owner, repo, cloneURL)

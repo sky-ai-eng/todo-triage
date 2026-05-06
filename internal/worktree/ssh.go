@@ -89,11 +89,26 @@ func (e sshPreflightEntry) valid() bool {
 // combined output as the success signal rather than the exit code.
 //
 // Options used:
+//
 //   - -T:                          disable pty allocation (we don't want a shell)
+//
 //   - BatchMode=yes:               never prompt for passphrases or unknown hosts
+//
 //   - StrictHostKeyChecking=accept-new: write the host key on first
 //     connection so a clean machine doesn't fail the very first probe;
-//     after that the host key is pinned the standard way
+//     after that the host key is pinned the standard way.
+//
+//     This MUTATES the user's ~/.ssh/known_hosts on first contact with
+//     each unique host. We accept this trade-off rather than using
+//     UserKnownHostsFile=/dev/null (which would leave the subsequent
+//     `git clone --bare` to do the same accept-new write itself, just
+//     relocating the mutation) or StrictHostKeyChecking=yes (which
+//     would force every new GHE user to manually `ssh-keyscan` before
+//     TF could probe — a bad UX regression). The threat model
+//     (`feedback_local_threat_model`: trusted-local-user, no remote
+//     API surface) makes the user-provided-host attack vector
+//     non-actionable in practice; the alternative would shuffle where
+//     known_hosts gets written rather than eliminating writes.
 //
 // Returns nil on success. On failure returns an error whose Error()
 // string includes the combined stdout+stderr of the ssh process so
