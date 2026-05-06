@@ -306,7 +306,7 @@ func resolvedTakeoversDir(dataDir string) (string, error) {
 		}
 		return fallback, err
 	}
-	conn, err := db.Open()
+	conn, err := db.OpenAt(dbPath)
 	if err != nil {
 		return fallback, err
 	}
