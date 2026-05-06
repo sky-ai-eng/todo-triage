@@ -622,10 +622,10 @@ func (s *Spawner) setupGitHub(ctx context.Context, runID string, task domain.Tas
 		return runConfig{}, fmt.Errorf("failed to fetch PR: %w", err)
 	}
 
-	// pr.BaseCloneURL / pr.SSHURL pair: the upstream (the repo where
+	// pr.BaseCloneURL / pr.BaseSSHURL: the upstream (the repo where
 	// /pulls/<n> lives, which is always the canonical repo by
 	// construction), populated from base.repo.{clone_url,ssh_url}.
-	// pr.CloneURL / pr.SSHURL is the head's URL — the fork's URL when
+	// pr.CloneURL / pr.SSHURL: the head's URL — the fork's URL when
 	// the PR is from a fork, equal to the base URL for own-repo PRs.
 	// CreateForPR uses the upstream URL to fetch refs/pull/<n>/head
 	// and (if they differ) the head URL to configure push tracking so

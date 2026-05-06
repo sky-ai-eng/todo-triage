@@ -11,7 +11,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -275,13 +274,19 @@ func Load() (Config, error) {
 // users without SSH configured would see clones start failing for
 // no apparent reason.
 //
-// Detection: we look at the raw settings blob and check whether the
-// "clone_protocol" key was ever written. If absent, this row was
-// produced by a pre-feature version of TF; we set CloneProtocol to
+// Detection: parse the raw settings blob and check whether the
+// `github.clone_protocol` key was ever written. If absent, this row
+// was produced by a pre-feature version of TF; we set CloneProtocol to
 // "https" so the existing working state is preserved. If present
 // (including the empty value, which the toggle never produces but the
 // user might write manually), this is a current-version row and we
 // leave it alone.
+//
+// We deliberately parse the YAML rather than substring-matching the
+// blob: a substring search could false-positive on a user-controlled
+// value containing "clone_protocol" (Jira project names, base URLs,
+// etc.) and skip the migration, silently flipping legacy installs to
+// SSH — exactly the footgun this function exists to prevent.
 //
 // Idempotent: subsequent runs see the key in the blob and return nil.
 // Fresh installs (no row at all) also return nil — Default() handles
@@ -298,7 +303,7 @@ func MigrateLegacyCloneProtocol(db *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("probe settings row: %w", err)
 	}
-	if strings.Contains(blob, "clone_protocol") {
+	if cloneProtocolKeyPresent(blob) {
 		return nil
 	}
 
@@ -312,6 +317,27 @@ func MigrateLegacyCloneProtocol(db *sql.DB) error {
 	}
 	log.Printf("[config] migrated legacy install to clone_protocol=https (toggle is now opt-in via Settings)")
 	return nil
+}
+
+// cloneProtocolKeyPresent reports whether the YAML blob has the
+// `github.clone_protocol` key set (any value, including the empty
+// string). On unmarshal failure we conservatively report `true` —
+// migrating a corrupt blob would Save() over it with whatever Load()
+// degraded to, potentially destroying recoverable user state. The
+// post-migration "you're stuck on the new-install default" path
+// reproduces deterministically on next save once the user fixes the
+// blob; the destroy-corrupt-blob path doesn't.
+func cloneProtocolKeyPresent(blob string) bool {
+	var raw map[string]any
+	if err := yaml.Unmarshal([]byte(blob), &raw); err != nil {
+		return true
+	}
+	gh, ok := raw["github"].(map[string]any)
+	if !ok {
+		return false
+	}
+	_, ok = gh["clone_protocol"]
+	return ok
 }
 
 // Save upserts the settings row.

@@ -183,23 +183,29 @@ func diagnoseSSHFailure(ctx context.Context, sshOut string) string {
 // process lifetime, failures for sshPreflightFailureTTL (60 s) so a user who
 // fixes their SSH setup gets re-detected on the next clone cycle without
 // restarting the process.
+//
+// Concurrency: the global mutex is held across the probe so the
+// double-checked-lock pattern actually dedupes. N concurrent callers
+// see one ssh + one ssh-add subprocess pair; the rest hit the
+// populated cache when they acquire the lock. We accept global
+// (rather than per-host) serialization here because the only host in
+// production use is "git@github.com" and the probe is bounded by
+// PreflightSSH's 15-second context — switching to per-host locks
+// would only matter if a future caller probes multiple hosts in
+// parallel, which doesn't exist today.
 func CachedPreflightSSH(ctx context.Context, host string) error {
 	if host == "" {
 		host = "git@github.com"
 	}
 
 	sshPreflightCache.mu.Lock()
+	defer sshPreflightCache.mu.Unlock()
+
 	if e, ok := sshPreflightCache.entries[host]; ok && e.valid() {
-		sshPreflightCache.mu.Unlock()
 		return e.err
 	}
-	sshPreflightCache.mu.Unlock()
 
 	err := PreflightSSH(ctx, host)
-
-	sshPreflightCache.mu.Lock()
 	sshPreflightCache.entries[host] = sshPreflightEntry{err: err, cachedAt: time.Now()}
-	sshPreflightCache.mu.Unlock()
-
 	return err
 }
