@@ -401,6 +401,20 @@ func (c *Client) SubmitReview(owner, repo string, number int, commitSHA, event, 
 		if strings.Contains(errStr, "422") && event == "REQUEST_CHANGES" {
 			return 0, event, fmt.Errorf("cannot request changes on your own pull request — change the review type to Comment")
 		}
+		// Backstop: pre-submit validation in cmd/exec/gh should prevent
+		// cross-hunk multi-line comments, but if the PR was force-pushed
+		// after start-review the captured hunks are stale and we'd land
+		// here. The fix is the same in both cases — edit/delete the
+		// offending comment, or restart the review against the current
+		// diff.
+		if strings.Contains(errStr, "must be part of the same hunk") {
+			return 0, event, fmt.Errorf(
+				"a pending review comment has a multi-line range that crosses a diff hunk boundary — " +
+					"GitHub requires start_line and line to be in the same hunk. " +
+					"Edit or delete the offending comment, then resubmit. If the PR was force-pushed since the review was started, " +
+					"start a new review so the captured hunks match the current diff",
+			)
+		}
 		return 0, event, err
 	}
 

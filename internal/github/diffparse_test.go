@@ -1,6 +1,7 @@
 package github
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -202,5 +203,214 @@ func TestDiffLines_EmptyDiff(t *testing.T) {
 	got := DiffLines("")
 	if len(got) != 0 {
 		t.Errorf("DiffLines empty = %v, want empty map", got)
+	}
+}
+
+// --- DiffHunks ---
+
+func hunksEqual(a, b []Hunk) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestDiffHunks_SingleHunk(t *testing.T) {
+	diff := "diff --git a/foo.go b/foo.go\n@@ -1,4 +1,4 @@\n ctx\n-old\n+new\n line3\n line4"
+	got := DiffHunks(diff)
+	want := []Hunk{{NewStart: 1, NewEnd: 4}}
+	if !hunksEqual(got["foo.go"], want) {
+		t.Errorf("DiffHunks single = %v, want %v", got["foo.go"], want)
+	}
+}
+
+func TestDiffHunks_MultipleHunksSameFile(t *testing.T) {
+	// Two hunks in one file — the gap between them is what ValidateCommentRange
+	// uses to reject cross-hunk multi-line comments.
+	diff := "diff --git a/foo.go b/foo.go\n" +
+		"@@ -1,3 +1,3 @@\n ctx1\n-del1\n+add1\n" +
+		"@@ -10,3 +10,3 @@\n ctx10\n-del10\n+add10"
+	got := DiffHunks(diff)
+	want := []Hunk{{NewStart: 1, NewEnd: 2}, {NewStart: 10, NewEnd: 11}}
+	if !hunksEqual(got["foo.go"], want) {
+		t.Errorf("DiffHunks multi-hunk = %v, want %v", got["foo.go"], want)
+	}
+}
+
+func TestDiffHunks_MultipleFiles(t *testing.T) {
+	diff := "diff --git a/a.go b/a.go\n@@ -1,1 +1,2 @@\n+added\n ctx\n" +
+		"diff --git a/b.go b/b.go\n@@ -5,1 +5,2 @@\n ctx\n+added"
+	got := DiffHunks(diff)
+	wantA := []Hunk{{NewStart: 1, NewEnd: 2}}
+	wantB := []Hunk{{NewStart: 5, NewEnd: 6}}
+	if !hunksEqual(got["a.go"], wantA) {
+		t.Errorf("a.go hunks = %v, want %v", got["a.go"], wantA)
+	}
+	if !hunksEqual(got["b.go"], wantB) {
+		t.Errorf("b.go hunks = %v, want %v", got["b.go"], wantB)
+	}
+}
+
+func TestDiffHunks_DeletionOnlyHunkProducesNoHunk(t *testing.T) {
+	// Pure-deletion hunk has no commentable new-side line, so it doesn't
+	// produce a Hunk entry (NewEnd would be < NewStart).
+	diff := "diff --git a/foo.go b/foo.go\n@@ -1,3 +0,0 @@\n-line1\n-line2\n-line3"
+	got := DiffHunks(diff)
+	// File is still present in the map (registered when the diff --git header
+	// was seen) but has no hunks.
+	if hunks := got["foo.go"]; len(hunks) != 0 {
+		t.Errorf("DiffHunks deletion-only = %v, want no hunks", hunks)
+	}
+}
+
+func TestDiffHunks_AdditionOnlyAtEOF(t *testing.T) {
+	// New file: every line is a new-side addition starting at line 1.
+	diff := "diff --git a/new.go b/new.go\n@@ -0,0 +1,3 @@\n+line1\n+line2\n+line3"
+	got := DiffHunks(diff)
+	want := []Hunk{{NewStart: 1, NewEnd: 3}}
+	if !hunksEqual(got["new.go"], want) {
+		t.Errorf("DiffHunks addition-only = %v, want %v", got["new.go"], want)
+	}
+}
+
+func TestDiffHunks_TrailingNewlineDoesNotInflateRange(t *testing.T) {
+	diff := "diff --git a/foo.go b/foo.go\n@@ -1,2 +1,2 @@\n ctx\n+new\n"
+	got := DiffHunks(diff)
+	want := []Hunk{{NewStart: 1, NewEnd: 2}}
+	if !hunksEqual(got["foo.go"], want) {
+		t.Errorf("DiffHunks trailing newline = %v, want %v", got["foo.go"], want)
+	}
+}
+
+func TestDiffHunks_EmptyDiff(t *testing.T) {
+	if got := DiffHunks(""); len(got) != 0 {
+		t.Errorf("DiffHunks empty = %v, want empty map", got)
+	}
+}
+
+// --- DiffHunksFromPatches ---
+
+func TestDiffHunksFromPatches_MultiHunk(t *testing.T) {
+	files := []PRFile{{
+		Filename: "a.go",
+		Patch: "@@ -1,3 +1,3 @@\n ctx\n-del\n+add\n" +
+			"@@ -20,2 +20,3 @@\n ctx20\n+added\n more",
+	}}
+	got := DiffHunksFromPatches(files)
+	want := []Hunk{{NewStart: 1, NewEnd: 2}, {NewStart: 20, NewEnd: 22}}
+	if !hunksEqual(got["a.go"], want) {
+		t.Errorf("DiffHunksFromPatches multi-hunk = %v, want %v", got["a.go"], want)
+	}
+}
+
+func TestDiffHunksFromPatches_BinaryFileNoPatch(t *testing.T) {
+	files := []PRFile{{Filename: "image.png", Patch: ""}}
+	got := DiffHunksFromPatches(files)
+	if _, ok := got["image.png"]; !ok {
+		t.Error("expected image.png key present even with empty patch")
+	}
+	if len(got["image.png"]) != 0 {
+		t.Errorf("expected no hunks for binary file, got %v", got["image.png"])
+	}
+}
+
+// --- ValidateCommentRange ---
+
+func intPtr(i int) *int { return &i }
+
+func TestValidateCommentRange_SingleLineValid(t *testing.T) {
+	hunks := map[string][]Hunk{"a.go": {{NewStart: 1, NewEnd: 5}}}
+	if msg := ValidateCommentRange(hunks, "a.go", 3, nil); msg != "" {
+		t.Errorf("expected valid, got error: %q", msg)
+	}
+}
+
+func TestValidateCommentRange_MultiLineInSameHunk(t *testing.T) {
+	hunks := map[string][]Hunk{"a.go": {{NewStart: 10, NewEnd: 30}}}
+	if msg := ValidateCommentRange(hunks, "a.go", 25, intPtr(15)); msg != "" {
+		t.Errorf("expected valid, got error: %q", msg)
+	}
+}
+
+func TestValidateCommentRange_CrossHunkRejected(t *testing.T) {
+	// start_line in hunk A, line in hunk B — this is the exact 422 we're
+	// trying to prevent at submit time.
+	hunks := map[string][]Hunk{"a.go": {
+		{NewStart: 1, NewEnd: 5},
+		{NewStart: 20, NewEnd: 30},
+	}}
+	msg := ValidateCommentRange(hunks, "a.go", 25, intPtr(3))
+	if msg == "" {
+		t.Fatal("expected cross-hunk error, got nil")
+	}
+	if !strings.Contains(msg, "same diff hunk") {
+		t.Errorf("error should mention same hunk requirement: %q", msg)
+	}
+	// The message must list the hunks so the agent can pick a valid range
+	// on retry without another round-trip.
+	if !strings.Contains(msg, "[1–5]") || !strings.Contains(msg, "[20–30]") {
+		t.Errorf("error should include hunk list, got: %q", msg)
+	}
+}
+
+func TestValidateCommentRange_LineNotInDiff(t *testing.T) {
+	hunks := map[string][]Hunk{"a.go": {{NewStart: 1, NewEnd: 5}, {NewStart: 30, NewEnd: 40}}}
+	msg := ValidateCommentRange(hunks, "a.go", 100, nil)
+	if !strings.Contains(msg, "line 100") || !strings.Contains(msg, "not part of the diff") {
+		t.Errorf("expected line-not-in-diff error, got: %q", msg)
+	}
+	// The error must include the file's hunks so the agent can pick a
+	// valid line on retry without another round-trip — same pattern as
+	// the cross-hunk and start_line-not-in-diff errors.
+	if !strings.Contains(msg, "[1–5]") || !strings.Contains(msg, "[30–40]") {
+		t.Errorf("error should include hunk list, got: %q", msg)
+	}
+}
+
+func TestValidateCommentRange_StartLineNotInDiff(t *testing.T) {
+	// `line` falls in a hunk but `start_line` doesn't — distinct error
+	// from the cross-hunk case.
+	hunks := map[string][]Hunk{"a.go": {{NewStart: 10, NewEnd: 20}}}
+	msg := ValidateCommentRange(hunks, "a.go", 15, intPtr(5))
+	if !strings.Contains(msg, "start_line 5") || !strings.Contains(msg, "not part of the diff") {
+		t.Errorf("expected start_line-not-in-diff error, got: %q", msg)
+	}
+}
+
+func TestValidateCommentRange_StartLineGreaterThanLine(t *testing.T) {
+	hunks := map[string][]Hunk{"a.go": {{NewStart: 1, NewEnd: 100}}}
+	msg := ValidateCommentRange(hunks, "a.go", 5, intPtr(10))
+	if !strings.Contains(msg, "start_line 10") || !strings.Contains(msg, "≤ line 5") {
+		t.Errorf("expected start_line>line error, got: %q", msg)
+	}
+}
+
+func TestValidateCommentRange_FileNotInDiff(t *testing.T) {
+	hunks := map[string][]Hunk{"a.go": {{NewStart: 1, NewEnd: 5}}}
+	msg := ValidateCommentRange(hunks, "missing.go", 1, nil)
+	if !strings.Contains(msg, "missing.go") || !strings.Contains(msg, "not in the diff") {
+		t.Errorf("expected file-not-in-diff error, got: %q", msg)
+	}
+}
+
+func TestValidateCommentRange_BoundaryLines(t *testing.T) {
+	// Both endpoints of a hunk must be valid (inclusive bounds).
+	hunks := map[string][]Hunk{"a.go": {{NewStart: 10, NewEnd: 20}}}
+	if msg := ValidateCommentRange(hunks, "a.go", 10, intPtr(10)); msg != "" {
+		t.Errorf("expected valid at NewStart, got: %q", msg)
+	}
+	if msg := ValidateCommentRange(hunks, "a.go", 20, intPtr(10)); msg != "" {
+		t.Errorf("expected valid full-hunk range, got: %q", msg)
+	}
+	if msg := ValidateCommentRange(hunks, "a.go", 21, nil); msg == "" {
+		t.Error("expected error one past NewEnd")
+	}
+	if msg := ValidateCommentRange(hunks, "a.go", 9, nil); msg == "" {
+		t.Error("expected error one before NewStart")
 	}
 }

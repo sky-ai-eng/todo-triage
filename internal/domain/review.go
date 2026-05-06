@@ -25,6 +25,7 @@ type PendingReview struct {
 	Repo                string
 	CommitSHA           string
 	DiffLines           string  // JSON: {"file.go": [1,2,3,...], ...}
+	DiffHunks           string  // JSON: {"file.go": [[start,end], ...], ...} — one [start,end] pair per hunk on the new side
 	RunID               string  // agent run that created this review (empty for standalone CLI)
 	ReviewBody          string  // deferred review body (set when awaiting approval)
 	ReviewEvent         string  // deferred review event: APPROVE, COMMENT, REQUEST_CHANGES

@@ -37,9 +37,10 @@ func jsonPRFiles(t *testing.T, files []map[string]any) []byte {
 	return data
 }
 
-// TestGetDiffLines_NormalDiff verifies the happy path: the diff endpoint returns
-// a valid unified diff and getDiffLines parses it into a file→commentable-lines map.
-func TestGetDiffLines_NormalDiff(t *testing.T) {
+// TestGetDiffShapes_NormalDiff verifies the happy path: the diff endpoint returns
+// a valid unified diff and getDiffShapes parses it into both a file→commentable-lines
+// map and a file→hunks map, fetched in a single round-trip.
+func TestGetDiffShapes_NormalDiff(t *testing.T) {
 	diffContent := "diff --git a/foo.go b/foo.go\n@@ -1,2 +1,2 @@\n context\n-old\n+new\n"
 
 	srv := newTestServer(t,
@@ -54,9 +55,9 @@ func TestGetDiffLines_NormalDiff(t *testing.T) {
 	)
 
 	client := ghclient.NewClient(srv.URL, "test-token")
-	result, err := getDiffLines(client, "owner", "repo", 42)
+	result, hunks, err := getDiffShapes(client, "owner", "repo", 42)
 	if err != nil {
-		t.Fatalf("getDiffLines: %v", err)
+		t.Fatalf("getDiffShapes: %v", err)
 	}
 	if _, ok := result["foo.go"]; !ok {
 		t.Errorf("expected foo.go in result, got keys: %v", keys(result))
@@ -64,11 +65,16 @@ func TestGetDiffLines_NormalDiff(t *testing.T) {
 	if !result["foo.go"][1] || !result["foo.go"][2] {
 		t.Errorf("expected lines 1 and 2 commentable for foo.go, got %v", result["foo.go"])
 	}
+	// Hunks are derived from the same diff fetch — verify they're populated.
+	if got, want := hunks["foo.go"], []ghclient.Hunk{{NewStart: 1, NewEnd: 2}}; len(got) != 1 || got[0] != want[0] {
+		t.Errorf("expected foo.go hunks %v, got %v", want, got)
+	}
 }
 
-// TestGetDiffLines_406FallsBackToFiles verifies that when the diff endpoint
-// returns HTTP 406, getDiffLines falls back to GetPRFiles + DiffLinesFromPatches.
-func TestGetDiffLines_406FallsBackToFiles(t *testing.T) {
+// TestGetDiffShapes_406FallsBackToFiles verifies that when the diff endpoint
+// returns HTTP 406, getDiffShapes falls back to GetPRFiles + DiffLinesFromPatches /
+// DiffHunksFromPatches.
+func TestGetDiffShapes_406FallsBackToFiles(t *testing.T) {
 	filesPayload := jsonPRFiles(t, []map[string]any{
 		{
 			"filename":  "a.go",
@@ -97,14 +103,21 @@ func TestGetDiffLines_406FallsBackToFiles(t *testing.T) {
 	)
 
 	client := ghclient.NewClient(srv.URL, "test-token")
-	result, err := getDiffLines(client, "owner", "repo", 42)
+	result, hunks, err := getDiffShapes(client, "owner", "repo", 42)
 	if err != nil {
-		t.Fatalf("getDiffLines with 406 fallback: %v", err)
+		t.Fatalf("getDiffShapes with 406 fallback: %v", err)
 	}
 
 	// a.go: context line 1, added line 2
 	if _, ok := result["a.go"]; !ok {
 		t.Errorf("expected a.go in fallback result, got: %v", keys(result))
+	}
+	// Hunks come from the same fallback — verify both files have them.
+	if got := hunks["a.go"]; len(got) != 1 || got[0].NewStart != 1 || got[0].NewEnd != 2 {
+		t.Errorf("expected a.go hunk [1-2], got %v", got)
+	}
+	if got := hunks["b.go"]; len(got) != 1 || got[0].NewStart != 1 || got[0].NewEnd != 2 {
+		t.Errorf("expected b.go hunk [1-2], got %v", got)
 	}
 	if !result["a.go"][1] || !result["a.go"][2] {
 		t.Errorf("expected lines 1,2 commentable for a.go, got %v", result["a.go"])
@@ -119,9 +132,9 @@ func TestGetDiffLines_406FallsBackToFiles(t *testing.T) {
 	}
 }
 
-// TestGetDiffLines_406EmptyFileList verifies the fallback works even when the
+// TestGetDiffShapes_406EmptyFileList verifies the fallback works even when the
 // files endpoint returns an empty list (e.g., all files are binary-only).
-func TestGetDiffLines_406EmptyFileList(t *testing.T) {
+func TestGetDiffShapes_406EmptyFileList(t *testing.T) {
 	srv := newTestServer(t,
 		func(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"message":"diff too large"}`, http.StatusNotAcceptable)
@@ -133,18 +146,21 @@ func TestGetDiffLines_406EmptyFileList(t *testing.T) {
 	)
 
 	client := ghclient.NewClient(srv.URL, "test-token")
-	result, err := getDiffLines(client, "owner", "repo", 42)
+	result, hunks, err := getDiffShapes(client, "owner", "repo", 42)
 	if err != nil {
-		t.Fatalf("getDiffLines with 406 + empty files: %v", err)
+		t.Fatalf("getDiffShapes with 406 + empty files: %v", err)
 	}
 	if len(result) != 0 {
 		t.Errorf("expected empty result for empty file list, got: %v", result)
 	}
+	if len(hunks) != 0 {
+		t.Errorf("expected empty hunks for empty file list, got: %v", hunks)
+	}
 }
 
-// TestGetDiffLines_406FilesEndpointFails verifies that when the diff endpoint
+// TestGetDiffShapes_406FilesEndpointFails verifies that when the diff endpoint
 // returns 406 AND the files fallback also fails, the files error is returned.
-func TestGetDiffLines_406FilesEndpointFails(t *testing.T) {
+func TestGetDiffShapes_406FilesEndpointFails(t *testing.T) {
 	srv := newTestServer(t,
 		func(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"message":"diff too large"}`, http.StatusNotAcceptable)
@@ -155,15 +171,15 @@ func TestGetDiffLines_406FilesEndpointFails(t *testing.T) {
 	)
 
 	client := ghclient.NewClient(srv.URL, "test-token")
-	_, err := getDiffLines(client, "owner", "repo", 42)
+	_, _, err := getDiffShapes(client, "owner", "repo", 42)
 	if err == nil {
 		t.Fatal("expected error when 406 and files endpoint also fails, got nil")
 	}
 }
 
-// TestGetDiffLines_OtherErrorPropagates verifies that non-406 errors from the
+// TestGetDiffShapes_OtherErrorPropagates verifies that non-406 errors from the
 // diff endpoint are NOT silently swallowed — the fallback must NOT be triggered.
-func TestGetDiffLines_OtherErrorPropagates(t *testing.T) {
+func TestGetDiffShapes_OtherErrorPropagates(t *testing.T) {
 	filesCallCount := 0
 	srv := newTestServer(t,
 		func(w http.ResponseWriter, r *http.Request) {
@@ -177,7 +193,7 @@ func TestGetDiffLines_OtherErrorPropagates(t *testing.T) {
 	)
 
 	client := ghclient.NewClient(srv.URL, "test-token")
-	_, err := getDiffLines(client, "owner", "repo", 42)
+	_, _, err := getDiffShapes(client, "owner", "repo", 42)
 	if err == nil {
 		t.Fatal("expected error on 404 from diff endpoint, got nil")
 	}
@@ -186,10 +202,10 @@ func TestGetDiffLines_OtherErrorPropagates(t *testing.T) {
 	}
 }
 
-// TestGetDiffLines_406BinaryFile verifies that a 406 fallback handles PRs that
+// TestGetDiffShapes_406BinaryFile verifies that a 406 fallback handles PRs that
 // include binary files (missing patch field) without crashing and produces
 // an empty line set for those files.
-func TestGetDiffLines_406BinaryFile(t *testing.T) {
+func TestGetDiffShapes_406BinaryFile(t *testing.T) {
 	filesPayload := jsonPRFiles(t, []map[string]any{
 		{
 			"filename":  "image.png",
@@ -218,9 +234,9 @@ func TestGetDiffLines_406BinaryFile(t *testing.T) {
 	)
 
 	client := ghclient.NewClient(srv.URL, "test-token")
-	result, err := getDiffLines(client, "owner", "repo", 42)
+	result, hunks, err := getDiffShapes(client, "owner", "repo", 42)
 	if err != nil {
-		t.Fatalf("getDiffLines binary file: %v", err)
+		t.Fatalf("getDiffShapes binary file: %v", err)
 	}
 
 	// binary file should be present but have no commentable lines
@@ -229,6 +245,9 @@ func TestGetDiffLines_406BinaryFile(t *testing.T) {
 	}
 	if len(result["image.png"]) != 0 {
 		t.Errorf("expected no commentable lines for binary file, got %v", result["image.png"])
+	}
+	if len(hunks["image.png"]) != 0 {
+		t.Errorf("expected no hunks for binary file, got %v", hunks["image.png"])
 	}
 
 	// text file should have correct commentable lines

@@ -19,8 +19,8 @@ var ErrPendingReviewAlreadySubmitted = errors.New("pending review already submit
 
 func CreatePendingReview(database *sql.DB, r domain.PendingReview) error {
 	_, err := database.Exec(
-		`INSERT INTO pending_reviews (id, pr_number, owner, repo, commit_sha, diff_lines, run_id) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		r.ID, r.PRNumber, r.Owner, r.Repo, r.CommitSHA, r.DiffLines, r.RunID,
+		`INSERT INTO pending_reviews (id, pr_number, owner, repo, commit_sha, diff_lines, diff_hunks, run_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.ID, r.PRNumber, r.Owner, r.Repo, r.CommitSHA, r.DiffLines, r.DiffHunks, r.RunID,
 	)
 	return err
 }
@@ -35,7 +35,7 @@ func GetPendingReview(database *sql.DB, reviewID string) (*domain.PendingReview,
 	// silently suppress the diff section.
 	row := database.QueryRow(`
 		SELECT id, pr_number, owner, repo, commit_sha,
-		       COALESCE(diff_lines, ''), COALESCE(run_id, ''),
+		       COALESCE(diff_lines, ''), COALESCE(diff_hunks, ''), COALESCE(run_id, ''),
 		       COALESCE(review_body, ''), COALESCE(review_event, ''),
 		       original_review_body, original_review_event
 		FROM pending_reviews WHERE id = ?`, reviewID)
@@ -43,7 +43,7 @@ func GetPendingReview(database *sql.DB, reviewID string) (*domain.PendingReview,
 	var origBody, origEvent sql.NullString
 	err := row.Scan(
 		&r.ID, &r.PRNumber, &r.Owner, &r.Repo, &r.CommitSHA,
-		&r.DiffLines, &r.RunID, &r.ReviewBody, &r.ReviewEvent,
+		&r.DiffLines, &r.DiffHunks, &r.RunID, &r.ReviewBody, &r.ReviewEvent,
 		&origBody, &origEvent,
 	)
 	if err == sql.ErrNoRows {

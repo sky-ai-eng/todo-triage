@@ -1,0 +1,13 @@
+-- Track per-file hunk boundaries on pending reviews so we can validate
+-- that multi-line review comments don't straddle two diff hunks.
+-- GitHub rejects such comments at review submission time with HTTP 422
+-- ("Pull request review thread start line must be part of the same
+-- hunk as the line"); the existing diff_lines column stores a flat
+-- per-file list of commentable lines, which is enough to validate
+-- `line` but loses the hunk grouping needed to validate `start_line`.
+--
+-- Format: JSON object {"path": [[start, end], ...], ...}, one
+-- [start, end] pair per hunk on the new side. Empty string for legacy
+-- rows mid-flight when this migration lands; the validator falls back
+-- to the line-only check (current behaviour) for those rows.
+ALTER TABLE pending_reviews ADD COLUMN diff_hunks TEXT NOT NULL DEFAULT '';
