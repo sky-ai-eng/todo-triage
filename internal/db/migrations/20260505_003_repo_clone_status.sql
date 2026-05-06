@@ -4,10 +4,10 @@
 --   clone_status: 'pending' (default for legacy rows pre-first-attempt),
 --                 'ok' on success, 'failed' on error
 --   clone_error:  raw stderr / preflight output captured at failure time
---   clone_error_kind: 'ssh' when our PreflightSSH against git@github.com
---                     fails (config is using SSH AND the SSH side is the
---                     cause), 'other' otherwise; NULL while clone_status
---                     is 'pending' or 'ok'
+--   clone_error_kind: 'ssh' when our PreflightSSH against the configured
+--                     GitHub SSH host fails (config is using SSH AND the
+--                     SSH side is the cause), 'other' otherwise; NULL
+--                     while clone_status is 'pending' or 'ok'
 --
 -- Existing rows get NULL/default and will be flipped on the next
 -- BootstrapBareClones pass.
