@@ -380,7 +380,15 @@ export default function Settings() {
               </p>
               {sshTestState.kind === 'ok' && (
                 <p className="text-[11px] text-[var(--color-claim)] mt-1.5">
-                  ✓ SSH preflight succeeded — git@github.com is reachable with your key.
+                  ✓ SSH preflight succeeded — git@
+                  {(() => {
+                    try {
+                      return new URL(form.github_base_url).hostname || 'github.com'
+                    } catch {
+                      return 'github.com'
+                    }
+                  })()}{' '}
+                  is reachable with your key.
                 </p>
               )}
               {sshTestState.kind === 'fail' && (
