@@ -231,12 +231,25 @@ export function buildBelt(scene: Scene, spec: BeltSpec, material: PBRMaterial): 
  *  The path is given in world coords with z = floor level (the belt's
  *  top sits at z + CONVEYOR_HEIGHT). For tight curves the belt's inner
  *  edge will be more compressed than the outer; this is normal — pick
- *  a tessellation high enough that the chord error is negligible. */
+ *  a tessellation high enough that the chord error is negligible.
+ *
+ *  Optional `startTangent` / `endTangent` override the per-vertex
+ *  tangent at the first / last waypoint. By default each endpoint
+ *  uses a one-sided chord to its single neighbor, which on a
+ *  tessellated arc differs from the analytic tangent by half the
+ *  per-segment sweep angle and rotates the endpoint cross-section.
+ *  Pass these when the caller knows the true tangent (e.g. an arc's
+ *  radial-perpendicular at its endpoints) and the belt must butt up
+ *  flush with another belt at that seam. World-space xy direction
+ *  vectors; z is ignored. Magnitude doesn't matter — they're
+ *  normalized internally — but they must be non-zero. */
 export function buildCurvedBelt(
   scene: Scene,
   pathPoints: Vector3[],
   pathOffset: number,
   material: PBRMaterial,
+  startTangent?: Vector3,
+  endTangent?: Vector3,
 ): BeltBuild {
   if (pathPoints.length < 2) {
     throw new Error('buildCurvedBelt requires at least 2 waypoints')
@@ -263,14 +276,28 @@ export function buildCurvedBelt(
     const p = pathPoints[i]
 
     // Tangent in xy. Average forward + backward chords at interior
-    // points; one-sided at the endpoints.
+    // points. At endpoints, prefer a caller-supplied tangent if given —
+    // a one-sided chord is off from the analytic tangent of a
+    // tessellated arc by half the per-segment sweep angle, which
+    // rotates the endpoint cross-section and leaves a wedge gap at
+    // the seam with a connecting straight belt.
     let tx: number, ty: number
     if (i === 0) {
-      tx = pathPoints[1].x - pathPoints[0].x
-      ty = pathPoints[1].y - pathPoints[0].y
+      if (startTangent) {
+        tx = startTangent.x
+        ty = startTangent.y
+      } else {
+        tx = pathPoints[1].x - pathPoints[0].x
+        ty = pathPoints[1].y - pathPoints[0].y
+      }
     } else if (i === pathPoints.length - 1) {
-      tx = pathPoints[i].x - pathPoints[i - 1].x
-      ty = pathPoints[i].y - pathPoints[i - 1].y
+      if (endTangent) {
+        tx = endTangent.x
+        ty = endTangent.y
+      } else {
+        tx = pathPoints[i].x - pathPoints[i - 1].x
+        ty = pathPoints[i].y - pathPoints[i - 1].y
+      }
     } else {
       tx = pathPoints[i + 1].x - pathPoints[i - 1].x
       ty = pathPoints[i + 1].y - pathPoints[i - 1].y

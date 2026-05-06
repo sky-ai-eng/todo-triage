@@ -210,7 +210,15 @@ export function buildPoleMesh(
         )
       }
 
-      const belt = buildCurvedBelt(scene, arcPath, pathOffset, beltMaterial)
+      // Items move INTO the cell at the input port and OUT of the cell
+      // at the output port, so the analytic arc tangents at the two
+      // endpoints are exactly the (anti-)OUTWARD directions of those
+      // ports. Hand them to buildCurvedBelt so its endpoint cross-
+      // sections sit perpendicular to the cell wall — flush with the
+      // connecting straight belt's end cross-section.
+      const startTan = OUTWARD[input.direction].scale(-1)
+      const endTan = OUTWARD[output.direction]
+      const belt = buildCurvedBelt(scene, arcPath, pathOffset, beltMaterial, startTan, endTan)
       belt.root.parent = root
       meshes.push(...belt.meshes)
       internalSegment = belt.segment
