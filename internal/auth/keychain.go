@@ -26,7 +26,7 @@ const (
 var envKeys = map[string]string{
 	keyGitHubURL:       "TRIAGE_FACTORY_GITHUB_URL",
 	keyGitHubPAT:       "TRIAGE_FACTORY_GITHUB_PAT",
-	keyGitHubUsername:   "TRIAGE_FACTORY_GITHUB_USERNAME",
+	keyGitHubUsername:  "TRIAGE_FACTORY_GITHUB_USERNAME",
 	keyJiraURL:         "TRIAGE_FACTORY_JIRA_URL",
 	keyJiraPAT:         "TRIAGE_FACTORY_JIRA_PAT",
 	keyJiraDisplayName: "TRIAGE_FACTORY_JIRA_DISPLAY_NAME",
