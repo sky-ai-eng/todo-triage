@@ -48,32 +48,38 @@ func (s *Server) handleRepoProfiles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type repoJSON struct {
-		ID            string  `json:"id"`
-		Owner         string  `json:"owner"`
-		Repo          string  `json:"repo"`
-		Description   string  `json:"description,omitempty"`
-		HasReadme     bool    `json:"has_readme"`
-		HasClaudeMd   bool    `json:"has_claude_md"`
-		HasAgentsMd   bool    `json:"has_agents_md"`
-		ProfileText   string  `json:"profile_text,omitempty"`
-		DefaultBranch string  `json:"default_branch,omitempty"`
-		BaseBranch    string  `json:"base_branch,omitempty"`
-		ProfiledAt    *string `json:"profiled_at,omitempty"`
+		ID             string  `json:"id"`
+		Owner          string  `json:"owner"`
+		Repo           string  `json:"repo"`
+		Description    string  `json:"description,omitempty"`
+		HasReadme      bool    `json:"has_readme"`
+		HasClaudeMd    bool    `json:"has_claude_md"`
+		HasAgentsMd    bool    `json:"has_agents_md"`
+		ProfileText    string  `json:"profile_text,omitempty"`
+		DefaultBranch  string  `json:"default_branch,omitempty"`
+		BaseBranch     string  `json:"base_branch,omitempty"`
+		ProfiledAt     *string `json:"profiled_at,omitempty"`
+		CloneStatus    string  `json:"clone_status,omitempty"`
+		CloneError     string  `json:"clone_error,omitempty"`
+		CloneErrorKind string  `json:"clone_error_kind,omitempty"`
 	}
 
 	result := make([]repoJSON, len(profiles))
 	for i, p := range profiles {
 		result[i] = repoJSON{
-			ID:            p.ID,
-			Owner:         p.Owner,
-			Repo:          p.Repo,
-			Description:   p.Description,
-			HasReadme:     p.HasReadme,
-			HasClaudeMd:   p.HasClaudeMd,
-			HasAgentsMd:   p.HasAgentsMd,
-			ProfileText:   p.ProfileText,
-			DefaultBranch: p.DefaultBranch,
-			BaseBranch:    p.BaseBranch,
+			ID:             p.ID,
+			Owner:          p.Owner,
+			Repo:           p.Repo,
+			Description:    p.Description,
+			HasReadme:      p.HasReadme,
+			HasClaudeMd:    p.HasClaudeMd,
+			HasAgentsMd:    p.HasAgentsMd,
+			ProfileText:    p.ProfileText,
+			DefaultBranch:  p.DefaultBranch,
+			BaseBranch:     p.BaseBranch,
+			CloneStatus:    p.CloneStatus,
+			CloneError:     p.CloneError,
+			CloneErrorKind: p.CloneErrorKind,
 		}
 		if p.ProfiledAt != nil {
 			t := p.ProfiledAt.UTC().Format(time.RFC3339)
