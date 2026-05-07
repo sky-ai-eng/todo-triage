@@ -73,9 +73,6 @@ export default function ProjectBackfillModal({ projectId, projectName, onClose }
         if (cancelled) return
         const list = data.candidates ?? []
         setCandidates(list)
-        // Default-check unassigned candidates; leave already-assigned-
-        // elsewhere unchecked so reclaim is an explicit action.
-        setSelected(new Set(list.filter((c) => !c.current_project_id).map((c) => c.id)))
       } catch (err) {
         if (!cancelled) setLoadError(`Failed to load candidates: ${(err as Error).message}`)
       }
@@ -99,6 +96,22 @@ export default function ProjectBackfillModal({ projectId, projectName, onClose }
       return next
     })
   }, [])
+
+  // Partition candidates into the two sections rendered in the body.
+  // Mirrors CarryOverList's "your tickets" / "available to claim" split:
+  // unclaimed entities go first since they're the common case; entities
+  // already in another project are surfaced below with a caption that
+  // calls out the override behavior.
+  const { unclaimed, claimedElsewhere } = useMemo(() => {
+    const list = candidates ?? []
+    const a: BackfillCandidate[] = []
+    const b: BackfillCandidate[] = []
+    for (const c of list) {
+      if (c.current_project_id) b.push(c)
+      else a.push(c)
+    }
+    return { unclaimed: a, claimedElsewhere: b }
+  }, [candidates])
 
   const selectionCount = selected.size
   const handleBackdropClick = () => {
@@ -182,8 +195,8 @@ export default function ProjectBackfillModal({ projectId, projectName, onClose }
             Claim entities for {projectName}
           </h2>
           <p className="text-[13px] text-text-tertiary mt-1 leading-relaxed">
-            We&rsquo;ve pre-selected open entities not yet assigned to a project. Entities already
-            in another project are listed too — check them to override the existing assignment.
+            Pick the entities you want to claim for this project. Unclaimed entities are listed
+            first; reclaiming one already in another project moves it.
           </p>
         </div>
 
@@ -195,17 +208,28 @@ export default function ProjectBackfillModal({ projectId, projectName, onClose }
             <p className="text-[13px] text-dismiss text-center py-12">{loadError}</p>
           )}
           {!isLoading && !loadError && (candidates?.length ?? 0) > 0 && (
-            <ul className="py-2 space-y-1">
-              {(candidates ?? []).map((c) => (
-                <CandidateRow
-                  key={c.id}
-                  candidate={c}
-                  checked={selected.has(c.id)}
-                  failure={failures[c.id]}
-                  onToggle={() => toggle(c.id)}
+            <div className="py-2 space-y-4">
+              {unclaimed.length > 0 && (
+                <Section
+                  title="Unclaimed"
+                  caption="Open entities not yet assigned to any project."
+                  candidates={unclaimed}
+                  selected={selected}
+                  failures={failures}
+                  onToggle={toggle}
                 />
-              ))}
-            </ul>
+              )}
+              {claimedElsewhere.length > 0 && (
+                <Section
+                  title="In another project"
+                  caption="Already assigned elsewhere — checking one moves it to this project."
+                  candidates={claimedElsewhere}
+                  selected={selected}
+                  failures={failures}
+                  onToggle={toggle}
+                />
+              )}
+            </div>
           )}
         </div>
 
@@ -231,6 +255,44 @@ export default function ProjectBackfillModal({ projectId, projectName, onClose }
           </div>
         </div>
       </div>
+    </div>
+  )
+}
+
+function Section({
+  title,
+  caption,
+  candidates,
+  selected,
+  failures,
+  onToggle,
+}: {
+  title: string
+  caption: string
+  candidates: BackfillCandidate[]
+  selected: Set<string>
+  failures: Record<string, string>
+  onToggle: (id: string) => void
+}) {
+  return (
+    <div>
+      <div className="px-1 pb-1.5">
+        <h3 className="text-[12px] font-semibold text-text-secondary uppercase tracking-wide">
+          {title}
+        </h3>
+        <p className="text-[11px] text-text-tertiary mt-0.5">{caption}</p>
+      </div>
+      <ul className="space-y-0.5">
+        {candidates.map((c) => (
+          <CandidateRow
+            key={c.id}
+            candidate={c}
+            checked={selected.has(c.id)}
+            failure={failures[c.id]}
+            onToggle={() => onToggle(c.id)}
+          />
+        ))}
+      </ul>
     </div>
   )
 }
