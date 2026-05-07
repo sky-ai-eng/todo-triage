@@ -226,3 +226,41 @@ func BuildAllowedTools(selfBin string) string {
 
 	return strings.Join(append(bashPatterns, otherTools...), ",")
 }
+
+// BuildAllowedToolsWithExtras returns the base allowlist merged with
+// extra tool names/patterns from skill and agent definitions. Extras
+// are appended after deduplication against the base set — the base
+// allowlist is the security boundary, extras only ADD surface (MCP
+// tools, Agent subagent spawning, etc.).
+//
+// extras is a comma-separated string (same format as --allowedTools);
+// empty or whitespace-only is a no-op.
+func BuildAllowedToolsWithExtras(selfBin, extras string) string {
+	base := BuildAllowedTools(selfBin)
+	extras = strings.TrimSpace(extras)
+	if extras == "" {
+		return base
+	}
+
+	existing := make(map[string]struct{})
+	for _, t := range strings.Split(base, ",") {
+		existing[t] = struct{}{}
+	}
+
+	var added []string
+	for _, t := range strings.Split(extras, ",") {
+		t = strings.TrimSpace(t)
+		if t == "" {
+			continue
+		}
+		if _, ok := existing[t]; ok {
+			continue
+		}
+		existing[t] = struct{}{}
+		added = append(added, t)
+	}
+	if len(added) == 0 {
+		return base
+	}
+	return base + "," + strings.Join(added, ",")
+}

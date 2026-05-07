@@ -22,6 +22,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/skills"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
@@ -58,6 +59,9 @@ type Spawner struct {
 	drainer               QueueDrainer                               // nil-safe; set post-construction via SetQueueDrainer
 	takenOver             map[string]bool                            // runIDs claimed by Takeover. Sticky-on for the rest of the goroutine's lifetime even after rollback — clearing the entry would let late-firing goroutine gates race the takeover/abort lifecycle. Suppresses every cleanup path in runAgent so Takeover/abortTakeover own the row's terminal state.
 	waitForClassification func(ctx context.Context, entityID string) // SKY-220 hook: blocks until the project classifier has decided this entity, or a timeout/ctx-cancel elapses. Nil-safe (test setups skip it). Wired in main.go via SetWaitForClassification — keeps internal/delegate from importing internal/projectclassify.
+
+	agentToolsOnce  sync.Once
+	agentToolsCache string
 }
 
 func NewSpawner(database *sql.DB, ghClient *ghclient.Client, wsHub *websocket.Hub, model string) *Spawner {
@@ -515,6 +519,8 @@ type runConfig struct {
 	prNumber  int     // PR number (0 for non-PR runs); set so the runAgent defer can call worktree.CleanupPRConfig and reclaim the per-PR remote + branch tracking config the bare repo would otherwise accumulate
 	headRef   string  // PR head ref (empty for non-PR runs); passed to CleanupPRConfig so own-repo branch tracking (branch.<headRef>.*) gets reclaimed alongside fork-only artifacts
 	projectID *string // entity's project assignment (nil for un-assigned); SKY-219 uses this to copy the project's knowledge-base into ./_scratch/project-knowledge/
+
+	extraAllowedTools string // comma-separated extra tools from prompt.AllowedTools + agent scans; merged into --allowedTools at spawn time
 }
 
 // Delegate kicks off an async agent run for any task type.
@@ -526,10 +532,15 @@ func (s *Spawner) Delegate(task domain.Task, explicitPromptID string, triggerTyp
 	s.mu.Unlock()
 
 	// Resolve prompt
-	promptID, mission, err := s.resolvePrompt(task, explicitPromptID)
+	resolved, err := s.resolvePrompt(task, explicitPromptID)
 	if err != nil {
 		return "", err
 	}
+	promptID := resolved.ID
+	mission := resolved.Body
+
+	extraTools := s.collectExtraTools(resolved.AllowedTools)
+
 	if err := db.IncrementPromptUsage(s.database, promptID); err != nil {
 		log.Printf("[delegate] warning: failed to increment usage for prompt %s: %v", promptID, err)
 	}
@@ -598,6 +609,8 @@ func (s *Spawner) Delegate(task domain.Task, explicitPromptID string, triggerTyp
 			s.failRun(runID, task.ID, triggerType, setupErr.Error())
 			return
 		}
+
+		cfg.extraAllowedTools = extraTools
 
 		// Phase 2: run the agent
 		// Announce the run start once setup is done — the agent is about to
@@ -916,7 +929,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		Cwd:          claudeCwd,
 		Model:        model,
 		Message:      prompt,
-		AllowedTools: agentproc.BuildAllowedTools(selfBin),
+		AllowedTools: agentproc.BuildAllowedToolsWithExtras(selfBin, cfg.extraAllowedTools),
 		MaxTurns:     100,
 		ExtraEnv:     extraEnv,
 		TraceID:      runID,
@@ -931,7 +944,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	}
 
 	if outcome != nil && outcome.Result != nil {
-		s.processCompletion(ctx, runID, task, outcome.Result, claudeCwd, outcome.SessionID, model, cfg.owner, cfg.repo, triggerType)
+		s.processCompletion(ctx, runID, task, outcome.Result, claudeCwd, outcome.SessionID, model, cfg.owner, cfg.repo, triggerType, cfg.extraAllowedTools)
 		return
 	}
 
@@ -967,7 +980,7 @@ func (s *Spawner) processCompletion(
 	runID string,
 	task domain.Task,
 	completion *agentproc.Result,
-	claudeCwd, sessionID, model, owner, repo, triggerType string,
+	claudeCwd, sessionID, model, owner, repo, triggerType, extraAllowedTools string,
 ) {
 	// Yield branch (SKY-139): the agent emitted status:"yield" to
 	// pause the run for user input rather than terminating. Skip the
@@ -1004,7 +1017,7 @@ func (s *Spawner) processCompletion(
 	if owner != "" && repo != "" {
 		repoEnv = owner + "/" + repo
 	}
-	completion = s.runMemoryGate(ctx, runID, task.ID, claudeCwd, completion, sessionID, model, repoEnv)
+	completion = s.runMemoryGate(ctx, runID, task.ID, claudeCwd, completion, sessionID, model, repoEnv, extraAllowedTools)
 
 	// Unconditional upsert of the run_memory row at termination
 	// (SKY-204): row presence === "termination passed through the
@@ -1190,6 +1203,14 @@ func (s *Spawner) ResumeAfterYield(runID, agentMessage string) error {
 		owner, repo = parseOwnerRepo(entity.SourceID)
 	}
 
+	// Resolve extra allowed tools from the prompt used for this run.
+	var extraTools string
+	if run.PromptID != "" {
+		if p, err := db.GetPrompt(s.database, run.PromptID); err == nil && p != nil {
+			extraTools = s.collectExtraTools(p.AllowedTools)
+		}
+	}
+
 	// Capture state needed inside the goroutine.
 	sessionID := run.SessionID
 	cwd := run.WorktreePath
@@ -1281,8 +1302,9 @@ func (s *Spawner) ResumeAfterYield(runID, agentMessage string) error {
 		}
 
 		outcome, err := s.ResumeWithMessage(ctx, runID, sessionID, cwd, agentMessage, ResumeOptions{
-			Model:   model,
-			RepoEnv: repoEnv,
+			Model:             model,
+			RepoEnv:           repoEnv,
+			ExtraAllowedTools: extraTools,
 		})
 		if ctx.Err() != nil {
 			// User cancelled mid-resume. ResumeWithMessage SIGKILLed
@@ -1300,7 +1322,7 @@ func (s *Spawner) ResumeAfterYield(runID, agentMessage string) error {
 			return
 		}
 
-		s.processCompletion(ctx, runID, taskCopy, outcome.Completion, cwd, sessionID, model, owner, repo, triggerType)
+		s.processCompletion(ctx, runID, taskCopy, outcome.Completion, cwd, sessionID, model, owner, repo, triggerType, extraTools)
 	}()
 	return nil
 }
@@ -1332,6 +1354,12 @@ type ResumeOptions struct {
 	// Left empty for Jira-no-match runs that never had repo context in
 	// the first place.
 	RepoEnv string
+
+	// ExtraAllowedTools carries the prompt/agent-derived tool extensions
+	// so a resumed session has the same --allowedTools as the initial
+	// invocation. Without this, MCP tools allowed on the first run
+	// would be rejected on resume.
+	ExtraAllowedTools string
 }
 
 // ResumeOutcome bundles what ResumeWithMessage returns: the raw
@@ -1418,7 +1446,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, runID, sessionID, cwd, 
 		Model:        model,
 		SessionID:    sessionID,
 		Message:      message,
-		AllowedTools: agentproc.BuildAllowedTools(selfBin),
+		AllowedTools: agentproc.BuildAllowedToolsWithExtras(selfBin, opts.ExtraAllowedTools),
 		MaxTurns:     100,
 		ExtraEnv:     extraEnv,
 		TraceID:      runID,
@@ -1531,7 +1559,7 @@ func (s *Spawner) runMemoryGate(
 	ctx context.Context,
 	runID, taskID, cwd string,
 	initial *agentproc.Result,
-	sessionID, model, repoEnv string,
+	sessionID, model, repoEnv, extraAllowedTools string,
 ) *agentproc.Result {
 	if memoryFileExists(cwd, runID) {
 		return initial
@@ -1542,7 +1570,7 @@ func (s *Spawner) runMemoryGate(
 		return initial
 	}
 
-	resumeOpts := ResumeOptions{Model: model, RepoEnv: repoEnv}
+	resumeOpts := ResumeOptions{Model: model, RepoEnv: repoEnv, ExtraAllowedTools: extraAllowedTools}
 
 	current := initial
 	for attempt := 1; attempt <= maxMemoryRetries; attempt++ {
@@ -1735,22 +1763,22 @@ func materializeProjectKnowledge(cwd string, projectID *string) {
 	}
 }
 
-// resolvePrompt finds the mission text for a task from an explicit prompt ID.
+// resolvePrompt finds the prompt for a task from an explicit prompt ID.
 // Manual delegation always requires the caller to pick a prompt; auto-delegation
 // supplies the prompt_id from the trigger row.
-func (s *Spawner) resolvePrompt(task domain.Task, explicitPromptID string) (string, string, error) {
+func (s *Spawner) resolvePrompt(task domain.Task, explicitPromptID string) (*domain.Prompt, error) {
 	if explicitPromptID == "" {
-		return "", "", fmt.Errorf("%w — select one from the prompt picker", ErrPromptUnspecified)
+		return nil, fmt.Errorf("%w — select one from the prompt picker", ErrPromptUnspecified)
 	}
 
 	p, err := db.GetPrompt(s.database, explicitPromptID)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to load prompt %s: %w", explicitPromptID, err)
+		return nil, fmt.Errorf("failed to load prompt %s: %w", explicitPromptID, err)
 	}
 	if p == nil {
-		return "", "", fmt.Errorf("%w: %s", ErrPromptNotFound, explicitPromptID)
+		return nil, fmt.Errorf("%w: %s", ErrPromptNotFound, explicitPromptID)
 	}
-	return p.ID, p.Body, nil
+	return p, nil
 }
 
 // handleCancelled finalizes a run that exited via context cancel. wtPath
@@ -1976,6 +2004,23 @@ func buildPrompt(task domain.Task, metadataJSON, mission, scope, toolsRef, binar
 	body := strings.ReplaceAll(mission, "triagefactory exec", binaryPath+" exec")
 	full := body + "\n\n" + ai.EnvelopeTemplate
 	return BuildPromptReplacer(task, metadataJSON, runID, binaryPath, scope, toolsRef).Replace(full)
+}
+
+func (s *Spawner) cachedAgentTools() string {
+	s.agentToolsOnce.Do(func() {
+		s.agentToolsCache = skills.ScanAgentTools()
+	})
+	return s.agentToolsCache
+}
+
+// collectExtraTools merges a prompt's declared allowed_tools with tools
+// discovered from agent definitions (~/.claude/agents/*.md).
+func (s *Spawner) collectExtraTools(promptAllowedTools string) string {
+	agentTools := s.cachedAgentTools()
+	if promptAllowedTools == "" && agentTools == "" {
+		return ""
+	}
+	return skills.NormalizeToolList(promptAllowedTools + "," + agentTools)
 }
 
 func parseOwnerRepo(s string) (string, string) {

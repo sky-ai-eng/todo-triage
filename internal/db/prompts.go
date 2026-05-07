@@ -130,7 +130,7 @@ func SeedPrompt(db *sql.DB, p domain.Prompt) error {
 // ListPrompts returns all non-hidden prompts.
 func ListPrompts(db *sql.DB) ([]domain.Prompt, error) {
 	rows, err := db.Query(`
-		SELECT id, name, body, source, usage_count, created_at, updated_at
+		SELECT id, name, body, source, allowed_tools, usage_count, created_at, updated_at
 		FROM prompts WHERE hidden = 0 ORDER BY updated_at DESC
 	`)
 	if err != nil {
@@ -141,7 +141,7 @@ func ListPrompts(db *sql.DB) ([]domain.Prompt, error) {
 	var prompts []domain.Prompt
 	for rows.Next() {
 		var p domain.Prompt
-		if err := rows.Scan(&p.ID, &p.Name, &p.Body, &p.Source, &p.UsageCount, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.Body, &p.Source, &p.AllowedTools, &p.UsageCount, &p.CreatedAt, &p.UpdatedAt); err != nil {
 			return nil, err
 		}
 		prompts = append(prompts, p)
@@ -153,9 +153,9 @@ func ListPrompts(db *sql.DB) ([]domain.Prompt, error) {
 func GetPrompt(db *sql.DB, id string) (*domain.Prompt, error) {
 	var p domain.Prompt
 	err := db.QueryRow(`
-		SELECT id, name, body, source, usage_count, created_at, updated_at
+		SELECT id, name, body, source, allowed_tools, usage_count, created_at, updated_at
 		FROM prompts WHERE id = ?
-	`, id).Scan(&p.ID, &p.Name, &p.Body, &p.Source, &p.UsageCount, &p.CreatedAt, &p.UpdatedAt)
+	`, id).Scan(&p.ID, &p.Name, &p.Body, &p.Source, &p.AllowedTools, &p.UsageCount, &p.CreatedAt, &p.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -169,9 +169,9 @@ func GetPrompt(db *sql.DB, id string) (*domain.Prompt, error) {
 func CreatePrompt(db *sql.DB, p domain.Prompt) error {
 	now := time.Now()
 	_, err := db.Exec(`
-		INSERT INTO prompts (id, name, body, source, usage_count, created_at, updated_at)
-		VALUES (?, ?, ?, ?, 0, ?, ?)
-	`, p.ID, p.Name, p.Body, p.Source, now, now)
+		INSERT INTO prompts (id, name, body, source, allowed_tools, usage_count, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, 0, ?, ?)
+	`, p.ID, p.Name, p.Body, p.Source, p.AllowedTools, now, now)
 	return err
 }
 
@@ -180,6 +180,16 @@ func UpdatePrompt(db *sql.DB, id, name, body string) error {
 	_, err := db.Exec(`
 		UPDATE prompts SET name = ?, body = ?, user_modified = 1, updated_at = ? WHERE id = ?
 	`, name, body, time.Now(), id)
+	return err
+}
+
+// UpdateImportedPrompt updates name, body, and allowed_tools atomically
+// for an imported (skill-file) prompt. Unlike UpdatePrompt it does NOT
+// set user_modified because the change comes from a file re-import.
+func UpdateImportedPrompt(db *sql.DB, id, name, body, allowedTools string) error {
+	_, err := db.Exec(`
+		UPDATE prompts SET name = ?, body = ?, allowed_tools = ?, updated_at = ? WHERE id = ?
+	`, name, body, allowedTools, time.Now(), id)
 	return err
 }
 
