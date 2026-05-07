@@ -192,6 +192,13 @@ func TestBackfill_BulkAssignPartialSuccess(t *testing.T) {
 		got, _ := db.GetEntity(s.db, e.ID)
 		if got == nil || got.ProjectID == nil || *got.ProjectID != pid {
 			t.Errorf("entity %s not assigned to %s", e.ID, pid)
+			continue
+		}
+		// Manual claim should stamp the sentinel rationale so the
+		// entities panel surfaces "Manually assigned by user" rather
+		// than the empty-fallback. SKY-238.
+		if got.ClassificationRationale != manualAssignmentRationale {
+			t.Errorf("entity %s rationale = %q, want %q", e.ID, got.ClassificationRationale, manualAssignmentRationale)
 		}
 	}
 }

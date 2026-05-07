@@ -122,6 +122,15 @@ func (s *Server) handleBackfillCandidates(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]any{"candidates": out})
 }
 
+// manualAssignmentRationale is stamped on entities reclaimed via the
+// project-creation backfill popup. The entities panel reads this
+// value when rendering the click-to-expand row so a manual claim
+// surfaces as "Manually assigned by user" instead of the
+// no-rationale fallback. Treat as a stable sentinel — the frontend
+// MAY special-case it for distinct styling later, but for now any
+// non-empty rationale renders identically.
+const manualAssignmentRationale = "Manually assigned by user."
+
 type backfillRequest struct {
 	EntityIDs []string `json:"entity_ids"`
 }
@@ -199,11 +208,14 @@ func (s *Server) handleBackfill(w http.ResponseWriter, r *http.Request) {
 			failures = append(failures, backfillFailure{EntityID: eid, Error: "entity is outside this project's scope"})
 			continue
 		}
-		// Empty rationale: this is a human-driven assignment, not a
-		// model-driven one. The classifier's rationale (if any) was set
-		// by the post-poll runner; we don't overwrite with an empty
-		// string when reclaiming.
-		if assignErr := db.AssignEntityProject(s.db, eid, &projectID, ""); assignErr != nil {
+		// Stamp a sentinel rationale so the entities-panel UI (SKY-238)
+		// can render "Manually assigned by user" instead of the
+		// "No rationale recorded" fallback. Overwrites any prior
+		// model-driven rationale on reclaim — the human's pick
+		// supersedes the classifier's vote, and showing the stale
+		// model rationale next to a human-claimed assignment would
+		// be misleading.
+		if assignErr := db.AssignEntityProject(s.db, eid, &projectID, manualAssignmentRationale); assignErr != nil {
 			if errors.Is(assignErr, sql.ErrNoRows) {
 				failures = append(failures, backfillFailure{EntityID: eid, Error: "entity not found"})
 			} else {
