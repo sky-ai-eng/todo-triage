@@ -106,16 +106,31 @@ func UpdateEntityDescription(db *sql.DB, entityID, description string) error {
 // classifier and the project-creation backfill popup write through this
 // helper — a popup-driven assignment is also a "final answer" from the
 // classifier's perspective.
-func AssignEntityProject(database *sql.DB, entityID string, projectID *string) error {
+//
+// rationale is the highest-scoring project's one-sentence explanation
+// (winner OR runner-up), preserved on the row so the UI can surface
+// "why this match" or "closest match was X at score N." Empty string
+// is acceptable for the popup path, where the human is the rationale.
+func AssignEntityProject(database *sql.DB, entityID string, projectID *string, rationale string) error {
 	var arg any
 	if projectID != nil && *projectID != "" {
 		arg = *projectID
 	} else {
 		arg = nil
 	}
+	var rationaleArg any
+	if rationale != "" {
+		rationaleArg = rationale
+	} else {
+		rationaleArg = nil
+	}
 	_, err := database.Exec(`
-		UPDATE entities SET project_id = ?, classified_at = CURRENT_TIMESTAMP WHERE id = ?
-	`, arg, entityID)
+		UPDATE entities
+		SET project_id = ?,
+		    classification_rationale = ?,
+		    classified_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, arg, rationaleArg, entityID)
 	return err
 }
 
@@ -128,7 +143,7 @@ func AssignEntityProject(database *sql.DB, entityID string, projectID *string) e
 func ListUnclassifiedEntities(database *sql.DB) ([]domain.Entity, error) {
 	rows, err := database.Query(`
 		SELECT id, source, source_id, kind, COALESCE(title, ''), COALESCE(url, ''),
-		       COALESCE(snapshot_json, ''), COALESCE(description, ''), state, project_id, created_at, last_polled_at, closed_at
+		       COALESCE(snapshot_json, ''), COALESCE(description, ''), state, project_id, COALESCE(classification_rationale, ''), created_at, last_polled_at, closed_at
 		FROM entities
 		WHERE project_id IS NULL AND classified_at IS NULL AND state = 'active'
 		ORDER BY created_at ASC
@@ -143,7 +158,7 @@ func ListUnclassifiedEntities(database *sql.DB) ([]domain.Entity, error) {
 		var e domain.Entity
 		var projectID sql.NullString
 		if err := rows.Scan(&e.ID, &e.Source, &e.SourceID, &e.Kind, &e.Title, &e.URL,
-			&e.SnapshotJSON, &e.Description, &e.State, &projectID, &e.CreatedAt, &e.LastPolledAt, &e.ClosedAt); err != nil {
+			&e.SnapshotJSON, &e.Description, &e.State, &projectID, &e.ClassificationRationale, &e.CreatedAt, &e.LastPolledAt, &e.ClosedAt); err != nil {
 			return nil, err
 		}
 		if projectID.Valid {
@@ -167,7 +182,7 @@ func CloseEntity(db *sql.DB, entityID string) error {
 func GetEntity(db *sql.DB, id string) (*domain.Entity, error) {
 	row := db.QueryRow(`
 		SELECT id, source, source_id, kind, COALESCE(title, ''), COALESCE(url, ''),
-		       COALESCE(snapshot_json, ''), COALESCE(description, ''), state, project_id, created_at, last_polled_at, closed_at
+		       COALESCE(snapshot_json, ''), COALESCE(description, ''), state, project_id, COALESCE(classification_rationale, ''), created_at, last_polled_at, closed_at
 		FROM entities WHERE id = ?
 	`, id)
 	return scanEntity(row)
@@ -177,7 +192,7 @@ func GetEntity(db *sql.DB, id string) (*domain.Entity, error) {
 func GetEntityBySource(db *sql.DB, source, sourceID string) (*domain.Entity, error) {
 	row := db.QueryRow(`
 		SELECT id, source, source_id, kind, COALESCE(title, ''), COALESCE(url, ''),
-		       COALESCE(snapshot_json, ''), COALESCE(description, ''), state, project_id, created_at, last_polled_at, closed_at
+		       COALESCE(snapshot_json, ''), COALESCE(description, ''), state, project_id, COALESCE(classification_rationale, ''), created_at, last_polled_at, closed_at
 		FROM entities WHERE source = ? AND source_id = ?
 	`, source, sourceID)
 	return scanEntity(row)
@@ -258,7 +273,7 @@ func GetEntityDescriptions(database *sql.DB, ids []string) (map[string]string, e
 func ListActiveEntities(db *sql.DB, source string) ([]domain.Entity, error) {
 	rows, err := db.Query(`
 		SELECT id, source, source_id, kind, COALESCE(title, ''), COALESCE(url, ''),
-		       COALESCE(snapshot_json, ''), COALESCE(description, ''), state, project_id, created_at, last_polled_at, closed_at
+		       COALESCE(snapshot_json, ''), COALESCE(description, ''), state, project_id, COALESCE(classification_rationale, ''), created_at, last_polled_at, closed_at
 		FROM entities WHERE source = ? AND state = 'active'
 		ORDER BY last_polled_at ASC
 	`, source)
@@ -272,7 +287,7 @@ func ListActiveEntities(db *sql.DB, source string) ([]domain.Entity, error) {
 		var e domain.Entity
 		var projectID sql.NullString
 		if err := rows.Scan(&e.ID, &e.Source, &e.SourceID, &e.Kind, &e.Title, &e.URL,
-			&e.SnapshotJSON, &e.Description, &e.State, &projectID, &e.CreatedAt, &e.LastPolledAt, &e.ClosedAt); err != nil {
+			&e.SnapshotJSON, &e.Description, &e.State, &projectID, &e.ClassificationRationale, &e.CreatedAt, &e.LastPolledAt, &e.ClosedAt); err != nil {
 			return nil, err
 		}
 		if projectID.Valid {
@@ -287,7 +302,7 @@ func scanEntity(row *sql.Row) (*domain.Entity, error) {
 	var e domain.Entity
 	var projectID sql.NullString
 	err := row.Scan(&e.ID, &e.Source, &e.SourceID, &e.Kind, &e.Title, &e.URL,
-		&e.SnapshotJSON, &e.Description, &e.State, &projectID, &e.CreatedAt, &e.LastPolledAt, &e.ClosedAt)
+		&e.SnapshotJSON, &e.Description, &e.State, &projectID, &e.ClassificationRationale, &e.CreatedAt, &e.LastPolledAt, &e.ClosedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

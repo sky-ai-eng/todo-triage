@@ -28,7 +28,7 @@ func TestAssignEntityProject_RoundTrips(t *testing.T) {
 		t.Fatalf("create project: %v", err)
 	}
 
-	if err := AssignEntityProject(database, entity.ID, &pid); err != nil {
+	if err := AssignEntityProject(database, entity.ID, &pid, "winning rationale"); err != nil {
 		t.Fatalf("assign: %v", err)
 	}
 
@@ -42,6 +42,9 @@ func TestAssignEntityProject_RoundTrips(t *testing.T) {
 			gotStr = *got.ProjectID
 		}
 		t.Errorf("project_id = %s, want %s", gotStr, pid)
+	}
+	if got.ClassificationRationale != "winning rationale" {
+		t.Errorf("rationale = %q, want %q", got.ClassificationRationale, "winning rationale")
 	}
 }
 
@@ -66,7 +69,9 @@ func TestAssignEntityProject_NilStampsClassified(t *testing.T) {
 
 	// Below-threshold path: nil project_id, but the helper should still
 	// stamp classified_at so the runner doesn't re-fire next cycle.
-	if err := AssignEntityProject(database, entity.ID, nil); err != nil {
+	// Rationale comes from the runner-up project so the UI can surface
+	// "closest match was X at N/100."
+	if err := AssignEntityProject(database, entity.ID, nil, "closest match: Auth at 45/100"); err != nil {
 		t.Fatalf("assign nil: %v", err)
 	}
 
@@ -76,6 +81,15 @@ func TestAssignEntityProject_NilStampsClassified(t *testing.T) {
 	}
 	if containsEntity(post, entity.ID) {
 		t.Errorf("entity still in unclassified queue after AssignEntityProject(nil) — classified_at not stamped")
+	}
+
+	// Rationale is preserved on the row even though project_id is NULL.
+	got, err := GetEntity(database, entity.ID)
+	if err != nil {
+		t.Fatalf("GetEntity: %v", err)
+	}
+	if got.ClassificationRationale != "closest match: Auth at 45/100" {
+		t.Errorf("rationale = %q, want %q", got.ClassificationRationale, "closest match: Auth at 45/100")
 	}
 }
 
@@ -96,7 +110,7 @@ func TestListUnclassifiedEntities_ExcludesAssignedAndClosed(t *testing.T) {
 	}
 
 	pid, _ := CreateProject(database, domain.Project{ID: "px", Name: "X"})
-	if err := AssignEntityProject(database, assigned.ID, &pid); err != nil {
+	if err := AssignEntityProject(database, assigned.ID, &pid, ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := MarkEntityClosed(database, closed.ID); err != nil {

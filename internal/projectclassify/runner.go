@@ -92,7 +92,7 @@ func (r *Runner) run() {
 		// project-creation popup is the path to retro-assign these once
 		// projects exist.
 		for _, e := range entities {
-			if err := db.AssignEntityProject(r.database, e.ID, nil); err != nil {
+			if err := db.AssignEntityProject(r.database, e.ID, nil, ""); err != nil {
 				log.Printf("[classify] stamp classified_at for %s: %v", e.ID, err)
 			}
 		}
@@ -104,6 +104,7 @@ func (r *Runner) run() {
 	assigned := 0
 	for _, e := range entities {
 		winner, votes := Classify(projects, e)
+		rationale := bestRationale(votes)
 		if winner != nil {
 			log.Printf("[classify] %s -> project %s (winning vote)", e.ID, *winner)
 			assigned++
@@ -116,9 +117,28 @@ func (r *Runner) run() {
 			}
 			log.Printf("[classify] %s unassigned (best score: %d, threshold: %d)", e.ID, best, ConfidenceThreshold)
 		}
-		if err := db.AssignEntityProject(r.database, e.ID, winner); err != nil {
+		if err := db.AssignEntityProject(r.database, e.ID, winner, rationale); err != nil {
 			log.Printf("[classify] assign %s: %v", e.ID, err)
 		}
 	}
 	log.Printf("[classify] cycle complete: %d/%d entities assigned", assigned, len(entities))
+}
+
+// bestRationale picks the rationale of the highest-scoring vote (winner
+// or runner-up), so unassigned entities still record "closest match was
+// X at N/100, because: …". Errored votes are skipped. Returns empty
+// string if no successful vote exists.
+func bestRationale(votes []Vote) string {
+	bestScore := -1
+	best := ""
+	for _, v := range votes {
+		if v.Err != nil {
+			continue
+		}
+		if v.Score > bestScore {
+			bestScore = v.Score
+			best = v.Rationale
+		}
+	}
+	return best
 }
