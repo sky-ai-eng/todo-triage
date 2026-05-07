@@ -57,6 +57,37 @@ func (p GitHubPRReviewRequestedPredicate) Matches(m GitHubPRReviewRequestedMetad
 }
 
 // -----------------------------------------------------------------------------
+// review_request_removed — "my review request was removed"
+// -----------------------------------------------------------------------------
+
+type GitHubPRReviewRequestRemovedMetadata struct {
+	Author       string   `json:"author"`
+	AuthorIsSelf bool     `json:"author_is_self"`
+	Repo         string   `json:"repo"`
+	PRNumber     int      `json:"pr_number"`
+	IsDraft      bool     `json:"is_draft"`
+	HeadSHA      string   `json:"head_sha"`
+	Labels       []string `json:"labels"`
+	Title        string   `json:"title"`
+}
+
+type GitHubPRReviewRequestRemovedPredicate struct {
+	AuthorIsSelf *bool   `json:"author_is_self,omitempty" doc:"Match PRs authored by you."`
+	Author       *string `json:"author,omitempty" doc:"Exact-match on PR author login."`
+	Repo         *string `json:"repo,omitempty" doc:"Scope to a specific repo (owner/name)."`
+	IsDraft      *bool   `json:"is_draft,omitempty" doc:"Match draft vs. ready-for-review PRs."`
+	HasLabel     *string `json:"has_label,omitempty" doc:"Require the PR to currently bear this label."`
+}
+
+func (p GitHubPRReviewRequestRemovedPredicate) Matches(m GitHubPRReviewRequestRemovedMetadata) bool {
+	return boolEq(p.AuthorIsSelf, m.AuthorIsSelf) &&
+		strEq(p.Author, m.Author) &&
+		strEq(p.Repo, m.Repo) &&
+		boolEq(p.IsDraft, m.IsDraft) &&
+		hasLabel(p.HasLabel, m.Labels)
+}
+
+// -----------------------------------------------------------------------------
 // review_submitted — "I reviewed someone else's PR"
 // -----------------------------------------------------------------------------
 
@@ -595,6 +626,7 @@ func (p GitHubPRMentionedPredicate) Matches(m GitHubPRMentionedMetadata) bool {
 
 func init() {
 	Register(newSchema[GitHubPRReviewRequestedMetadata, GitHubPRReviewRequestedPredicate](domain.EventGitHubPRReviewRequested))
+	Register(newSchema[GitHubPRReviewRequestRemovedMetadata, GitHubPRReviewRequestRemovedPredicate](domain.EventGitHubPRReviewRequestRemoved))
 	Register(newSchema[GitHubPRReviewSubmittedMetadata, GitHubPRReviewSubmittedPredicate](domain.EventGitHubPRReviewSubmitted))
 
 	Register(newSchema[GitHubPRReviewChangesRequestedMetadata, GitHubPRReviewChangesRequestedPredicate](domain.EventGitHubPRReviewChangesRequested))

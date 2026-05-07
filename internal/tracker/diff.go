@@ -231,6 +231,13 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, us
 				IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA,
 				Labels: curr.Labels, Title: curr.Title,
 			})
+		} else if prevMatched && !currMatched {
+			emit(domain.EventGitHubPRReviewRequestRemoved, "", events.GitHubPRReviewRequestRemovedMetadata{
+				Author: curr.Author, AuthorIsSelf: authorIsSelf,
+				Repo: curr.Repo, PRNumber: curr.Number,
+				IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA,
+				Labels: curr.Labels, Title: curr.Title,
+			})
 		}
 	}
 

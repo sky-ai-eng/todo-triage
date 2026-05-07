@@ -222,6 +222,7 @@ func TestEntityTerminatingEvents(t *testing.T) {
 		domain.EventGitHubPRCICheckFailed,
 		domain.EventGitHubPRNewCommits,
 		domain.EventGitHubPRReviewRequested,
+		domain.EventGitHubPRReviewRequestRemoved,
 		domain.EventJiraIssueAssigned,
 	}
 	for _, et := range nonTerminators {

@@ -134,6 +134,14 @@ func (r *Router) HandleEvent(evt domain.Event) {
 		return
 	}
 
+	// Inline close checks run unconditionally — they are lifecycle signals
+	// that close stale tasks. They must fire even when no task_rules or
+	// triggers match the event, because close-signal events (ci_check_passed,
+	// review_submitted, review_request_removed) are not task-creating events.
+	if r.runInlineCloseChecks(evt, entityID) {
+		r.ws.Broadcast(websocket.Event{Type: "tasks_updated", Data: map[string]any{}})
+	}
+
 	// became_atomic is the belated-discovery path for parents whose
 	// subtasks just closed. Only create a task when none exists on the
 	// entity — otherwise an atomic ticket that gained and then lost
@@ -256,8 +264,6 @@ func (r *Router) HandleEvent(evt domain.Event) {
 		}
 	}
 
-	// Step 10: Inline close checks.
-	r.runInlineCloseChecks(evt, entityID)
 }
 
 // tryAutoDelegate decides whether a matched (task, trigger) fires now or
@@ -730,102 +736,108 @@ func (r *Router) closeTaskWithAudit(taskID, closingEventID, closeReason, closeEv
 	return nil
 }
 
-func (r *Router) runInlineCloseChecks(evt domain.Event, entityID string) {
+func (r *Router) runInlineCloseChecks(evt domain.Event, entityID string) bool {
 	switch evt.EventType {
 	case domain.EventGitHubPRCICheckPassed:
-		r.closeCheckCIPassed(evt, entityID)
+		return r.closeCheckCIPassed(evt, entityID)
 	case domain.EventGitHubPRReviewApproved,
 		domain.EventGitHubPRReviewCommented,
 		domain.EventGitHubPRReviewDismissed:
-		r.closeCheckReviewResolved(evt, entityID)
+		return r.closeCheckReviewResolved(evt, entityID)
 	case domain.EventGitHubPRReviewSubmitted:
-		r.closeCheckReviewSubmitted(evt, entityID)
+		return r.closeCheckReviewSubmitted(evt, entityID)
+	case domain.EventGitHubPRReviewRequestRemoved:
+		return r.closeCheckReviewRequestRemoved(evt, entityID)
 	case domain.EventJiraIssueAssigned:
-		r.closeCheckJiraReassigned(evt, entityID)
+		return r.closeCheckJiraReassigned(evt, entityID)
 	}
+	return false
 }
 
 // closeCheckCIPassed: if no failing check-runs remain on this entity at the
 // latest SHA, close active ci_check_failed tasks.
-func (r *Router) closeCheckCIPassed(evt domain.Event, entityID string) {
+func (r *Router) closeCheckCIPassed(evt domain.Event, entityID string) bool {
 	// Parse metadata to get head_sha.
 	var meta events.GitHubPRCICheckPassedMetadata
 	if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {
-		return
+		return false
 	}
 
 	// Query: any active ci_check_failed tasks still open on this entity?
 	failedTasks, err := dbpkg.FindActiveTasksByEntityAndType(r.db, entityID, domain.EventGitHubPRCICheckFailed)
 	if err != nil || len(failedTasks) == 0 {
-		return
+		return false
 	}
 
 	// Check entity snapshot for remaining failures at the current SHA.
 	entity, err := dbpkg.GetEntity(r.db, entityID)
 	if err != nil || entity == nil {
-		return
+		return false
 	}
 	var snap domain.PRSnapshot
 	if err := json.Unmarshal([]byte(entity.SnapshotJSON), &snap); err != nil {
-		return
+		return false
 	}
 
 	// If any check is still failing at the latest SHA, don't close.
 	for _, cr := range snap.CheckRuns {
 		if domain.IsFailingConclusion(cr.Conclusion) {
-			return
+			return false
 		}
 	}
 
 	// All green — close the failure tasks.
+	closed := false
 	for _, t := range failedTasks {
 		if err := r.closeTaskWithAudit(t.ID, evt.ID, "auto_closed_by_event", domain.EventGitHubPRCICheckPassed); err != nil {
 			log.Printf("[router] failed to close ci_check_failed task %s: %v", t.ID, err)
 		} else {
 			log.Printf("[router] inline-closed task %s (ci_check_failed → ci_check_passed)", t.ID)
+			closed = true
 		}
 	}
+	return closed
 }
 
 // closeCheckReviewResolved: if the reviewer's prior state was
 // changes_requested and no other reviewer still has outstanding
 // changes_requested, close active review_changes_requested tasks.
-func (r *Router) closeCheckReviewResolved(evt domain.Event, entityID string) {
+func (r *Router) closeCheckReviewResolved(evt domain.Event, entityID string) bool {
 	// We need to know which reviewer just changed state. Parse metadata.
 	var reviewer string
 	switch evt.EventType {
 	case domain.EventGitHubPRReviewApproved:
 		var meta events.GitHubPRReviewApprovedMetadata
 		if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {
-			return
+			return false
 		}
 		reviewer = meta.Reviewer
 	case domain.EventGitHubPRReviewCommented:
 		var meta events.GitHubPRReviewCommentedMetadata
 		if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {
-			return
+			return false
 		}
 		reviewer = meta.Reviewer
 	case domain.EventGitHubPRReviewDismissed:
 		var meta events.GitHubPRReviewDismissedMetadata
 		if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {
-			return
+			return false
 		}
 		reviewer = meta.Reviewer
 	}
 	if reviewer == "" {
-		return
+		return false
 	}
 
 	// Check entity snapshot: does this reviewer's prior state include
 	// changes_requested, and is no other reviewer still requesting changes?
 	entity, err := dbpkg.GetEntity(r.db, entityID)
 	if err != nil || entity == nil {
-		return
+		return false
 	}
 	var snap domain.PRSnapshot
 	if err := json.Unmarshal([]byte(entity.SnapshotJSON), &snap); err != nil {
-		return
+		return false
 	}
 
 	anyOutstandingChanges := false
@@ -836,60 +848,87 @@ func (r *Router) closeCheckReviewResolved(evt domain.Event, entityID string) {
 		}
 	}
 	if anyOutstandingChanges {
-		return
+		return false
 	}
 
 	// Close review_changes_requested tasks on this entity.
 	tasks, err := dbpkg.FindActiveTasksByEntityAndType(r.db, entityID, domain.EventGitHubPRReviewChangesRequested)
 	if err != nil {
-		return
+		return false
 	}
+	closed := false
 	for _, t := range tasks {
 		if err := r.closeTaskWithAudit(t.ID, evt.ID, "auto_closed_by_event", evt.EventType); err != nil {
 			log.Printf("[router] failed to close changes_requested task %s: %v", t.ID, err)
 		} else {
 			log.Printf("[router] inline-closed task %s (review resolved by %s)", t.ID, reviewer)
+			closed = true
 		}
 	}
+	return closed
 }
 
 // closeCheckReviewSubmitted: if I submitted my review, close any active
 // review_requested task on this entity (the request is satisfied).
-func (r *Router) closeCheckReviewSubmitted(evt domain.Event, entityID string) {
+func (r *Router) closeCheckReviewSubmitted(evt domain.Event, entityID string) bool {
 	var meta events.GitHubPRReviewSubmittedMetadata
 	if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {
-		return
+		return false
 	}
 	if !meta.ReviewerIsSelf {
-		return
+		return false
 	}
 
 	tasks, err := dbpkg.FindActiveTasksByEntityAndType(r.db, entityID, domain.EventGitHubPRReviewRequested)
 	if err != nil {
-		return
+		return false
 	}
+	closed := false
 	for _, t := range tasks {
 		if err := r.closeTaskWithAudit(t.ID, evt.ID, "auto_closed_by_event", domain.EventGitHubPRReviewSubmitted); err != nil {
 			log.Printf("[router] failed to close review_requested task %s: %v", t.ID, err)
 		} else {
 			log.Printf("[router] inline-closed task %s (review submitted by self)", t.ID)
+			closed = true
 		}
 	}
+	return closed
+}
+
+// closeCheckReviewRequestRemoved: user was removed from the PR's requested-
+// reviewers list (reviewed or request rescinded). Close any active
+// review_requested task on this entity.
+func (r *Router) closeCheckReviewRequestRemoved(evt domain.Event, entityID string) bool {
+	tasks, err := dbpkg.FindActiveTasksByEntityAndType(r.db, entityID, domain.EventGitHubPRReviewRequested)
+	if err != nil {
+		return false
+	}
+	closed := false
+	for _, t := range tasks {
+		if err := r.closeTaskWithAudit(t.ID, evt.ID, "auto_closed_by_event", domain.EventGitHubPRReviewRequestRemoved); err != nil {
+			log.Printf("[router] failed to close review_requested task %s: %v", t.ID, err)
+		} else {
+			log.Printf("[router] inline-closed task %s (review request removed)", t.ID)
+			closed = true
+		}
+	}
+	return closed
 }
 
 // closeCheckJiraReassigned: when a Jira issue is assigned to someone who is
 // NOT self, close any active jira:issue:assigned or jira:issue:available
 // tasks on this entity.
-func (r *Router) closeCheckJiraReassigned(evt domain.Event, entityID string) {
+func (r *Router) closeCheckJiraReassigned(evt domain.Event, entityID string) bool {
 	var meta events.JiraIssueAssignedMetadata
 	if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {
-		return
+		return false
 	}
 	if meta.AssigneeIsSelf {
-		return // assigned to me — not a reassignment-away
+		return false // assigned to me — not a reassignment-away
 	}
 
 	// Close active assigned tasks.
+	closed := false
 	for _, eventType := range []string{domain.EventJiraIssueAssigned, domain.EventJiraIssueAvailable} {
 		tasks, err := dbpkg.FindActiveTasksByEntityAndType(r.db, entityID, eventType)
 		if err != nil {
@@ -900,9 +939,11 @@ func (r *Router) closeCheckJiraReassigned(evt domain.Event, entityID string) {
 				log.Printf("[router] failed to close %s task %s: %v", eventType, t.ID, err)
 			} else {
 				log.Printf("[router] inline-closed task %s (jira reassigned away)", t.ID)
+				closed = true
 			}
 		}
 	}
+	return closed
 }
 
 // --- Predicate matching ---

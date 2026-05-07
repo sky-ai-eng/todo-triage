@@ -561,6 +561,69 @@ func TestDiff_ReviewRequested_SelfAuthoredViaTeam_NoEvent(t *testing.T) {
 	}
 }
 
+// --- Review request removed ---------------------------------------------------
+
+func TestDiff_ReviewRequestRemoved_Direct(t *testing.T) {
+	prev := basePRSnapshot()
+	prev.Author = "bob"
+	prev.ReviewRequests = []string{testUser}
+	curr := basePRSnapshot()
+	curr.Author = "bob"
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
+	if findEvent(evts, domain.EventGitHubPRReviewRequestRemoved) == nil {
+		t.Error("expected review_request_removed when user disappears from ReviewRequests")
+	}
+}
+
+func TestDiff_ReviewRequestRemoved_ViaTeam(t *testing.T) {
+	prev := basePRSnapshot()
+	prev.Author = "bob"
+	prev.ReviewRequests = []string{"eng/pulsar"}
+	curr := basePRSnapshot()
+	curr.Author = "bob"
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, []string{"eng/pulsar"})
+	if findEvent(evts, domain.EventGitHubPRReviewRequestRemoved) == nil {
+		t.Error("expected review_request_removed when user's team disappears from ReviewRequests")
+	}
+}
+
+func TestDiff_ReviewRequestRemoved_NeverPresent_NoEvent(t *testing.T) {
+	prev := basePRSnapshot()
+	curr := basePRSnapshot()
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
+	if findEvent(evts, domain.EventGitHubPRReviewRequestRemoved) != nil {
+		t.Error("should not emit review_request_removed when user was never in ReviewRequests")
+	}
+}
+
+func TestDiff_ReviewRequestRemoved_StillPresent_NoEvent(t *testing.T) {
+	prev := basePRSnapshot()
+	prev.ReviewRequests = []string{testUser}
+	curr := basePRSnapshot()
+	curr.ReviewRequests = []string{testUser}
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
+	if findEvent(evts, domain.EventGitHubPRReviewRequestRemoved) != nil {
+		t.Error("should not emit review_request_removed when user is still in ReviewRequests")
+	}
+}
+
+func TestDiff_ReviewRequestRemoved_SelfAuthored_NoEvent(t *testing.T) {
+	prev := basePRSnapshot()
+	prev.Author = testUser
+	prev.ReviewRequests = []string{"eng/pulsar"}
+	curr := basePRSnapshot()
+	curr.Author = testUser
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, []string{"eng/pulsar"})
+	if findEvent(evts, domain.EventGitHubPRReviewRequestRemoved) != nil {
+		t.Error("should not emit review_request_removed on self-authored PR")
+	}
+}
+
 // --- Labels -----------------------------------------------------------------
 
 func TestDiff_Labels_AddAndRemove(t *testing.T) {
