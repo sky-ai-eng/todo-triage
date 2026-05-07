@@ -157,7 +157,10 @@ func TestBackfillCandidates_ExcludesAlreadyInProject(t *testing.T) {
 func TestBackfill_BulkAssignPartialSuccess(t *testing.T) {
 	s := newTestServer(t)
 	seedConfiguredRepo(t, s, "owner", "repo")
-	pid, _ := db.CreateProject(s.db, domain.Project{Name: "P", PinnedRepos: []string{"owner/repo"}})
+	pid, err := db.CreateProject(s.db, domain.Project{Name: "P", PinnedRepos: []string{"owner/repo"}})
+	if err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
 	a := mustEntity(t, s.db, "github", "owner/repo#1", "pr", "A")
 	b := mustEntity(t, s.db, "github", "owner/repo#2", "pr", "B")
 
