@@ -12,6 +12,28 @@ set -euo pipefail
 
 echo "Cleaning Triage Factory local state..."
 
+# Resolve server.takeover_dir from the settings YAML blob BEFORE wiping
+# the DB. Default is ~/.triagefactory/takeovers, but a user can redirect
+# it (cmd/uninstall reads the same setting via cfg.Server.ResolvedTakeoverDir).
+# omitempty means an absent or empty key falls back to the default.
+takeover_dir="$HOME/.triagefactory/takeovers"
+if command -v sqlite3 >/dev/null 2>&1 && [ -f ~/.triagefactory/triagefactory.db ]; then
+  yaml_blob=$(sqlite3 ~/.triagefactory/triagefactory.db "SELECT data FROM settings WHERE id=1" 2>/dev/null || true)
+  if [ -n "$yaml_blob" ]; then
+    custom=$(printf '%s\n' "$yaml_blob" | sed -n 's/^[[:space:]]*takeover_dir:[[:space:]]*//p' | head -n 1 | tr -d '"' | tr -d "'")
+    if [ -n "$custom" ]; then
+      case "$custom" in
+        "~/"*)
+          takeover_dir="$HOME/${custom#~/}"
+          ;;
+        /*)
+          takeover_dir="$custom"
+          ;;
+      esac
+    fi
+  fi
+fi
+
 # Database
 rm -f ~/.triagefactory/triagefactory.db ~/.triagefactory/triagefactory.db-wal ~/.triagefactory/triagefactory.db-shm
 echo "  removed database"
@@ -35,8 +57,20 @@ fi
 # get pruned. Wiping projects/ now and re-pruning each bare's
 # worktrees/ tracker below closes that loop.
 if [ -d ~/.triagefactory/projects ]; then
+  # The Curator runs Claude Code with cwd =
+  # ~/.triagefactory/projects/<id>/, which makes Claude Code create
+  # ~/.claude/projects/<encoded(<cwd>)>/<sessionID>.jsonl. Walk each
+  # project ID dir and delete its encoded session entry BEFORE removing
+  # the projects tree (mirrors removeClaudeProjectsForCurator in
+  # cmd/uninstall/uninstall.go — keep the two in sync).
+  for dir in ~/.triagefactory/projects/*; do
+    [ -d "$dir" ] || continue
+    resolved=$(cd "$dir" && pwd -P) || continue
+    encoded=$(printf '%s' "$resolved" | tr '/.' '-')
+    rm -rf ~/.claude/projects/"$encoded"
+  done
   rm -rf ~/.triagefactory/projects
-  echo "  removed projects dir"
+  echo "  removed projects dir and any curator session JSONLs"
 fi
 
 # Prune stale worktree registrations from every preserved bare. The
@@ -71,8 +105,8 @@ fi
 # and slash-only encoding would silently miss the project dir Claude
 # Code actually uses. See encodeClaudeProjectDir in
 # internal/worktree/worktree.go for the full story.
-if [ -d ~/.triagefactory/takeovers ]; then
-  for dir in ~/.triagefactory/takeovers/run-*; do
+if [ -d "$takeover_dir" ]; then
+  for dir in "$takeover_dir"/run-*; do
     [ -d "$dir" ] || continue
     # `cd && pwd -P` is the POSIX-portable way to get the symlink-
     # resolved path; `realpath` isn't on default macOS.
@@ -85,12 +119,15 @@ if [ -d ~/.triagefactory/takeovers ]; then
     encoded=$(printf '%s' "$resolved" | tr '/.' '-')
     rm -rf ~/.claude/projects/"$encoded"
   done
-  rm -rf ~/.triagefactory/takeovers
-  echo "  removed takeovers and their session JSONLs"
+  rm -rf "$takeover_dir"
+  echo "  removed takeovers and their session JSONLs ($takeover_dir)"
 fi
 
-# Keychain
-for key in github_url github_pat github_username jira_url jira_pat; do
+# Keychain — keep this list in sync with auth.Clear() in
+# internal/auth/keychain.go (the canonical list, used by `triagefactory
+# uninstall`). Drift between the two means stale entries linger after
+# clean-slate; jira_display_name was the most recent miss.
+for key in github_url github_pat github_username jira_url jira_pat jira_display_name; do
   security delete-generic-password -s triagefactory -a "$key" 2>/dev/null && echo "  removed keychain: $key" || true
 done
 
