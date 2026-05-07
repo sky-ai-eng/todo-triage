@@ -45,7 +45,7 @@ func (s *Server) handleProjectEntities(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	entities, err := db.ListActiveEntitiesByProject(s.db, projectID)
+	entities, err := db.ListProjectPanelEntities(s.db, projectID)
 	if err != nil {
 		log.Printf("[entities] list for project %s: %v", projectID, err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load entities"})

@@ -138,10 +138,25 @@ interface RowProps {
 
 function EntityRow({ entity, expanded, onToggle }: RowProps) {
   const hasRationale = !!entity.classification_rationale
+  // Unlike ProjectBackfillModal's row, this row has no inner native
+  // control — it IS the toggle. Add keyboard equivalents (Enter/Space)
+  // and the proper ARIA attrs so screen-reader + keyboard users get
+  // the same expand-to-reveal-rationale interaction mouse users have.
+  // The inner external-link <a> remains independently clickable; its
+  // onClick stopPropagation prevents row toggle on link clicks.
   return (
     <li
-      className="px-3 py-2 rounded-xl hover:bg-black/[0.02] transition-colors cursor-pointer"
+      className="px-3 py-2 rounded-xl hover:bg-black/[0.02] focus:bg-black/[0.02] focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 transition-colors cursor-pointer"
       onClick={onToggle}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          onToggle()
+        }
+      }}
+      role="button"
+      tabIndex={0}
+      aria-expanded={expanded}
     >
       <div className="flex items-center gap-2.5 text-[13px] min-w-0">
         <span className="text-text-tertiary text-[10px] uppercase tracking-wide w-9 shrink-0">
