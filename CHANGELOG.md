@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.8.1](https://github.com/sky-ai-eng/triage-factory/compare/v1.8.0...v1.8.1) (2026-05-07)
+
+
+### Bug Fixes
+
+* **backfill:** default all checkboxes off, split sections ([#120](https://github.com/sky-ai-eng/triage-factory/issues/120)) ([acaa696](https://github.com/sky-ai-eng/triage-factory/commit/acaa696210467e0c25b611f42e6cadeca925b638))
+
 ## [1.8.0](https://github.com/sky-ai-eng/triage-factory/compare/v1.7.1...v1.8.0) (2026-05-07)
 
 
