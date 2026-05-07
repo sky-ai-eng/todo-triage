@@ -4,7 +4,6 @@
 -- reach the headless claude process.
 --
 -- Format: comma-separated tool names/patterns, same shape as the
--- --allowedTools CLI flag. Empty string = no extras. NULL treated as
--- empty (COALESCE in reads).
+-- --allowedTools CLI flag. NOT NULL DEFAULT '' — empty string = no extras.
 
 ALTER TABLE prompts ADD COLUMN allowed_tools TEXT NOT NULL DEFAULT '';

@@ -90,7 +90,7 @@ func ImportAll(database *sql.DB) ImportResult {
 	if err != nil {
 		result.Errors = append(result.Errors, "deduplicate imported prompts: "+err.Error())
 	} else if hiddenDuplicates > 0 {
-		log.Printf("[skills] deduplicated %d already-imported skills (same name/body)", hiddenDuplicates)
+		log.Printf("[skills] deduplicated %d already-imported skills (same name/body/allowed_tools)", hiddenDuplicates)
 	}
 
 	if result.Imported > 0 {
@@ -137,7 +137,7 @@ func importSkillFile(database *sql.DB, path string, canonicalPath string) error 
 
 	// Skip creating a duplicate imported prompt if the same skill body/name is
 	// already present from another path.
-	duplicateID, err := findVisibleImportedPromptByContent(database, meta.Name, meta.Body)
+	duplicateID, err := findVisibleImportedPromptByContent(database, meta.Name, meta.Body, meta.AllowedTools)
 	if err != nil {
 		return err
 	}
@@ -348,20 +348,20 @@ func promptIDForPath(path string) string {
 	return fmt.Sprintf("imported-%x", sha256.Sum256([]byte(path)))[:20]
 }
 
-func promptFingerprint(name, body string) string {
-	sum := sha256.Sum256([]byte(name + "\x00" + body))
+func promptFingerprint(name, body, allowedTools string) string {
+	sum := sha256.Sum256([]byte(name + "\x00" + body + "\x00" + allowedTools))
 	return fmt.Sprintf("%x", sum)
 }
 
-func findVisibleImportedPromptByContent(database *sql.DB, name, body string) (string, error) {
+func findVisibleImportedPromptByContent(database *sql.DB, name, body, allowedTools string) (string, error) {
 	var id string
 	err := database.QueryRow(`
 		SELECT id
 		FROM prompts
-		WHERE source = 'imported' AND hidden = 0 AND name = ? AND body = ?
+		WHERE source = 'imported' AND hidden = 0 AND name = ? AND body = ? AND allowed_tools = ?
 		ORDER BY updated_at DESC
 		LIMIT 1
-	`, name, body).Scan(&id)
+	`, name, body, allowedTools).Scan(&id)
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
@@ -373,11 +373,11 @@ func findVisibleImportedPromptByContent(database *sql.DB, name, body string) (st
 
 func hideDuplicateImportedPrompts(database *sql.DB) (int, error) {
 	rows, err := database.Query(`
-		SELECT p.id, p.name, p.body, COUNT(t.id) AS trigger_count
+		SELECT p.id, p.name, p.body, p.allowed_tools, COUNT(t.id) AS trigger_count
 		FROM prompts p
 		LEFT JOIN prompt_triggers t ON t.prompt_id = p.id
 		WHERE p.source = 'imported' AND p.hidden = 0
-		GROUP BY p.id, p.name, p.body, p.updated_at, p.created_at
+		GROUP BY p.id, p.name, p.body, p.allowed_tools, p.updated_at, p.created_at
 		ORDER BY trigger_count DESC, p.updated_at DESC, p.created_at DESC, p.id ASC
 	`)
 	if err != nil {
@@ -389,17 +389,18 @@ func hideDuplicateImportedPrompts(database *sql.DB) (int, error) {
 
 	for rows.Next() {
 		var (
-			id   string
-			name string
-			body string
-			refs int
+			id           string
+			name         string
+			body         string
+			allowedTools string
+			refs         int
 		)
-		if err := rows.Scan(&id, &name, &body, &refs); err != nil {
+		if err := rows.Scan(&id, &name, &body, &allowedTools, &refs); err != nil {
 			_ = rows.Close()
 			return 0, err
 		}
 
-		fingerprint := promptFingerprint(name, body)
+		fingerprint := promptFingerprint(name, body, allowedTools)
 		if _, ok := seen[fingerprint]; !ok {
 			seen[fingerprint] = struct{}{}
 			continue

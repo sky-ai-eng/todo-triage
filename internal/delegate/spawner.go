@@ -59,6 +59,9 @@ type Spawner struct {
 	drainer               QueueDrainer                               // nil-safe; set post-construction via SetQueueDrainer
 	takenOver             map[string]bool                            // runIDs claimed by Takeover. Sticky-on for the rest of the goroutine's lifetime even after rollback — clearing the entry would let late-firing goroutine gates race the takeover/abort lifecycle. Suppresses every cleanup path in runAgent so Takeover/abortTakeover own the row's terminal state.
 	waitForClassification func(ctx context.Context, entityID string) // SKY-220 hook: blocks until the project classifier has decided this entity, or a timeout/ctx-cancel elapses. Nil-safe (test setups skip it). Wired in main.go via SetWaitForClassification — keeps internal/delegate from importing internal/projectclassify.
+
+	agentToolsOnce  sync.Once
+	agentToolsCache string
 }
 
 func NewSpawner(database *sql.DB, ghClient *ghclient.Client, wsHub *websocket.Hub, model string) *Spawner {
@@ -536,7 +539,7 @@ func (s *Spawner) Delegate(task domain.Task, explicitPromptID string, triggerTyp
 	promptID := resolved.ID
 	mission := resolved.Body
 
-	extraTools := collectExtraTools(resolved.AllowedTools)
+	extraTools := s.collectExtraTools(resolved.AllowedTools)
 
 	if err := db.IncrementPromptUsage(s.database, promptID); err != nil {
 		log.Printf("[delegate] warning: failed to increment usage for prompt %s: %v", promptID, err)
@@ -1204,7 +1207,7 @@ func (s *Spawner) ResumeAfterYield(runID, agentMessage string) error {
 	var extraTools string
 	if run.PromptID != "" {
 		if p, err := db.GetPrompt(s.database, run.PromptID); err == nil && p != nil {
-			extraTools = collectExtraTools(p.AllowedTools)
+			extraTools = s.collectExtraTools(p.AllowedTools)
 		}
 	}
 
@@ -2003,10 +2006,17 @@ func buildPrompt(task domain.Task, metadataJSON, mission, scope, toolsRef, binar
 	return BuildPromptReplacer(task, metadataJSON, runID, binaryPath, scope, toolsRef).Replace(full)
 }
 
+func (s *Spawner) cachedAgentTools() string {
+	s.agentToolsOnce.Do(func() {
+		s.agentToolsCache = skills.ScanAgentTools()
+	})
+	return s.agentToolsCache
+}
+
 // collectExtraTools merges a prompt's declared allowed_tools with tools
 // discovered from agent definitions (~/.claude/agents/*.md).
-func collectExtraTools(promptAllowedTools string) string {
-	agentTools := skills.ScanAgentTools()
+func (s *Spawner) collectExtraTools(promptAllowedTools string) string {
+	agentTools := s.cachedAgentTools()
 	if promptAllowedTools == "" && agentTools == "" {
 		return ""
 	}
