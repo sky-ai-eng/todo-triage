@@ -201,7 +201,10 @@ func TestBackfill_BulkAssignPartialSuccess(t *testing.T) {
 func TestBackfill_StampsClassifiedAt(t *testing.T) {
 	s := newTestServer(t)
 	seedConfiguredRepo(t, s, "owner", "repo")
-	pid, _ := db.CreateProject(s.db, domain.Project{Name: "P", PinnedRepos: []string{"owner/repo"}})
+	pid, err := db.CreateProject(s.db, domain.Project{Name: "P", PinnedRepos: []string{"owner/repo"}})
+	if err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
 	e := mustEntity(t, s.db, "github", "owner/repo#1", "pr", "T")
 
 	pre, err := db.ListUnclassifiedEntities(s.db)
