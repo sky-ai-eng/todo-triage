@@ -4,10 +4,10 @@
 -- "never tried" from "tried, scored below threshold." Query is
 -- `WHERE project_id IS NULL AND classified_at IS NULL` so re-polls
 -- don't keep re-firing classification on entities that already lost
--- every project's vote. Nullable: existing rows pre-classifier have
--- NULL, which means the runner picks them up on its first cycle
--- after upgrade — that's the intended one-shot retro-classify
--- behavior on first launch with the classifier enabled.
+-- every project's vote. Nullable so newly eligible rows can start as
+-- NULL until the runner makes a decision; pre-existing rows are
+-- stamped later in this migration to avoid a one-shot retro-classify
+-- of historical entities on first launch with the classifier enabled.
 --
 -- classification_rationale: the highest-scoring project's one-sentence
 -- rationale from its Haiku call, regardless of whether the score
