@@ -61,7 +61,6 @@ func collectExportState(ctx context.Context, database *sql.DB, projectID string)
 			Project: ManifestProject{
 				Name:             project.Name,
 				Description:      project.Description,
-				SummaryMD:        project.SummaryMD,
 				PinnedRepos:      cloneStrings(project.PinnedRepos),
 				JiraProjectKey:   project.JiraProjectKey,
 				LinearProjectKey: project.LinearProjectKey,

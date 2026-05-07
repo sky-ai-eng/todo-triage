@@ -322,16 +322,14 @@ func insertImportedProject(tx *sql.Tx, projectID, curatorSessionID string, manif
 	now := time.Now().UTC()
 	_, err = tx.Exec(`
 		INSERT INTO projects (
-			id, name, description, summary_md, summary_stale,
+			id, name, description,
 			curator_session_id, pinned_repos, jira_project_key,
 			linear_project_key, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		projectID,
 		strings.TrimSpace(manifestProject.Name),
 		manifestProject.Description,
-		nullIfEmptyString(manifestProject.SummaryMD),
-		true,
 		nullIfEmptyString(curatorSessionID),
 		string(pinnedJSON),
 		nullIfEmptyString(manifestProject.JiraProjectKey),

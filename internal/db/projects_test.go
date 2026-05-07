@@ -42,9 +42,6 @@ func TestCreateGetProject_Roundtrip(t *testing.T) {
 	if len(got.PinnedRepos) != 2 || got.PinnedRepos[0] != "sky-ai-eng/triage-factory" {
 		t.Errorf("pinned_repos = %v", got.PinnedRepos)
 	}
-	if got.SummaryStale {
-		t.Errorf("summary_stale should default false, got true")
-	}
 	if got.CreatedAt.IsZero() || got.UpdatedAt.IsZero() {
 		t.Errorf("timestamps not set: created=%v updated=%v", got.CreatedAt, got.UpdatedAt)
 	}
@@ -152,7 +149,6 @@ func TestUpdateProject_PreservesCreatedAtBumpsUpdatedAt(t *testing.T) {
 	mutated := *original
 	mutated.Description = "now described"
 	mutated.PinnedRepos = []string{"a/b"}
-	mutated.SummaryStale = true
 	if err := UpdateProject(database, mutated); err != nil {
 		t.Fatalf("update: %v", err)
 	}
@@ -166,9 +162,6 @@ func TestUpdateProject_PreservesCreatedAtBumpsUpdatedAt(t *testing.T) {
 	}
 	if updated.Description != "now described" {
 		t.Errorf("description = %q", updated.Description)
-	}
-	if !updated.SummaryStale {
-		t.Errorf("summary_stale = false; expected true")
 	}
 }
 

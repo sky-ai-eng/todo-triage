@@ -85,8 +85,6 @@ func seedFixture(t *testing.T, database *sql.DB, projectName string) fixture {
 	projectID, err := db.CreateProject(database, domain.Project{
 		Name:             projectName,
 		Description:      "Fixture project",
-		SummaryMD:        "summary",
-		SummaryStale:     true,
 		CuratorSessionID: sessionID,
 		PinnedRepos:      []string{slug},
 		JiraProjectKey:   "SKY",

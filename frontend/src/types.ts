@@ -202,8 +202,6 @@ export interface Project {
   id: string
   name: string
   description: string
-  summary_md?: string
-  summary_stale: boolean
   curator_session_id?: string
   pinned_repos: string[]
   jira_project_key: string

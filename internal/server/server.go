@@ -107,7 +107,7 @@ func (s *Server) routes() {
 
 	// Projects (SKY-215). Pure CRUD over the projects table; the
 	// Curator runtime that populates curator_session_id lands in
-	// SKY-216 and the summary_md regenerator in SKY-220.
+	// SKY-216 and per-project entity classification in SKY-220.
 	s.mux.HandleFunc("POST /api/projects", s.handleProjectCreate)
 	s.mux.HandleFunc("GET /api/projects", s.handleProjectList)
 	s.mux.HandleFunc("GET /api/projects/{id}", s.handleProjectGet)

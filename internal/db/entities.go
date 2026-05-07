@@ -100,6 +100,60 @@ func UpdateEntityDescription(db *sql.DB, entityID, description string) error {
 	return err
 }
 
+// AssignEntityProject sets entities.project_id (NULL if projectID is nil
+// or "") and stamps classified_at = CURRENT_TIMESTAMP so the project
+// classifier (SKY-220) won't re-fire on this entity. Both the auto
+// classifier and the project-creation backfill popup write through this
+// helper — a popup-driven assignment is also a "final answer" from the
+// classifier's perspective.
+func AssignEntityProject(database *sql.DB, entityID string, projectID *string) error {
+	var arg any
+	if projectID != nil && *projectID != "" {
+		arg = *projectID
+	} else {
+		arg = nil
+	}
+	_, err := database.Exec(`
+		UPDATE entities SET project_id = ?, classified_at = CURRENT_TIMESTAMP WHERE id = ?
+	`, arg, entityID)
+	return err
+}
+
+// ListUnclassifiedEntities returns active entities that haven't been
+// classified yet — i.e. project_id IS NULL AND classified_at IS NULL.
+// Once an entity has been processed by the classifier (with any outcome,
+// including below-threshold) classified_at is set and the entity won't
+// resurface here. Re-assignment via the backfill popup also sets
+// classified_at, so a popup-assigned entity stays out too.
+func ListUnclassifiedEntities(database *sql.DB) ([]domain.Entity, error) {
+	rows, err := database.Query(`
+		SELECT id, source, source_id, kind, COALESCE(title, ''), COALESCE(url, ''),
+		       COALESCE(snapshot_json, ''), COALESCE(description, ''), state, project_id, created_at, last_polled_at, closed_at
+		FROM entities
+		WHERE project_id IS NULL AND classified_at IS NULL AND state = 'active'
+		ORDER BY created_at ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []domain.Entity
+	for rows.Next() {
+		var e domain.Entity
+		var projectID sql.NullString
+		if err := rows.Scan(&e.ID, &e.Source, &e.SourceID, &e.Kind, &e.Title, &e.URL,
+			&e.SnapshotJSON, &e.Description, &e.State, &projectID, &e.CreatedAt, &e.LastPolledAt, &e.ClosedAt); err != nil {
+			return nil, err
+		}
+		if projectID.Valid {
+			e.ProjectID = &projectID.String
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
 // CloseEntity sets state='closed' and closed_at=now. Called by the entity
 // lifecycle handler when an entity-terminating event fires.
 func CloseEntity(db *sql.DB, entityID string) error {

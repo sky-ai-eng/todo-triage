@@ -55,8 +55,6 @@ type patchProjectRequest struct {
 	PinnedRepos            *[]string `json:"pinned_repos"`
 	JiraProjectKey         *string   `json:"jira_project_key"`
 	LinearProjectKey       *string   `json:"linear_project_key"`
-	SummaryMD              *string   `json:"summary_md"`
-	SummaryStale           *bool     `json:"summary_stale"`
 	CuratorSessionID       *string   `json:"curator_session_id"`
 	SpecAuthorshipPromptID *string   `json:"spec_authorship_prompt_id"`
 }
@@ -416,12 +414,6 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		updated.LinearProjectKey = linearKey
-	}
-	if req.SummaryMD != nil {
-		updated.SummaryMD = *req.SummaryMD
-	}
-	if req.SummaryStale != nil {
-		updated.SummaryStale = *req.SummaryStale
 	}
 	if req.CuratorSessionID != nil {
 		updated.CuratorSessionID = *req.CuratorSessionID
@@ -1285,14 +1277,10 @@ func (s *Server) handleProjectKnowledgeUpload(w http.ResponseWriter, r *http.Req
 		results = append(results, uploadResult{Path: name, Original: original})
 	}
 
-	// Flip summary_stale if anything actually landed. Per the
-	// schema comment on summary_stale, knowledge-base changes have
-	// to mark the project so SKY-220's regenerator picks them up.
-	// A pure-failures request (every file rejected for conflict /
-	// size / sanitize) leaves the on-disk state unchanged, so we
-	// don't need to bump summary_stale in that case — keeping the
-	// flip conditional on at-least-one-success avoids a regen
-	// trigger for a no-op upload.
+	// Bump updated_at if anything actually landed. A pure-failures
+	// request (every file rejected for conflict / size / sanitize)
+	// leaves the on-disk state unchanged, so we don't need to bump
+	// the timestamp in that case.
 	wroteAny := false
 	for _, r := range results {
 		if r.Error == "" {
@@ -1301,13 +1289,12 @@ func (s *Server) handleProjectKnowledgeUpload(w http.ResponseWriter, r *http.Req
 		}
 	}
 	if wroteAny {
-		if _, err := s.db.Exec(`UPDATE projects SET summary_stale = TRUE, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, id); err != nil {
+		if _, err := s.db.Exec(`UPDATE projects SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`, id); err != nil {
 			// Log but don't fail the upload — the files are on disk
 			// and the user expects the response to reflect that.
-			// The stale marker and activity timestamp are hints for
-			// follow-on processing / display, not part of the
-			// upload's correctness contract.
-			log.Printf("[projects] knowledge upload: mark summary_stale/update timestamp for %s: %v", id, err)
+			// The activity timestamp is a hint for follow-on display,
+			// not part of the upload's correctness contract.
+			log.Printf("[projects] knowledge upload: bump updated_at for %s: %v", id, err)
 		}
 	}
 
@@ -1414,14 +1401,10 @@ func (s *Server) handleProjectKnowledgeDelete(w http.ResponseWriter, r *http.Req
 	id := r.PathValue("id")
 
 	// Same per-project lock as upload + project PATCH/DELETE.
-	// Without it, the direct UPDATE summary_stale = TRUE below
-	// races a concurrent project PATCH: PATCH reads
-	// summary_stale=false, this handler removes the file and
-	// flips the flag, then PATCH's UpdateProject writes its
-	// pre-edit summary_stale=false back over our flip — the
-	// regenerator never picks the change up. Holding the lock
-	// makes the file remove + flag flip atomic from the
-	// perspective of other writers.
+	// Holding the lock keeps the file remove + updated_at bump
+	// atomic from the perspective of other writers, so a racing
+	// PATCH can't sandwich a stale snapshot of the project row
+	// over the timestamp bump.
 	mu := s.projectMutex(id)
 	mu.Lock()
 	defer mu.Unlock()
@@ -1450,8 +1433,8 @@ func (s *Server) handleProjectKnowledgeDelete(w http.ResponseWriter, r *http.Req
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to remove file"})
 		return
 	}
-	if _, err := s.db.Exec(`UPDATE projects SET summary_stale = TRUE, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, id); err != nil {
-		log.Printf("[projects] knowledge delete: mark summary_stale for %s: %v", id, err)
+	if _, err := s.db.Exec(`UPDATE projects SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`, id); err != nil {
+		log.Printf("[projects] knowledge delete: bump updated_at for %s: %v", id, err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to update project state"})
 		return
 	}

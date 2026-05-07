@@ -1,0 +1,12 @@
+-- SKY-220: add a classified_at marker to entities so the project
+-- classifier can distinguish "never tried" from "tried, scored below
+-- threshold." The post-poll runner queries
+-- `WHERE project_id IS NULL AND classified_at IS NULL`
+-- so re-polls don't keep re-firing classification on entities that
+-- already lost every project's vote.
+--
+-- Nullable: existing rows pre-classifier have NULL, which means the
+-- runner will pick them up on its first cycle after upgrade — that's
+-- the intended one-shot retro-classify behavior on first launch with
+-- the classifier enabled.
+ALTER TABLE entities ADD COLUMN classified_at DATETIME;
