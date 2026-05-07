@@ -109,8 +109,14 @@ func TestBackfillCandidates_EmptyConfigShowsAll(t *testing.T) {
 func TestBackfillCandidates_ExcludesAlreadyInProject(t *testing.T) {
 	s := newTestServer(t)
 	seedConfiguredRepo(t, s, "owner", "repo")
-	pid, _ := db.CreateProject(s.db, domain.Project{Name: "P", PinnedRepos: []string{"owner/repo"}})
-	other, _ := db.CreateProject(s.db, domain.Project{Name: "Other", PinnedRepos: []string{"owner/repo"}})
+	pid, err := db.CreateProject(s.db, domain.Project{Name: "P", PinnedRepos: []string{"owner/repo"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := db.CreateProject(s.db, domain.Project{Name: "Other", PinnedRepos: []string{"owner/repo"}})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	already := mustEntity(t, s.db, "github", "owner/repo#1", "pr", "already in")
 	if err := db.AssignEntityProject(s.db, already.ID, &pid, ""); err != nil {
