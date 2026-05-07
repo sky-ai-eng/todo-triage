@@ -5,6 +5,7 @@ import type { Project, ProjectImportError, ProjectImportResult } from '../types'
 import { readError } from '../lib/api'
 import { toast } from '../components/Toast/toastStore'
 import ProjectCreateModal from '../components/ProjectCreateModal'
+import ProjectBackfillModal from '../components/ProjectBackfillModal'
 
 // Projects index. List view only — the per-project view lives in
 // ProjectDetail.tsx and the Curator chat panel will graft into it
@@ -22,6 +23,14 @@ export default function Projects() {
   const [createOpen, setCreateOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
   const [importSeedFile, setImportSeedFile] = useState<File | null>(null)
+  // SKY-220 PR B: after a project is created OR imported, surface a
+  // popup that lets the user reclaim existing non-terminal entities
+  // into the new project. `backfillTarget` carries the destination;
+  // `backfillThenNavigate` records whether the popup's close handler
+  // should also navigate to the project page (true on import, false
+  // on create — matching each flow's existing post-success behavior).
+  const [backfillTarget, setBackfillTarget] = useState<Project | null>(null)
+  const [backfillThenNavigate, setBackfillThenNavigate] = useState(false)
   const [pageDragOver, setPageDragOver] = useState(false)
   const pageDragDepth = useRef(0)
   // Distinguish "load failed" from "loaded but empty" so a transient
@@ -61,19 +70,34 @@ export default function Projects() {
       // Re-fetch to pick up server-generated fields we don't model
       // optimistically (e.g. anything the server post-processes).
       refresh()
+      // Surface the backfill popup. Stay on the grid after — matches
+      // the pre-SKY-220 create flow that didn't navigate either.
+      setBackfillTarget(created)
+      setBackfillThenNavigate(false)
     },
     [refresh],
   )
 
-  const handleImported = useCallback(
-    (created: Project) => {
-      setImportOpen(false)
-      setImportSeedFile(null)
-      setProjects((prev) => [...prev, created].sort((a, b) => a.name.localeCompare(b.name)))
-      navigate(`/projects/${encodeURIComponent(created.id)}`)
-    },
-    [navigate],
-  )
+  const handleImported = useCallback((created: Project) => {
+    setImportOpen(false)
+    setImportSeedFile(null)
+    setProjects((prev) => [...prev, created].sort((a, b) => a.name.localeCompare(b.name)))
+    // Defer the /projects/:id navigation until the backfill popup
+    // closes — the user expects to land on the imported project,
+    // but the popup is the chance to claim existing entities first.
+    setBackfillTarget(created)
+    setBackfillThenNavigate(true)
+  }, [])
+
+  const handleBackfillClose = useCallback(() => {
+    const target = backfillTarget
+    const navigateAfter = backfillThenNavigate
+    setBackfillTarget(null)
+    setBackfillThenNavigate(false)
+    if (navigateAfter && target) {
+      navigate(`/projects/${encodeURIComponent(target.id)}`)
+    }
+  }, [backfillTarget, backfillThenNavigate, navigate])
 
   const closeImportModal = useCallback(() => {
     setImportOpen(false)
@@ -229,6 +253,13 @@ export default function Projects() {
           onClose={closeImportModal}
           onImported={handleImported}
           initialFile={importSeedFile}
+        />
+      )}
+      {backfillTarget && (
+        <ProjectBackfillModal
+          projectId={backfillTarget.id}
+          projectName={backfillTarget.name}
+          onClose={handleBackfillClose}
         />
       )}
     </div>
