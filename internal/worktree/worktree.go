@@ -135,8 +135,9 @@ func RunRoot(runID string) string {
 
 // MakeRunRoot creates the run-root directory and returns its absolute
 // path. Used by the spawner's setupJira path: the agent's initial cwd
-// is the run-root (a throwaway dir holding only task_memory/ until the
-// agent calls `workspace add` to materialize worktrees as subdirs).
+// is the run-root (a throwaway dir holding only _scratch/entity-memory/
+// until the agent calls `workspace add` to materialize worktrees as
+// subdirs).
 //
 // Single-purpose vs. CreateForBranch: CreateForBranch creates a worktree
 // AT runDir(runID); MakeRunRoot creates only the directory itself, with
@@ -1054,9 +1055,10 @@ func addExcludesOrRollback(runID, wtDir string) error {
 // managedExcludePatterns are the gitignore patterns writeLocalExcludes
 // ensures are present in .git/info/exclude for every delegated worktree.
 //
-// - _scratch/    — CI log archives, other ephemeral download targets (SKY-146)
-// - task_memory/ — cross-run structured audit entries (SKY-141)
-var managedExcludePatterns = []string{"_scratch/", "task_memory/"}
+//   - _scratch/ — CI log archives, ephemeral downloads (SKY-146), entity-memory
+//     and project-knowledge subdirs populated by the spawner (SKY-219).
+//     One prefix covers everything under it.
+var managedExcludePatterns = []string{"_scratch/"}
 
 // Markers delimiting the managed section of .git/info/exclude. writeLocalExcludes
 // rewrites the content between these markers in place when both are present,
@@ -1333,8 +1335,8 @@ func detectDefaultBranch(ctx context.Context, bareDir string) string {
 // directories — so the user sees exactly what the agent was looking
 // at when takeover happened.
 //
-// Files matching managedExcludePatterns (task_memory/, _scratch/) are
-// not copied. The destination's .git/info/exclude inherits the bare's
+// Files matching managedExcludePatterns (_scratch/) are not copied.
+// The destination's .git/info/exclude inherits the bare's
 // configuration; we re-write our managed block so those paths stay
 // hidden from `git status` in the takeover dir as well.
 func CopyForTakeover(ctx context.Context, runID, srcWorktree, baseDir string) (string, error) {
@@ -1420,13 +1422,11 @@ func CopyForTakeover(ctx context.Context, runID, srcWorktree, baseDir string) (s
 		return "", fmt.Errorf("takeover: move worktree: %w", err)
 	}
 	if moved {
-		// task_memory/ and _scratch/ traveled with the move; the overlay
-		// path skips them explicitly because they're TF infra and shouldn't
-		// land in the user's hands. Mirror that here so behavior is the
-		// same regardless of which path we took.
-		for _, name := range []string{"task_memory", "_scratch"} {
-			_ = os.RemoveAll(filepath.Join(destDir, name))
-		}
+		// _scratch/ traveled with the move; the overlay path skips it
+		// explicitly because it's TF infra and shouldn't land in the
+		// user's hands. Mirror that here so behavior is the same
+		// regardless of which path we took.
+		_ = os.RemoveAll(filepath.Join(destDir, "_scratch"))
 		// Refresh the managed exclude block in case managedExcludePatterns
 		// has grown since the agent originally wrote it. Best-effort.
 		if err := writeLocalExcludes(destDir); err != nil {
@@ -1583,10 +1583,10 @@ func addAndOverlayForTakeover(ctx context.Context, runID, bareDir, srcWorktree, 
 		return fmt.Errorf("takeover: worktree add: %w", err)
 	}
 
-	// Re-apply the managed exclude block (task_memory/, _scratch/) so
-	// `git status` in the takeover dir doesn't surface our infra dirs
-	// even if the user ends up needing them. Best-effort: a failure here
-	// is annoying but not fatal — git status will just be a bit noisy.
+	// Re-apply the managed exclude block (_scratch/) so `git status` in
+	// the takeover dir doesn't surface our infra dirs even if the user
+	// ends up needing them. Best-effort: a failure here is annoying but
+	// not fatal — git status will just be a bit noisy.
 	if err := writeLocalExcludes(destDir); err != nil {
 		log.Printf("[worktree] warning: takeover %s: write excludes: %v", runID, err)
 	}
@@ -1686,7 +1686,7 @@ func overlayWorkingTree(src, dest string) error {
 		if rel == "." {
 			return nil
 		}
-		// Top-level skips: .git, task_memory, _scratch
+		// Top-level skips: .git, _scratch
 		topSegment := rel
 		if i := strings.Index(rel, string(filepath.Separator)); i >= 0 {
 			topSegment = rel[:i]

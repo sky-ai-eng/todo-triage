@@ -389,7 +389,7 @@ func prSubmitReview(client *ghclient.Client, database *db.DB, args []string) {
 		err = db.LockPendingReviewSubmission(database.Conn, reviewID, body, ghEvent)
 		if errors.Is(err, db.ErrPendingReviewAlreadySubmitted) {
 			exitErr(fmt.Sprintf(
-				"review %s has already been queued for human approval. Do not call submit-review again — your work on this review is complete. Finish the run by writing $TRIAGE_FACTORY_RUN_ROOT/task_memory/<run_id>.md and returning your completion JSON.",
+				"review %s has already been queued for human approval. Do not call submit-review again — your work on this review is complete. Finish the run by writing $TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/<run_id>.md and returning your completion JSON.",
 				reviewID,
 			))
 		}
@@ -408,7 +408,7 @@ func prSubmitReview(client *ghclient.Client, database *db.DB, args []string) {
 			"review_id":       reviewID,
 			"event":           ghEvent,
 			"comments_queued": len(ghComments),
-			"next_step":       "Review is queued for human approval. Do not call submit-review again. Finish the run by writing $TRIAGE_FACTORY_RUN_ROOT/task_memory/<run_id>.md and returning your completion JSON.",
+			"next_step":       "Review is queued for human approval. Do not call submit-review again. Finish the run by writing $TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/<run_id>.md and returning your completion JSON.",
 		})
 		return
 	}
@@ -576,7 +576,7 @@ func prCreate(client *ghclient.Client, database *db.DB, args []string) {
 			exitErr("lookup existing pending PR for run: " + err.Error())
 		} else if existing != nil {
 			exitErr(fmt.Sprintf(
-				"a PR for run %s has already been queued for human approval. Do not call pr create again — your work is complete. Finish the run by writing $TRIAGE_FACTORY_RUN_ROOT/task_memory/<run_id>.md and returning your completion JSON.",
+				"a PR for run %s has already been queued for human approval. Do not call pr create again — your work is complete. Finish the run by writing $TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/<run_id>.md and returning your completion JSON.",
 				runID,
 			))
 		}
@@ -600,7 +600,7 @@ func prCreate(client *ghclient.Client, database *db.DB, args []string) {
 			// error the agent doesn't know how to interpret.
 			if existing, lookupErr := db.PendingPRByRunID(database.Conn, runID); lookupErr == nil && existing != nil {
 				exitErr(fmt.Sprintf(
-					"a PR for run %s has already been queued for human approval. Do not call pr create again — your work is complete. Finish the run by writing $TRIAGE_FACTORY_RUN_ROOT/task_memory/<run_id>.md and returning your completion JSON.",
+					"a PR for run %s has already been queued for human approval. Do not call pr create again — your work is complete. Finish the run by writing $TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/<run_id>.md and returning your completion JSON.",
 					runID,
 				))
 			}
@@ -616,7 +616,7 @@ func prCreate(client *ghclient.Client, database *db.DB, args []string) {
 		if err := db.LockPendingPR(database.Conn, id, title, body); err != nil {
 			if errors.Is(err, db.ErrPendingPRAlreadyQueued) {
 				exitErr(fmt.Sprintf(
-					"a PR for run %s has already been queued for human approval. Do not call pr create again — your work is complete. Finish the run by writing $TRIAGE_FACTORY_RUN_ROOT/task_memory/<run_id>.md and returning your completion JSON.",
+					"a PR for run %s has already been queued for human approval. Do not call pr create again — your work is complete. Finish the run by writing $TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/<run_id>.md and returning your completion JSON.",
 					runID,
 				))
 			}
@@ -632,7 +632,7 @@ func prCreate(client *ghclient.Client, database *db.DB, args []string) {
 			"base":       base,
 			"head_sha":   headSHA,
 			"draft_hint": draft, // not stored — passed through at user-approval time
-			"next_step":  "PR is queued for human approval. Do not call pr create again. Finish the run by writing $TRIAGE_FACTORY_RUN_ROOT/task_memory/<run_id>.md and returning your completion JSON.",
+			"next_step":  "PR is queued for human approval. Do not call pr create again. Finish the run by writing $TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/<run_id>.md and returning your completion JSON.",
 		})
 		return
 	}

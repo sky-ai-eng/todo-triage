@@ -3,7 +3,7 @@
 // inside a Jira delegation run.
 //
 // The flow: Jira delegations spawn the agent at the run-root (a throwaway
-// dir holding only task_memory/), no codebase pre-cloned. The agent reads
+// dir holding only _scratch/entity-memory/), no codebase pre-cloned. The agent reads
 // the ticket, decides which repo(s) it needs, and calls `workspace add
 // <owner/repo>` to materialize a worktree. The CLI prints the absolute
 // worktree path; the agent `cd`s in. `workspace list` returns the JSON

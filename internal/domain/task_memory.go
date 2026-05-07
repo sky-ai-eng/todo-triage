@@ -3,8 +3,9 @@ package domain
 import "time"
 
 // TaskMemory is a durable per-run narrative of what an agent tried on a task
-// and why. Written to `./task_memory/<run_id>.md` in the worktree during the
-// run, then ingested into the `run_memory` table before worktree teardown.
+// and why. Written to `./_scratch/entity-memory/<run_id>.md` in the worktree
+// during the run, then ingested into the `run_memory` table before worktree
+// teardown.
 // Materialized back into future runs' worktrees so iterations on the same
 // entity can read what prior attempts tried.
 //

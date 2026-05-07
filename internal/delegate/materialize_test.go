@@ -11,13 +11,14 @@ import (
 
 // TestMaterializePriorMemories_CreatesDirEvenWithNoPriors guards the
 // invariant the prompt + memory-gate retry both depend on: the agent's
-// initial cwd has a task_memory/ directory it can ls and write into,
-// regardless of whether prior runs ever existed for this entity.
+// initial cwd has a _scratch/entity-memory/ directory it can ls and
+// write into, regardless of whether prior runs ever existed for this
+// entity.
 //
 // Pre-fix, the function early-returned when len(memories)==0, so a
 // first-run agent saw a missing directory and either (a) failed `ls
-// task_memory/` outright or (b) failed the final memory write because
-// the parent dir didn't exist.
+// _scratch/entity-memory/` outright or (b) failed the final memory
+// write because the parent dir didn't exist.
 func TestMaterializePriorMemories_CreatesDirEvenWithNoPriors(t *testing.T) {
 	database := newTakeoverTestDB(t)
 	cwd := t.TempDir()
@@ -38,22 +39,22 @@ func TestMaterializePriorMemories_CreatesDirEvenWithNoPriors(t *testing.T) {
 
 	materializePriorMemories(database, cwd, entity.ID)
 
-	memDir := filepath.Join(cwd, "task_memory")
+	memDir := filepath.Join(cwd, "_scratch", "entity-memory")
 	info, err := os.Stat(memDir)
 	if err != nil {
-		t.Fatalf("task_memory dir not created at %s: %v", memDir, err)
+		t.Fatalf("entity-memory dir not created at %s: %v", memDir, err)
 	}
 	if !info.IsDir() {
-		t.Fatalf("task_memory exists but is not a directory")
+		t.Fatalf("entity-memory exists but is not a directory")
 	}
 
 	// And it's empty (no prior memory files materialized).
 	entries, err := os.ReadDir(memDir)
 	if err != nil {
-		t.Fatalf("read task_memory: %v", err)
+		t.Fatalf("read entity-memory: %v", err)
 	}
 	if len(entries) != 0 {
-		t.Errorf("expected empty task_memory dir, found %d entries", len(entries))
+		t.Errorf("expected empty entity-memory dir, found %d entries", len(entries))
 	}
 }
 
@@ -92,7 +93,7 @@ func TestMaterializePriorMemories_WritesPriors(t *testing.T) {
 
 	materializePriorMemories(database, cwd, entity.ID)
 
-	priorPath := filepath.Join(cwd, "task_memory", "prior-run.md")
+	priorPath := filepath.Join(cwd, "_scratch", "entity-memory", "prior-run.md")
 	body, err := os.ReadFile(priorPath)
 	if err != nil {
 		t.Fatalf("expected materialized prior at %s: %v", priorPath, err)

@@ -83,7 +83,7 @@ Per project convention: update `CREATE TABLE` in `internal/db/db.go` directly. A
 
 ### 9. Local excludes, not committed gitignore
 
-The `task_memory/` (SKY-141) and `_scratch/` (SKY-146) directories are added to `.git/info/exclude` at worktree creation, **not** to a committed `.gitignore`. We don't want to pollute the tracked repo with entries for our internal scratch dirs. Whichever ticket lands first should factor this exclude-writing logic so the second just adds its entry.
+The `_scratch/` directory (covering both `_scratch/entity-memory/` from SKY-141 and `_scratch/ci-logs/` from SKY-146) is added to `.git/info/exclude` at worktree creation, **not** to a committed `.gitignore`. We don't want to pollute the tracked repo with entries for our internal scratch dirs. One prefix exclude covers everything under it.
 
 ### 10. Build order
 
@@ -128,8 +128,8 @@ Several tickets touch the same plumbing. You can assume you're the only agent ma
 
 ### `_scratch/` directory convention
 
-- **Built in**: SKY-141 (for `task_memory/`) and SKY-146 (for `_scratch/ci-logs/`)
-- Both need `.git/info/exclude` writes at worktree creation. Factor the exclude-writing logic once.
+- **Built in**: SKY-141 (for `_scratch/entity-memory/`) and SKY-146 (for `_scratch/ci-logs/`)
+- Subsumed under a single `_scratch/` prefix in SKY-219; one `.git/info/exclude` entry covers both.
 
 ### `trigger_source` column
 
@@ -145,7 +145,7 @@ Several tickets touch the same plumbing. You can assume you're the only agent ma
 
 ### Reading prior memory: the `## Human feedback (post-run)` block
 
-When you read materialized `task_memory/*.md` files from a prior run on the same entity (or a linked entity), you may see a section like:
+When you read materialized `_scratch/entity-memory/*.md` files from a prior run on the same entity (or a linked entity), you may see a section like:
 
 ```
 ## Human feedback (post-run)
@@ -243,7 +243,7 @@ Current contract (in `internal/ai/prompts/envelope.txt`):
 
 After SKY-148: `status` can also be `"task_unsolvable"`. The spawner-assigned `"failed"` state is never returned by the agent — it's set by the spawner when no valid JSON arrives.
 
-After SKY-141: the agent is required to have written `./task_memory/<run_id>.md` on disk **before** returning its completion JSON. The spawner verifies this and auto-resumes the session once with a correction message if the file is missing. This happens externally via `--resume`, not via hooks.
+After SKY-141: the agent is required to have written `./_scratch/entity-memory/<run_id>.md` on disk **before** returning its completion JSON. The spawner verifies this and auto-resumes the session once with a correction message if the file is missing. This happens externally via `--resume`, not via hooks.
 
 ---
 

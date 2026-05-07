@@ -17,6 +17,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/config"
+	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
@@ -472,21 +473,22 @@ func (s *Spawner) abortTakeover(runID, claudeCwd, destPath string) {
 //     Cleanup uses RemoveAt(wtPath) + CleanupPRConfig.
 //
 //   - Jira (lazy): hasWT=false, wtPath=runRoot is the throwaway run-root
-//     (initial cwd; holds task_memory/ but no codebase), owner/repo empty.
+//     (initial cwd; holds _scratch/entity-memory/ but no codebase), owner/repo empty.
 //     Per-repo worktrees materialize as subdirs under runRoot via the
 //     `triagefactory exec workspace add` CLI; the run_worktrees DB table
 //     is the source of truth for cleanup, which iterates the table at
 //     runAgent terminal.
 type runConfig struct {
-	scope    string // what the agent is scoped to (repo, PR, issue)
-	toolsRef string // tool documentation to inject
-	wtPath   string // initial cwd: GitHub PR worktree, or Jira run-root
-	hasWT    bool   // GitHub PR has a real worktree to clean up via RemoveAt; Jira's worktrees are tracked in run_worktrees and cleaned by iterating that table
-	runRoot  string // run-root path: GitHub PR runs == wtPath; Jira lazy runs == the throwaway parent of materialized worktrees. Always set so $TRIAGE_FACTORY_RUN_ROOT resolves uniformly for the memory-gate retry.
-	owner    string // resolved GitHub owner (empty for Jira lazy runs)
-	repo     string // resolved GitHub repo (empty for Jira lazy runs)
-	prNumber int    // PR number (0 for non-PR runs); set so the runAgent defer can call worktree.CleanupPRConfig and reclaim the per-PR remote + branch tracking config the bare repo would otherwise accumulate
-	headRef  string // PR head ref (empty for non-PR runs); passed to CleanupPRConfig so own-repo branch tracking (branch.<headRef>.*) gets reclaimed alongside fork-only artifacts
+	scope     string  // what the agent is scoped to (repo, PR, issue)
+	toolsRef  string  // tool documentation to inject
+	wtPath    string  // initial cwd: GitHub PR worktree, or Jira run-root
+	hasWT     bool    // GitHub PR has a real worktree to clean up via RemoveAt; Jira's worktrees are tracked in run_worktrees and cleaned by iterating that table
+	runRoot   string  // run-root path: GitHub PR runs == wtPath; Jira lazy runs == the throwaway parent of materialized worktrees. Always set so $TRIAGE_FACTORY_RUN_ROOT resolves uniformly for the memory-gate retry.
+	owner     string  // resolved GitHub owner (empty for Jira lazy runs)
+	repo      string  // resolved GitHub repo (empty for Jira lazy runs)
+	prNumber  int     // PR number (0 for non-PR runs); set so the runAgent defer can call worktree.CleanupPRConfig and reclaim the per-PR remote + branch tracking config the bare repo would otherwise accumulate
+	headRef   string  // PR head ref (empty for non-PR runs); passed to CleanupPRConfig so own-repo branch tracking (branch.<headRef>.*) gets reclaimed alongside fork-only artifacts
+	projectID *string // entity's project assignment (nil for un-assigned); SKY-219 uses this to copy the project's knowledge-base into ./_scratch/project-knowledge/
 }
 
 // Delegate kicks off an async agent run for any task type.
@@ -679,15 +681,16 @@ func (s *Spawner) setupGitHub(ctx context.Context, runID string, task domain.Tas
 	}
 
 	return runConfig{
-		scope:    fmt.Sprintf("Repository: %s/%s\nPR: #%d\nBranch: %s", owner, repo, prNumber, pr.HeadRef),
-		toolsRef: ai.GHToolsTemplate,
-		wtPath:   wtPath,
-		hasWT:    true,
-		runRoot:  wtPath, // GitHub PR runs: worktree IS the run-root, so $TRIAGE_FACTORY_RUN_ROOT resolves to the worktree
-		owner:    owner,
-		repo:     repo,
-		prNumber: prNumber,
-		headRef:  pr.HeadRef,
+		scope:     fmt.Sprintf("Repository: %s/%s\nPR: #%d\nBranch: %s", owner, repo, prNumber, pr.HeadRef),
+		toolsRef:  ai.GHToolsTemplate,
+		wtPath:    wtPath,
+		hasWT:     true,
+		runRoot:   wtPath, // GitHub PR runs: worktree IS the run-root, so $TRIAGE_FACTORY_RUN_ROOT resolves to the worktree
+		owner:     owner,
+		repo:      repo,
+		prNumber:  prNumber,
+		headRef:   pr.HeadRef,
+		projectID: lookupEntityProjectID(s.database, task.EntityID),
 	}, nil
 }
 
@@ -698,9 +701,9 @@ func (s *Spawner) setupGitHub(ctx context.Context, runID string, task domain.Tas
 // {runRoot}/{owner}/{repo}/ and inserts a row into run_worktrees.
 //
 // The agent's initial cwd is the run-root: a throwaway dir holding
-// only ./task_memory/ (populated by materializePriorMemories below).
-// Both gh and jira tool surfaces are exposed since the agent will
-// need both to implement and ship a PR.
+// only ./_scratch/entity-memory/ (populated by materializePriorMemories
+// below). Both gh and jira tool surfaces are exposed since the agent
+// will need both to implement and ship a PR.
 //
 // runs.worktree_path is set to the run-root. Yield/resume reads this
 // field as the cwd to resume the session in (`claude --resume` keys
@@ -719,11 +722,12 @@ func (s *Spawner) setupJira(ctx context.Context, runID string, task domain.Task,
 		log.Printf("[delegate] warning: failed to set worktree_path for Jira run %s: %v — yield/resume will reject this run", runID, err)
 	}
 	return runConfig{
-		scope:    fmt.Sprintf("Jira issue: %s", task.EntitySourceID),
-		toolsRef: ai.GHToolsTemplate + "\n\n" + ai.JiraToolsTemplate,
-		wtPath:   runRoot,
-		hasWT:    false,
-		runRoot:  runRoot,
+		scope:     fmt.Sprintf("Jira issue: %s", task.EntitySourceID),
+		toolsRef:  ai.GHToolsTemplate + "\n\n" + ai.JiraToolsTemplate,
+		wtPath:    runRoot,
+		hasWT:     false,
+		runRoot:   runRoot,
+		projectID: lookupEntityProjectID(s.database, task.EntityID),
 		// owner/repo intentionally empty: the agent picks per-ticket via `workspace add`
 	}, nil
 }
@@ -814,11 +818,18 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		worktree.RemoveClaudeProjectDir(claudeCwd)
 	}()
 
-	// Materialize any prior task memories into ./task_memory/ so the agent
-	// sees what previous iterations on this task have already tried. The
-	// directory is git-excluded by writeLocalExcludes (managedExcludePatterns
-	// in internal/worktree/worktree.go) so nothing leaks into the PR.
+	// Materialize any prior task memories into ./_scratch/entity-memory/
+	// so the agent sees what previous iterations on this task have
+	// already tried. The directory is git-excluded by writeLocalExcludes
+	// (managedExcludePatterns in internal/worktree/worktree.go) so
+	// nothing leaks into the PR.
 	materializePriorMemories(s.database, claudeCwd, task.EntityID)
+
+	// SKY-219: copy the entity's project knowledge-base into
+	// ./_scratch/project-knowledge/ if the entity is assigned to a
+	// project, so the agent has curated project context available
+	// alongside prior memories.
+	materializeProjectKnowledge(claudeCwd, cfg.projectID)
 
 	selfBin, err := os.Executable()
 	if err != nil {
@@ -849,7 +860,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	extraEnv := []string{
 		"TRIAGE_FACTORY_RUN_ID=" + runID,
 		"TRIAGE_FACTORY_REVIEW_PREVIEW=1",
-		"TRIAGE_FACTORY_RUN_ROOT=" + cfg.runRoot, // Set for both sources so the memory-gate retry message can reference an absolute task_memory path that resolves regardless of which worktree the agent has cd'd into.
+		"TRIAGE_FACTORY_RUN_ROOT=" + cfg.runRoot, // Set for both sources so the memory-gate retry message can reference an absolute _scratch/entity-memory path that resolves regardless of which worktree the agent has cd'd into.
 	}
 	// Set TRIAGE_FACTORY_REPO when the run has a resolved GitHub repo context
 	// (GitHub PR runs only) so gh subcommands can default to the right target
@@ -941,9 +952,10 @@ func (s *Spawner) processCompletion(
 		}
 	}
 
-	// Enforce the pre-complete task_memory write gate. If the agent
-	// returned a completion JSON without writing ./task_memory/<runID>.md,
-	// resume the session with a correction message (up to 2 retries).
+	// Enforce the pre-complete entity-memory write gate. If the agent
+	// returned a completion JSON without writing
+	// ./_scratch/entity-memory/<runID>.md, resume the session with a
+	// correction message (up to 2 retries).
 	// Retries that produce new completions are merged into the totals
 	// so cost/duration accounting reflects the full invocation, not
 	// just the initial call.
@@ -1347,8 +1359,9 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, runID, sessionID, cwd, 
 		// agentproc Cwd; for GitHub PR runs the worktree IS the run-root,
 		// for Jira lazy runs the run-root is the throwaway parent of
 		// per-repo worktrees). Without this, the memory-gate retry
-		// message — which now references $TRIAGE_FACTORY_RUN_ROOT/task_memory/
-		// for absolute-path resilience across `cd`s — would resolve to
+		// message — which now references
+		// $TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/ for
+		// absolute-path resilience across `cd`s — would resolve to
 		// an empty string in the resumed shell and the agent couldn't
 		// follow the retry instructions. Same env shape as the initial
 		// invocation so the agent sees a consistent environment across
@@ -1405,11 +1418,12 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, runID, sessionID, cwd, 
 // works). Not a config knob because no one needs to tune it per-run.
 const maxMemoryRetries = 2
 
-// memoryFileExists returns true iff the agent wrote ./task_memory/<runID>.md
-// during the run. Used by the write-gate both before retrying (is another
-// attempt needed?) and after (did the retry succeed?).
+// memoryFileExists returns true iff the agent wrote
+// ./_scratch/entity-memory/<runID>.md during the run. Used by the
+// write-gate both before retrying (is another attempt needed?) and
+// after (did the retry succeed?).
 func memoryFileExists(cwd, runID string) bool {
-	_, err := os.Stat(filepath.Join(cwd, "task_memory", runID+".md"))
+	_, err := os.Stat(filepath.Join(cwd, "_scratch", "entity-memory", runID+".md"))
 	return err == nil
 }
 
@@ -1428,16 +1442,16 @@ const (
 	memoryFileReadErr                        // file exists, read failed (permissions, race, etc.)
 )
 
-// readAgentMemoryFile returns the agent-written ./task_memory/<runID>.md
-// content along with a state classification. The content string is
-// empty for every non-Present state — callers pass it straight to
-// UpsertAgentMemory either way, but inspect the state to log
-// distinctly rather than collapsing every form of noncompliance to
-// the same line. Read errors that aren't a missing file are logged
-// at the read site so they aren't lost when the caller picks a
-// higher-level message.
+// readAgentMemoryFile returns the agent-written
+// ./_scratch/entity-memory/<runID>.md content along with a state
+// classification. The content string is empty for every non-Present
+// state — callers pass it straight to UpsertAgentMemory either way,
+// but inspect the state to log distinctly rather than collapsing every
+// form of noncompliance to the same line. Read errors that aren't a
+// missing file are logged at the read site so they aren't lost when
+// the caller picks a higher-level message.
 func readAgentMemoryFile(cwd, runID string) (string, memoryFileState) {
-	path := filepath.Join(cwd, "task_memory", runID+".md")
+	path := filepath.Join(cwd, "_scratch", "entity-memory", runID+".md")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -1453,9 +1467,9 @@ func readAgentMemoryFile(cwd, runID string) (string, memoryFileState) {
 	return content, memoryFilePresent
 }
 
-// runMemoryGate enforces the pre-complete task_memory file requirement.
+// runMemoryGate enforces the pre-complete entity-memory file requirement.
 //
-// If the agent wrote ./task_memory/<runID>.md during its initial
+// If the agent wrote ./_scratch/entity-memory/<runID>.md during its initial
 // invocation, returns the original completion unchanged. Otherwise
 // resumes the session (up to maxMemoryRetries times) with a correction
 // message and re-checks after each attempt. Completions from resumed
@@ -1498,7 +1512,7 @@ func (s *Spawner) runMemoryGate(
 		log.Printf("[delegate] run %s: memory file missing after attempt %d, resuming", runID, attempt-1)
 		msg := fmt.Sprintf(
 			"You returned a completion JSON but did not write your memory file to "+
-				"$TRIAGE_FACTORY_RUN_ROOT/task_memory/%s.md. Write it now using the "+
+				"$TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/%s.md. Write it now using the "+
 				"absolute path (the env var resolves to the run-root regardless of "+
 				"which worktree you have cd'd into) — one paragraph of what you did, "+
 				"one of why, one of what to try next if this recurs — then return "+
@@ -1524,18 +1538,18 @@ func (s *Spawner) runMemoryGate(
 	return current
 }
 
-// materializePriorMemories writes any existing task_memory rows for the
-// task into <cwd>/task_memory/<prior_run_id>.md as individual markdown
-// files, so a fresh agent invocation sees what previous iterations on
-// the same task have already tried. The agent is taught to read this
-// directory by the envelope.
+// materializePriorMemories writes any existing run_memory rows for the
+// task into <cwd>/_scratch/entity-memory/<prior_run_id>.md as individual
+// markdown files, so a fresh agent invocation sees what previous
+// iterations on the same task have already tried. The agent is taught
+// to read this directory by the envelope.
 //
 // The directory is created unconditionally — even on the very first run
 // when there are no priors. Two reasons: the prompt instructs the agent
-// to `ls task_memory/` early (fails noisily without the dir), and the
-// memory-gate retry message tells the agent to write to
-// `$TRIAGE_FACTORY_RUN_ROOT/task_memory/<run>.md` (which fails on a
-// missing parent dir unless the agent guesses to mkdir first).
+// to `ls _scratch/entity-memory/` early (fails noisily without the dir),
+// and the memory-gate retry message tells the agent to write to
+// `$TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/<run>.md` (which fails
+// on a missing parent dir unless the agent guesses to mkdir first).
 //
 // Pattern: DB is the source of truth, we materialize into the worktree
 // at startup, and ingest back on completion. The worktree is destroyed
@@ -1549,9 +1563,9 @@ func (s *Spawner) runMemoryGate(
 // the read side — the write-before-finish gate is enforced separately
 // for NEW memories produced during the run.
 func materializePriorMemories(database *sql.DB, cwd, entityID string) {
-	memDir := filepath.Join(cwd, "task_memory")
+	memDir := filepath.Join(cwd, "_scratch", "entity-memory")
 	if err := os.MkdirAll(memDir, 0755); err != nil {
-		log.Printf("[delegate] warning: failed to create task_memory dir at %s: %v", memDir, err)
+		log.Printf("[delegate] warning: failed to create entity-memory dir at %s: %v", memDir, err)
 		return
 	}
 
@@ -1575,6 +1589,95 @@ func materializePriorMemories(database *sql.DB, cwd, entityID string) {
 	}
 	if written > 0 {
 		log.Printf("[delegate] materialized %d prior memories for entity %s", written, entityID)
+	}
+}
+
+// lookupEntityProjectID returns the entity's project_id (or nil if the
+// entity is unassigned, missing, or the lookup fails). Failure is
+// logged and treated as "not assigned" — the spawner degrades gracefully
+// rather than blocking the run on a non-essential context lookup.
+func lookupEntityProjectID(database *sql.DB, entityID string) *string {
+	entity, err := db.GetEntity(database, entityID)
+	if err != nil {
+		log.Printf("[delegate] warning: failed to load entity %s for project lookup: %v", entityID, err)
+		return nil
+	}
+	if entity == nil {
+		return nil
+	}
+	return entity.ProjectID
+}
+
+// projectKnowledgeWarnBytes is the soft cap on per-project knowledge-base
+// total size. We log when crossed but still copy — curated KB content is
+// the user's intent, and silently dropping it would be more surprising
+// than a noisy log line.
+const projectKnowledgeWarnBytes = 500 * 1024
+
+// materializeProjectKnowledge stages the entity's project knowledge-base
+// into <cwd>/_scratch/project-knowledge/ so the agent can read it as
+// ambient context. Mirrors materializePriorMemories' "create the dir
+// unconditionally" pattern so the agent's pre-flight `ls` doesn't fail
+// noisily on ENOENT when no project is assigned.
+//
+// Reads from ~/.triagefactory/projects/<projectID>/knowledge-base/*.md
+// (the path the Curator writes to per SKY-216) and copies each .md file
+// flat into _scratch/project-knowledge/, preserving source filenames.
+//
+// Degrades gracefully: a nil projectID, a missing knowledge-base dir,
+// or per-file copy failures are logged but never fail the run.
+func materializeProjectKnowledge(cwd string, projectID *string) {
+	dir := filepath.Join(cwd, "_scratch", "project-knowledge")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		log.Printf("[delegate] warning: failed to create project-knowledge dir at %s: %v", dir, err)
+		return
+	}
+
+	if projectID == nil || *projectID == "" {
+		return
+	}
+
+	kbRoot, err := curator.KnowledgeDir(*projectID)
+	if err != nil {
+		log.Printf("[delegate] warning: resolve knowledge dir for project %s: %v", *projectID, err)
+		return
+	}
+	srcDir := filepath.Join(kbRoot, "knowledge-base")
+
+	entries, err := os.ReadDir(srcDir)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("[delegate] warning: read project knowledge-base %s: %v", srcDir, err)
+		}
+		return
+	}
+
+	written := 0
+	totalBytes := int64(0)
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+			continue
+		}
+		src := filepath.Join(srcDir, e.Name())
+		data, err := os.ReadFile(src)
+		if err != nil {
+			log.Printf("[delegate] warning: read project knowledge file %s: %v", src, err)
+			continue
+		}
+		dst := filepath.Join(dir, e.Name())
+		if err := os.WriteFile(dst, data, 0644); err != nil {
+			log.Printf("[delegate] warning: write project knowledge file %s: %v", dst, err)
+			continue
+		}
+		written++
+		totalBytes += int64(len(data))
+	}
+
+	if totalBytes > projectKnowledgeWarnBytes {
+		log.Printf("[delegate] project %s knowledge-base is %d bytes — over the %d soft cap; consider trimming", *projectID, totalBytes, projectKnowledgeWarnBytes)
+	}
+	if written > 0 {
+		log.Printf("[delegate] materialized %d project-knowledge files for project %s", written, *projectID)
 	}
 }
 

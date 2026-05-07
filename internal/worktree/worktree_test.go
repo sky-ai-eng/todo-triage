@@ -59,9 +59,6 @@ func TestWriteLocalExcludes_CreatesFileWhenMissing(t *testing.T) {
 	if !strings.Contains(s, "_scratch/") {
 		t.Errorf("missing _scratch/ pattern: %q", s)
 	}
-	if !strings.Contains(s, "task_memory/") {
-		t.Errorf("missing task_memory/ pattern: %q", s)
-	}
 	if !strings.Contains(s, managedExcludeBegin) || !strings.Contains(s, managedExcludeEnd) {
 		t.Errorf("missing marker pair: %q", s)
 	}
@@ -106,12 +103,9 @@ node_modules/
 		}
 	}
 
-	// Our managed patterns must be present too.
+	// Our managed pattern must be present too.
 	if !strings.Contains(gotStr, "_scratch/") {
 		t.Error("missing _scratch/ after append")
-	}
-	if !strings.Contains(gotStr, "task_memory/") {
-		t.Error("missing task_memory/ after append")
 	}
 }
 
@@ -163,7 +157,7 @@ func TestWriteLocalExcludes_Idempotent(t *testing.T) {
 func TestWriteLocalExcludes_PartialExisting(t *testing.T) {
 	wtDir, excludePath := setupPlainCheckout(t)
 
-	// _scratch/ lives in user content; task_memory/ is not yet in the file.
+	// _scratch/ lives in user content; we still write the managed block.
 	if err := os.WriteFile(excludePath, []byte("other-tool-pattern/\n_scratch/\n"), 0644); err != nil {
 		t.Fatalf("pre-populate: %v", err)
 	}
@@ -370,7 +364,7 @@ func TestWriteLocalExcludes_LinkedWorktreePointer(t *testing.T) {
 		t.Fatalf("read external exclude: %v", err)
 	}
 	s := string(content)
-	if !strings.Contains(s, "_scratch/") || !strings.Contains(s, "task_memory/") {
+	if !strings.Contains(s, "_scratch/") {
 		t.Errorf("managed patterns not written through pointer file; got:\n%s", s)
 	}
 }
@@ -586,10 +580,10 @@ func TestWriteLocalExcludes_StrayBeginBeforeBlock(t *testing.T) {
 		}
 	}
 
-	// The real managed block has been expanded in place (task_memory/
-	// is now present alongside _scratch/). The orphaned begin earlier
-	// in the file is left alone — we'd need a bigger cleanup pass to
-	// remove orphaned markers, and that's out of scope for this fix.
+	// The real managed block has been expanded in place. The orphaned
+	// begin earlier in the file is left alone — we'd need a bigger
+	// cleanup pass to remove orphaned markers, and that's out of scope
+	// for this fix.
 	beginIdx := strings.LastIndex(s, managedExcludeBegin)
 	searchFrom := beginIdx + len(managedExcludeBegin)
 	relEnd := strings.Index(s[searchFrom:], managedExcludeEnd)
@@ -845,24 +839,20 @@ func TestAddAndOverlayForTakeover_OverlaySkipsManagedDirs(t *testing.T) {
 	bareDir, srcWorktree := setupBareWithBranch(t)
 	destDir := filepath.Join(t.TempDir(), "run-overlay-mgr")
 
-	for _, name := range []string{"task_memory", "_scratch"} {
-		dir := filepath.Join(srcWorktree, name)
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			t.Fatalf("mkdir %s: %v", name, err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, "secret.txt"), []byte("nope"), 0644); err != nil {
-			t.Fatalf("write secret: %v", err)
-		}
+	dir := filepath.Join(srcWorktree, "_scratch")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatalf("mkdir _scratch: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "secret.txt"), []byte("nope"), 0644); err != nil {
+		t.Fatalf("write secret: %v", err)
 	}
 
 	if err := addAndOverlayForTakeover(context.Background(), "overlay-mgr", bareDir, srcWorktree, destDir, "feature"); err != nil {
 		t.Fatalf("addAndOverlayForTakeover: %v", err)
 	}
 
-	for _, name := range []string{"task_memory", "_scratch"} {
-		if _, err := os.Stat(filepath.Join(destDir, name, "secret.txt")); !os.IsNotExist(err) {
-			t.Errorf("%s/ should have been skipped by overlay (err=%v)", name, err)
-		}
+	if _, err := os.Stat(filepath.Join(destDir, "_scratch", "secret.txt")); !os.IsNotExist(err) {
+		t.Errorf("_scratch/ should have been skipped by overlay (err=%v)", err)
 	}
 }
 
@@ -1100,22 +1090,20 @@ func TestCopyForTakeover_SourceIsAFile(t *testing.T) {
 	}
 }
 
-// TestCopyForTakeover_ManagedDirsSkipped — task_memory/, _scratch/, and
-// .git/ in the source must NOT be copied to the destination. The first
-// two are TF infrastructure that doesn't belong in the user's hands;
-// the third would clobber the linked-worktree gitdir pointer.
+// TestCopyForTakeover_ManagedDirsSkipped — _scratch/ and .git/ in the
+// source must NOT be copied to the destination. The first is TF
+// infrastructure that doesn't belong in the user's hands; the second
+// would clobber the linked-worktree gitdir pointer.
 func TestCopyForTakeover_ManagedDirsSkipped(t *testing.T) {
 	_, srcWorktree := setupBareWithBranch(t)
 	baseDir := t.TempDir()
 
-	for _, name := range []string{"task_memory", "_scratch"} {
-		dir := filepath.Join(srcWorktree, name)
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			t.Fatalf("mkdir %s: %v", name, err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, "secret.txt"), []byte("nope"), 0644); err != nil {
-			t.Fatalf("write secret: %v", err)
-		}
+	dir := filepath.Join(srcWorktree, "_scratch")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatalf("mkdir _scratch: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "secret.txt"), []byte("nope"), 0644); err != nil {
+		t.Fatalf("write secret: %v", err)
 	}
 
 	dest, err := CopyForTakeover(context.Background(), "skip-run", srcWorktree, baseDir)
@@ -1123,10 +1111,8 @@ func TestCopyForTakeover_ManagedDirsSkipped(t *testing.T) {
 		t.Fatalf("CopyForTakeover: %v", err)
 	}
 
-	for _, name := range []string{"task_memory", "_scratch"} {
-		if _, err := os.Stat(filepath.Join(dest, name, "secret.txt")); !os.IsNotExist(err) {
-			t.Errorf("%s/ should have been skipped, but file exists at dest (err=%v)", name, err)
-		}
+	if _, err := os.Stat(filepath.Join(dest, "_scratch", "secret.txt")); !os.IsNotExist(err) {
+		t.Errorf("_scratch/ should have been skipped, but file exists at dest (err=%v)", err)
 	}
 
 	// .git/ in the destination must be the linked-worktree pointer file

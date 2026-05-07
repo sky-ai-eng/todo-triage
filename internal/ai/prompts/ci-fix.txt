@@ -22,7 +22,7 @@ A CI check has failed on a PR you own. Your job is to diagnose the failure, fix 
 
 2. Read the failing job's logs in that directory to identify the root cause. Prefer `grep -r` for the failing check name or known error markers over reading every file.
 
-3. Read any prior entries in `./task_memory/` before making changes — they describe what previous iterations on this task have already tried and what has been ruled out.
+3. Read any prior entries in `./_scratch/entity-memory/` before making changes — they describe what previous iterations on this task have already tried and what has been ruled out.
 
 4. Fix the issue, commit with a clear message explaining the root cause and fix, and push to the PR branch.
 
