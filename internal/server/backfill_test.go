@@ -95,7 +95,9 @@ func TestBackfillCandidates_EmptyConfigShowsAll(t *testing.T) {
 	var resp struct {
 		Candidates []backfillCandidate `json:"candidates"`
 	}
-	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
 	if len(resp.Candidates) != 2 {
 		t.Errorf("expected 2 candidates with empty config, got %d", len(resp.Candidates))
 	}
@@ -124,7 +126,9 @@ func TestBackfillCandidates_ExcludesAlreadyInProject(t *testing.T) {
 	var resp struct {
 		Candidates []backfillCandidate `json:"candidates"`
 	}
-	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
 
 	got := map[string]string{}
 	for _, c := range resp.Candidates {
@@ -165,13 +169,14 @@ func TestBackfill_BulkAssignPartialSuccess(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	// AssignEntityProject doesn't return ErrNoRows for unknown IDs (the
-	// UPDATE just affects 0 rows silently), so all three "applied" —
-	// the contract is "best-effort bulk." If we ever tighten that, the
-	// failure should surface here. For now, we assert the call doesn't
-	// blow up and the real entities ended up in the project.
-	if resp.Applied < 2 {
-		t.Errorf("applied = %d, want at least 2", resp.Applied)
+	// Real entities applied; bogus id surfaces as a per-row failure
+	// rather than being silently counted (relies on
+	// db.AssignEntityProject returning sql.ErrNoRows on 0-row UPDATE).
+	if resp.Applied != 2 {
+		t.Errorf("applied = %d, want 2 (a + b; bogus id should fail)", resp.Applied)
+	}
+	if len(resp.Failed) != 1 || resp.Failed[0].EntityID != "nonexistent-id" {
+		t.Errorf("failed = %+v, want one entry for nonexistent-id", resp.Failed)
 	}
 	for _, e := range []domain.Entity{*a, *b} {
 		got, _ := db.GetEntity(s.db, e.ID)

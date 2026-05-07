@@ -45,6 +45,18 @@ export default function ProjectBackfillModal({ projectId, projectName, onClose }
     }
   }, [])
 
+  // Escape closes unless a submit is in flight. Mirrors
+  // ProjectCreateModal's contract — keep the user from dismissing
+  // mid-request, since the dismiss leaves no UI to surface a
+  // partial-success response.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !saving) onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose, saving])
+
   useEffect(() => {
     let cancelled = false
     ;(async () => {

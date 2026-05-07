@@ -111,6 +111,11 @@ func UpdateEntityDescription(db *sql.DB, entityID, description string) error {
 // (winner OR runner-up), preserved on the row so the UI can surface
 // "why this match" or "closest match was X at score N." Empty string
 // is acceptable for the popup path, where the human is the rationale.
+//
+// Returns sql.ErrNoRows when the UPDATE matches no row — i.e. the
+// entity id doesn't exist. Callers that ingest user input (e.g. the
+// backfill HTTP handler) need this signal to report per-row failures
+// rather than silently counting bogus ids as applied.
 func AssignEntityProject(database *sql.DB, entityID string, projectID *string, rationale string) error {
 	var arg any
 	if projectID != nil && *projectID != "" {
@@ -124,14 +129,24 @@ func AssignEntityProject(database *sql.DB, entityID string, projectID *string, r
 	} else {
 		rationaleArg = nil
 	}
-	_, err := database.Exec(`
+	res, err := database.Exec(`
 		UPDATE entities
 		SET project_id = ?,
 		    classification_rationale = ?,
 		    classified_at = CURRENT_TIMESTAMP
 		WHERE id = ?
 	`, arg, rationaleArg, entityID)
-	return err
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 // ListUnclassifiedEntities returns active entities that haven't been
