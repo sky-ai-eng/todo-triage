@@ -2,12 +2,10 @@ package projectclassify
 
 import (
 	"database/sql"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
-	"github.com/sky-ai-eng/triage-factory/internal/domain"
 
 	_ "modernc.org/sqlite"
 )
