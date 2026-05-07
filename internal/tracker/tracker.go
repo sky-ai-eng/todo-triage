@@ -161,25 +161,6 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, userTe
 			continue // can't refresh without a node ID
 		}
 
-		// Close stale review_requested tasks where the stored snapshot shows
-		// the user is no longer in ReviewRequests. Runs before the gate so
-		// quiet (skipped) entities are still reconciled. Guarded by NodeID
-		// above: empty/legacy snapshots have nil ReviewRequests which would
-		// falsely close legitimate tasks. This reconciliation also depends on
-		// team membership data for team-based review requests, so skip it when
-		// userTeams is unavailable rather than treating "unknown teams" as
-		// "user is not a reviewer" and incorrectly closing active tasks.
-		if userTeams != nil && !isReviewerMatch(snap.ReviewRequests, username, userTeams) {
-			if stale, err := db.FindActiveTasksByEntityAndType(t.database, e.ID, domain.EventGitHubPRReviewRequested); err == nil {
-				for _, task := range stale {
-					if err := db.CloseTask(t.database, task.ID, "reconciled_stale", domain.EventGitHubPRReviewRequestRemoved); err != nil {
-						log.Printf("[tracker] reconcile: failed to close task %s: %v", task.ID, err)
-					} else {
-						log.Printf("[tracker] reconciled stale review_requested task %s", task.ID)
-					}
-				}
-			}
-		}
 		item := entityWithSnap{entity: e, snap: snap, nodeID: snap.NodeID}
 		if snap.Merged || snap.State == "CLOSED" || snap.State == "MERGED" {
 			terminalItems = append(terminalItems, item)
@@ -197,6 +178,31 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, userTe
 			age = 24 * time.Hour
 		}
 		if fresh, ok := discoveredBySourceID[e.SourceID]; ok && shouldSkipRefresh(snap, fresh, age) {
+			// Skipped entities won't be diffed, so reconcile stale
+			// review_requested tasks here. Entities proceeding to
+			// DiffPRSnapshots emit their own review_request_removed events.
+			if userTeams != nil && !isReviewerMatch(snap.ReviewRequests, username, userTeams) {
+				if stale, err := db.FindActiveTasksByEntityAndType(t.database, e.ID, domain.EventGitHubPRReviewRequested); err == nil && len(stale) > 0 {
+					meta, _ := json.Marshal(events.GitHubPRReviewRequestRemovedMetadata{
+						Author:       snap.Author,
+						AuthorIsSelf: snap.Author == username,
+						Repo:         snap.Repo,
+						PRNumber:     snap.Number,
+						IsDraft:      snap.IsDraft,
+						HeadSHA:      snap.HeadSHA,
+						Labels:       snap.Labels,
+						Title:        snap.Title,
+					})
+					eid := e.ID
+					t.bus.Publish(domain.Event{
+						EventType:    domain.EventGitHubPRReviewRequestRemoved,
+						EntityID:     &eid,
+						MetadataJSON: string(meta),
+						OccurredAt:   time.Now(),
+					})
+					log.Printf("[tracker] reconciled: emitting review_request_removed for skipped entity %s", e.ID)
+				}
+			}
 			skippedOpen++
 			continue
 		}
