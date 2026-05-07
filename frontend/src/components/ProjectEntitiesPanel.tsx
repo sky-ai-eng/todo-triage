@@ -96,7 +96,7 @@ export default function ProjectEntitiesPanel({ projectId }: Props) {
           ) : null}
         </h2>
         <p className="text-[12px] text-text-tertiary mt-0.5 leading-relaxed">
-          Active work assigned to this project. Click a row to see why the classifier picked it.
+          Active work assigned to this project. Click a row to see why it was assigned.
         </p>
       </header>
 
