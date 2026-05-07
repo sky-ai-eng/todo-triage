@@ -1658,6 +1658,18 @@ func materializeProjectKnowledge(cwd string, projectID *string) {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
 			continue
 		}
+		if e.Type()&os.ModeSymlink != 0 {
+			log.Printf("[delegate] warning: skipping symlink in project knowledge-base %s", filepath.Join(srcDir, e.Name()))
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			log.Printf("[delegate] warning: stat project knowledge file %s: %v", filepath.Join(srcDir, e.Name()), err)
+			continue
+		}
+		if !info.Mode().IsRegular() {
+			continue
+		}
 		src := filepath.Join(srcDir, e.Name())
 		data, err := os.ReadFile(src)
 		if err != nil {
