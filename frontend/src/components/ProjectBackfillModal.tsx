@@ -269,7 +269,7 @@ function CandidateRow({ candidate, checked, failure, onToggle }: RowProps) {
           <a
             href={candidate.url}
             target="_blank"
-            rel="noreferrer"
+            rel="noopener noreferrer"
             onClick={(e) => e.stopPropagation()}
             className="text-text-primary font-medium hover:text-accent transition-colors flex items-center gap-1"
           >
