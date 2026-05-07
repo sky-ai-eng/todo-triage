@@ -17,3 +17,14 @@
 -- the project-creation backfill popup (PR B) as a hover hint.
 ALTER TABLE entities ADD COLUMN classified_at DATETIME;
 ALTER TABLE entities ADD COLUMN classification_rationale TEXT;
+
+-- Stamp every pre-existing entity as "we have a final answer" (NULL
+-- project, no rationale) so the post-poll classifier doesn't try to
+-- backfill the entire history on first launch with the classifier
+-- enabled. Existing untagged entities stay untagged forever unless
+-- the user reaches them via the project-creation backfill popup
+-- (PR B). This is the deliberate "no retro-classification" stance:
+-- nobody is using projects yet, so there's no real cost, and avoiding
+-- a 200-entity classification stampede on first launch is worth a
+-- one-line stamp.
+UPDATE entities SET classified_at = CURRENT_TIMESTAMP WHERE classified_at IS NULL;

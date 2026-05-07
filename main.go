@@ -457,6 +457,15 @@ func main() {
 	spawner := delegate.NewSpawner(database, nil, wsHub, "")
 	srv.SetSpawner(spawner)
 
+	// SKY-220: wire the classifier wait into the spawner's setup path.
+	// Before reading entity.project_id for KB injection, the spawner
+	// blocks until classified_at is set (or DefaultWaitTimeout elapses).
+	// projectclassify.WaitFor triggers the runner on entry to wake it up
+	// even if no post-poll cycle has fired for this entity yet.
+	spawner.SetWaitForClassification(func(entityID string) {
+		projectclassify.WaitFor(database, classifier, entityID, projectclassify.DefaultWaitTimeout)
+	})
+
 	// Curator runtime (SKY-216) — per-project chat sessions. Any
 	// rows left non-terminal from a previous process are stranded:
 	// running rows lost their goroutine + agentproc subprocess,

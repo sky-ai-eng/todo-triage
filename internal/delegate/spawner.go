@@ -51,12 +51,13 @@ type Spawner struct {
 	database *sql.DB
 	wsHub    *websocket.Hub
 
-	mu        sync.Mutex
-	ghClient  *ghclient.Client
-	model     string
-	cancels   map[string]context.CancelFunc // runID → cancel the entire run
-	drainer   QueueDrainer                  // nil-safe; set post-construction via SetQueueDrainer
-	takenOver map[string]bool               // runIDs claimed by Takeover. Sticky-on for the rest of the goroutine's lifetime even after rollback — clearing the entry would let late-firing goroutine gates race the takeover/abort lifecycle. Suppresses every cleanup path in runAgent so Takeover/abortTakeover own the row's terminal state.
+	mu                    sync.Mutex
+	ghClient              *ghclient.Client
+	model                 string
+	cancels               map[string]context.CancelFunc // runID → cancel the entire run
+	drainer               QueueDrainer                  // nil-safe; set post-construction via SetQueueDrainer
+	takenOver             map[string]bool               // runIDs claimed by Takeover. Sticky-on for the rest of the goroutine's lifetime even after rollback — clearing the entry would let late-firing goroutine gates race the takeover/abort lifecycle. Suppresses every cleanup path in runAgent so Takeover/abortTakeover own the row's terminal state.
+	waitForClassification func(entityID string)         // SKY-220 hook: blocks until the project classifier has decided this entity, or a timeout elapses. Nil-safe (test setups skip it). Wired in main.go via SetWaitForClassification — keeps internal/delegate from importing internal/projectclassify.
 }
 
 func NewSpawner(database *sql.DB, ghClient *ghclient.Client, wsHub *websocket.Hub, model string) *Spawner {
@@ -104,6 +105,30 @@ func (s *Spawner) SetQueueDrainer(d QueueDrainer) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.drainer = d
+}
+
+// SetWaitForClassification wires the SKY-220 hook that blocks the
+// spawner until the project classifier has decided the entity (or a
+// timeout elapses). main.go provides the implementation so this
+// package doesn't import projectclassify. Nil-safe — tests and any
+// configuration without a classifier skip the wait entirely.
+func (s *Spawner) SetWaitForClassification(fn func(entityID string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.waitForClassification = fn
+}
+
+// awaitClassification calls the wait hook if one is configured. Used
+// in setupGitHub / setupJira before lookupEntityProjectID so the
+// spawner reads a freshly-classified project_id when the classifier
+// is available.
+func (s *Spawner) awaitClassification(entityID string) {
+	s.mu.Lock()
+	fn := s.waitForClassification
+	s.mu.Unlock()
+	if fn != nil {
+		fn(entityID)
+	}
 }
 
 // notifyDrainer fires the QueueDrainer hook for an entity if a drainer is
@@ -681,6 +706,12 @@ func (s *Spawner) setupGitHub(ctx context.Context, runID string, task domain.Tas
 		log.Printf("[delegate] warning: failed to update worktree path for run %s: %v", runID, err)
 	}
 
+	// SKY-220: block briefly so the project classifier (post-poll
+	// runner) can decide this entity before we read project_id for KB
+	// injection. Nil-safe — tests and pre-classifier configurations
+	// skip the wait.
+	s.awaitClassification(task.EntityID)
+
 	return runConfig{
 		scope:     fmt.Sprintf("Repository: %s/%s\nPR: #%d\nBranch: %s", owner, repo, prNumber, pr.HeadRef),
 		toolsRef:  ai.GHToolsTemplate,
@@ -722,6 +753,11 @@ func (s *Spawner) setupJira(ctx context.Context, runID string, task domain.Task,
 	if _, err := s.database.Exec(`UPDATE runs SET worktree_path = ? WHERE id = ?`, runRoot, runID); err != nil {
 		log.Printf("[delegate] warning: failed to set worktree_path for Jira run %s: %v — yield/resume will reject this run", runID, err)
 	}
+
+	// SKY-220: block briefly so the project classifier can decide this
+	// entity before we read project_id for KB injection. Nil-safe.
+	s.awaitClassification(task.EntityID)
+
 	return runConfig{
 		scope:     fmt.Sprintf("Jira issue: %s", task.EntitySourceID),
 		toolsRef:  ai.GHToolsTemplate + "\n\n" + ai.JiraToolsTemplate,
