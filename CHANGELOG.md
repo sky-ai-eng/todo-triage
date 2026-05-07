@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.9.0](https://github.com/sky-ai-eng/triage-factory/compare/v1.8.1...v1.9.0) (2026-05-07)
+
+
+### Features
+
+* **delegate:** use per-prompt allowed-tools from skills ([#122](https://github.com/sky-ai-eng/triage-factory/issues/122)) ([4c79cf8](https://github.com/sky-ai-eng/triage-factory/commit/4c79cf87cee5dd453f0bc6e9f6a0bdd6783fa1d3))
+* **tracker:** add review_request_removed event and reconcile tasks ([#112](https://github.com/sky-ai-eng/triage-factory/issues/112)) ([fef901f](https://github.com/sky-ai-eng/triage-factory/commit/fef901fe75c1738c7bfded7971429cad9c481db4))
+
 ## [1.8.1](https://github.com/sky-ai-eng/triage-factory/compare/v1.8.0...v1.8.1) (2026-05-07)
 
 
