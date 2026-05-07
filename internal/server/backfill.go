@@ -164,11 +164,16 @@ func (s *Server) handleBackfill(w http.ResponseWriter, r *http.Request) {
 	applied := 0
 	var failures []backfillFailure
 	var assigned []string
+	seen := make(map[string]struct{}, len(req.EntityIDs))
 	for _, eid := range req.EntityIDs {
 		eid = strings.TrimSpace(eid)
 		if eid == "" {
 			continue
 		}
+		if _, ok := seen[eid]; ok {
+			continue
+		}
+		seen[eid] = struct{}{}
 		// Re-validate every id server-side. The client built this list
 		// from /backfill-candidates, which already filtered, but a
 		// stale tab, a tampered request, or a race against entity
