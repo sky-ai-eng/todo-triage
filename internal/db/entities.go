@@ -291,6 +291,41 @@ func GetEntityDescriptions(database *sql.DB, ids []string) (map[string]string, e
 	return out, nil
 }
 
+// ListActiveEntitiesByProject returns active entities assigned to the
+// given project, ordered by last_polled_at DESC so the most recently
+// updated entity bubbles to the top of the project-detail entities
+// panel (SKY-238). NULL last_polled_at sorts last — fresh-discovered
+// entities haven't been polled yet but they're rare and the ordering
+// is best-effort.
+func ListActiveEntitiesByProject(db *sql.DB, projectID string) ([]domain.Entity, error) {
+	rows, err := db.Query(`
+		SELECT id, source, source_id, kind, COALESCE(title, ''), COALESCE(url, ''),
+		       COALESCE(snapshot_json, ''), COALESCE(description, ''), state, project_id, COALESCE(classification_rationale, ''), created_at, last_polled_at, closed_at
+		FROM entities
+		WHERE project_id = ? AND state = 'active'
+		ORDER BY last_polled_at DESC NULLS LAST
+	`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []domain.Entity
+	for rows.Next() {
+		var e domain.Entity
+		var pid sql.NullString
+		if err := rows.Scan(&e.ID, &e.Source, &e.SourceID, &e.Kind, &e.Title, &e.URL,
+			&e.SnapshotJSON, &e.Description, &e.State, &pid, &e.ClassificationRationale, &e.CreatedAt, &e.LastPolledAt, &e.ClosedAt); err != nil {
+			return nil, err
+		}
+		if pid.Valid {
+			e.ProjectID = &pid.String
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
 // ListActiveEntities returns all entities with state='active' for a given source.
 func ListActiveEntities(db *sql.DB, source string) ([]domain.Entity, error) {
 	rows, err := db.Query(`

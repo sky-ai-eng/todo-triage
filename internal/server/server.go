@@ -123,6 +123,8 @@ func (s *Server) routes() {
 	// Project-creation backfill popup (SKY-220 PR B).
 	s.mux.HandleFunc("GET /api/projects/{id}/backfill-candidates", s.handleBackfillCandidates)
 	s.mux.HandleFunc("POST /api/projects/{id}/backfill", s.handleBackfill)
+	// Project entities panel (SKY-238).
+	s.mux.HandleFunc("GET /api/projects/{id}/entities", s.handleProjectEntities)
 
 	// Curator chat per project (SKY-216). The Curator package owns the
 	// long-lived CC session lifecycle; these endpoints are the API

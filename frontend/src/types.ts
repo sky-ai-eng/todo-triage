@@ -363,6 +363,11 @@ export type WSEvent =
       data: { request_id: string; status: CuratorRequestStatus }
     }
   | { type: 'project_knowledge_updated'; project_id: string; data: null }
+  | {
+      type: 'entities_assigned_to_project'
+      project_id: string
+      data: { entity_ids: string[] }
+    }
   | { type: 'curator_reset'; project_id: string; data: null }
   | { type: 'event'; data: DomainEvent }
   | { type: 'tasks_updated'; data: Record<string, never> }

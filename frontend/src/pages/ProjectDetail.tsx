@@ -20,6 +20,7 @@ import { readError } from '../lib/api'
 import { toast } from '../components/Toast/toastStore'
 import TrackerProjectPickers from '../components/TrackerProjectPickers'
 import CuratorChat from '../components/CuratorChat'
+import ProjectEntitiesPanel from '../components/ProjectEntitiesPanel'
 import { useWebSocket } from '../hooks/useWebSocket'
 
 // ProjectDetail is the per-project workspace. Top-to-bottom on the
@@ -339,6 +340,8 @@ export default function ProjectDetail() {
           <IntegrationsPanel project={project} onPatch={patch} />
 
           <KnowledgePanel projectId={project.id} />
+
+          <ProjectEntitiesPanel projectId={project.id} />
         </div>
 
         <CuratorChat project={project} onPatch={patch} />
@@ -1126,7 +1129,10 @@ function KnowledgePanel({ projectId }: { projectId: string }) {
           .
         </div>
       ) : (
-        <div className="space-y-2">
+        // SKY-238 caps the KB list so the entities panel below has
+        // breathing room in the left column. Unbounded growth would
+        // push the entities panel below the fold on a typical laptop.
+        <div className="max-h-[50vh] overflow-y-auto space-y-2 pr-1">
           {files.map((file) => (
             <KnowledgeRow
               key={file.path}
