@@ -165,8 +165,11 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, userTe
 		// the user is no longer in ReviewRequests. Runs before the gate so
 		// quiet (skipped) entities are still reconciled. Guarded by NodeID
 		// above: empty/legacy snapshots have nil ReviewRequests which would
-		// falsely close legitimate tasks.
-		if !isReviewerMatch(snap.ReviewRequests, username, userTeams) {
+		// falsely close legitimate tasks. This reconciliation also depends on
+		// team membership data for team-based review requests, so skip it when
+		// userTeams is unavailable rather than treating "unknown teams" as
+		// "user is not a reviewer" and incorrectly closing active tasks.
+		if userTeams != nil && !isReviewerMatch(snap.ReviewRequests, username, userTeams) {
 			if stale, err := db.FindActiveTasksByEntityAndType(t.database, e.ID, domain.EventGitHubPRReviewRequested); err == nil {
 				for _, task := range stale {
 					if err := db.CloseTask(t.database, task.ID, "reconciled_stale", domain.EventGitHubPRReviewRequestRemoved); err != nil {
