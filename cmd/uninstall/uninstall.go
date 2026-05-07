@@ -277,15 +277,15 @@ func buildPlan(dataDir, takeoversDir, linkPath string) uninstallPlan {
 	return p
 }
 
+// claudeProjectReplacer encodes an absolute path to the directory name
+// Claude Code uses under ~/.claude/projects/. Every '/' and '.' becomes '-'.
+// Mirrors encodeClaudeProjectDir in internal/worktree; kept local to avoid
+// pulling in that package just for path encoding.
+var claudeProjectReplacer = strings.NewReplacer("/", "-", ".", "-")
+
 // removeClaudeProjectsForTakeovers walks takeover run dirs and deletes
 // the matching ~/.claude/projects/<encoded> dir for each.
-// Encoding rule mirrors encodeClaudeProjectDir in internal/worktree:
-// every '/' AND every '.' becomes '-'. Returns the number of project
-// dirs successfully removed.
-//
-// We don't import internal/worktree to reuse its encoder — uninstall only
-// needs this tiny mapping and keeping it local avoids pulling in the
-// worktree package just for path encoding.
+// Returns the number of project dirs successfully removed.
 func removeClaudeProjectsForTakeovers(takeoversDir, home string) (int, error) {
 	entries, err := os.ReadDir(takeoversDir)
 	if err != nil {
@@ -302,7 +302,7 @@ func removeClaudeProjectsForTakeovers(takeoversDir, home string) (int, error) {
 		if err != nil {
 			resolved = full
 		}
-		encoded := strings.NewReplacer("/", "-", ".", "-").Replace(resolved)
+		encoded := claudeProjectReplacer.Replace(resolved)
 		projectDir := filepath.Join(home, ".claude", "projects", encoded)
 		if _, err := os.Stat(projectDir); err != nil {
 			if os.IsNotExist(err) {
@@ -345,7 +345,7 @@ func removeClaudeProjectsForCurator(projectsDir, home string) (int, error) {
 		if err != nil {
 			resolved = full
 		}
-		encoded := strings.NewReplacer("/", "-", ".", "-").Replace(resolved)
+		encoded := claudeProjectReplacer.Replace(resolved)
 		projectDir := filepath.Join(home, ".claude", "projects", encoded)
 		if _, err := os.Stat(projectDir); err != nil {
 			if os.IsNotExist(err) {
