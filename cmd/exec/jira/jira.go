@@ -35,6 +35,7 @@ const HelpText = `Jira Ticket Commands:
   jira ticket assign <key>                                     Assign to the authenticated user
   jira ticket unassign <key>                                   Remove assignee
   jira ticket create <project> --type <type> --summary <text> [--description <text>] [--parent <key>] [--priority <priority>]
+  jira ticket edit <key> [--summary <text>] [--description <text>] [--priority <p>] [--type <t>] [--add-label <l>] [--remove-label <l>]  Update fields on an existing issue
   jira ticket set-parent <key> --parent <parent_key>           Link issue under a parent
   jira ticket set-priority <key> --priority <priority>         Update issue priority
   jira ticket search --jql <jql> [--fields <f1,f2,...>] [--max <N>]  Search issues via JQL

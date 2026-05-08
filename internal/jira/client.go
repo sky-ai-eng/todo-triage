@@ -474,6 +474,72 @@ func (c *Client) SetPriority(issueKey, priority string) error {
 	}})
 }
 
+// UpdateIssueFields describes the fields to mutate on an existing issue.
+// Nil pointers mean "leave the field untouched"; an empty string means
+// "set the field to empty" (Jira accepts this for description, less so
+// for summary). AddLabels / RemoveLabels are processed via Jira's
+// `update` operation so existing labels not mentioned are preserved.
+type UpdateIssueFields struct {
+	Summary      *string
+	Description  *string
+	Priority     *string
+	IssueType    *string
+	AddLabels    []string
+	RemoveLabels []string
+}
+
+// IsEmpty reports whether the update would be a no-op.
+func (u UpdateIssueFields) IsEmpty() bool {
+	return u.Summary == nil &&
+		u.Description == nil &&
+		u.Priority == nil &&
+		u.IssueType == nil &&
+		len(u.AddLabels) == 0 &&
+		len(u.RemoveLabels) == 0
+}
+
+// UpdateIssue mutates an existing issue. Only fields explicitly set on
+// `fields` are touched; everything else is preserved. Returns an error
+// if no fields were provided.
+func (c *Client) UpdateIssue(issueKey string, f UpdateIssueFields) error {
+	if f.IsEmpty() {
+		return fmt.Errorf("no fields to update")
+	}
+
+	fields := map[string]any{}
+	if f.Summary != nil {
+		fields["summary"] = *f.Summary
+	}
+	if f.Description != nil {
+		fields["description"] = *f.Description
+	}
+	if f.Priority != nil {
+		fields["priority"] = map[string]string{"name": *f.Priority}
+	}
+	if f.IssueType != nil {
+		fields["issuetype"] = map[string]string{"name": *f.IssueType}
+	}
+
+	payload := map[string]any{}
+	if len(fields) > 0 {
+		payload["fields"] = fields
+	}
+
+	if len(f.AddLabels) > 0 || len(f.RemoveLabels) > 0 {
+		ops := make([]map[string]string, 0, len(f.AddLabels)+len(f.RemoveLabels))
+		for _, l := range f.AddLabels {
+			ops = append(ops, map[string]string{"add": l})
+		}
+		for _, l := range f.RemoveLabels {
+			ops = append(ops, map[string]string{"remove": l})
+		}
+		payload["update"] = map[string]any{"labels": ops}
+	}
+
+	url := fmt.Sprintf("%s/rest/api/2/issue/%s", c.baseURL, issueKey)
+	return c.put(url, payload)
+}
+
 // SetParent links an existing issue under a parent.
 // Tries fields.parent first (works for Cloud + Server/DC subtasks).
 // Falls back to Epic Link custom field on Server/DC if parent is an Epic.
