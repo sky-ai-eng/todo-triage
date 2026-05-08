@@ -160,7 +160,8 @@ func BuildAllowedTools(selfBin string) string {
 
 		// Go tooling - explicit subcommand list. `go run` and `go install`
 		// deliberately omitted: the former executes arbitrary Go source,
-		// the latter installs binaries into $GOPATH/bin.
+		// the latter installs binaries into $GOPATH/bin. `go get` is omitted
+		// because (modern) it can still pull binaries via the -tool flag.
 		"Bash(go test *)", "Bash(go build *)",
 		"Bash(go vet *)", "Bash(go fmt *)",
 		"Bash(go mod tidy)", "Bash(go mod download)",
@@ -169,18 +170,65 @@ func BuildAllowedTools(selfBin string) string {
 		"Bash(go generate *)", "Bash(go doc *)",
 		"Bash(go env)", "Bash(go env *)",
 		"Bash(go version)", "Bash(go list *)",
+		// Workspace & misc: workspace ops manipulate go.work which is
+		// committed alongside go.mod, no install side effects. clean
+		// removes build artifacts. tool runs Go-bundled tools (cover,
+		// pprof, trace, fix, vet, asm, compile, link) — all ship with
+		// Go itself, not downloaded code, so the threat surface is
+		// equivalent to `go build` (produces local binaries the agent
+		// could already produce). bug/telemetry are diagnostic.
+		"Bash(go work)", "Bash(go work *)",
+		"Bash(go clean)", "Bash(go clean *)",
+		"Bash(go tool *)",
+		"Bash(go bug)", "Bash(go telemetry *)",
 		"Bash(gofmt *)", "Bash(goimports *)",
 
-		// Node / JS tooling - non-install subcommands only. `npm install`,
-		// `npm publish`, `npm link`, `npm exec` all deliberately omitted.
+		// Node / JS tooling - non-install subcommands only. `*** install`,
+		// `*** add`, `*** publish`, `*** link`, `*** exec`, and pnpm's
+		// `dlx` are deliberately omitted: they all either run install
+		// scripts (postinstall RCE) or invoke arbitrary binaries
+		// (allowlist evasion). pnpm install --frozen-lockfile is the
+		// one exception — the lockfile is committed and reviewed, so
+		// installed versions are pinned to what the project intends.
+		//
+		// Script shortcuts (pnpm build, pnpm lint, etc.) need explicit
+		// patterns because pnpm's allowlist syntax can't say "any pnpm
+		// subcommand except exec/dlx/add/install/remove/update". These
+		// names map to `pnpm run <name>` under the hood and are safe by
+		// the same logic as `pnpm run *` — they execute scripts the
+		// project author wrote into package.json. We list the common
+		// ones; new script names can be added as they come up. npm
+		// only special-cases test/start/stop/restart this way; for
+		// other scripts npm requires the explicit `run`.
 		"Bash(npm run *)", "Bash(npm test *)", "Bash(npm ci)",
+		"Bash(npm start)", "Bash(npm start *)",
+		"Bash(npm stop)", "Bash(npm stop *)",
+		"Bash(npm restart)", "Bash(npm restart *)",
 		"Bash(npm ls *)", "Bash(npm list *)",
 		"Bash(npm outdated *)", "Bash(npm audit *)",
 		"Bash(npm view *)", "Bash(npm pack *)",
+		"Bash(npm why *)", "Bash(npm fund)", "Bash(npm fund *)",
+		"Bash(npm root)", "Bash(npm root *)",
+		"Bash(npm bin)", "Bash(npm bin *)",
+		"Bash(npm prefix)", "Bash(npm prefix *)",
+		"Bash(npm ping)", "Bash(npm doctor)",
+		"Bash(npm config get *)", "Bash(npm config list)", "Bash(npm config list *)",
 		"Bash(pnpm run *)", "Bash(pnpm test *)",
+		"Bash(pnpm build)", "Bash(pnpm build *)",
+		"Bash(pnpm lint)", "Bash(pnpm lint *)",
+		"Bash(pnpm typecheck)", "Bash(pnpm typecheck *)",
+		"Bash(pnpm dev)", "Bash(pnpm dev *)",
+		"Bash(pnpm format)", "Bash(pnpm format *)",
+		"Bash(pnpm check)", "Bash(pnpm check *)",
+		"Bash(pnpm coverage)", "Bash(pnpm coverage *)",
+		"Bash(pnpm start)", "Bash(pnpm start *)",
 		"Bash(pnpm ls *)", "Bash(pnpm list *)",
 		"Bash(pnpm install --frozen-lockfile)",
 		"Bash(pnpm audit *)",
+		"Bash(pnpm why *)", "Bash(pnpm licenses *)",
+		"Bash(pnpm root)", "Bash(pnpm root *)",
+		"Bash(pnpm bin)", "Bash(pnpm bin *)",
+		"Bash(pnpm doctor)",
 		"Bash(yarn run *)", "Bash(yarn test *)",
 		"Bash(yarn list *)",
 		"Bash(tsc *)", "Bash(eslint *)", "Bash(prettier *)",
@@ -207,11 +255,19 @@ func BuildAllowedTools(selfBin string) string {
 		//   - bash, sh, zsh, dash - re-shelling to evade the allowlist
 		//   - python, python3, node, ruby, perl, php, deno, osascript - arbitrary
 		//     interpreter execution via -c / -e flags
+		//   - npx, pnpm exec, pnpm dlx, npm exec, yarn dlx - same as above:
+		//     they're launchers that resolve to arbitrary binaries (any
+		//     curl-like tool from node_modules/.bin or downloaded packages)
+		//   - npm/pnpm/yarn install (without --frozen-lockfile), npm/pnpm
+		//     add, npm/pnpm update, npm/pnpm rebuild - postinstall lifecycle
+		//     scripts run as the user; installing/upgrading any package is
+		//     equivalent to RCE
 		//   - sudo, su, doas - privilege escalation
 		//   - chmod, chown - permission escalation surface; agents don't need it
 		//   - kill, killall, pkill - could target other processes on the machine
 		//   - env (no args) - prints environment including any secrets
-		//   - npm install, pip install, go install, cargo install, brew install - arbitrary code
+		//   - go run, go install, go get - run arbitrary Go source / install binaries
+		//   - pip install, cargo install, brew install - arbitrary code
 		//   - *** anything not on this list is blocked ***
 	}
 
