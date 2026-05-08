@@ -644,8 +644,8 @@ func (s *Spawner) Release(runID string) error {
 	// and then failed RemoveAt, we'd be in a half-released state
 	// where the run is "held" for retry but the resume history is
 	// already gone.
-	if err := worktree.RemoveAt(takeoverPath, runID); err != nil {
-		return fmt.Errorf("remove takeover worktree %s: %w", takeoverPath, err)
+	if err := worktree.RemoveAt(canonPath, runID); err != nil {
+		return fmt.Errorf("remove takeover worktree %s: %w", canonPath, err)
 	}
 
 	// (4) Per-PR config cleanup. Best-effort — failures here leak a
