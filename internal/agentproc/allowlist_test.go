@@ -51,6 +51,7 @@ func TestBuildAllowedToolsWithExtras_WhitespaceOnly(t *testing.T) {
 func TestBuildAllowedTools_PnpmScriptShortcuts(t *testing.T) {
 	base := BuildAllowedTools("/usr/local/bin/tf")
 	for _, p := range []string{
+		"Bash(pnpm test)", "Bash(pnpm test *)",
 		"Bash(pnpm build)", "Bash(pnpm build *)",
 		"Bash(pnpm lint)", "Bash(pnpm lint *)",
 		"Bash(pnpm typecheck)", "Bash(pnpm typecheck *)",
@@ -67,11 +68,15 @@ func TestBuildAllowedTools_PnpmScriptShortcuts(t *testing.T) {
 }
 
 // TestBuildAllowedTools_NpmScriptShortcuts asserts npm's special-cased
-// script shortcuts (start/stop/restart — npm only auto-runs these four
-// without `run`; everything else needs `npm run <x>`).
+// script shortcuts. npm only auto-runs four scripts without an explicit
+// `run`: test, start, stop, restart. Everything else needs `npm run <x>`.
+// Each form needs both bare and `*` patterns because the file convention
+// (mirroring git status / git status *) treats the wildcard as
+// non-empty-matching.
 func TestBuildAllowedTools_NpmScriptShortcuts(t *testing.T) {
 	base := BuildAllowedTools("/usr/local/bin/tf")
 	for _, p := range []string{
+		"Bash(npm test)", "Bash(npm test *)",
 		"Bash(npm start)", "Bash(npm start *)",
 		"Bash(npm stop)", "Bash(npm stop *)",
 		"Bash(npm restart)", "Bash(npm restart *)",
