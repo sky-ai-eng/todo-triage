@@ -553,7 +553,43 @@ func (s *Spawner) Release(runID string) error {
 
 	takeoverPath := run.WorktreePath
 
-	// (1) Capture branch name from the takeover dir. Best-effort: empty
+	// (1) Resolve the takeover base early. Two reasons:
+	//
+	//   - Path-safety check: a poisoned worktree_path (DB row tampered
+	//     with, or a bug elsewhere wrote an arbitrary path into the
+	//     column) would otherwise let RemoveAt nuke a directory we
+	//     don't own. Refuse the release if takeoverPath isn't under
+	//     the configured takeover base.
+	//
+	//   - Projects-dir cleanup needs the base for its own safety rail.
+	//
+	// If config can't be loaded (broken on-disk DB or filesystem), we
+	// refuse rather than barrel ahead without the safety check —
+	// handleAgentTakeover already requires this to work, so a release
+	// against a takeover that successfully created should also have
+	// access to the same config.
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load config for release: %w", err)
+	}
+	takeoverBase, err := cfg.Server.ResolvedTakeoverDir()
+	if err != nil {
+		return fmt.Errorf("resolve takeover base: %w", err)
+	}
+	resolvedPath, err := filepath.EvalSymlinks(takeoverPath)
+	if err != nil {
+		return fmt.Errorf("resolve takeover path %s: %w", takeoverPath, err)
+	}
+	resolvedBase, err := filepath.EvalSymlinks(takeoverBase)
+	if err != nil {
+		return fmt.Errorf("resolve takeover base %s: %w", takeoverBase, err)
+	}
+	rel, err := filepath.Rel(resolvedBase, resolvedPath)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return fmt.Errorf("release: takeover path %s is not under takeover base %s; refusing teardown", resolvedPath, resolvedBase)
+	}
+
+	// (2) Capture branch name from the takeover dir. Best-effort: empty
 	// branch is acceptable (CleanupPRConfig handles "" — it just skips
 	// the own-repo branch.<headRef>.* and `branch -D headRef` blocks,
 	// while still reclaiming the synthetic triagefactory/pr-<n> remote
@@ -578,7 +614,17 @@ func (s *Spawner) Release(runID string) error {
 		}
 	}
 
-	// (2) Remove the worktree dir + bare-side registration. RemoveAt
+	// (3) Drop the ~/.claude/projects entry FIRST, before RemoveAt
+	// destroys the dir. RemoveClaudeProjectDirUnderTakeover internally
+	// EvalSymlinks's the cwd to compute the encoded project-dir name,
+	// which Claude Code keys session storage by. Doing this AFTER
+	// RemoveAt would silently no-op (EvalSymlinks fails on a
+	// non-existent path) and leave a ghost projects entry behind. The
+	// runAgent normal-completion path naturally has this ordering via
+	// LIFO defer registration; we have to do it explicitly here.
+	worktree.RemoveClaudeProjectDirUnderTakeover(takeoverPath, takeoverBase)
+
+	// (4) Remove the worktree dir + bare-side registration. RemoveAt
 	// errors propagate — leaving an unremovable dir on disk while the
 	// row says "released" would silently break the next delegation
 	// against the same PR. Better to surface the error.
@@ -586,7 +632,7 @@ func (s *Spawner) Release(runID string) error {
 		return fmt.Errorf("remove takeover worktree %s: %w", takeoverPath, err)
 	}
 
-	// (3) Per-PR config cleanup. Best-effort — failures here leak a
+	// (5) Per-PR config cleanup. Best-effort — failures here leak a
 	// stale remote + branch into the bare's config, which the next
 	// bootstrap's SweepStaleForkPRConfig reclaims. Don't block the
 	// release on it.
@@ -594,17 +640,7 @@ func (s *Spawner) Release(runID string) error {
 		worktree.CleanupPRConfig(owner, repo, headBranch, prNumber)
 	}
 
-	// (4) Projects-dir entry for the takeover cwd. Resolve the takeover
-	// base dir from config so the safety rail compares against the
-	// configured root (which may be a takeover_dir override, not just
-	// ~/.triagefactory/takeovers).
-	if cfg, cfgErr := config.Load(); cfgErr == nil {
-		if base, baseErr := cfg.Server.ResolvedTakeoverDir(); baseErr == nil {
-			worktree.RemoveClaudeProjectDirUnderTakeover(takeoverPath, base)
-		}
-	}
-
-	// (5) DB flip. The status='taken_over' AND worktree_path != ''
+	// (6) DB flip. The status='taken_over' AND worktree_path != ''
 	// guard inside MarkAgentRunReleased makes a concurrent double-call
 	// idempotent: the second one returns ok=false and we return a
 	// 409-equivalent.
