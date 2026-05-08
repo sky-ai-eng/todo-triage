@@ -305,7 +305,10 @@ func MarkAgentRunReleased(database *sql.DB, runID string) (bool, error) {
 	res, err := database.Exec(`
 		UPDATE runs
 		SET worktree_path = '',
-		    result_summary = COALESCE(result_summary, '') || '; released by user'
+		    result_summary = CASE
+		        WHEN COALESCE(result_summary, '') = '' THEN 'released by user'
+		        ELSE result_summary || '; released by user'
+		    END
 		WHERE id = ?
 		  AND status = 'taken_over'
 		  AND COALESCE(worktree_path, '') != ''
