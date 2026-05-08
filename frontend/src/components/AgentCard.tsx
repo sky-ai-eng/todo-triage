@@ -88,6 +88,15 @@ export default function AgentCard({ task, run, messages, onRequeue, onReview }: 
   const isFailed = run.Status === 'failed'
   const isCancelled = run.Status === 'cancelled'
   const isPendingApproval = run.Status === 'pending_approval'
+  // task_unsolvable is the agent's self-reported "I tried, can't finish
+  // without human action." Functionally a failure from the user's POV
+  // (the run won't do anything more on its own), so it gets the same
+  // Return-to-queue affordance as `failed` — colored as a warning rather
+  // than a hard error since the agent exited cleanly. Without this
+  // branch, the icon/color logic falls through to the success bucket
+  // (green ✓) and the requeue button never renders, leaving the task
+  // stranded in the Agent column with no visible way back.
+  const isUnsolvable = run.Status === 'task_unsolvable'
   // A "held" takeover has a live worktree on disk; releasing it tears
   // that worktree down so the next delegated run on the same PR can
   // fetch into the branch ref. Released takeovers keep status='taken_over'
@@ -99,7 +108,7 @@ export default function AgentCard({ task, run, messages, onRequeue, onReview }: 
   const statusColor =
     isFailed || isCancelled
       ? 'text-dismiss'
-      : isPendingApproval || isAwaiting
+      : isUnsolvable || isPendingApproval || isAwaiting
         ? 'text-snooze'
         : isActive
           ? 'text-delegate'
@@ -109,13 +118,15 @@ export default function AgentCard({ task, run, messages, onRequeue, onReview }: 
     ? '✗'
     : isCancelled
       ? '◼'
-      : isPendingApproval
-        ? '◉'
-        : isAwaiting
-          ? '⏳'
-          : isActive
-            ? '●'
-            : '✓'
+      : isUnsolvable
+        ? '⊘'
+        : isPendingApproval
+          ? '◉'
+          : isAwaiting
+            ? '⏳'
+            : isActive
+              ? '●'
+              : '✓'
   const statusLabel = formatStatus(run.Status)
 
   const stats = computeStats(messages, run)
@@ -287,7 +298,7 @@ export default function AgentCard({ task, run, messages, onRequeue, onReview }: 
         </div>
 
         <div className="flex items-center gap-3">
-          {(isFailed || isCancelled || isPendingApproval) && onRequeue && (
+          {(isFailed || isCancelled || isUnsolvable || isPendingApproval) && onRequeue && (
             <button
               onClick={onRequeue}
               className="text-[12px] text-text-tertiary hover:text-text-primary font-medium transition-colors"
@@ -465,6 +476,7 @@ function renderActivityLog(messages: AgentMessage[], isActive: boolean, run: Age
   // Append result as a frosted summary card
   if (run.ResultSummary && !isActive) {
     const isFailed = run.Status === 'failed' || run.Status === 'cancelled'
+    const isUnsolvable = run.Status === 'task_unsolvable'
     elements.push(
       <div
         key="result-summary"
@@ -472,9 +484,17 @@ function renderActivityLog(messages: AgentMessage[], isActive: boolean, run: Age
       >
         <div className="mb-2">
           <span
-            className={`text-[11px] font-semibold tracking-wide ${isFailed ? 'text-dismiss' : 'text-text-primary'}`}
+            className={`text-[11px] font-semibold tracking-wide ${
+              isFailed ? 'text-dismiss' : isUnsolvable ? 'text-snooze' : 'text-text-primary'
+            }`}
           >
-            {run.Status === 'cancelled' ? '◼ Cancelled' : isFailed ? '✗ Failed' : '✓ Done'}
+            {run.Status === 'cancelled'
+              ? '◼ Cancelled'
+              : isFailed
+                ? '✗ Failed'
+                : isUnsolvable
+                  ? '⊘ Unsolvable'
+                  : '✓ Done'}
           </span>
         </div>
         <p className="text-[12px] leading-relaxed text-text-secondary">{run.ResultSummary}</p>
@@ -541,6 +561,7 @@ function formatStatus(status: string): string {
     pending_approval: 'Pending Approval',
     cancelled: 'Cancelled',
     failed: 'Failed',
+    task_unsolvable: 'Unsolvable',
     taken_over: 'Taken over',
   }
   return map[status] || status

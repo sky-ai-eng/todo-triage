@@ -177,13 +177,14 @@ export default function Board() {
   )
 
   // Agent column: attention-weighted ordering
-  // Top: needs review (pending_approval), then failed/cancelled, then running at bottom
+  // Top: needs review (pending_approval), then failed/cancelled/unsolvable, then running at bottom
   const agentItems = useMemo(() => {
     const weight = (t: Task) => {
       const run = agentRuns[t.id]
       if (!run) return 2
       if (run.Status === 'pending_approval') return 0
-      if (run.Status === 'failed' || run.Status === 'cancelled') return 1
+      if (run.Status === 'failed' || run.Status === 'cancelled' || run.Status === 'task_unsolvable')
+        return 1
       if (run.Status === 'completed') return 3
       return 2 // running/active
     }
