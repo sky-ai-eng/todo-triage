@@ -603,13 +603,26 @@ func (s *Spawner) Release(runID string) error {
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
 		return fmt.Errorf("release: takeover path %s is not under takeover base %s; refusing teardown", canonPath, canonBase)
 	}
-	// resolvedPath used by step (5) for the projects-dir cleanup —
-	// reuse the canonical form whether it came from EvalSymlinks or
-	// the abs-clean fallback. In the fallback case the encoded
-	// projects-dir name might differ from what Claude Code wrote (if
-	// the path traversed a symlink), in which case the projects entry
-	// stays as a harmless ghost; the load-bearing DB flip still happens.
-	resolvedPath := canonPath
+	// resolvedPath is used by step (5) for the projects-dir cleanup and
+	// should match the symlink-resolved cwd Claude Code would have used
+	// when creating the ~/.claude/projects entry. Compute it best-effort
+	// before removing the takeover dir, with an Abs+Clean fallback when
+	// the path cannot be fully resolved (for example, if it no longer
+	// exists).
+	resolvedPath := ""
+	if evalPath, evalErr := filepath.EvalSymlinks(takeoverPath); evalErr == nil {
+		resolvedPath, err = filepath.Abs(evalPath)
+		if err != nil {
+			return fmt.Errorf("resolve absolute symlink-evaluated takeover path %s: %w", evalPath, err)
+		}
+		resolvedPath = filepath.Clean(resolvedPath)
+	} else {
+		resolvedPath, err = filepath.Abs(takeoverPath)
+		if err != nil {
+			return fmt.Errorf("resolve absolute takeover path %s: %w", takeoverPath, err)
+		}
+		resolvedPath = filepath.Clean(resolvedPath)
+	}
 
 	// (2) Capture branch name from the takeover dir. Best-effort: empty
 	// branch is acceptable (CleanupPRConfig handles "" — it just skips
