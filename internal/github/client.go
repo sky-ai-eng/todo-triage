@@ -132,7 +132,15 @@ func (c *Client) DownloadArtifact(ctx context.Context, path string, dst io.Write
 		// Drain a modest amount of the error body for context — these are
 		// usually small JSON messages.
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return 0, fmt.Errorf("GET %s returned %d: %s", path, resp.StatusCode, string(body))
+		// Wrap in *HTTPError so callers can errors.As to discriminate
+		// status codes (e.g., the download-logs fallback path needs to
+		// detect 404 specifically — GitHub returns it for runs that
+		// haven't finished yet — without resorting to string matching).
+		return 0, &HTTPError{
+			StatusCode: resp.StatusCode,
+			Body:       string(body),
+			msg:        fmt.Sprintf("GET %s returned %d: %s", path, resp.StatusCode, string(body)),
+		}
 	}
 
 	// Pre-flight size cap. GitHub's signed-URL redirect returns an honest
