@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.10.0](https://github.com/sky-ai-eng/triage-factory/compare/v1.9.0...v1.10.0) (2026-05-08)
+
+
+### Features
+
+* **jira-cli:** add `jira ticket edit` for in-place updates ([573c319](https://github.com/sky-ai-eng/triage-factory/commit/573c319b0b0223a7333f135046da7ac8bbcbf4a8))
+
+
+### Bug Fixes
+
+* **github:** per-job log fallback when jobs still running ([#127](https://github.com/sky-ai-eng/triage-factory/issues/127)) ([0ebbdef](https://github.com/sky-ai-eng/triage-factory/commit/0ebbdefe28f6a9d6fc79f0086a627cfcded0c462))
+* **jira-cli:** make `edit` flag parsing reject ambiguous and trailing flags ([b0edbd1](https://github.com/sky-ai-eng/triage-factory/commit/b0edbd19628d24bca17e65f4f736e50c04685782))
+
 ## [1.9.0](https://github.com/sky-ai-eng/triage-factory/compare/v1.8.1...v1.9.0) (2026-05-07)
 
 
