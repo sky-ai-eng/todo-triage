@@ -3,6 +3,7 @@ package github
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -247,5 +248,18 @@ func TestDownloadArtifact_ErrorResponse(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "404") {
 		t.Errorf("error should include status code, got: %v", err)
+	}
+
+	// Typed error: callers (e.g., the download-logs fallback path that
+	// needs to distinguish "run not finished yet" from real errors) must
+	// be able to discriminate status codes via errors.As. Regression guard
+	// for a previous regression where DownloadArtifact wrapped the status
+	// in fmt.Errorf and forced callers to string-match for 404.
+	var he *HTTPError
+	if !errors.As(err, &he) {
+		t.Fatalf("expected error to be *HTTPError, got %T: %v", err, err)
+	}
+	if he.StatusCode != http.StatusNotFound {
+		t.Errorf("StatusCode = %d, want %d", he.StatusCode, http.StatusNotFound)
 	}
 }

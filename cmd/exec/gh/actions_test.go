@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -683,6 +684,283 @@ func TestFlagValue(t *testing.T) {
 				t.Errorf("flagValue(%v, %q) = %q, want %q", tc.args, tc.flag, got, tc.want)
 			}
 		})
+	}
+}
+
+// --- per-job fallback tests -----------------------------------------------
+
+// TestFetchJobsForRun_ShapesResponse exercises the /actions/runs/{id}/jobs
+// fetch — the read side of the per-job fallback. Verifies field mapping and
+// the per_page=100 cap landing on the request.
+func TestFetchJobsForRun_ShapesResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wantPath := "/api/v3/repos/owner/repo/actions/runs/42/jobs"
+		if r.URL.Path != wantPath {
+			t.Errorf("path = %q, want %q", r.URL.Path, wantPath)
+			http.NotFound(w, r)
+			return
+		}
+		if got := r.URL.Query().Get("per_page"); got != "100" {
+			t.Errorf("per_page = %q, want 100", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"total_count": 2,
+			"jobs": [
+				{"id": 9001, "name": "Lint", "status": "completed", "conclusion": "failure", "started_at": "2026-04-20T00:00:00Z", "completed_at": "2026-04-20T00:00:30Z"},
+				{"id": 9002, "name": "Build (node 20)", "status": "in_progress", "conclusion": null, "started_at": "2026-04-20T00:00:00Z", "completed_at": null}
+			]
+		}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	client := github.NewClient(srv.URL, "test-token")
+	jobs, err := fetchJobsForRun(client, "owner", "repo", 42)
+	if err != nil {
+		t.Fatalf("fetchJobsForRun: %v", err)
+	}
+	if len(jobs) != 2 {
+		t.Fatalf("len = %d, want 2", len(jobs))
+	}
+	if jobs[0].ID != 9001 || jobs[0].Name != "Lint" || jobs[0].Status != "completed" || jobs[0].Conclusion != "failure" {
+		t.Errorf("job[0] shape wrong: %+v", jobs[0])
+	}
+	if jobs[1].ID != 9002 || jobs[1].Status != "in_progress" || jobs[1].Conclusion != "" {
+		t.Errorf("job[1] shape wrong: %+v", jobs[1])
+	}
+}
+
+// TestDeriveRunStatus walks the decision matrix that lets us avoid a
+// second API call to /actions/runs/{id}. The mapping is the contract
+// agents see in the response, so any change here ripples to prompt-side
+// expectations.
+func TestDeriveRunStatus(t *testing.T) {
+	cases := []struct {
+		name string
+		jobs []jobInfo
+		want string
+	}{
+		{"empty → queued", nil, "queued"},
+		{"all queued → queued", []jobInfo{{Status: "queued"}, {Status: "queued"}}, "queued"},
+		{"all completed → completed", []jobInfo{{Status: "completed"}, {Status: "completed"}}, "completed"},
+		{"any in_progress → in_progress", []jobInfo{{Status: "completed"}, {Status: "in_progress"}}, "in_progress"},
+		{"queued + completed → in_progress", []jobInfo{{Status: "queued"}, {Status: "completed"}}, "in_progress"},
+		{"single in_progress → in_progress", []jobInfo{{Status: "in_progress"}}, "in_progress"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := deriveRunStatus(tc.jobs); got != tc.want {
+				t.Errorf("deriveRunStatus(%+v) = %q, want %q", tc.jobs, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSanitizeJobNameForFile guards the filename-mangling rule. The
+// agent reads LogPath out of the response so it doesn't need to recompute
+// the path, but the contract is "any GitHub job name produces a usable
+// POSIX filename component."
+func TestSanitizeJobNameForFile(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"Lint", "Lint"},
+		{"build (ubuntu-latest)", "build__ubuntu-latest_"},
+		{"Lint / typecheck (node 20)", "Lint___typecheck__node_20_"},
+		{"matrix.os: ubuntu", "matrix.os__ubuntu"},
+		{"123_abc-XYZ.log", "123_abc-XYZ.log"},
+		{"", "job"},
+		{"!!!", "___"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			if got := sanitizeJobNameForFile(tc.in); got != tc.want {
+				t.Errorf("sanitizeJobNameForFile(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDownloadPerJobLogsToDir_HappyPath verifies the fallback writes one
+// file per completed job, skips in_progress / queued jobs (their LogPath
+// stays empty as a stub), and reports the cumulative bytes downloaded.
+func TestDownloadPerJobLogsToDir_HappyPath(t *testing.T) {
+	const lintBody = "lint failed: missing semicolon at line 42\n"
+	const buildBody = "build succeeded in 3m21s\n"
+
+	// Map job ID → response body so the handler can serve per-job logs
+	// without coupling to URL-parsing heuristics.
+	logBodies := map[int64]string{
+		1001: lintBody,
+		1002: buildBody,
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Match path: /api/v3/repos/owner/repo/actions/jobs/{id}/logs
+		parts := strings.Split(r.URL.Path, "/")
+		if len(parts) < 2 || parts[len(parts)-1] != "logs" {
+			http.NotFound(w, r)
+			return
+		}
+		jobIDStr := parts[len(parts)-2]
+		jobID, err := strconv.ParseInt(jobIDStr, 10, 64)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		body, ok := logBodies[jobID]
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+
+	client := github.NewClient(srv.URL, "test-token")
+	destDir := filepath.Join(t.TempDir(), "_scratch", "ci-logs", "42")
+
+	jobs := []jobInfo{
+		{ID: 1001, Name: "Lint / typecheck", Status: "completed", Conclusion: "failure"},
+		{ID: 1002, Name: "Build", Status: "completed", Conclusion: "success"},
+		{ID: 1003, Name: "E2E", Status: "in_progress"},
+		{ID: 1004, Name: "Deploy", Status: "queued"},
+	}
+
+	bytes, updated, err := downloadPerJobLogsToDir(client, "owner", "repo", destDir, jobs)
+	if err != nil {
+		t.Fatalf("downloadPerJobLogsToDir: %v", err)
+	}
+	wantBytes := int64(len(lintBody) + len(buildBody))
+	if bytes != wantBytes {
+		t.Errorf("bytes = %d, want %d", bytes, wantBytes)
+	}
+
+	// Completed jobs got LogPath populated and the file contents match.
+	wantLog := map[int64]string{1001: lintBody, 1002: buildBody}
+	for i, j := range updated {
+		if j.Status != "completed" {
+			if j.LogPath != "" {
+				t.Errorf("job %d (%s) is %s; LogPath should be empty stub, got %q", j.ID, j.Name, j.Status, j.LogPath)
+			}
+			continue
+		}
+		if j.LogPath == "" {
+			t.Errorf("job %d (%s) completed but LogPath is empty", j.ID, j.Name)
+			continue
+		}
+		got, err := os.ReadFile(j.LogPath)
+		if err != nil {
+			t.Errorf("read job[%d] log %q: %v", i, j.LogPath, err)
+			continue
+		}
+		if string(got) != wantLog[j.ID] {
+			t.Errorf("job %d log content = %q, want %q", j.ID, string(got), wantLog[j.ID])
+		}
+	}
+}
+
+// TestDownloadPerJobLogsToDir_FailureCleansUp asserts the cleanup defer
+// fires when a per-job download errors mid-way: destDir must be removed
+// so a retry sees a clean slate, not a partial extraction. Mirrors the
+// equivalent guard on downloadAndExtractLogs (TestDownloadAndExtractLogs_FailureCleansUp).
+func TestDownloadPerJobLogsToDir_FailureCleansUp(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"message":"Internal"}`, http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+
+	client := github.NewClient(srv.URL, "test-token")
+	destDir := filepath.Join(t.TempDir(), "_scratch", "ci-logs", "42")
+
+	jobs := []jobInfo{{ID: 7777, Name: "Lint", Status: "completed"}}
+	_, _, err := downloadPerJobLogsToDir(client, "owner", "repo", destDir, jobs)
+	if err == nil {
+		t.Fatal("expected error from 500 response, got nil")
+	}
+	if _, statErr := os.Stat(destDir); !os.IsNotExist(statErr) {
+		t.Errorf("destDir should be cleaned up on failure, stat returned: %v", statErr)
+	}
+}
+
+// TestDownloadPerJobLogsToDir_AllStubs covers the "queued early in run"
+// case: no jobs are completed yet, so we write zero files but still
+// return successfully with the stub list intact. This is the right
+// behavior — the agent gets back the same job metadata, sees empty
+// LogPaths, and knows to retry later.
+func TestDownloadPerJobLogsToDir_AllStubs(t *testing.T) {
+	// Server should never be hit since there's nothing to download. Fail
+	// loudly if we ever do.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request to %s — no completed jobs to download", r.URL.Path)
+		http.Error(w, "should not be called", http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+
+	client := github.NewClient(srv.URL, "test-token")
+	destDir := filepath.Join(t.TempDir(), "_scratch", "ci-logs", "42")
+
+	jobs := []jobInfo{
+		{ID: 1, Name: "Lint", Status: "queued"},
+		{ID: 2, Name: "Build", Status: "in_progress"},
+	}
+	bytes, updated, err := downloadPerJobLogsToDir(client, "owner", "repo", destDir, jobs)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if bytes != 0 {
+		t.Errorf("bytes = %d, want 0", bytes)
+	}
+	for _, j := range updated {
+		if j.LogPath != "" {
+			t.Errorf("job %d should have empty LogPath stub, got %q", j.ID, j.LogPath)
+		}
+	}
+	// destDir must exist (we MkdirAll'd it) but be empty.
+	entries, err := os.ReadDir(destDir)
+	if err != nil {
+		t.Fatalf("readdir destDir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("destDir should be empty, got %d entries", len(entries))
+	}
+}
+
+// TestDownloadLogsResult_JSONShape pins the response envelope. Field
+// renames here would break the prompt templates and `jq` paths agents
+// rely on — fail the build before that ships.
+func TestDownloadLogsResult_JSONShape(t *testing.T) {
+	r := downloadLogsResult{
+		RunID:           42,
+		Owner:           "owner",
+		Repo:            "repo",
+		DestDir:         "/abs/dest",
+		BytesDownloaded: 1024,
+		RunStatus:       "in_progress",
+		FallbackUsed:    true,
+		Jobs: []jobInfo{
+			{ID: 1, Name: "Lint", Status: "completed", Conclusion: "failure", LogPath: "/abs/dest/Lint-1.log"},
+		},
+	}
+	data, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	s := string(data)
+	for _, key := range []string{
+		`"run_id"`, `"owner"`, `"repo"`, `"dest_dir"`, `"bytes_downloaded"`,
+		`"run_status"`, `"fallback_used"`, `"jobs"`,
+		`"id"`, `"name"`, `"status"`, `"conclusion"`, `"log_path"`,
+	} {
+		if !strings.Contains(s, key) {
+			t.Errorf("expected JSON to contain %s; got %s", key, s)
+		}
+	}
+	// entries omitted when nil — the fallback path doesn't extract an archive.
+	if strings.Contains(s, `"entries"`) {
+		t.Errorf("expected entries to be omitted when nil (fallback path); got %s", s)
 	}
 }
 

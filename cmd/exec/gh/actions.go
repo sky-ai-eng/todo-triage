@@ -4,11 +4,14 @@ import (
 	"archive/zip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -229,26 +232,70 @@ func flagValue(args []string, name string) string {
 // contract that every command produces JSON on stdout, so downstream
 // tooling (agents, jq, shell pipelines) can parse without scraping
 // human-readable text.
+//
+// Two response shapes are possible depending on which path served the
+// request:
+//
+//   - Run-level archive succeeded (run is fully completed): Entries is the
+//     top-level extracted dir listing, FallbackUsed=false, and Jobs[]
+//     entries have empty LogPath fields (the agent reads files via DestDir
+//     using the standard zip layout).
+//   - Per-job fallback (run is still in_progress; archive 404s): Entries is
+//     omitted, FallbackUsed=true, and each completed job in Jobs[] has its
+//     LogPath populated with the absolute path to a plain-text log file.
+//     Queued/in_progress jobs are stubs (empty LogPath).
+//
+// Jobs[] is always present so the agent sees the full job set in either
+// shape. RunStatus is derived from job statuses (any non-completed job →
+// run is in_progress) which avoids a second API round-trip.
 type downloadLogsResult struct {
-	RunID           int64    `json:"run_id"`
-	Owner           string   `json:"owner"`
-	Repo            string   `json:"repo"`
-	DestDir         string   `json:"dest_dir"`
-	BytesDownloaded int64    `json:"bytes_downloaded"`
-	Entries         []string `json:"entries"`
+	RunID           int64     `json:"run_id"`
+	Owner           string    `json:"owner"`
+	Repo            string    `json:"repo"`
+	DestDir         string    `json:"dest_dir"`
+	BytesDownloaded int64     `json:"bytes_downloaded"`
+	RunStatus       string    `json:"run_status"`
+	FallbackUsed    bool      `json:"fallback_used"`
+	Entries         []string  `json:"entries,omitempty"`
+	Jobs            []jobInfo `json:"jobs"`
+}
+
+// jobInfo is one row of the Jobs[] array on downloadLogsResult. Field names
+// mirror GitHub's Actions API where possible so an agent reading the docs
+// can cross-reference. LogPath is the only field we synthesize ourselves
+// (absolute path on disk, populated only when the per-job fallback wrote a
+// log file for this job).
+type jobInfo struct {
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	Status      string `json:"status"`
+	Conclusion  string `json:"conclusion,omitempty"`
+	StartedAt   string `json:"started_at,omitempty"`
+	CompletedAt string `json:"completed_at,omitempty"`
+	LogPath     string `json:"log_path,omitempty"`
 }
 
 // actionsDownloadLogs implements `gh actions download-logs <run_id>`.
 //
-// Fetches the full log archive for a workflow run, extracts it into
-// <cwd>/_scratch/ci-logs/<run_id>/, and prints a structured JSON result
-// on stdout so agents can parse it the same way they parse every other
-// exec gh command. Errors go to stderr with a non-zero exit.
+// Fetches workflow run logs into <cwd>/_scratch/ci-logs/<run_id>/ and
+// prints a structured JSON result on stdout so agents can parse it the
+// same way they parse every other exec gh command. Errors go to stderr
+// with a non-zero exit.
+//
+// Two paths exist because GitHub's run-level archive endpoint
+// (/actions/runs/{id}/logs) returns 404 until the entire run completes —
+// so when one job fails fast in a long-running matrix build, the archive
+// is unavailable for the rest of the run. The fallback hits the per-job
+// endpoint (/actions/jobs/{id}/logs) for each completed job individually,
+// which works the moment a job finishes regardless of run state. Either
+// way the response always includes Jobs[] so the agent sees the full job
+// set with stubs for anything still running.
 //
 // The resource-owning work (temp file + destination directory) lives in
-// downloadAndExtractLogs so defers actually fire on error — exitErr calls
-// os.Exit, which skips defers, so inlining the logic here would leak the
-// temp zip (and leave a half-extracted destDir) on every failure path.
+// downloadAndExtractLogs / downloadPerJobLogsToDir so defers actually fire
+// on error — exitErr calls os.Exit, which skips defers, so inlining the
+// logic here would leak the temp zip (and leave a half-extracted destDir)
+// on every failure path.
 func actionsDownloadLogs(client *github.Client, args []string) {
 	// Validate the positional arg first. If the user forgot <run_id>
 	// entirely, we want the usage message, not a confusing "could not
@@ -284,22 +331,52 @@ func actionsDownloadLogs(client *github.Client, args []string) {
 		exitErr(err.Error())
 	}
 
-	bytesDownloaded, err := downloadAndExtractLogs(client, owner, repo, runID, destDir)
+	// Always fetch the job list up front. Cheap (single JSON GET) and the
+	// response shape is consistent in either path — agents don't need to
+	// branch on whether Jobs[] is present.
+	jobs, err := fetchJobsForRun(client, owner, repo, runID)
 	if err != nil {
 		exitErr(err.Error())
 	}
+	runStatus := deriveRunStatus(jobs)
 
-	// Top-level directory listing so the agent can see which jobs are
-	// available without a separate tool call. Kept outside the transactional
-	// inner function because a listing failure on a successfully-extracted
-	// destDir shouldn't roll back the extraction — the bytes are good even
-	// if we can't enumerate them.
-	entries, err := topLevelEntries(destDir)
-	if err != nil {
-		exitErr(fmt.Sprintf("list extracted entries: %v", err))
+	// Try the run-level archive first. This is the happy path for any
+	// completed run and produces the same response shape we've always
+	// emitted (Entries listing + extracted files on disk).
+	bytesDownloaded, err := downloadAndExtractLogs(client, owner, repo, runID, destDir)
+	if err == nil {
+		entries, listErr := topLevelEntries(destDir)
+		if listErr != nil {
+			exitErr(fmt.Sprintf("list extracted entries: %v", listErr))
+		}
+		if entries == nil {
+			entries = []string{} // JSON null would be misleading; empty archive is an empty list
+		}
+		printJSON(downloadLogsResult{
+			RunID:           runID,
+			Owner:           owner,
+			Repo:            repo,
+			DestDir:         destDir,
+			BytesDownloaded: bytesDownloaded,
+			RunStatus:       runStatus,
+			FallbackUsed:    false,
+			Entries:         entries,
+			Jobs:            jobs,
+		})
+		return
 	}
-	if entries == nil {
-		entries = []string{} // JSON null would be misleading; empty archive is an empty list
+
+	// Fall back to per-job download iff the archive 404'd. Every other
+	// error (auth failure, network blip, size cap exceeded, etc.) is a
+	// real problem and should propagate so the agent sees it.
+	var he *github.HTTPError
+	if !errors.As(err, &he) || he.StatusCode != http.StatusNotFound {
+		exitErr(err.Error())
+	}
+
+	bytesDownloaded, jobs, err = downloadPerJobLogsToDir(client, owner, repo, destDir, jobs)
+	if err != nil {
+		exitErr(err.Error())
 	}
 
 	printJSON(downloadLogsResult{
@@ -308,8 +385,174 @@ func actionsDownloadLogs(client *github.Client, args []string) {
 		Repo:            repo,
 		DestDir:         destDir,
 		BytesDownloaded: bytesDownloaded,
-		Entries:         entries,
+		RunStatus:       runStatus,
+		FallbackUsed:    true,
+		Entries:         nil, // omitempty — archive wasn't extracted on this path
+		Jobs:            jobs,
 	})
+}
+
+// fetchJobsForRun queries GET /repos/{o}/{r}/actions/runs/{id}/jobs and
+// flattens the response to the subset of fields the agent + fallback path
+// need. Jobs come back in the order GitHub returns them (roughly start
+// order, which matches what the user sees in the Actions UI).
+//
+// Pagination: capped at 100 (one page). A workflow with >100 jobs is
+// already extreme; if we ever see truncation we log a warning to stderr
+// rather than silently dropping data, but real pagination is deferred
+// until something actually hits the cap.
+func fetchJobsForRun(client *github.Client, owner, repo string, runID int64) ([]jobInfo, error) {
+	apiPath := fmt.Sprintf("/repos/%s/%s/actions/runs/%d/jobs?per_page=100", owner, repo, runID)
+	data, err := client.Get(apiPath)
+	if err != nil {
+		return nil, fmt.Errorf("list jobs for run %d: %w", runID, err)
+	}
+	var resp struct {
+		TotalCount int `json:"total_count"`
+		Jobs       []struct {
+			ID          int64  `json:"id"`
+			Name        string `json:"name"`
+			Status      string `json:"status"`
+			Conclusion  string `json:"conclusion"`
+			StartedAt   string `json:"started_at"`
+			CompletedAt string `json:"completed_at"`
+		} `json:"jobs"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, fmt.Errorf("parse jobs response: %w", err)
+	}
+	if resp.TotalCount > len(resp.Jobs) {
+		fmt.Fprintf(os.Stderr,
+			"warning: run %d has %d jobs but only the first %d were returned (pagination not implemented)\n",
+			runID, resp.TotalCount, len(resp.Jobs))
+	}
+	out := make([]jobInfo, 0, len(resp.Jobs))
+	for _, j := range resp.Jobs {
+		out = append(out, jobInfo{
+			ID:          j.ID,
+			Name:        j.Name,
+			Status:      j.Status,
+			Conclusion:  j.Conclusion,
+			StartedAt:   j.StartedAt,
+			CompletedAt: j.CompletedAt,
+		})
+	}
+	return out, nil
+}
+
+// deriveRunStatus collapses the per-job statuses into a single run-level
+// status string. Avoids a second API call to /actions/runs/{id} just to
+// read a field we can compute. Mapping:
+//   - no jobs visible → "queued" (run hasn't really started yet)
+//   - all jobs "queued" → "queued"
+//   - all jobs "completed" → "completed"
+//   - anything else (mix, or any "in_progress") → "in_progress"
+//
+// Precise enough for the agent's purposes; it cares about completed vs
+// not-completed rather than the GitHub-internal taxonomy.
+func deriveRunStatus(jobs []jobInfo) string {
+	if len(jobs) == 0 {
+		return "queued"
+	}
+	allCompleted := true
+	allQueued := true
+	for _, j := range jobs {
+		if j.Status != "completed" {
+			allCompleted = false
+		}
+		if j.Status != "queued" {
+			allQueued = false
+		}
+	}
+	switch {
+	case allCompleted:
+		return "completed"
+	case allQueued:
+		return "queued"
+	default:
+		return "in_progress"
+	}
+}
+
+// jobNameSafePattern matches characters that are not safe in filesystem
+// paths across the platforms we support. Spaces, slashes, parens, colons,
+// and the rest get replaced with underscore so a job named
+// "Lint / typecheck (node 20)" maps to "Lint___typecheck__node_20_".
+var jobNameSafePattern = regexp.MustCompile(`[^a-zA-Z0-9._-]`)
+
+// sanitizeJobNameForFile maps a GitHub job name (which can contain spaces,
+// slashes, parens, brackets, etc.) to a filesystem-safe filename component.
+// Empty result (job name was all special chars or empty) collapses to
+// "job"; the caller appends the job ID anyway, so disambiguation is
+// guaranteed regardless of how aggressively the name was sanitized.
+func sanitizeJobNameForFile(name string) string {
+	cleaned := jobNameSafePattern.ReplaceAllString(name, "_")
+	if cleaned == "" {
+		return "job"
+	}
+	return cleaned
+}
+
+// downloadPerJobLogsToDir writes one log file per completed job into
+// destDir, returning the total bytes written and an updated jobs slice
+// with LogPath populated for any job whose log was fetched.
+//
+// Filenames are "<sanitized_name>-<id>.log". Always including the ID
+// guarantees uniqueness without disambiguation logic, even when several
+// matrix legs sanitize to the same name. The agent reads LogPath out of
+// the JSON response rather than recomputing the filename.
+//
+// Cleanup semantics mirror downloadAndExtractLogs: destDir is clobbered
+// up front, and on any failure (mid-download or partial extract) it's
+// removed so a retry sees a clean slate. Queued and in_progress jobs are
+// skipped (their LogPath stays empty as a stub).
+func downloadPerJobLogsToDir(client *github.Client, owner, repo, destDir string, jobs []jobInfo) (int64, []jobInfo, error) {
+	if err := os.RemoveAll(destDir); err != nil {
+		return 0, nil, fmt.Errorf("clear stale destination directory: %w", err)
+	}
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		return 0, nil, fmt.Errorf("create destination directory: %w", err)
+	}
+	success := false
+	defer func() {
+		if !success {
+			_ = os.RemoveAll(destDir)
+		}
+	}()
+
+	out := make([]jobInfo, len(jobs))
+	copy(out, jobs)
+
+	var totalBytes int64
+	ctx := context.Background()
+	for i, j := range out {
+		if j.Status != "completed" {
+			// Stub for queued / in_progress jobs. Empty LogPath signals
+			// "no log available yet" — the agent can re-run download-logs
+			// later once the run completes for the full archive.
+			continue
+		}
+		filename := fmt.Sprintf("%s-%d.log", sanitizeJobNameForFile(j.Name), j.ID)
+		path := filepath.Join(destDir, filename)
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+		if err != nil {
+			return totalBytes, out, fmt.Errorf("create log file %q: %w", path, err)
+		}
+		apiPath := fmt.Sprintf("/repos/%s/%s/actions/jobs/%d/logs", owner, repo, j.ID)
+		n, downloadErr := client.DownloadArtifact(ctx, apiPath, f, maxArchiveBytes)
+		closeErr := f.Close()
+		if downloadErr != nil {
+			return totalBytes, out, fmt.Errorf("download job %d (%s) logs: %w", j.ID, j.Name, downloadErr)
+		}
+		if closeErr != nil {
+			return totalBytes, out, fmt.Errorf("close log file %q: %w", path, closeErr)
+		}
+		out[i].LogPath = path
+		totalBytes += n
+	}
+
+	success = true
+	return totalBytes, out, nil
 }
 
 // downloadAndExtractLogs owns every on-disk resource the command needs: the
