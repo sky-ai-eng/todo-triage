@@ -175,8 +175,9 @@ func releaseErrorStatus(err error) int {
 	return http.StatusInternalServerError
 }
 
-// handleHeldTakeovers lists every taken-over run that still has a live
-// takeover dir on disk. Drives the Board's "Held takeovers" banner.
+// handleHeldTakeovers lists every taken-over run whose takeover
+// worktree_path is still recorded in the database. Drives the Board's
+// "Held takeovers" banner.
 // Released takeovers (status='taken_over' AND empty worktree_path) are
 // already filtered out by the underlying query.
 //
