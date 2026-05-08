@@ -23,6 +23,7 @@ var ticketHelp = map[string]string{
 	"assign":           "jira ticket assign <key>",
 	"unassign":         "jira ticket unassign <key>",
 	"create":           "jira ticket create <project> --type <type> --summary <text> [--description <text>] [--parent <key>] [--priority <priority>]",
+	"edit":             "jira ticket edit <key> [--summary <text>] [--description <text>] [--priority <priority>] [--type <type>] [--add-label <label>] [--remove-label <label>]",
 	"set-parent":       "jira ticket set-parent <key> --parent <parent_key>",
 	"set-priority":     "jira ticket set-priority <key> --priority <priority>",
 	"search":           "jira ticket search --jql <jql> [--fields <f1,f2,...>] [--max <N>]",
@@ -101,6 +102,8 @@ func handleTicket(client *jiraclient.Client, args []string) {
 		ticketUnassign(client, flags)
 	case "create":
 		ticketCreate(client, flags)
+	case "edit":
+		ticketEdit(client, flags)
 	case "set-parent":
 		ticketSetParent(client, flags)
 	case "list-types":
@@ -205,6 +208,41 @@ func ticketCreate(client *jiraclient.Client, args []string) {
 	printJSON(map[string]any{"ok": true, "key": key})
 }
 
+func ticketEdit(client *jiraclient.Client, args []string) {
+	if len(args) < 1 {
+		exitErr("usage: jira ticket edit <key> [--summary <text>] [--description <text>] [--priority <priority>] [--type <type>] [--add-label <label>] [--remove-label <label>]")
+	}
+	key := args[0]
+
+	fields := jiraclient.UpdateIssueFields{}
+	if flagPresent(args, "--summary") {
+		v := flagVal(args, "--summary")
+		fields.Summary = &v
+	}
+	if flagPresent(args, "--description") {
+		v := flagVal(args, "--description")
+		fields.Description = &v
+	}
+	if flagPresent(args, "--priority") {
+		v := flagVal(args, "--priority")
+		fields.Priority = &v
+	}
+	if flagPresent(args, "--type") {
+		v := flagVal(args, "--type")
+		fields.IssueType = &v
+	}
+	fields.AddLabels = flagVals(args, "--add-label")
+	fields.RemoveLabels = flagVals(args, "--remove-label")
+
+	if fields.IsEmpty() {
+		exitErr("at least one of --summary, --description, --priority, --type, --add-label, --remove-label is required")
+	}
+
+	err := client.UpdateIssue(key, fields)
+	exitOnErr(err)
+	printJSON(map[string]any{"ok": true, "key": key})
+}
+
 func ticketSetParent(client *jiraclient.Client, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: jira ticket set-parent <key> --parent <parent_key>")
@@ -299,6 +337,29 @@ func flagVal(args []string, flag string) string {
 		}
 	}
 	return ""
+}
+
+// flagPresent reports whether `flag` appears anywhere in args. Used by
+// `edit` to distinguish "flag omitted" (leave field untouched) from
+// "flag passed with empty value" (set field to empty).
+func flagPresent(args []string, flag string) bool {
+	for _, a := range args {
+		if a == flag {
+			return true
+		}
+	}
+	return false
+}
+
+// flagVals collects every value of a repeatable flag (e.g. --add-label foo --add-label bar).
+func flagVals(args []string, flag string) []string {
+	var vals []string
+	for i, a := range args {
+		if a == flag && i+1 < len(args) {
+			vals = append(vals, args[i+1])
+		}
+	}
+	return vals
 }
 
 func printJSON(v any) {
