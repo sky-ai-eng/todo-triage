@@ -213,7 +213,7 @@ func BuildAllowedTools(selfBin string) string {
 		"Bash(npm prefix)", "Bash(npm prefix *)",
 		"Bash(npm ping)", "Bash(npm doctor)",
 		"Bash(npm config get *)", "Bash(npm config list)", "Bash(npm config list *)",
-		"Bash(pnpm run *)", "Bash(pnpm test *)",
+		"Bash(pnpm run *)", "Bash(pnpm test)", "Bash(pnpm test *)",
 		"Bash(pnpm build)", "Bash(pnpm build *)",
 		"Bash(pnpm lint)", "Bash(pnpm lint *)",
 		"Bash(pnpm typecheck)", "Bash(pnpm typecheck *)",
