@@ -37,9 +37,17 @@ export default function HeldTakeoversBanner() {
     refresh()
   }, [refresh])
 
+  // Only re-fetch on transitions involving 'taken_over'. The held set
+  // can only change when (a) a run flips into 'taken_over' (added) or
+  // (b) a release fires, which keeps status='taken_over' and re-broadcasts
+  // it (removed via the empty-worktree_path filter on the server side).
+  // Other status transitions (running → completed, failed, etc.) don't
+  // affect the banner and shouldn't burn an HTTP request per run.
   const onWS = useCallback(
     (ev: WSEvent) => {
-      if (ev.type === 'agent_run_update') refresh()
+      if (ev.type === 'agent_run_update' && ev.data?.status === 'taken_over') {
+        refresh()
+      }
     },
     [refresh],
   )

@@ -583,18 +583,33 @@ func (s *Spawner) Release(runID string) error {
 	if err != nil {
 		return fmt.Errorf("resolve takeover base: %w", err)
 	}
-	resolvedPath, err := filepath.EvalSymlinks(takeoverPath)
+	// Tolerate a missing takeover dir: the user may have manually
+	// deleted it, or a prior release may have removed the dir but
+	// crashed before the DB flip. We still need to be able to clear
+	// worktree_path so the run can stop appearing in the banner. Fall
+	// back to filepath.Abs(filepath.Clean(...)) when EvalSymlinks
+	// fails on either side; canonicalizeForSafetyCheck applies the
+	// same fallback to both inputs so the prefix comparison stays
+	// consistent.
+	canonPath, err := canonicalizeForSafetyCheck(takeoverPath)
 	if err != nil {
-		return fmt.Errorf("resolve takeover path %s: %w", takeoverPath, err)
+		return fmt.Errorf("canonicalize takeover path %s: %w", takeoverPath, err)
 	}
-	resolvedBase, err := filepath.EvalSymlinks(takeoverBase)
+	canonBase, err := canonicalizeForSafetyCheck(takeoverBase)
 	if err != nil {
-		return fmt.Errorf("resolve takeover base %s: %w", takeoverBase, err)
+		return fmt.Errorf("canonicalize takeover base %s: %w", takeoverBase, err)
 	}
-	rel, err := filepath.Rel(resolvedBase, resolvedPath)
+	rel, err := filepath.Rel(canonBase, canonPath)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-		return fmt.Errorf("release: takeover path %s is not under takeover base %s; refusing teardown", resolvedPath, resolvedBase)
+		return fmt.Errorf("release: takeover path %s is not under takeover base %s; refusing teardown", canonPath, canonBase)
 	}
+	// resolvedPath used by step (5) for the projects-dir cleanup —
+	// reuse the canonical form whether it came from EvalSymlinks or
+	// the abs-clean fallback. In the fallback case the encoded
+	// projects-dir name might differ from what Claude Code wrote (if
+	// the path traversed a symlink), in which case the projects entry
+	// stays as a harmless ghost; the load-bearing DB flip still happens.
+	resolvedPath := canonPath
 
 	// (2) Capture branch name from the takeover dir. Best-effort: empty
 	// branch is acceptable (CleanupPRConfig handles "" — it just skips
@@ -2193,6 +2208,34 @@ func (s *Spawner) collectExtraTools(promptAllowedTools string) string {
 		return ""
 	}
 	return skills.NormalizeToolList(promptAllowedTools + "," + agentTools)
+}
+
+// canonicalizeForSafetyCheck returns filepath.Clean(filepath.Abs(p))
+// for the takeover-base prefix check in Release. Deliberately doesn't
+// EvalSymlinks: the manual-delete case (user rm -rf'd the takeover
+// dir) makes EvalSymlinks fail on the path side, and mixing
+// EvalSymlinks-resolved (existing base) with abs-only (missing path)
+// produces inconsistent results — on macOS, e.g., the base resolves
+// to /private/var/... while the missing path stays /var/..., wrongly
+// failing the prefix check.
+//
+// Abs+Clean alone is sufficient because the takeover_path stored in
+// the DB comes from worktree.CopyForTakeover, which itself uses
+// filepath.Abs(baseDir); the path and base were canonicalised the
+// same way at takeover time. The threat model (poisoned worktree_path
+// pointing at, say, /etc) is still defended because Abs+Clean turns
+// arbitrary input into an unambiguous absolute form before the rel
+// check.
+//
+// Without this fix Release wedged on its up-front EvalSymlinks when
+// the takeover dir was already gone, leaving the run permanently held
+// in the UI with no way to flip the DB row.
+func canonicalizeForSafetyCheck(p string) (string, error) {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(abs), nil
 }
 
 func parseOwnerRepo(s string) (string, string) {
