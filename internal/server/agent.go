@@ -177,7 +177,7 @@ func releaseErrorStatus(err error) int {
 
 // handleHeldTakeovers lists every taken-over run that still has a live
 // takeover dir on disk. Drives the Board's "Held takeovers" banner.
-// Released takeovers (status='taken_over' AND worktree_path=”) are
+// Released takeovers (status='taken_over' AND worktree_path='') are
 // already filtered out by the underlying query.
 //
 // Each row carries everything the banner needs to (a) display the
