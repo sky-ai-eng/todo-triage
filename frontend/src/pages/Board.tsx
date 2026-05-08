@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import type { Task, AgentRun, AgentMessage, WSEvent } from '../types'
 import { useWebSocket } from '../hooks/useWebSocket'
 import AgentCard from '../components/AgentCard'
+import HeldTakeoversBanner from '../components/HeldTakeoversBanner'
 import TaskCard from '../components/TaskCard'
 import PromptPicker from '../components/PromptPicker'
 import ReviewOverlay from '../components/ReviewOverlay'
@@ -608,6 +609,10 @@ export default function Board() {
             </>
           )}
         </AnimatePresence>
+
+        <div style={{ marginLeft: '3rem' }}>
+          <HeldTakeoversBanner />
+        </div>
 
         {/* Main board — 3 columns */}
         <div className="grid grid-cols-3 gap-6 min-h-[70vh]" style={{ marginLeft: '3rem' }}>

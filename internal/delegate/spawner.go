@@ -257,6 +257,11 @@ var (
 	// id. The picker should have prevented this; 400 Bad Request when
 	// the contract is violated.
 	ErrPromptUnspecified = errors.New("delegate: no prompt specified")
+
+	// ErrReleaseNothingHeld — Release was called against a run that
+	// isn't a held takeover (wrong status, or already released so
+	// worktree_path is empty). 409 Conflict from the HTTP handler.
+	ErrReleaseNothingHeld = errors.New("release: run is not a held takeover")
 )
 
 // Takeover hands a running headless session over to the user for
@@ -492,6 +497,129 @@ func (s *Spawner) abortTakeover(runID, claudeCwd, destPath string) {
 	if ok {
 		s.broadcastRunUpdate(runID, "cancelled")
 	}
+}
+
+// Release tears down a held takeover: removes the takeover worktree dir,
+// reclaims per-PR config in the bare repo, drops the takeover dir's
+// ~/.claude/projects entry, and flips the run row from "held" to
+// "released" (status stays 'taken_over' for audit; worktree_path is
+// cleared so the resume picker, banner and startup-cleanup-preserve
+// queries all drop the row).
+//
+// Caller signals: pre-release validation failures return ErrReleaseNothingHeld
+// (HTTP 409). Filesystem failures during teardown are surfaced as 5xx;
+// the row stays held so a retry can finish the job rather than ending
+// up half-cleaned with the row marked released.
+//
+// Order matters:
+//
+//  1. Snapshot identity (branch name, owner/repo/PR number) BEFORE the
+//     worktree is removed. WorktreeBranch needs the dir to exist;
+//     CleanupPRConfig needs both the branch and the bare repo to be
+//     intact when its `branch -D` runs (and `branch -D` requires the
+//     branch NOT to be checked out — RemoveAt clears that).
+//
+//  2. Remove the worktree dir + deregister from the bare. From this
+//     moment forward, the next delegated run on the same PR can fetch
+//     into the branch ref again — this is the load-bearing step the
+//     bug report was hitting.
+//
+//  3. CleanupPRConfig — reclaim the bare's per-PR remote + branch
+//     tracking. Best-effort; SweepStaleForkPRConfig is the next
+//     bootstrap's backstop if this fails.
+//
+//  4. Drop the ~/.claude/projects entry for the takeover dir. Uses
+//     RemoveClaudeProjectDirUnderTakeover (not the TMPDIR-railed
+//     RemoveClaudeProjectDir) since the takeover dir lives outside
+//     /tmp.
+//
+//  5. Flip the DB row. Done LAST so a teardown failure leaves the row
+//     held and the action retryable.
+//
+// We deliberately don't clear s.takenOver[runID] (sticky-by-design;
+// see Takeover's comment) — a released run never spawns another
+// goroutine, so the flag is harmless once set.
+func (s *Spawner) Release(runID string) error {
+	run, err := db.GetAgentRun(s.database, runID)
+	if err != nil {
+		return fmt.Errorf("load run: %w", err)
+	}
+	if run == nil {
+		return fmt.Errorf("%w: run %s not found", ErrReleaseNothingHeld, runID)
+	}
+	if run.Status != "taken_over" || run.WorktreePath == "" {
+		return fmt.Errorf("%w: run %s (status=%q, worktree_path=%q)", ErrReleaseNothingHeld, runID, run.Status, run.WorktreePath)
+	}
+
+	takeoverPath := run.WorktreePath
+
+	// (1) Capture branch name from the takeover dir. Best-effort: empty
+	// branch is acceptable (CleanupPRConfig handles "" — it just skips
+	// the own-repo branch.<headRef>.* and `branch -D headRef` blocks,
+	// while still reclaiming the synthetic triagefactory/pr-<n> remote
+	// + branch). Detached HEAD also returns "" via WorktreeBranch.
+	headBranch, _ := worktree.WorktreeBranch(takeoverPath)
+
+	// Look up task → entity to derive owner/repo/PR for CleanupPRConfig.
+	task, err := db.GetTask(s.database, run.TaskID)
+	if err != nil {
+		return fmt.Errorf("load task for release: %w", err)
+	}
+	var owner, repo string
+	var prNumber int
+	if task != nil && task.EntitySource == "github" {
+		repoStr := task.EntitySourceID
+		if idx := strings.LastIndex(repoStr, "#"); idx >= 0 {
+			repoStr = repoStr[:idx]
+		}
+		owner, repo = parseOwnerRepo(repoStr)
+		if idx := strings.LastIndex(task.EntitySourceID, "#"); idx >= 0 {
+			fmt.Sscanf(task.EntitySourceID[idx+1:], "%d", &prNumber)
+		}
+	}
+
+	// (2) Remove the worktree dir + bare-side registration. RemoveAt
+	// errors propagate — leaving an unremovable dir on disk while the
+	// row says "released" would silently break the next delegation
+	// against the same PR. Better to surface the error.
+	if err := worktree.RemoveAt(takeoverPath, runID); err != nil {
+		return fmt.Errorf("remove takeover worktree %s: %w", takeoverPath, err)
+	}
+
+	// (3) Per-PR config cleanup. Best-effort — failures here leak a
+	// stale remote + branch into the bare's config, which the next
+	// bootstrap's SweepStaleForkPRConfig reclaims. Don't block the
+	// release on it.
+	if owner != "" && repo != "" && prNumber > 0 {
+		worktree.CleanupPRConfig(owner, repo, headBranch, prNumber)
+	}
+
+	// (4) Projects-dir entry for the takeover cwd. Resolve the takeover
+	// base dir from config so the safety rail compares against the
+	// configured root (which may be a takeover_dir override, not just
+	// ~/.triagefactory/takeovers).
+	if cfg, cfgErr := config.Load(); cfgErr == nil {
+		if base, baseErr := cfg.Server.ResolvedTakeoverDir(); baseErr == nil {
+			worktree.RemoveClaudeProjectDirUnderTakeover(takeoverPath, base)
+		}
+	}
+
+	// (5) DB flip. The status='taken_over' AND worktree_path != ''
+	// guard inside MarkAgentRunReleased makes a concurrent double-call
+	// idempotent: the second one returns ok=false and we return a
+	// 409-equivalent.
+	ok, err := db.MarkAgentRunReleased(s.database, runID)
+	if err != nil {
+		return fmt.Errorf("mark released: %w", err)
+	}
+	if !ok {
+		return fmt.Errorf("%w: run %s (DB row no longer matches release preconditions)", ErrReleaseNothingHeld, runID)
+	}
+
+	s.broadcastRunUpdate(runID, "taken_over")
+	toast.Info(s.wsHub, fmt.Sprintf("Released takeover: run %s", shortRunID(runID)))
+
+	return nil
 }
 
 // runConfig holds everything the generic agent runner needs.

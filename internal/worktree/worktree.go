@@ -328,6 +328,45 @@ func RemoveClaudeProjectDir(cwd string) {
 	}
 }
 
+// RemoveClaudeProjectDirUnderTakeover is the takeover-base counterpart of
+// RemoveClaudeProjectDir. The normal-completion path's TMPDIR rail correctly
+// rejects paths under ~/.triagefactory/takeovers/, so the release path needs
+// its own helper with the matching prefix check.
+//
+// Safety rail: refuses to act unless the resolved cwd lives under
+// resolvedTakeoverBase. takeoverBase may be a configured override
+// (ServerConfig.TakeoverDir); callers should pass the result of
+// ResolvedTakeoverDir so a relative or "~"-prefixed value is canonicalised
+// before the prefix check.
+func RemoveClaudeProjectDirUnderTakeover(cwd, takeoverBase string) {
+	if cwd == "" || takeoverBase == "" {
+		return
+	}
+
+	resolved, err := filepath.EvalSymlinks(cwd)
+	if err != nil {
+		return
+	}
+
+	baseResolved, err := filepath.EvalSymlinks(takeoverBase)
+	if err != nil {
+		return
+	}
+	if !strings.HasPrefix(resolved, baseResolved) {
+		log.Printf("[worktree] refusing to clean project dir for cwd outside takeover base: %s (base %s)", resolved, baseResolved)
+		return
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	projectDir := filepath.Join(home, claudeProjectsDir, encodeClaudeProjectDir(resolved))
+	if err := os.RemoveAll(projectDir); err != nil {
+		log.Printf("[worktree] remove takeover project dir %s: %v", projectDir, err)
+	}
+}
+
 // EnsureBareClone is the exported entry point for callers that want a
 // bare clone of owner/repo materialized. It's idempotent: if the bare
 // already exists, it only repairs a drifted origin URL; otherwise it
@@ -1748,6 +1787,26 @@ func copyFile(src, dst string, mode os.FileMode) error {
 	defer out.Close()
 	_, err = io.Copy(out, in)
 	return err
+}
+
+// WorktreeBranch returns the name of the branch checked out at the given
+// worktree path. Empty result + non-nil error means the path isn't a
+// worktree (or git refused). The caller uses this to learn the local
+// branch name without consulting the GitHub API — important for the
+// release path, which has to reclaim the bare's branch ref before the
+// fetch-into-checked-out-branch error can clear, and a network call
+// would make release fail when GitHub is unreachable.
+func WorktreeBranch(path string) (string, error) {
+	out, err := gitOutput(path, "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		return "", err
+	}
+	branch := strings.TrimSpace(out)
+	if branch == "HEAD" {
+		// Detached HEAD — no branch name to clean up.
+		return "", nil
+	}
+	return branch, nil
 }
 
 func gitOutput(dir string, args ...string) (string, error) {
