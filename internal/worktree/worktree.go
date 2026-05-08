@@ -352,7 +352,13 @@ func RemoveClaudeProjectDirUnderTakeover(cwd, takeoverBase string) {
 	if err != nil {
 		return
 	}
-	if !strings.HasPrefix(resolved, baseResolved) {
+
+	rel, err := filepath.Rel(baseResolved, resolved)
+	if err != nil {
+		log.Printf("[worktree] refusing to clean project dir for cwd with unrelatable path: %s (base %s)", resolved, baseResolved)
+		return
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
 		log.Printf("[worktree] refusing to clean project dir for cwd outside takeover base: %s (base %s)", resolved, baseResolved)
 		return
 	}
