@@ -193,15 +193,15 @@ func (s *Server) handleHeldTakeovers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := make([]map[string]any, 0, len(runs))
-	for _, r := range runs {
+	for _, run := range runs {
 		out = append(out, map[string]any{
-			"run_id":         r.RunID,
-			"session_id":     r.SessionID,
-			"takeover_path":  r.WorktreePath,
-			"task_title":     r.TaskTitle,
-			"source_id":      r.SourceID,
-			"taken_over_at":  r.CompletedAt,
-			"resume_command": fmt.Sprintf("cd %s && claude --resume %s", shellQuote(r.WorktreePath), shellQuote(r.SessionID)),
+			"run_id":         run.RunID,
+			"session_id":     run.SessionID,
+			"takeover_path":  run.WorktreePath,
+			"task_title":     run.TaskTitle,
+			"source_id":      run.SourceID,
+			"taken_over_at":  run.CompletedAt,
+			"resume_command": fmt.Sprintf("cd %s && claude --resume %s", shellQuote(run.WorktreePath), shellQuote(run.SessionID)),
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
