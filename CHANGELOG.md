@@ -1,12 +1,6 @@
 # Changelog
 
-## [1.10.0](https://github.com/sky-ai-eng/triage-factory/compare/v1.9.0...v1.10.0) (2026-05-08)
-
-
-### Features
-
-* **jira-cli:** add `jira ticket edit` for in-place updates ([573c319](https://github.com/sky-ai-eng/triage-factory/commit/573c319b0b0223a7333f135046da7ac8bbcbf4a8))
-
+## [1.9.1](https://github.com/sky-ai-eng/triage-factory/compare/v1.9.0...v1.9.1) (2026-05-08)
 
 ### Bug Fixes
 
