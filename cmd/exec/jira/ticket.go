@@ -231,14 +231,19 @@ func ticketEdit(client *jiraclient.Client, args []string) {
 		v := flagVal(args, "--type")
 		fields.IssueType = &v
 	}
-	fields.AddLabels = flagVals(args, "--add-label")
-	fields.RemoveLabels = flagVals(args, "--remove-label")
+	addLabels, err := flagVals(args, "--add-label")
+	exitOnErr(err)
+	fields.AddLabels = addLabels
+
+	removeLabels, err := flagVals(args, "--remove-label")
+	exitOnErr(err)
+	fields.RemoveLabels = removeLabels
 
 	if fields.IsEmpty() {
 		exitErr("at least one of --summary, --description, --priority, --type, --add-label, --remove-label is required")
 	}
 
-	err := client.UpdateIssue(key, fields)
+	err = client.UpdateIssue(key, fields)
 	exitOnErr(err)
 	printJSON(map[string]any{"ok": true, "key": key})
 }
@@ -339,27 +344,46 @@ func flagVal(args []string, flag string) string {
 	return ""
 }
 
-// flagPresent reports whether `flag` appears anywhere in args. Used by
-// `edit` to distinguish "flag omitted" (leave field untouched) from
-// "flag passed with empty value" (set field to empty).
+// flagPresent reports whether `flag` appears as a flag argument (not
+// as the value of a preceding `--xxx` flag). The preceding-flag skip
+// is what prevents `--description --summary` from falsely reporting
+// --summary as present (where it's actually --description's value),
+// which would otherwise trigger an unintended summary clear in `edit`.
 func flagPresent(args []string, flag string) bool {
-	for _, a := range args {
-		if a == flag {
-			return true
+	for i, a := range args {
+		if a != flag {
+			continue
 		}
+		if i > 0 && strings.HasPrefix(args[i-1], "--") {
+			// Preceding token is a value-taking flag; this is its value.
+			continue
+		}
+		return true
 	}
 	return false
 }
 
-// flagVals collects every value of a repeatable flag (e.g. --add-label foo --add-label bar).
-func flagVals(args []string, flag string) []string {
+// flagVals collects every value of a repeatable flag (e.g.
+// --add-label foo --add-label bar). Skips occurrences that are
+// themselves values of a preceding flag (mirroring flagPresent).
+// Returns an error if any qualifying occurrence has no following
+// value — surfacing trailing-flag typos rather than silently dropping
+// them and producing a partial update.
+func flagVals(args []string, flag string) ([]string, error) {
 	var vals []string
 	for i, a := range args {
-		if a == flag && i+1 < len(args) {
-			vals = append(vals, args[i+1])
+		if a != flag {
+			continue
 		}
+		if i > 0 && strings.HasPrefix(args[i-1], "--") {
+			continue
+		}
+		if i+1 >= len(args) {
+			return nil, fmt.Errorf("%s requires a value", flag)
+		}
+		vals = append(vals, args[i+1])
 	}
-	return vals
+	return vals, nil
 }
 
 func printJSON(v any) {
