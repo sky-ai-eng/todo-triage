@@ -200,7 +200,7 @@ func BuildAllowedTools(selfBin string) string {
 		// ones; new script names can be added as they come up. npm
 		// only special-cases test/start/stop/restart this way; for
 		// other scripts npm requires the explicit `run`.
-		"Bash(npm run *)", "Bash(npm test *)", "Bash(npm ci)",
+		"Bash(npm run *)", "Bash(npm test)", "Bash(npm test *)", "Bash(npm ci)",
 		"Bash(npm start)", "Bash(npm start *)",
 		"Bash(npm stop)", "Bash(npm stop *)",
 		"Bash(npm restart)", "Bash(npm restart *)",
