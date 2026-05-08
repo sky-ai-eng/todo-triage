@@ -87,6 +87,13 @@ export default function AgentCard({ task, run, messages, onRequeue, onReview }: 
   const isFailed = run.Status === 'failed'
   const isCancelled = run.Status === 'cancelled'
   const isPendingApproval = run.Status === 'pending_approval'
+  // A "held" takeover has a live worktree on disk; releasing it tears
+  // that worktree down so the next delegated run on the same PR can
+  // fetch into the branch ref. Released takeovers keep status='taken_over'
+  // for audit but null out worktree_path — those should NOT show the
+  // Release button (nothing to release).
+  const isHeldTakeover = run.Status === 'taken_over' && !!run.WorktreePath
+  const [releasePending, setReleasePending] = useState(false)
 
   const statusColor =
     isFailed || isCancelled
@@ -285,6 +292,33 @@ export default function AgentCard({ task, run, messages, onRequeue, onReview }: 
               className="text-[12px] text-text-tertiary hover:text-text-primary font-medium transition-colors"
             >
               Return to queue
+            </button>
+          )}
+          {isHeldTakeover && (
+            <button
+              disabled={releasePending}
+              onClick={async () => {
+                if (!confirm('Release this takeover? The worktree dir will be deleted.')) return
+                setReleasePending(true)
+                try {
+                  const res = await fetch(`/api/agent/runs/${run.ID}/release`, { method: 'POST' })
+                  if (!res.ok) {
+                    toast.error(await readError(res, 'Failed to release takeover'))
+                  }
+                } catch (err) {
+                  toast.error(`Failed to release takeover: ${(err as Error).message}`)
+                } finally {
+                  setReleasePending(false)
+                }
+              }}
+              className="text-[12px] text-text-tertiary hover:text-dismiss disabled:opacity-50 disabled:cursor-wait font-medium transition-colors"
+              title={
+                releasePending
+                  ? 'Releasing the takeover dir…'
+                  : 'Tear down the takeover worktree so the next delegated run on this PR can run'
+              }
+            >
+              {releasePending ? 'Releasing…' : 'Release worktree'}
             </button>
           )}
           {isPendingApproval && onReview && (
@@ -505,6 +539,7 @@ function formatStatus(status: string): string {
     pending_approval: 'Pending Approval',
     cancelled: 'Cancelled',
     failed: 'Failed',
+    taken_over: 'Taken over',
   }
   return map[status] || status
 }

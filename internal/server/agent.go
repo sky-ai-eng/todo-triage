@@ -142,6 +142,71 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }
 
+// handleAgentRelease tears down a held takeover (worktree dir, bare
+// repo's per-PR config, projects-dir entry) so the next delegated run
+// against the same PR can fetch into the branch ref again.
+//
+// Status mapping:
+//   - 200: released, banner row will disappear via WS broadcast
+//   - 409: nothing held (wrong status, or already released)
+//   - 5xx: filesystem/git/DB failure during teardown — row stays held
+//     so a retry can finish the job
+func (s *Server) handleAgentRelease(w http.ResponseWriter, r *http.Request) {
+	runID := r.PathValue("runID")
+	if s.spawner == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "delegation not configured"})
+		return
+	}
+	if err := s.spawner.Release(runID); err != nil {
+		writeJSON(w, releaseErrorStatus(err), map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "released"})
+}
+
+// releaseErrorStatus maps Release() errors to HTTP status codes.
+// ErrReleaseNothingHeld is 409 (the precondition shifted under the
+// caller — wrong status, or someone already released the row), and
+// everything else is 500 since it's filesystem/git/DB.
+func releaseErrorStatus(err error) int {
+	if errors.Is(err, delegate.ErrReleaseNothingHeld) {
+		return http.StatusConflict
+	}
+	return http.StatusInternalServerError
+}
+
+// handleHeldTakeovers lists every taken-over run whose takeover
+// worktree_path is still recorded in the database. Drives the Board's
+// "Held takeovers" banner.
+// Released takeovers (status='taken_over' AND empty worktree_path) are
+// already filtered out by the underlying query.
+//
+// Each row carries everything the banner needs to (a) display the
+// takeover, (b) re-show the resume command via TakeoverModal, and (c)
+// fire the release endpoint by run id. The resume_command is rebuilt
+// server-side using the same shellQuote() rule the takeover endpoint
+// uses, so the banner's modal renders an identical paste-safe command.
+func (s *Server) handleHeldTakeovers(w http.ResponseWriter, r *http.Request) {
+	runs, err := db.ListTakenOverRunsForResume(s.db)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	out := make([]map[string]any, 0, len(runs))
+	for _, run := range runs {
+		out = append(out, map[string]any{
+			"run_id":         run.RunID,
+			"session_id":     run.SessionID,
+			"takeover_path":  run.WorktreePath,
+			"task_title":     run.TaskTitle,
+			"source_id":      run.SourceID,
+			"taken_over_at":  run.CompletedAt,
+			"resume_command": fmt.Sprintf("cd %s && claude --resume %s", shellQuote(run.WorktreePath), shellQuote(run.SessionID)),
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
 // takeoverErrorStatus maps a Takeover() error to an HTTP status code.
 // Validation failures (no session id, no worktree, run not active) are
 // 400 — the client asked for something the run state doesn't support.

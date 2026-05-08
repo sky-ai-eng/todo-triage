@@ -257,6 +257,11 @@ var (
 	// id. The picker should have prevented this; 400 Bad Request when
 	// the contract is violated.
 	ErrPromptUnspecified = errors.New("delegate: no prompt specified")
+
+	// ErrReleaseNothingHeld — Release was called against a run that
+	// isn't a held takeover (wrong status, or already released so
+	// worktree_path is empty). 409 Conflict from the HTTP handler.
+	ErrReleaseNothingHeld = errors.New("release: run is not a held takeover")
 )
 
 // Takeover hands a running headless session over to the user for
@@ -492,6 +497,201 @@ func (s *Spawner) abortTakeover(runID, claudeCwd, destPath string) {
 	if ok {
 		s.broadcastRunUpdate(runID, "cancelled")
 	}
+}
+
+// Release tears down a held takeover: removes the takeover worktree dir,
+// reclaims per-PR config in the bare repo, drops the takeover dir's
+// ~/.claude/projects entry, and flips the run row from "held" to
+// "released" (status stays 'taken_over' for audit; worktree_path is
+// cleared so the resume picker, banner and startup-cleanup-preserve
+// queries all drop the row).
+//
+// Caller signals: pre-release validation failures return ErrReleaseNothingHeld
+// (HTTP 409). Filesystem failures during teardown are surfaced as 5xx;
+// the row stays held so a retry can finish the job rather than ending
+// up half-cleaned with the row marked released.
+//
+// Order matters:
+//
+//  1. Resolve config (takeover base) and validate the worktree_path
+//     lives under it — defense-in-depth against a poisoned DB row
+//     pointing at an arbitrary directory.
+//
+//  2. Snapshot identity that's only available while the worktree
+//     exists: branch name (via WorktreeBranch) and the symlink-
+//     resolved cwd (via EvalSymlinks, captured at step 1's safety
+//     check). Both are gone after RemoveAt.
+//
+//  3. Remove the worktree dir + deregister from the bare. From this
+//     moment forward, the next delegated run on the same PR can
+//     fetch into the branch ref — the load-bearing step. If this
+//     fails, return early and leave EVERYTHING ELSE intact (DB row
+//     stays held, projects entry stays put) so a retry can resume
+//     with the user's resume command still functional.
+//
+//  4. CleanupPRConfig — reclaim the bare's per-PR remote + branch
+//     tracking. Best-effort; SweepStaleForkPRConfig is the next
+//     bootstrap's backstop if this fails.
+//
+//  5. Drop the ~/.claude/projects entry. Done AFTER RemoveAt so a
+//     RemoveAt failure doesn't leave the user with neither a
+//     working takeover dir nor the resume JSONL needed to retry.
+//     Uses the resolved-path variant (RemoveClaudeProjectDirForResolved)
+//     since the cwd no longer exists on disk by this point —
+//     EvalSymlinks-based variants would silently no-op.
+//
+//  6. Flip the DB row. Done LAST so a teardown failure leaves the row
+//     held and the action retryable.
+//
+// We deliberately don't clear s.takenOver[runID] (sticky-by-design;
+// see Takeover's comment) — a released run never spawns another
+// goroutine, so the flag is harmless once set.
+func (s *Spawner) Release(runID string) error {
+	run, err := db.GetAgentRun(s.database, runID)
+	if err != nil {
+		return fmt.Errorf("load run: %w", err)
+	}
+	if run == nil {
+		return fmt.Errorf("%w: run %s not found", ErrReleaseNothingHeld, runID)
+	}
+	if run.Status != "taken_over" || run.WorktreePath == "" {
+		return fmt.Errorf("%w: run %s (status=%q, worktree_path=%q)", ErrReleaseNothingHeld, runID, run.Status, run.WorktreePath)
+	}
+
+	takeoverPath := run.WorktreePath
+
+	// (1) Resolve the takeover base early. Two reasons:
+	//
+	//   - Path-safety check: a poisoned worktree_path (DB row tampered
+	//     with, or a bug elsewhere wrote an arbitrary path into the
+	//     column) would otherwise let RemoveAt nuke a directory we
+	//     don't own. Refuse the release if takeoverPath isn't under
+	//     the configured takeover base.
+	//
+	//   - Projects-dir cleanup needs the base for its own safety rail.
+	//
+	// If config can't be loaded (broken on-disk DB or filesystem), we
+	// refuse rather than barrel ahead without the safety check —
+	// handleAgentTakeover already requires this to work, so a release
+	// against a takeover that successfully created should also have
+	// access to the same config.
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load config for release: %w", err)
+	}
+	takeoverBase, err := cfg.Server.ResolvedTakeoverDir()
+	if err != nil {
+		return fmt.Errorf("resolve takeover base: %w", err)
+	}
+	// Tolerate a missing takeover dir: the user may have manually
+	// deleted it, or a prior release may have removed the dir but
+	// crashed before the DB flip. We still need to be able to clear
+	// worktree_path so the run can stop appearing in the banner. Fall
+	// back to filepath.Abs(filepath.Clean(...)) when EvalSymlinks
+	// fails on either side; canonicalizeForSafetyCheck applies the
+	// same fallback to both inputs so the prefix comparison stays
+	// consistent.
+	canonPath, err := canonicalizeForSafetyCheck(takeoverPath)
+	if err != nil {
+		return fmt.Errorf("canonicalize takeover path %s: %w", takeoverPath, err)
+	}
+	canonBase, err := canonicalizeForSafetyCheck(takeoverBase)
+	if err != nil {
+		return fmt.Errorf("canonicalize takeover base %s: %w", takeoverBase, err)
+	}
+	rel, err := filepath.Rel(canonBase, canonPath)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return fmt.Errorf("release: takeover path %s is not under takeover base %s; refusing teardown", canonPath, canonBase)
+	}
+	// resolvedPath is used by step (5) for the projects-dir cleanup and
+	// should match the symlink-resolved cwd Claude Code would have used
+	// when creating the ~/.claude/projects entry. Compute it best-effort
+	// before removing the takeover dir, with an Abs+Clean fallback when
+	// the path cannot be fully resolved (for example, if it no longer
+	// exists).
+	resolvedPath := ""
+	if evalPath, evalErr := filepath.EvalSymlinks(takeoverPath); evalErr == nil {
+		resolvedPath, err = filepath.Abs(evalPath)
+		if err != nil {
+			return fmt.Errorf("resolve absolute symlink-evaluated takeover path %s: %w", evalPath, err)
+		}
+		resolvedPath = filepath.Clean(resolvedPath)
+	} else {
+		resolvedPath, err = filepath.Abs(takeoverPath)
+		if err != nil {
+			return fmt.Errorf("resolve absolute takeover path %s: %w", takeoverPath, err)
+		}
+		resolvedPath = filepath.Clean(resolvedPath)
+	}
+
+	// (2) Capture branch name from the takeover dir. Best-effort: empty
+	// branch is acceptable (CleanupPRConfig handles "" — it just skips
+	// the own-repo branch.<headRef>.* and `branch -D headRef` blocks,
+	// while still reclaiming the synthetic triagefactory/pr-<n> remote
+	// + branch). Detached HEAD also returns "" via WorktreeBranch.
+	headBranch, _ := worktree.WorktreeBranch(takeoverPath)
+
+	// Look up task → entity to derive owner/repo/PR for CleanupPRConfig.
+	task, err := db.GetTask(s.database, run.TaskID)
+	if err != nil {
+		return fmt.Errorf("load task for release: %w", err)
+	}
+	var owner, repo string
+	var prNumber int
+	if task != nil && task.EntitySource == "github" {
+		repoStr := task.EntitySourceID
+		if idx := strings.LastIndex(repoStr, "#"); idx >= 0 {
+			repoStr = repoStr[:idx]
+		}
+		owner, repo = parseOwnerRepo(repoStr)
+		if idx := strings.LastIndex(task.EntitySourceID, "#"); idx >= 0 {
+			fmt.Sscanf(task.EntitySourceID[idx+1:], "%d", &prNumber)
+		}
+	}
+
+	// (3) Remove the worktree dir + bare-side registration FIRST. If
+	// this fails, return early with everything else intact: the
+	// projects-dir entry (and the JSONL inside it) is still on disk,
+	// so the user's `claude --resume` keeps working and they can
+	// retry the release. If we'd cleaned the projects entry first
+	// and then failed RemoveAt, we'd be in a half-released state
+	// where the run is "held" for retry but the resume history is
+	// already gone.
+	if err := worktree.RemoveAt(canonPath, runID); err != nil {
+		return fmt.Errorf("remove takeover worktree %s: %w", canonPath, err)
+	}
+
+	// (4) Per-PR config cleanup. Best-effort — failures here leak a
+	// stale remote + branch into the bare's config, which the next
+	// bootstrap's SweepStaleForkPRConfig reclaims. Don't block the
+	// release on it.
+	if owner != "" && repo != "" && prNumber > 0 {
+		worktree.CleanupPRConfig(owner, repo, headBranch, prNumber)
+	}
+
+	// (5) Drop the ~/.claude/projects entry now that the worktree dir
+	// is gone. Uses the resolved-path variant because the cwd no
+	// longer exists on disk — RemoveClaudeProjectDir's internal
+	// EvalSymlinks would fail and silently no-op. resolvedPath was
+	// captured at step (1) before RemoveAt destroyed the path.
+	worktree.RemoveClaudeProjectDirForResolved(resolvedPath)
+
+	// (6) DB flip. The status='taken_over' AND worktree_path != ''
+	// guard inside MarkAgentRunReleased makes a concurrent double-call
+	// idempotent: the second one returns ok=false and we return a
+	// 409-equivalent.
+	ok, err := db.MarkAgentRunReleased(s.database, runID)
+	if err != nil {
+		return fmt.Errorf("mark released: %w", err)
+	}
+	if !ok {
+		return fmt.Errorf("%w: run %s (DB row no longer matches release preconditions)", ErrReleaseNothingHeld, runID)
+	}
+
+	s.broadcastRunUpdate(runID, "taken_over")
+	toast.Info(s.wsHub, fmt.Sprintf("Released takeover: run %s", shortRunID(runID)))
+
+	return nil
 }
 
 // runConfig holds everything the generic agent runner needs.
@@ -2021,6 +2221,34 @@ func (s *Spawner) collectExtraTools(promptAllowedTools string) string {
 		return ""
 	}
 	return skills.NormalizeToolList(promptAllowedTools + "," + agentTools)
+}
+
+// canonicalizeForSafetyCheck returns filepath.Clean(filepath.Abs(p))
+// for the takeover-base prefix check in Release. Deliberately doesn't
+// EvalSymlinks: the manual-delete case (user rm -rf'd the takeover
+// dir) makes EvalSymlinks fail on the path side, and mixing
+// EvalSymlinks-resolved (existing base) with abs-only (missing path)
+// produces inconsistent results — on macOS, e.g., the base resolves
+// to /private/var/... while the missing path stays /var/..., wrongly
+// failing the prefix check.
+//
+// Abs+Clean alone is sufficient because the takeover_path stored in
+// the DB comes from worktree.CopyForTakeover, which itself uses
+// filepath.Abs(baseDir); the path and base were canonicalised the
+// same way at takeover time. The threat model (poisoned worktree_path
+// pointing at, say, /etc) is still defended because Abs+Clean turns
+// arbitrary input into an unambiguous absolute form before the rel
+// check.
+//
+// Without this fix Release wedged on its up-front EvalSymlinks when
+// the takeover dir was already gone, leaving the run permanently held
+// in the UI with no way to flip the DB row.
+func canonicalizeForSafetyCheck(p string) (string, error) {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(abs), nil
 }
 
 func parseOwnerRepo(s string) (string, string) {

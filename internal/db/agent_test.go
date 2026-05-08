@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"strings"
 	"testing"
 	"time"
 
@@ -325,15 +326,18 @@ func TestMarkAgentRunCancelledIfActive_AlreadyTerminal(t *testing.T) {
 	}
 }
 
-// TestListTakenOverRunIDs returns only runs whose status is taken_over.
-// Used at startup to decide which ~/.claude/projects entries to preserve
-// during the orphan sweep.
+// TestListTakenOverRunIDs returns only runs whose status is taken_over
+// AND whose worktree_path is still populated. Released takeovers (status
+// stays 'taken_over' as audit trail, but worktree_path is cleared) are
+// excluded — their dirs are gone, so the startup-cleanup sweep has
+// nothing to preserve for them.
 func TestListTakenOverRunIDs(t *testing.T) {
 	database := newTestDB(t)
 	takeoverFixture(t, database, "run-A", "running", "")
-	takeoverFixture(t, database, "run-B", "taken_over", "")
+	takeoverFixture(t, database, "run-B", "taken_over", "/tmp/wt-B")
 	takeoverFixture(t, database, "run-C", "completed", "")
-	takeoverFixture(t, database, "run-D", "taken_over", "")
+	takeoverFixture(t, database, "run-D", "taken_over", "/tmp/wt-D")
+	takeoverFixture(t, database, "run-E-released", "taken_over", "")
 
 	got, err := ListTakenOverRunIDs(database)
 	if err != nil {
@@ -344,10 +348,73 @@ func TestListTakenOverRunIDs(t *testing.T) {
 		gotSet[id] = true
 	}
 	if !gotSet["run-B"] || !gotSet["run-D"] {
-		t.Errorf("missing taken_over runs; got %v", got)
+		t.Errorf("missing held taken_over runs; got %v", got)
 	}
 	if gotSet["run-A"] || gotSet["run-C"] {
 		t.Errorf("included non-taken_over runs; got %v", got)
+	}
+	if gotSet["run-E-released"] {
+		t.Errorf("released takeover (empty worktree_path) must not appear in preserve set; got %v", got)
+	}
+}
+
+// TestMarkAgentRunReleased verifies the release flip: status stays
+// 'taken_over' for audit, worktree_path is cleared, result_summary
+// gets the released marker. Idempotent against double-call.
+func TestMarkAgentRunReleased(t *testing.T) {
+	database := newTestDB(t)
+	takeoverFixture(t, database, "run-rel", "taken_over", "/tmp/wt-rel")
+
+	ok, err := MarkAgentRunReleased(database, "run-rel")
+	if err != nil {
+		t.Fatalf("MarkAgentRunReleased: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected ok=true on first release")
+	}
+
+	got, err := GetAgentRun(database, "run-rel")
+	if err != nil {
+		t.Fatalf("GetAgentRun: %v", err)
+	}
+	if got.Status != "taken_over" {
+		t.Errorf("status: got %q, want taken_over (audit trail)", got.Status)
+	}
+	if got.WorktreePath != "" {
+		t.Errorf("worktree_path: got %q, want empty after release", got.WorktreePath)
+	}
+	if !strings.Contains(got.ResultSummary, "released by user") {
+		t.Errorf("result_summary missing release marker: %q", got.ResultSummary)
+	}
+
+	// Idempotent: a second call returns ok=false (no rows match the
+	// non-empty-worktree_path guard since we just cleared it).
+	ok2, err := MarkAgentRunReleased(database, "run-rel")
+	if err != nil {
+		t.Fatalf("MarkAgentRunReleased (second): %v", err)
+	}
+	if ok2 {
+		t.Errorf("second release returned ok=true; want false (already released)")
+	}
+}
+
+// TestMarkAgentRunReleased_RejectsNonHeld confirms the guard: release
+// against a run that isn't in 'taken_over' (or is taken_over with empty
+// worktree_path) returns ok=false without mutating anything.
+func TestMarkAgentRunReleased_RejectsNonHeld(t *testing.T) {
+	database := newTestDB(t)
+	takeoverFixture(t, database, "run-running", "running", "/tmp/wt-running")
+	takeoverFixture(t, database, "run-completed", "completed", "/tmp/wt-completed")
+	takeoverFixture(t, database, "run-already-released", "taken_over", "")
+
+	for _, runID := range []string{"run-running", "run-completed", "run-already-released"} {
+		ok, err := MarkAgentRunReleased(database, runID)
+		if err != nil {
+			t.Fatalf("MarkAgentRunReleased(%s): %v", runID, err)
+		}
+		if ok {
+			t.Errorf("release of %s returned ok=true; want false", runID)
+		}
 	}
 }
 

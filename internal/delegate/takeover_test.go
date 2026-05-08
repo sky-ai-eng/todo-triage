@@ -429,3 +429,68 @@ func TestAbortTakeover_PreservesTerminalRow(t *testing.T) {
 		t.Errorf("StopReason changed from end_turn to %q", got.StopReason)
 	}
 }
+
+// TestCanonicalizeForSafetyCheck_ExistingPath: returns the abs+clean
+// form (deliberately NOT symlink-resolved — see the helper's comment
+// for why). The path doesn't have to exist on disk for the function
+// to succeed.
+func TestCanonicalizeForSafetyCheck_ExistingPath(t *testing.T) {
+	dir := t.TempDir()
+	got, err := canonicalizeForSafetyCheck(dir)
+	if err != nil {
+		t.Fatalf("canonicalizeForSafetyCheck: %v", err)
+	}
+	abs, _ := filepath.Abs(dir)
+	expected := filepath.Clean(abs)
+	if got != expected {
+		t.Errorf("got %q, want filepath.Clean(filepath.Abs(...)) = %q", got, expected)
+	}
+}
+
+// TestCanonicalizeForSafetyCheck_FallsBackForMissingPath is the
+// load-bearing case for the manual-delete fix: when the takeover dir
+// is gone, EvalSymlinks fails, but Release still needs a canonical
+// form to compare against the takeover base. The fallback uses
+// filepath.Abs(filepath.Clean(...)), which doesn't require the path
+// to exist. Without this, a manually-deleted takeover dir wedged
+// Release on its up-front EvalSymlinks call and stranded the run as
+// permanently held.
+func TestCanonicalizeForSafetyCheck_FallsBackForMissingPath(t *testing.T) {
+	parent := t.TempDir()
+	missing := filepath.Join(parent, "definitely-not-here")
+
+	got, err := canonicalizeForSafetyCheck(missing)
+	if err != nil {
+		t.Fatalf("canonicalizeForSafetyCheck on missing path: %v", err)
+	}
+	expectedAbs, _ := filepath.Abs(missing)
+	if got != filepath.Clean(expectedAbs) {
+		t.Errorf("got %q, want filepath.Clean(filepath.Abs(...)) = %q", got, filepath.Clean(expectedAbs))
+	}
+}
+
+// TestCanonicalizeForSafetyCheck_PrefixCheckSurvivesMissingPath proves
+// the failure mode the fallback fixes: a missing takeover dir under
+// an existing base must still pass the rel-based prefix check Release
+// uses. Same canonicalization on both sides means the comparison stays
+// consistent regardless of which side fell back.
+func TestCanonicalizeForSafetyCheck_PrefixCheckSurvivesMissingPath(t *testing.T) {
+	base := t.TempDir()
+	missing := filepath.Join(base, "run-deleted-by-user")
+
+	canonBase, err := canonicalizeForSafetyCheck(base)
+	if err != nil {
+		t.Fatalf("canonicalize base: %v", err)
+	}
+	canonPath, err := canonicalizeForSafetyCheck(missing)
+	if err != nil {
+		t.Fatalf("canonicalize missing path: %v", err)
+	}
+	rel, err := filepath.Rel(canonBase, canonPath)
+	if err != nil {
+		t.Fatalf("filepath.Rel: %v", err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		t.Errorf("missing path %q wrongly judged outside base %q (rel=%q)", canonPath, canonBase, rel)
+	}
+}

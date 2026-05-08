@@ -292,6 +292,37 @@ func MarkAgentRunTakenOver(database *sql.DB, runID, takeoverPath string) (bool, 
 	return n > 0, nil
 }
 
+// MarkAgentRunReleased flips a held takeover into the "released" sub-state:
+// status stays 'taken_over' (the audit trail keeps "the user took this over"
+// readable), but worktree_path is cleared and result_summary appended so the
+// resume picker / Held Takeovers banner / startup cleanup-preserve sweep all
+// drop the row from their working sets.
+//
+// Guarded by status='taken_over' AND non-empty worktree_path so a double-click
+// or a release on a never-taken-over row returns ok=false (no error). Caller
+// uses ok=false to skip the websocket broadcast and surface a 409 to the UI.
+func MarkAgentRunReleased(database *sql.DB, runID string) (bool, error) {
+	res, err := database.Exec(`
+		UPDATE runs
+		SET worktree_path = '',
+		    result_summary = CASE
+		        WHEN COALESCE(result_summary, '') = '' THEN 'released by user'
+		        ELSE result_summary || '; released by user'
+		    END
+		WHERE id = ?
+		  AND status = 'taken_over'
+		  AND COALESCE(worktree_path, '') != ''
+	`, runID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // MarkAgentRunCancelledIfActive marks a run cancelled with the given
 // stop_reason / summary, but only if the row hasn't already reached a
 // terminal state. Returns ok=false (no error) when the row is already
@@ -414,12 +445,15 @@ func ActiveRunIDsForTask(database *sql.DB, taskID string) ([]string, error) {
 	return ids, rows.Err()
 }
 
-// ListTakenOverRunIDs returns the IDs of every run whose final state was
-// taken_over. Read at startup so the worktree-cleanup sweep knows to leave
-// those runs' ~/.claude/projects entries alone — the JSONL inside is what
-// makes `claude --resume` work in the takeover destination.
+// ListTakenOverRunIDs returns the IDs of every run currently held in the
+// taken_over state with a live takeover dir. Read at startup so the
+// worktree-cleanup sweep knows to leave those runs' ~/.claude/projects
+// entries alone — the JSONL inside is what makes `claude --resume` work in
+// the takeover destination. Released takeovers (status='taken_over' with
+// empty worktree_path) are excluded: their dirs are gone, so the projects
+// entry has nothing left to preserve.
 func ListTakenOverRunIDs(database *sql.DB) ([]string, error) {
-	rows, err := database.Query(`SELECT id FROM runs WHERE status = 'taken_over'`)
+	rows, err := database.Query(`SELECT id FROM runs WHERE status = 'taken_over' AND COALESCE(worktree_path, '') != ''`)
 	if err != nil {
 		return nil, err
 	}
@@ -475,6 +509,7 @@ func ListTakenOverRunsForResume(database *sql.DB) ([]TakenOverRun, error) {
 		LEFT JOIN tasks t ON t.id = r.task_id
 		LEFT JOIN entities e ON e.id = t.entity_id
 		WHERE r.status = 'taken_over'
+		  AND COALESCE(r.worktree_path, '') != ''
 		ORDER BY COALESCE(r.completed_at, r.started_at) DESC
 	`)
 	if err != nil {
