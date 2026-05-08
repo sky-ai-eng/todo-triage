@@ -335,20 +335,30 @@ func RemoveClaudeProjectDir(cwd string) {
 //
 // Safety rail: refuses to act unless the resolved cwd lives under
 // resolvedTakeoverBase. takeoverBase may be a configured override
-// (ServerConfig.TakeoverDir); callers should pass the result of
-// ResolvedTakeoverDir so a relative or "~"-prefixed value is canonicalised
-// before the prefix check.
+// (ServerConfig.TakeoverDir). Both cwd and takeoverBase are made absolute
+// (filepath.Abs) and symlink-resolved (filepath.EvalSymlinks) before the
+// prefix check, so callers can pass relative paths, "~"-prefixed paths
+// already expanded by ResolvedTakeoverDir, or fully-resolved paths
+// without changing the result.
 func RemoveClaudeProjectDirUnderTakeover(cwd, takeoverBase string) {
 	if cwd == "" || takeoverBase == "" {
 		return
 	}
 
-	resolved, err := filepath.EvalSymlinks(cwd)
+	cwdAbs, err := filepath.Abs(cwd)
+	if err != nil {
+		return
+	}
+	resolved, err := filepath.EvalSymlinks(cwdAbs)
 	if err != nil {
 		return
 	}
 
-	baseResolved, err := filepath.EvalSymlinks(takeoverBase)
+	baseAbs, err := filepath.Abs(takeoverBase)
+	if err != nil {
+		return
+	}
+	baseResolved, err := filepath.EvalSymlinks(baseAbs)
 	if err != nil {
 		return
 	}
@@ -370,6 +380,33 @@ func RemoveClaudeProjectDirUnderTakeover(cwd, takeoverBase string) {
 	projectDir := filepath.Join(home, claudeProjectsDir, encodeClaudeProjectDir(resolved))
 	if err := os.RemoveAll(projectDir); err != nil {
 		log.Printf("[worktree] remove takeover project dir %s: %v", projectDir, err)
+	}
+}
+
+// RemoveClaudeProjectDirForResolved removes ~/.claude/projects/<encoded>
+// for a cwd whose absolute, symlink-resolved path is already known. Use
+// this when the cwd may no longer exist on disk (e.g. RemoveAt has
+// already destroyed the worktree), since the standard
+// RemoveClaudeProjectDir / RemoveClaudeProjectDirUnderTakeover variants
+// EvalSymlinks the cwd and silently no-op on a non-existent path. The
+// caller is responsible for any safety-rail check — by the time you have
+// a resolved path, you've already validated it.
+//
+// Best-effort, like the other variants: failures are logged. The
+// resolved path must already be the symlink-evaluated form (e.g.
+// /private/var/... rather than /var/...) because Claude Code keys the
+// projects-dir name off the resolved cwd at the time the agent ran.
+func RemoveClaudeProjectDirForResolved(resolvedCwd string) {
+	if resolvedCwd == "" {
+		return
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	projectDir := filepath.Join(home, claudeProjectsDir, encodeClaudeProjectDir(resolvedCwd))
+	if err := os.RemoveAll(projectDir); err != nil {
+		log.Printf("[worktree] remove project dir %s: %v", projectDir, err)
 	}
 }
 

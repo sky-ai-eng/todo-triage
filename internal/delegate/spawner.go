@@ -513,27 +513,34 @@ func (s *Spawner) abortTakeover(runID, claudeCwd, destPath string) {
 //
 // Order matters:
 //
-//  1. Snapshot identity (branch name, owner/repo/PR number) BEFORE the
-//     worktree is removed. WorktreeBranch needs the dir to exist;
-//     CleanupPRConfig needs both the branch and the bare repo to be
-//     intact when its `branch -D` runs (and `branch -D` requires the
-//     branch NOT to be checked out — RemoveAt clears that).
+//  1. Resolve config (takeover base) and validate the worktree_path
+//     lives under it — defense-in-depth against a poisoned DB row
+//     pointing at an arbitrary directory.
 //
-//  2. Remove the worktree dir + deregister from the bare. From this
-//     moment forward, the next delegated run on the same PR can fetch
-//     into the branch ref again — this is the load-bearing step the
-//     bug report was hitting.
+//  2. Snapshot identity that's only available while the worktree
+//     exists: branch name (via WorktreeBranch) and the symlink-
+//     resolved cwd (via EvalSymlinks, captured at step 1's safety
+//     check). Both are gone after RemoveAt.
 //
-//  3. CleanupPRConfig — reclaim the bare's per-PR remote + branch
+//  3. Remove the worktree dir + deregister from the bare. From this
+//     moment forward, the next delegated run on the same PR can
+//     fetch into the branch ref — the load-bearing step. If this
+//     fails, return early and leave EVERYTHING ELSE intact (DB row
+//     stays held, projects entry stays put) so a retry can resume
+//     with the user's resume command still functional.
+//
+//  4. CleanupPRConfig — reclaim the bare's per-PR remote + branch
 //     tracking. Best-effort; SweepStaleForkPRConfig is the next
 //     bootstrap's backstop if this fails.
 //
-//  4. Drop the ~/.claude/projects entry for the takeover dir. Uses
-//     RemoveClaudeProjectDirUnderTakeover (not the TMPDIR-railed
-//     RemoveClaudeProjectDir) since the takeover dir lives outside
-//     /tmp.
+//  5. Drop the ~/.claude/projects entry. Done AFTER RemoveAt so a
+//     RemoveAt failure doesn't leave the user with neither a
+//     working takeover dir nor the resume JSONL needed to retry.
+//     Uses the resolved-path variant (RemoveClaudeProjectDirForResolved)
+//     since the cwd no longer exists on disk by this point —
+//     EvalSymlinks-based variants would silently no-op.
 //
-//  5. Flip the DB row. Done LAST so a teardown failure leaves the row
+//  6. Flip the DB row. Done LAST so a teardown failure leaves the row
 //     held and the action retryable.
 //
 // We deliberately don't clear s.takenOver[runID] (sticky-by-design;
@@ -614,31 +621,32 @@ func (s *Spawner) Release(runID string) error {
 		}
 	}
 
-	// (3) Drop the ~/.claude/projects entry FIRST, before RemoveAt
-	// destroys the dir. RemoveClaudeProjectDirUnderTakeover internally
-	// EvalSymlinks's the cwd to compute the encoded project-dir name,
-	// which Claude Code keys session storage by. Doing this AFTER
-	// RemoveAt would silently no-op (EvalSymlinks fails on a
-	// non-existent path) and leave a ghost projects entry behind. The
-	// runAgent normal-completion path naturally has this ordering via
-	// LIFO defer registration; we have to do it explicitly here.
-	worktree.RemoveClaudeProjectDirUnderTakeover(takeoverPath, takeoverBase)
-
-	// (4) Remove the worktree dir + bare-side registration. RemoveAt
-	// errors propagate — leaving an unremovable dir on disk while the
-	// row says "released" would silently break the next delegation
-	// against the same PR. Better to surface the error.
+	// (3) Remove the worktree dir + bare-side registration FIRST. If
+	// this fails, return early with everything else intact: the
+	// projects-dir entry (and the JSONL inside it) is still on disk,
+	// so the user's `claude --resume` keeps working and they can
+	// retry the release. If we'd cleaned the projects entry first
+	// and then failed RemoveAt, we'd be in a half-released state
+	// where the run is "held" for retry but the resume history is
+	// already gone.
 	if err := worktree.RemoveAt(takeoverPath, runID); err != nil {
 		return fmt.Errorf("remove takeover worktree %s: %w", takeoverPath, err)
 	}
 
-	// (5) Per-PR config cleanup. Best-effort — failures here leak a
+	// (4) Per-PR config cleanup. Best-effort — failures here leak a
 	// stale remote + branch into the bare's config, which the next
 	// bootstrap's SweepStaleForkPRConfig reclaims. Don't block the
 	// release on it.
 	if owner != "" && repo != "" && prNumber > 0 {
 		worktree.CleanupPRConfig(owner, repo, headBranch, prNumber)
 	}
+
+	// (5) Drop the ~/.claude/projects entry now that the worktree dir
+	// is gone. Uses the resolved-path variant because the cwd no
+	// longer exists on disk — RemoveClaudeProjectDir's internal
+	// EvalSymlinks would fail and silently no-op. resolvedPath was
+	// captured at step (1) before RemoveAt destroyed the path.
+	worktree.RemoveClaudeProjectDirForResolved(resolvedPath)
 
 	// (6) DB flip. The status='taken_over' AND worktree_path != ''
 	// guard inside MarkAgentRunReleased makes a concurrent double-call

@@ -1548,3 +1548,44 @@ func TestRemoveClaudeProjectDirUnderTakeover_EmptyArgs(t *testing.T) {
 	RemoveClaudeProjectDirUnderTakeover("/some/cwd", "")
 	RemoveClaudeProjectDirUnderTakeover("", "")
 }
+
+// TestRemoveClaudeProjectDirForResolved_RemovesEntryWhenCwdGone is the
+// load-bearing case for the release path: by the time we want to remove
+// the projects entry, RemoveAt has already destroyed the cwd. The
+// resolved-path variant must work even though EvalSymlinks(cwd) would
+// fail.
+func TestRemoveClaudeProjectDirForResolved_RemovesEntryWhenCwdGone(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	// Create the cwd just long enough to capture the resolved path,
+	// then remove it to mimic the post-RemoveAt state. The encoded
+	// projects-dir name is what we're really testing — it has to be
+	// derivable without re-resolving the cwd.
+	tmp := t.TempDir()
+	cwd := filepath.Join(tmp, "run-gone")
+	if err := os.MkdirAll(cwd, 0755); err != nil {
+		t.Fatalf("mkdir cwd: %v", err)
+	}
+	resolved, err := filepath.EvalSymlinks(cwd)
+	if err != nil {
+		t.Fatalf("evalsymlinks: %v", err)
+	}
+	projectDir := filepath.Join(home, claudeProjectsDir, encodeClaudeProjectDir(resolved))
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatalf("mkdir project dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "session.jsonl"), []byte("x"), 0644); err != nil {
+		t.Fatalf("write jsonl: %v", err)
+	}
+	// Remove the cwd — exactly the state Release is in after RemoveAt.
+	if err := os.RemoveAll(cwd); err != nil {
+		t.Fatalf("remove cwd: %v", err)
+	}
+
+	RemoveClaudeProjectDirForResolved(resolved)
+
+	if _, err := os.Stat(projectDir); !os.IsNotExist(err) {
+		t.Errorf("project dir should have been removed despite cwd being gone (err=%v)", err)
+	}
+}
