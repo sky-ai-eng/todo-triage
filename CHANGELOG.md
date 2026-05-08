@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.9.2](https://github.com/sky-ai-eng/triage-factory/compare/v1.9.1...v1.9.2) (2026-05-08)
+
+
+### Bug Fixes
+
+* **delegate:** pnpm/npm script shortcuts + go workspace ops in allowlist ([#128](https://github.com/sky-ai-eng/triage-factory/issues/128)) ([cad3eee](https://github.com/sky-ai-eng/triage-factory/commit/cad3eee9e2ca18e0bcddc156833014f1f5dbcc62))
+
 ## [1.9.1](https://github.com/sky-ai-eng/triage-factory/compare/v1.9.0...v1.9.1) (2026-05-08)
 
 
