@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.10.0](https://github.com/sky-ai-eng/triage-factory/compare/v1.9.2...v1.10.0) (2026-05-08)
+
+
+### Features
+
+* **delegate:** release held takeovers ([#131](https://github.com/sky-ai-eng/triage-factory/issues/131)) ([b2c7316](https://github.com/sky-ai-eng/triage-factory/commit/b2c7316a648bd70b7691cca238c7560da47c4cc9))
+
+
+### Bug Fixes
+
+* **board:** seed agentRuns on delegate so early run phases are visible ([#130](https://github.com/sky-ai-eng/triage-factory/issues/130)) ([06e511e](https://github.com/sky-ai-eng/triage-factory/commit/06e511ef99d2869e99091a2acf12cf463c6540e1))
+
 ## [1.9.2](https://github.com/sky-ai-eng/triage-factory/compare/v1.9.1...v1.9.2) (2026-05-08)
 
 
