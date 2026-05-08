@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.10.1](https://github.com/sky-ai-eng/triage-factory/compare/v1.10.0...v1.10.1) (2026-05-08)
+
+
+### Bug Fixes
+
+* **board:** surface Return-to-queue on task_unsolvable runs ([#133](https://github.com/sky-ai-eng/triage-factory/issues/133)) ([9bb6272](https://github.com/sky-ai-eng/triage-factory/commit/9bb6272fe0d1cbd3f68b606493253f0a73edace6))
+
 ## [1.10.0](https://github.com/sky-ai-eng/triage-factory/compare/v1.9.2...v1.10.0) (2026-05-08)
 
 
