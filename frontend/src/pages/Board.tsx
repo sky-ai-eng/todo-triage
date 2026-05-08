@@ -133,7 +133,19 @@ export default function Board() {
             .then((r) => (r.ok ? r.json() : null))
             .then((fullRun: AgentRun | null) => {
               if (!fullRun) return
-              setAgentRuns((p) => ({ ...p, [fullRun.TaskID]: fullRun }))
+              setAgentRuns((p) => {
+                const existing = p[fullRun.TaskID]
+                // Don't let a delayed event for a prior run clobber a
+                // newer run already tracked for this task.
+                if (
+                  existing &&
+                  existing.ID !== fullRun.ID &&
+                  existing.StartedAt >= fullRun.StartedAt
+                ) {
+                  return p
+                }
+                return { ...p, [fullRun.TaskID]: fullRun }
+              })
             })
             .catch(() => {})
           // 'cancelled' triggers a task refetch so the
