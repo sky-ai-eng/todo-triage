@@ -27,6 +27,7 @@ export default function AgentCard({ task, run, messages, onRequeue, onReview }: 
   const [pendingOverlayDismissed, setPendingOverlayDismissed] = useState(false)
 
   const isActive = [
+    'initializing',
     'cloning',
     'fetching',
     'worktree_created',
@@ -529,6 +530,7 @@ function basename(path: string): string {
 
 function formatStatus(status: string): string {
   const map: Record<string, string> = {
+    initializing: 'Initializing',
     cloning: 'Pulling repo',
     fetching: 'Fetching PR details',
     worktree_created: 'Creating worktree',

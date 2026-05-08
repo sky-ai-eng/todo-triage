@@ -115,27 +115,40 @@ export default function Board() {
     useCallback(
       (event: WSEvent) => {
         if (event.type === 'agent_run_update') {
+          // Optimistic status update for an already-tracked run.
           setAgentRuns((prev) => {
             const updated = { ...prev }
             for (const [taskId, run] of Object.entries(updated)) {
               if (run.ID === event.run_id) {
                 updated[taskId] = { ...run, Status: event.data.status }
-                fetch(`/api/agent/runs/${event.run_id}`)
-                  .then((r) => r.json())
-                  .then((fullRun: AgentRun) => {
-                    setAgentRuns((p) => {
-                      const u = { ...p }
-                      for (const [tid, r] of Object.entries(u)) {
-                        if (r.ID === event.run_id) u[tid] = fullRun
-                      }
-                      return u
-                    })
-                  })
                 break
               }
             }
             return updated
           })
+          // Refetch the full run and key by TaskID. Refreshes an existing
+          // entry and also seeds when the WS update arrives before
+          // agentRuns has the run (auto-delegation, cross-tab, or swipe
+          // response that hasn't landed yet).
+          fetch(`/api/agent/runs/${event.run_id}`)
+            .then((r) => (r.ok ? r.json() : null))
+            .then((fullRun: AgentRun | null) => {
+              if (!fullRun) return
+              setAgentRuns((p) => {
+                const existing = p[fullRun.TaskID]
+                // Don't let a delayed event for a prior run clobber a
+                // newer run already tracked for this task.
+                if (
+                  existing &&
+                  existing.ID !== fullRun.ID &&
+                  existing.StartedAt >= fullRun.StartedAt
+                ) {
+                  return p
+                }
+                return { ...p, [fullRun.TaskID]: fullRun }
+              })
+            })
+            .catch(() => {})
           // 'cancelled' triggers a task refetch so the
           // pending_approval-cleanup broadcast (SKY-206) collapses
           // the AgentCard and swaps in the queued SortableTaskCard
@@ -438,11 +451,35 @@ export default function Board() {
       const task = pendingDelegateTask.current
       if (!task) return
       pendingDelegateTask.current = null
-      await fetch(`/api/tasks/${task.id}/swipe`, {
+      // Seed agentRuns from the swipe response so the AgentCard renders
+      // immediately, before the first WS update or fetchTasks resolves.
+      // Without this the card can appear to skip early phases on slow
+      // connections. The WS handler's follow-up fetch replaces the stub.
+      const res = await fetch(`/api/tasks/${task.id}/swipe`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'delegate', hesitation_ms: 0, prompt_id: promptId }),
       })
+      if (res.ok) {
+        try {
+          const { run_id: runID } = (await res.json()) as { run_id?: string }
+          if (runID) {
+            setAgentRuns((prev) => ({
+              ...prev,
+              [task.id]: {
+                ID: runID,
+                TaskID: task.id,
+                Status: 'initializing',
+                Model: '',
+                StartedAt: new Date().toISOString(),
+                ResultSummary: '',
+              },
+            }))
+          }
+        } catch {
+          // Body wasn't JSON — fetchTasks below still recovers.
+        }
+      }
       fetchTasks()
     },
     [fetchTasks],
