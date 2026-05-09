@@ -2,13 +2,16 @@ package agentproc
 
 import "strconv"
 
-// BuildArgs assembles the argv for a `claude` invocation. Pulled out of
-// Run so the flag set is unit-testable without spawning a subprocess.
+// BuildArgs assembles the argv consumed by wrapper.mjs (which translates
+// it into Agent SDK Options). Pulled out of Run so the flag set is
+// unit-testable without spawning a subprocess.
 //
-// The shape mirrors what the delegate spawner used inline before this
-// package existed: stream-json output, verbose, allowedTools, optional
-// --resume + --max-turns. New flags should be added here so both the
-// initial-run and resume paths pick them up uniformly.
+// The shape historically mirrored the `claude` CLI's flags (the runtime
+// used to be `claude -p`); the wrapper preserves those flag names so
+// switching between the CLI and the SDK runtime is a one-line change in
+// run.go. New flags should be added here so both the initial-run and
+// resume paths pick them up uniformly, and mirrored in wrapper.mjs's
+// parseArgs switch.
 func BuildArgs(opts RunOptions) []string {
 	args := []string{
 		"-p", opts.Message,

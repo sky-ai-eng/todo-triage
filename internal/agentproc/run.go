@@ -70,6 +70,16 @@ type RunOptions struct {
 	TraceID string
 }
 
+// NoopSink discards all stream events. Suitable for one-shot agent
+// calls (classifier, scorer, profiler) that only care about the
+// terminal Outcome.Result.Result string and don't need to persist
+// per-message rows or push to a websocket. The parsing overhead per
+// message is negligible for the few-second calls these sites make.
+type NoopSink struct{}
+
+func (NoopSink) OnSession(string) error               { return nil }
+func (NoopSink) OnMessage(*domain.AgentMessage) error { return nil }
+
 // Sink is the storage-side adapter that turns parsed stream events
 // into rows + websocket pushes. Implementations are constructed per
 // invocation (they typically close over a runID or projectID) and are
@@ -131,6 +141,16 @@ func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	// EnsureSDK installs Node + Agent SDK + wrapper.mjs on first call
+	// and returns the absolute wrapper path. Failures here are usually
+	// "Node not on PATH" — surface them to the caller so the run lands
+	// in failed state with a clear message rather than spawning a
+	// broken subprocess.
+	wrapperPath, err := EnsureSDK()
+	if err != nil {
+		return nil, fmt.Errorf("agent runtime: %w", err)
+	}
+
 	// exec.CommandContext owns the cancel watcher: it spawns a goroutine
 	// at Start time that selects on runCtx.Done() vs. an internal "wait
 	// finished" channel, and exits whichever fires first. That's
@@ -141,7 +161,14 @@ func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
 	// pgid. The Cancel hook below customizes the kill to target the
 	// process group (Setpgid is set), so child processes the agent
 	// spawned go down with it.
-	cmd := exec.CommandContext(runCtx, "claude", BuildArgs(opts)...)
+	//
+	// We spawn the SDK via `node wrapper.mjs <flags>` instead of the
+	// `claude` CLI. The wrapper translates the flag-based argv emitted
+	// by BuildArgs into Agent SDK Options, so the call site stays
+	// runtime-agnostic. The SDK uses the same auth / config / session
+	// store as Claude Code, so behavior is identical for the user.
+	nodeArgs := append([]string{wrapperPath}, BuildArgs(opts)...)
+	cmd := exec.CommandContext(runCtx, "node", nodeArgs...)
 	cmd.Dir = opts.Cwd
 	cmd.Env = append(os.Environ(), opts.ExtraEnv...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

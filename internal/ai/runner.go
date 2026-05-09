@@ -1,6 +1,7 @@
 package ai
 
 import (
+	"context"
 	"database/sql"
 	"log"
 	"sync"
@@ -70,11 +71,21 @@ func (r *Runner) reportError(err error) {
 }
 
 func (r *Runner) Start() {
+	// Derive a ctx that cancels when Stop() closes r.stop. This ctx is
+	// passed into each run() so any in-flight scoring agent (which now
+	// goes through agentproc.Run → SDK subprocess) gets SIGKILL'd on
+	// server shutdown rather than blocking the shutdown until the model
+	// times out on its own.
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-r.stop
+		cancel()
+	}()
 	go func() {
 		for {
 			select {
 			case <-r.trigger:
-				r.run()
+				r.run(ctx)
 			case <-r.stop:
 				return
 			}
@@ -86,7 +97,7 @@ func (r *Runner) Stop() {
 	close(r.stop)
 }
 
-func (r *Runner) run() {
+func (r *Runner) run(ctx context.Context) {
 	r.mu.Lock()
 	if r.running {
 		r.mu.Unlock()
@@ -136,7 +147,7 @@ func (r *Runner) run() {
 		r.callbacks.OnScoringStarted(taskIDs)
 	}
 
-	scores, skippedTasks, err := ScoreTasks(r.database, tasks)
+	scores, skippedTasks, err := ScoreTasks(ctx, r.database, tasks)
 	if err != nil {
 		log.Printf("[ai] scoring failed: %v", err)
 		r.reportError(err)
