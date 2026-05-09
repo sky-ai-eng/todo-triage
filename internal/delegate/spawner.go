@@ -1161,7 +1161,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		return
 	}
 
-	s.failRun(runID, task.ID, triggerType, "claude exited cleanly without producing a result event")
+	s.failRun(runID, task.ID, triggerType, "agent runtime exited cleanly without producing a result event")
 }
 
 // processCompletion handles the post-stream branching for any Claude
@@ -1669,7 +1669,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, runID, sessionID, cwd, 
 		if ctx.Err() != nil {
 			return outcome, ctx.Err()
 		}
-		return outcome, fmt.Errorf("claude resume failed: %w (stderr: %s)", runErr, outcome.StderrText)
+		return outcome, fmt.Errorf("agent runtime resume failed: %w (stderr: %s)", runErr, outcome.StderrText)
 	}
 
 	return outcome, nil

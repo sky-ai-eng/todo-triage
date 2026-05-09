@@ -2,15 +2,16 @@ package ai
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	_ "embed"
 	"encoding/json"
 	"fmt"
 	"log"
-	"os/exec"
 	"strings"
 	"sync"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -89,7 +90,7 @@ const scoringModel = "haiku"
 // the count, and so the number stays correct if batchSize changes.
 // Failures are non-fatal: the function still returns whatever scores
 // succeeded, and the caller surfaces skippedTasks as a warning toast.
-func ScoreTasks(database *sql.DB, tasks []domain.Task) (scores []TaskScore, skippedTasks int, err error) {
+func ScoreTasks(ctx context.Context, database *sql.DB, tasks []domain.Task) (scores []TaskScore, skippedTasks int, err error) {
 	if len(tasks) == 0 {
 		return nil, 0, nil
 	}
@@ -151,7 +152,7 @@ func ScoreTasks(database *sql.DB, tasks []domain.Task) (scores []TaskScore, skip
 		wg.Add(1)
 		go func(idx int, b []TaskInput) {
 			defer wg.Done()
-			scores, err := scoreBatch(b)
+			scores, err := scoreBatch(ctx, b)
 			results[idx] = batchResult{scores, err}
 		}(i, batch)
 	}
@@ -175,7 +176,7 @@ func ScoreTasks(database *sql.DB, tasks []domain.Task) (scores []TaskScore, skip
 	return allScores, skipped, nil
 }
 
-func scoreBatch(tasks []TaskInput) ([]TaskScore, error) {
+func scoreBatch(ctx context.Context, tasks []TaskInput) ([]TaskScore, error) {
 	tasksJSON, err := json.Marshal(tasks)
 	if err != nil {
 		return nil, fmt.Errorf("marshal tasks: %w", err)
@@ -183,32 +184,31 @@ func scoreBatch(tasks []TaskInput) ([]TaskScore, error) {
 
 	prompt := fmt.Sprintf(batchPrioritizePrompt, string(tasksJSON))
 
-	args := []string{
-		"-p", prompt,
-		"--model", scoringModel,
-		"--output-format", "json",
+	// Run through the shared agent runtime. The terminal `result` event
+	// populates outcome.Result.Result with the agent's final response —
+	// same string the old `claude --output-format json` envelope's
+	// `.result` field carried, so the post-parse logic below is
+	// unchanged. NoopSink discards per-message stream events; this path
+	// doesn't persist a transcript. ctx propagates from the Runner's
+	// stop channel so server shutdown SIGKILLs in-flight scoring calls
+	// instead of waiting for the model to time out.
+	outcome, err := agentproc.Run(ctx, agentproc.RunOptions{
+		Model:   scoringModel,
+		Message: prompt,
+		TraceID: "scorer-batch",
+	}, agentproc.NoopSink{})
+	if err != nil {
+		stderr := ""
+		if outcome != nil {
+			stderr = outcome.Stderr
+		}
+		return nil, fmt.Errorf("scorer agent failed: %w, stderr: %s", err, stderr)
+	}
+	if outcome == nil || outcome.Result == nil {
+		return nil, fmt.Errorf("scorer agent: no terminal result event")
 	}
 
-	cmd := exec.Command("claude", args...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("claude command failed: %w, stderr: %s", err, stderr.String())
-	}
-
-	// claude --output-format json wraps the response in a JSON object with a "result" field
-	var envelope struct {
-		Result string `json:"result"`
-	}
-	raw := stdout.Bytes()
-
-	// Try parsing as envelope first (claude JSON output format)
-	if err := json.Unmarshal(raw, &envelope); err == nil && envelope.Result != "" {
-		raw = []byte(envelope.Result)
-	}
-
+	raw := []byte(outcome.Result.Result)
 	// The result might contain markdown fences despite the prompt — strip them
 	raw = StripCodeFences(raw)
 

@@ -1,16 +1,15 @@
 package repoprofile
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
-	"os/exec"
 	"strings"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/config"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -182,7 +181,7 @@ func (p *Profiler) Run(ctx context.Context, repos []string, force bool) error {
 		}
 		batch := withDocs[i:end]
 
-		results, err := profileBatch(batch)
+		results, err := profileBatch(ctx, batch)
 		if err != nil {
 			log.Printf("[repoprofile] batch %d failed: %v", i/profileBatchSize+1, err)
 			repoNames := make([]string, len(batch))
@@ -246,7 +245,7 @@ type repoProfileResult struct {
 	Profile string `json:"profile"`
 }
 
-func profileBatch(batch []repoWithDocs) ([]repoProfileResult, error) {
+func profileBatch(ctx context.Context, batch []repoWithDocs) ([]repoProfileResult, error) {
 	inputs := make([]repoProfileInput, len(batch))
 	for i, d := range batch {
 		inputs[i] = repoProfileInput{
@@ -262,31 +261,27 @@ func profileBatch(batch []repoWithDocs) ([]repoProfileResult, error) {
 
 	prompt := fmt.Sprintf(ai.RepoProfilePrompt, string(inputJSON))
 
-	args := []string{
-		"-p", prompt,
-		"--model", profilingModel,
-		"--output-format", "json",
+	// Run through the shared agent runtime. NoopSink discards per-message
+	// stream events; we only care about the terminal Result.Result string,
+	// which carries the model's JSON array response (same string the old
+	// `claude --output-format json` envelope's `.result` field carried).
+	outcome, err := agentproc.Run(ctx, agentproc.RunOptions{
+		Model:   profilingModel,
+		Message: prompt,
+		TraceID: "repoprofile-batch",
+	}, agentproc.NoopSink{})
+	if err != nil {
+		stderr := ""
+		if outcome != nil {
+			stderr = outcome.Stderr
+		}
+		return nil, fmt.Errorf("repoprofile agent failed: %w, stderr: %s", err, stderr)
+	}
+	if outcome == nil || outcome.Result == nil {
+		return nil, fmt.Errorf("repoprofile agent: no terminal result event")
 	}
 
-	cmd := exec.Command("claude", args...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("claude command failed: %w, stderr: %s", err, stderr.String())
-	}
-
-	// claude --output-format json wraps the response in {"result": "..."}
-	var envelope struct {
-		Result string `json:"result"`
-	}
-	raw := stdout.Bytes()
-	if err := json.Unmarshal(raw, &envelope); err == nil && envelope.Result != "" {
-		raw = []byte(envelope.Result)
-	}
-
-	raw = ai.StripCodeFences(raw)
+	raw := ai.StripCodeFences([]byte(outcome.Result.Result))
 
 	var results []repoProfileResult
 	if err := json.Unmarshal(raw, &results); err != nil {

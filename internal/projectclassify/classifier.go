@@ -25,17 +25,18 @@ package projectclassify
 
 import (
 	"bytes"
+	"context"
 	_ "embed"
 	"encoding/json"
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -108,12 +109,12 @@ type Vote struct {
 // truncated vote exists. In the common case (clear winner OR clearly
 // nobody fits), Stage 2 is skipped and the cost stays at
 // 1 turn × N projects.
-func Classify(projects []domain.Project, entity domain.Entity) (*string, []Vote) {
+func Classify(ctx context.Context, projects []domain.Project, entity domain.Entity) (*string, []Vote) {
 	if len(projects) == 0 {
 		return nil, nil
 	}
 
-	stage1 := runVotes(projects, entity, voteStage1)
+	stage1 := runVotes(ctx, projects, entity, voteStage1)
 
 	if winner := pickWinner(stage1); winner != nil {
 		return winner, stage1
@@ -140,7 +141,7 @@ func Classify(projects []domain.Project, entity domain.Entity) (*string, []Vote)
 	}
 
 	log.Printf("[classify] entity %s: escalating %d borderline+truncated project(s) to Stage 2", entity.ID, len(escalated))
-	stage2 := runVotes(escalated, entity, voteStage2)
+	stage2 := runVotes(ctx, escalated, entity, voteStage2)
 
 	merged := mergeStages(stage1, stage2)
 	return pickWinner(merged), merged
@@ -149,7 +150,7 @@ func Classify(projects []domain.Project, entity domain.Entity) (*string, []Vote)
 // runVotes fans out one Haiku call per project using the provided
 // vote function (Stage 1 or Stage 2). Concurrency is capped at
 // maxConcurrentVotes.
-func runVotes(projects []domain.Project, entity domain.Entity, vote func(domain.Project, domain.Entity) Vote) []Vote {
+func runVotes(ctx context.Context, projects []domain.Project, entity domain.Entity, vote func(context.Context, domain.Project, domain.Entity) Vote) []Vote {
 	sem := make(chan struct{}, maxConcurrentVotes)
 	votes := make([]Vote, len(projects))
 	var wg sync.WaitGroup
@@ -159,7 +160,7 @@ func runVotes(projects []domain.Project, entity domain.Entity, vote func(domain.
 		go func(idx int, project domain.Project) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			votes[idx] = vote(project, entity)
+			votes[idx] = vote(ctx, project, entity)
 		}(i, p)
 	}
 	wg.Wait()
@@ -215,7 +216,7 @@ func pickWinner(votes []Vote) *string {
 // voteStage1 is the broad-pass single-shot Haiku call. KB inlined
 // up to kbInlineMaxBytes; flag KBTruncated when the cap was hit so
 // the orchestrator knows whether Stage 2 might help.
-func voteStage1(project domain.Project, entity domain.Entity) Vote {
+func voteStage1(ctx context.Context, project domain.Project, entity domain.Entity) Vote {
 	v := Vote{ProjectID: project.ID, Stage: 1}
 
 	kb, truncated, err := readProjectKB(project.ID)
@@ -237,7 +238,7 @@ func voteStage1(project domain.Project, entity domain.Entity) Vote {
 		truncateDescription(entity.Description),
 	)
 
-	score, rationale, err := runStage1Haiku(prompt)
+	score, rationale, err := runStage1Haiku(ctx, prompt)
 	if err != nil {
 		v.Err = err
 		return v
@@ -250,7 +251,7 @@ func voteStage1(project domain.Project, entity domain.Entity) Vote {
 // voteStage2 is the agent-mode call: Haiku in the project's working
 // directory, free to Read/Glob/Grep `./knowledge-base/` selectively.
 // Used only for borderline+truncated projects from Stage 1.
-func voteStage2(project domain.Project, entity domain.Entity) Vote {
+func voteStage2(ctx context.Context, project domain.Project, entity domain.Entity) Vote {
 	v := Vote{ProjectID: project.ID, Stage: 2}
 
 	kbRoot, err := curator.KnowledgeDir(project.ID)
@@ -274,7 +275,7 @@ func voteStage2(project domain.Project, entity domain.Entity) Vote {
 		truncateDescription(entity.Description),
 	)
 
-	score, rationale, err := runStage2Haiku(prompt, kbRoot)
+	score, rationale, err := runStage2Haiku(ctx, prompt, kbRoot)
 	if err != nil {
 		v.Err = err
 		return v
@@ -358,56 +359,55 @@ func readProjectKB(projectID string) (string, bool, error) {
 	return buf.String(), truncated, nil
 }
 
-// runStage1Haiku invokes the local `claude` CLI for a single-shot
-// classification. Mirrors internal/ai/scorer.go:scoreBatch's
-// subprocess shape. Exposed as a var so tests can stub.
+// runStage1Haiku runs a single-shot Haiku classification through the
+// shared agent runtime (agentproc.Run). Exposed as a var so tests can
+// stub.
 var runStage1Haiku = realRunStage1Haiku
 
-func realRunStage1Haiku(prompt string) (int, string, error) {
-	cmd := exec.Command("claude",
-		"-p", prompt,
-		"--model", classifyModel,
-		"--output-format", "json",
-	)
-	return runHaiku(cmd)
+func realRunStage1Haiku(ctx context.Context, prompt string) (int, string, error) {
+	return runHaiku(ctx, agentproc.RunOptions{
+		Model:   classifyModel,
+		Message: prompt,
+		TraceID: "classify-stage1",
+	})
 }
 
-// runStage2Haiku invokes the local `claude` CLI in the project's
-// working directory so the model can use Read/Glob/Grep to inspect
-// the KB selectively. --max-turns is a hard cap on the tool loop.
-// Exposed as a var so tests can stub.
+// runStage2Haiku runs in the project's KB directory so the model can
+// use Read/Glob/Grep to inspect knowledge-base files selectively.
+// MaxTurns is a hard cap on the tool loop. Exposed as a var so tests
+// can stub.
 var runStage2Haiku = realRunStage2Haiku
 
-func realRunStage2Haiku(prompt, cwd string) (int, string, error) {
-	cmd := exec.Command("claude",
-		"-p", prompt,
-		"--model", classifyModel,
-		"--output-format", "json",
-		"--max-turns", fmt.Sprintf("%d", stage2MaxTurns),
-	)
-	cmd.Dir = cwd
-	return runHaiku(cmd)
+func realRunStage2Haiku(ctx context.Context, prompt, cwd string) (int, string, error) {
+	return runHaiku(ctx, agentproc.RunOptions{
+		Cwd:      cwd,
+		Model:    classifyModel,
+		Message:  prompt,
+		MaxTurns: stage2MaxTurns,
+		TraceID:  "classify-stage2",
+	})
 }
 
-// runHaiku is the shared subprocess + JSON-parsing path for both
-// stages. Stage 1 and Stage 2 differ only in their command setup
-// (cwd, max-turns); the response shape is identical.
-func runHaiku(cmd *exec.Cmd) (int, string, error) {
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return 0, "", fmt.Errorf("claude command failed: %w (stderr: %s)", err, stderr.String())
+// runHaiku drives one classification call through agentproc.Run with a
+// NoopSink (no transcript persistence) and parses the {score, rationale}
+// JSON the model emits. Stage 1 and Stage 2 share this path; they differ
+// only in the RunOptions they pass. ctx propagates from the Runner's
+// stop channel so server shutdown SIGKILLs in-flight calls instead of
+// waiting for the model to time out.
+func runHaiku(ctx context.Context, opts agentproc.RunOptions) (int, string, error) {
+	outcome, err := agentproc.Run(ctx, opts, agentproc.NoopSink{})
+	if err != nil {
+		stderr := ""
+		if outcome != nil {
+			stderr = outcome.Stderr
+		}
+		return 0, "", fmt.Errorf("classify agent failed: %w (stderr: %s)", err, stderr)
+	}
+	if outcome == nil || outcome.Result == nil {
+		return 0, "", fmt.Errorf("classify agent: no terminal result event")
 	}
 
-	raw := stdout.Bytes()
-	var envelope struct {
-		Result string `json:"result"`
-	}
-	if err := json.Unmarshal(raw, &envelope); err == nil && envelope.Result != "" {
-		raw = []byte(envelope.Result)
-	}
-	raw = ai.StripCodeFences(raw)
+	raw := ai.StripCodeFences([]byte(outcome.Result.Result))
 
 	var resp struct {
 		Score     int    `json:"score"`
