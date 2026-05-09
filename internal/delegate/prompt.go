@@ -1,0 +1,196 @@
+// Prompt resolution + composition (mission text + envelope template +
+// placeholder interpolation), plus parsing of the agent's terminal
+// completion JSON envelope and the small string utilities the prompt
+// path needs (extra-tools merging, owner/repo splitting).
+
+package delegate
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+
+	"github.com/sky-ai-eng/triage-factory/internal/ai"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/skills"
+)
+
+// Sentinel errors the delegate HTTP handler uses to map prompt-resolution
+// failures to 4xx instead of 5xx.
+var (
+	// ErrPromptNotFound — Delegate's caller passed a prompt id that
+	// doesn't resolve to any row. Race-correctable (the prompt was
+	// deleted between snapshot fetch and drop, or the id was simply
+	// wrong) — 400 Bad Request, not 5xx.
+	ErrPromptNotFound = errors.New("delegate: prompt not found")
+
+	// ErrPromptUnspecified — Delegate's caller passed an empty prompt
+	// id. The picker should have prevented this; 400 Bad Request when
+	// the contract is violated.
+	ErrPromptUnspecified = errors.New("delegate: no prompt specified")
+)
+
+// resolvePrompt finds the prompt for a task from an explicit prompt ID.
+// Manual delegation always requires the caller to pick a prompt; auto-delegation
+// supplies the prompt_id from the trigger row.
+func (s *Spawner) resolvePrompt(task domain.Task, explicitPromptID string) (*domain.Prompt, error) {
+	if explicitPromptID == "" {
+		return nil, fmt.Errorf("%w — select one from the prompt picker", ErrPromptUnspecified)
+	}
+
+	p, err := db.GetPrompt(s.database, explicitPromptID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load prompt %s: %w", explicitPromptID, err)
+	}
+	if p == nil {
+		return nil, fmt.Errorf("%w: %s", ErrPromptNotFound, explicitPromptID)
+	}
+	return p, nil
+}
+
+// buildPrompt composes: mission + envelope (scope, tools, task memory, completion contract).
+// buildPrompt composes mission + envelope and interpolates all placeholders
+// in one pass. See placeholders.go for the full catalog — every {{X}} in
+// the mission or envelope gets resolved here, with unknown names falling
+// through as literal braces so they're obvious to prompt authors on first
+// run. metadataJSON is the primary event's metadata blob ("" is fine —
+// event-derived placeholders just render empty).
+func buildPrompt(task domain.Task, metadataJSON, mission, scope, toolsRef, binaryPath, runID string) string {
+	// Compatibility shim: some early prompts were written with the literal
+	// "triagefactory exec" prefix on CLI invocations, assuming the binary
+	// was on PATH. The binary lives at an absolute path in the worktree
+	// session, so rewrite those before interpolation. New prompts should
+	// use {{BINARY_PATH}} directly.
+	body := strings.ReplaceAll(mission, "triagefactory exec", binaryPath+" exec")
+	full := body + "\n\n" + ai.EnvelopeTemplate
+	return BuildPromptReplacer(task, metadataJSON, runID, binaryPath, scope, toolsRef).Replace(full)
+}
+
+func (s *Spawner) cachedAgentTools() string {
+	s.agentToolsOnce.Do(func() {
+		s.agentToolsCache = skills.ScanAgentTools()
+	})
+	return s.agentToolsCache
+}
+
+// collectExtraTools merges a prompt's declared allowed_tools with tools
+// discovered from agent definitions (~/.claude/agents/*.md).
+func (s *Spawner) collectExtraTools(promptAllowedTools string) string {
+	agentTools := s.cachedAgentTools()
+	if promptAllowedTools == "" && agentTools == "" {
+		return ""
+	}
+	return skills.NormalizeToolList(promptAllowedTools + "," + agentTools)
+}
+
+type agentResult struct {
+	Status  string         `json:"status"`
+	Link    string         `json:"link"` // legacy — single URL
+	Summary string         `json:"summary"`
+	Links   map[string]any `json:"links"` // new — keyed URLs (pr_review, pr, jira_issues)
+
+	// Yield is populated when Status == "yield". The agent is asking
+	// the user a question and the run should park in awaiting_input
+	// rather than completing. See domain.YieldRequest and SKY-139 /
+	// internal/ai/prompts/envelope.txt for the agent-facing contract.
+	Yield *domain.YieldRequest `json:"yield,omitempty"`
+}
+
+// isValid reports whether the parsed envelope contains enough to act on.
+// Two terminal shapes are accepted:
+//   - completion / task_unsolvable: Summary is non-empty (the legacy
+//     contract — every successful or unsolvable envelope has a summary)
+//   - yield: Status == "yield" and the yield payload passes
+//     YieldRequest.Validate (known type, non-empty message, well-formed
+//     options for choice yields, no duplicate option ids)
+//
+// Anything else is treated as "didn't parse cleanly" — the parser
+// falls through to its markdown-fence and brace-extraction paths
+// before giving up. Rejecting malformed yield payloads at parse time
+// matters because once a yield parks the run in awaiting_input, the
+// user can't respond unless the modal can render meaningfully —
+// e.g. a choice yield with no options has no buttons to click.
+func (r *agentResult) isValid() bool {
+	if r.Summary != "" {
+		return true
+	}
+	if r.Status == "yield" && r.Yield != nil {
+		return r.Yield.Validate() == nil
+	}
+	return false
+}
+
+// PrimaryLink returns the most relevant URL from the result.
+func (r *agentResult) PrimaryLink() string {
+	if r.Link != "" {
+		return r.Link
+	}
+	for _, key := range []string{"pr_review", "pr"} {
+		if v, ok := r.Links[key]; ok {
+			if s, ok := v.(string); ok && s != "" {
+				return s
+			}
+		}
+	}
+	if v, ok := r.Links["jira_issues"]; ok {
+		if arr, ok := v.([]any); ok && len(arr) > 0 {
+			if s, ok := arr[0].(string); ok {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+// parseAgentResult extracts the structured {status, link, summary} JSON from
+// the agent's final message. Handles markdown fences, leading/trailing text.
+// Recognizes both completion envelopes (status: completed | task_unsolvable
+// with a non-empty summary) and yield envelopes (status: yield with a typed
+// yield payload — SKY-139). See agentResult.isValid for the acceptance rule.
+func parseAgentResult(text string) *agentResult {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil
+	}
+
+	var result agentResult
+	if json.Unmarshal([]byte(text), &result) == nil && result.isValid() {
+		return &result
+	}
+
+	stripped := text
+	if idx := strings.Index(stripped, "```"); idx >= 0 {
+		stripped = stripped[idx+3:]
+		if nl := strings.Index(stripped, "\n"); nl >= 0 {
+			stripped = stripped[nl+1:]
+		}
+		if end := strings.LastIndex(stripped, "```"); end >= 0 {
+			stripped = stripped[:end]
+		}
+		stripped = strings.TrimSpace(stripped)
+		if json.Unmarshal([]byte(stripped), &result) == nil && result.isValid() {
+			return &result
+		}
+	}
+
+	if start := strings.Index(text, "{"); start >= 0 {
+		if end := strings.LastIndex(text, "}"); end > start {
+			candidate := text[start : end+1]
+			if json.Unmarshal([]byte(candidate), &result) == nil && result.isValid() {
+				return &result
+			}
+		}
+	}
+
+	return nil
+}
+
+func parseOwnerRepo(s string) (string, string) {
+	parts := strings.SplitN(s, "/", 2)
+	if len(parts) != 2 {
+		return "", ""
+	}
+	return parts[0], parts[1]
+}
