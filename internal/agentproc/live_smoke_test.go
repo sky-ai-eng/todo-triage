@@ -36,6 +36,7 @@ func TestSDK_LiveSmoke(t *testing.T) {
 	outcome, err := Run(ctx, RunOptions{
 		Cwd:      t.TempDir(),
 		Message:  "Reply with exactly the word PONG and nothing else.",
+		Model:    "haiku",
 		MaxTurns: 1,
 		TraceID:  "live-smoke",
 	}, sink)
