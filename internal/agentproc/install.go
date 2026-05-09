@@ -23,6 +23,16 @@ const sdkVersion = "0.2.137"
 //go:embed wrapper.mjs
 var wrapperJS []byte
 
+// Embedded lockfile pinning every transitive dependency of the SDK.
+// Materialized alongside package.json on every install so `npm ci`
+// produces a byte-identical node_modules tree across users running
+// the same Triage Factory binary version. Refresh in lockstep with
+// sdkVersion bumps: bump the constant, run a fresh install, copy the
+// resulting ~/.triagefactory/sdk/package-lock.json over this file.
+//
+//go:embed package-lock.json
+var packageLockJSON []byte
+
 var (
 	installOnce sync.Once
 	installPath string // populated on success
@@ -36,8 +46,8 @@ var (
 // install on every agent run when the user is missing Node.
 //
 // The install is idempotent: re-running against an already-populated dir
-// only re-writes wrapper.mjs (cheap) and skips `npm install` when the
-// pinned SDK version is already in node_modules.
+// re-writes wrapper.mjs + package.json + package-lock.json (cheap) and
+// skips `npm ci` when the pinned SDK version is already in node_modules.
 func EnsureSDK() (string, error) {
 	installOnce.Do(func() {
 		installPath, installErr = doInstall()
@@ -59,12 +69,19 @@ func doInstall() (string, error) {
 		return "", err
 	}
 
+	if err := os.WriteFile(filepath.Join(sdkDir, "package-lock.json"), packageLockJSON, 0o644); err != nil {
+		return "", fmt.Errorf("write package-lock.json: %w", err)
+	}
+
 	wrapperPath := filepath.Join(sdkDir, "wrapper.mjs")
 	if err := os.WriteFile(wrapperPath, wrapperJS, 0o644); err != nil {
 		return "", fmt.Errorf("write wrapper.mjs: %w", err)
 	}
 
 	if err := checkNode(); err != nil {
+		return "", err
+	}
+	if err := checkNpm(); err != nil {
 		return "", err
 	}
 
@@ -112,6 +129,18 @@ func checkNode() error {
 	return nil
 }
 
+// checkNpm verifies npm is on PATH. The official Node installer ships
+// npm bundled, but distro packages (debian's nodejs without npm) and
+// some nvm setups can have node alone. Surface this at first-run with
+// a clear message instead of letting it fall out of `npm ci` later as
+// an opaque "executable not found" inside the install error.
+func checkNpm() error {
+	if _, err := exec.Command("npm", "--version").Output(); err != nil {
+		return fmt.Errorf("npm not found on PATH: install npm (typically bundled with Node.js — https://nodejs.org/) — required for the Triage Factory agent runtime")
+	}
+	return nil
+}
+
 func parseNodeMajor(version string) (int, error) {
 	v := strings.TrimPrefix(version, "v")
 	dot := strings.IndexByte(v, '.')
@@ -124,7 +153,13 @@ func parseNodeMajor(version string) (int, error) {
 // installSDKIfNeeded skips when the pinned SDK is already on disk.
 // We check the installed package's version field rather than just
 // directory existence so a sdkVersion bump in a future release
-// re-triggers npm install.
+// re-triggers `npm ci`.
+//
+// Uses `npm ci` (not `npm install`) so the embedded package-lock.json is
+// authoritative: every Triage Factory binary version produces the same
+// transitive dependency tree, and `npm ci` refuses to drift if the
+// lockfile is out of sync with package.json — bugs in user environments
+// won't be papered over by silent dependency upgrades.
 func installSDKIfNeeded(sdkDir string) error {
 	pkgFile := filepath.Join(sdkDir, "node_modules", "@anthropic-ai", "claude-agent-sdk", "package.json")
 	body, err := os.ReadFile(pkgFile)
@@ -132,12 +167,12 @@ func installSDKIfNeeded(sdkDir string) error {
 		return nil
 	}
 
-	cmd := exec.Command("npm", "install", "--no-audit", "--no-fund", "--silent")
+	cmd := exec.Command("npm", "ci", "--no-audit", "--no-fund", "--silent")
 	cmd.Dir = sdkDir
 	cmd.Env = os.Environ()
 	combined, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("npm install in %s failed: %w\n%s", sdkDir, err, string(combined))
+		return fmt.Errorf("npm ci in %s failed: %w\n%s", sdkDir, err, string(combined))
 	}
 	return nil
 }

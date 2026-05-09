@@ -190,7 +190,7 @@ func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
 	cmd.Stderr = &stderrBuf
 
 	if err := cmd.Start(); err != nil {
-		return &Outcome{Stderr: stderrBuf.String()}, fmt.Errorf("start claude: %w", err)
+		return &Outcome{Stderr: stderrBuf.String()}, fmt.Errorf("start agent runtime: %w", err)
 	}
 
 	stream := NewStreamState()
@@ -224,7 +224,7 @@ func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
 		if ctx.Err() != nil {
 			return outcome, ctx.Err()
 		}
-		return outcome, fmt.Errorf("claude exited with error: %w", waitErr)
+		return outcome, fmt.Errorf("agent runtime exited with error: %w", waitErr)
 	}
 
 	return outcome, nil
