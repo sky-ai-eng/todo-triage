@@ -2,6 +2,7 @@ package agentproc
 
 import (
 	_ "embed"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -151,9 +152,11 @@ func parseNodeMajor(version string) (int, error) {
 }
 
 // installSDKIfNeeded skips when the pinned SDK is already on disk.
-// We check the installed package's version field rather than just
-// directory existence so a sdkVersion bump in a future release
-// re-triggers `npm ci`.
+// We parse the installed package's version field rather than just
+// checking directory existence so a sdkVersion bump in a future release
+// re-triggers `npm ci`. JSON parse (not substring match) so npm
+// reformatting the file — different whitespace, key order, etc. — never
+// causes us to spuriously re-run `npm ci` on every process start.
 //
 // Uses `npm ci` (not `npm install`) so the embedded package-lock.json is
 // authoritative: every Triage Factory binary version produces the same
@@ -162,8 +165,7 @@ func parseNodeMajor(version string) (int, error) {
 // won't be papered over by silent dependency upgrades.
 func installSDKIfNeeded(sdkDir string) error {
 	pkgFile := filepath.Join(sdkDir, "node_modules", "@anthropic-ai", "claude-agent-sdk", "package.json")
-	body, err := os.ReadFile(pkgFile)
-	if err == nil && strings.Contains(string(body), `"version": "`+sdkVersion+`"`) {
+	if installed, err := readInstalledSDKVersion(pkgFile); err == nil && installed == sdkVersion {
 		return nil
 	}
 
@@ -175,4 +177,22 @@ func installSDKIfNeeded(sdkDir string) error {
 		return fmt.Errorf("npm ci in %s failed: %w\n%s", sdkDir, err, string(combined))
 	}
 	return nil
+}
+
+// readInstalledSDKVersion parses node_modules/<sdk>/package.json and
+// returns the installed version. Errors (file missing, malformed JSON,
+// missing version field) all degrade to an empty string + error so the
+// caller treats them as "not installed" and runs `npm ci`.
+func readInstalledSDKVersion(pkgFile string) (string, error) {
+	body, err := os.ReadFile(pkgFile)
+	if err != nil {
+		return "", err
+	}
+	var pkg struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(body, &pkg); err != nil {
+		return "", fmt.Errorf("parse %s: %w", pkgFile, err)
+	}
+	return pkg.Version, nil
 }
