@@ -110,32 +110,61 @@ func migrationsFor(dialect string) (fs.FS, string, error) {
 	}
 }
 
-// installState classifies a SQLite DB into one of four shapes the
-// migration runner cares about. The fourth — installPreRunner — is
-// the case the binary detection (legacy table populated yes/no)
-// failed to surface: a DB that has application tables but neither
-// the goose tracker nor the pre-goose `schema_migrations` table.
-// Those installs predate the hand-rolled runner entirely (the
-// runner shipped before this PR's release; any binary that ran it
-// at least once left `schema_migrations` populated). Silently
-// stamping baseline against that shape would leave the schema
-// behind whatever ALTERs subsequent hand-rolled migrations applied,
-// because the consolidated baseline is `CREATE TABLE IF NOT EXISTS`
-// and won't add missing columns. Easier to fail fast and route the
-// operator through a known-good intermediate version.
+// installState classifies a SQLite DB into one of five shapes the
+// migration runner cares about. Fresh installs run the consolidated
+// baseline; goose-managed installs are already at head; legacy
+// installs that completed all 18 hand-rolled migrations get stamped
+// at baseline; partial-legacy and pre-runner installs are refused
+// because silently stamping baseline against either shape would
+// leave the schema behind whatever ALTERs the missing migrations
+// applied (the consolidated baseline is `CREATE TABLE IF NOT EXISTS`
+// and won't add missing columns).
 type installState int
 
 const (
 	installFresh                 installState = iota // empty DB
 	installAlreadyGooseManaged                       // goose_db_version exists with rows
-	installLegacyRunnerPopulated                     // schema_migrations exists with rows
-	installPreRunner                                 // app tables present, no version metadata
+	installLegacyRunnerPopulated                     // schema_migrations contains all 18 expected versions
+	installPartialLegacy                             // schema_migrations exists with rows but is missing some expected versions
+	installPreRunner                                 // app tables present, no version metadata at all
 )
 
+// expectedLegacyVersions is the complete set of migration version
+// strings the pre-goose hand-rolled runner applied. Hardcoded so the
+// stamp shim can verify a legacy-populated DB actually saw all 18 —
+// otherwise we'd silently stamp baseline against a partially-migrated
+// DB and corrupt downstream column expectations. Sourced from
+// `git show fa17d06^:internal/db/migrations/` (the file list at the
+// commit just before SKY-245 deleted the tree).
+//
+// Order doesn't matter — we only check membership. Treating this as
+// a closed set is safe because the legacy tree is frozen post-SKY-245;
+// no new entries will ever appear.
+var expectedLegacyVersions = []string{
+	"20260501_001_baseline",
+	"20260501_002_review_drafts_human_memory",
+	"20260501_003_pending_review_event_original",
+	"20260502_001_projects",
+	"20260503_001_curator",
+	"20260503_002_project_trackers",
+	"20260503_003_curator_pending_context",
+	"20260504_001_curator_skill",
+	"20260504_002_lazy_jira_worktrees",
+	"20260504_003_pending_prs",
+	"20260504_004_pending_prs_draft",
+	"20260505_001_system_prompt_versions",
+	"20260505_002_pending_review_diff_hunks",
+	"20260505_002_settings_table",
+	"20260505_003_repo_clone_status",
+	"20260507_001_drop_project_summary",
+	"20260507_001_prompt_allowed_tools",
+	"20260507_002_entities_classified_at",
+}
+
 // ErrPreRunnerInstall is returned by Migrate when the DB has
-// application tables but neither goose_db_version nor a populated
-// schema_migrations. Surfaced verbatim by main.go's log.Fatalf so
-// the operator sees the upgrade-path instructions.
+// application tables but no version metadata at all. Surfaced
+// verbatim by main.go's log.Fatalf so the operator sees the
+// upgrade-path instructions.
 var ErrPreRunnerInstall = errors.New(
 	"this database appears to predate the schema migration runner; " +
 		"to upgrade safely, install and run triagefactory v1.10.1 " +
@@ -144,10 +173,28 @@ var ErrPreRunnerInstall = errors.New(
 		"~/.triagefactory/triagefactory.db to perform a fresh install",
 )
 
+// ErrPartialLegacyInstall is returned by Migrate when schema_migrations
+// is populated but missing one or more of the 18 expected legacy
+// versions. The most likely cause is a binary version that landed
+// before all 18 migrations existed (or a transient runner error that
+// got silently retried). v1.10.1 ships the full legacy tree and will
+// run any missing migrations on the next boot, bringing the DB to the
+// state SKY-245's baseline assumes.
+var ErrPartialLegacyInstall = errors.New(
+	"this database has a partial migration history (some legacy " +
+		"migrations applied, some missing) — silently stamping baseline " +
+		"would leave the schema behind. To upgrade safely, install and " +
+		"run triagefactory v1.10.1 first — it ships the full legacy tree " +
+		"and will apply the missing migrations on next boot — then upgrade " +
+		"to this version. Or delete ~/.triagefactory/triagefactory.db to " +
+		"perform a fresh install",
+)
+
 // detectInstallState classifies the DB by probing in priority order:
 // goose tracker first (already-managed installs short-circuit so the
-// rest of the probe sequence stays simple), then the legacy table,
-// then a known-stable application table. The application probe uses
+// rest of the probe sequence stays simple), then the legacy table
+// (with completeness check against expectedLegacyVersions), then a
+// known-stable application table. The application probe uses
 // `entities` because it has been load-bearing since long before the
 // migration runner existed — the same probe the old
 // stampBaselineIfNeeded used.
@@ -165,6 +212,13 @@ func detectInstallState(db *sql.DB) (installState, error) {
 		return 0, err
 	}
 	if legacyPopulated {
+		complete, err := legacyMigrationsComplete(db)
+		if err != nil {
+			return 0, err
+		}
+		if !complete {
+			return installPartialLegacy, nil
+		}
 		return installLegacyRunnerPopulated, nil
 	}
 
@@ -178,12 +232,45 @@ func detectInstallState(db *sql.DB) (installState, error) {
 	return installFresh, nil
 }
 
-// importLegacyVersionsIfNeeded routes the boot through one of four
+// legacyMigrationsComplete reports whether schema_migrations contains
+// every version in expectedLegacyVersions. Returns true only if all 18
+// are present; any missing version flips it to false. The caller
+// translates that into installPartialLegacy.
+func legacyMigrationsComplete(db *sql.DB) (bool, error) {
+	rows, err := db.Query(`SELECT version FROM schema_migrations`)
+	if err != nil {
+		return false, fmt.Errorf("read schema_migrations: %w", err)
+	}
+	defer rows.Close()
+	present := make(map[string]bool, len(expectedLegacyVersions))
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			return false, fmt.Errorf("scan schema_migrations: %w", err)
+		}
+		present[v] = true
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("iterate schema_migrations: %w", err)
+	}
+	for _, v := range expectedLegacyVersions {
+		if !present[v] {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// importLegacyVersionsIfNeeded routes the boot through one of five
 // install-state branches:
 //
 //   - installAlreadyGooseManaged → no-op; goose.Up handles its own state.
 //   - installFresh               → no-op; goose.Up runs baseline.
 //   - installLegacyRunnerPopulated → stamp baseline so goose.Up no-ops.
+//   - installPartialLegacy       → fail fast with ErrPartialLegacyInstall
+//     so the operator routes through v1.10.1 (which ships the full
+//     legacy tree) to apply the missing migrations before reaching
+//     this binary.
 //   - installPreRunner           → fail fast with ErrPreRunnerInstall
 //     so the operator routes through v1.10.1 (which stamps
 //     schema_migrations) before reaching this binary.
@@ -206,6 +293,8 @@ func importLegacyVersionsIfNeeded(db *sql.DB, dialect string) error {
 		return nil
 	case installPreRunner:
 		return ErrPreRunnerInstall
+	case installPartialLegacy:
+		return ErrPartialLegacyInstall
 	case installLegacyRunnerPopulated:
 		// fall through to the stamp logic below
 	}
