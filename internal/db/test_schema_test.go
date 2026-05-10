@@ -12,7 +12,7 @@ import (
 
 // TestBootstrapSchemaForTest_MatchesMigrateAndSeed pins the cached
 // bootstrap path to the real Migrate + SeedEventTypes path. The cached
-// bundle only snapshots sqlite_master, schema_migrations, and
+// bundle only snapshots sqlite_master, goose_db_version, and
 // events_catalog — so a future migration that starts inserting required
 // rows into any other table (e.g. a defaults table, a settings row)
 // will silently diverge from the real bootstrap and most tests will

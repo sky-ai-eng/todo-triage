@@ -554,7 +554,7 @@ footer {
 }</pre>
 
   <h3>Dialect detection</h3>
-  <p>Drive off the <code>*sql.DB</code> driver name. Set at <code>sql.Open</code> time — sqlite gets <code>"sqlite"</code>, pgx gets <code>"pgx"</code>. Map both to goose's expected names (<code>"sqlite3"</code>, <code>"postgres"</code>).</p>
+  <p>This PR hardcodes <code>detectDialect</code> to return <code>"sqlite3"</code>. The pgx-based driver-name probe lands in SKY-247 (D6) alongside the first real Postgres consumer; centralizing the decision behind a function now keeps the call sites stable when that switch happens. Treat <code>detectDialect</code> as the seam, not a finished implementation.</p>
 
   <h3>Baseline body shape</h3>
   <p>Plain semicolon-delimited DDL with goose's <code>-- +goose Up</code> opener and a <code>-- +goose Down</code> block holding <code>SELECT 'down not supported';</code>. No <code>StatementBegin/End</code> blocks needed — the baseline is just <code>CREATE TABLE</code> and <code>CREATE INDEX</code> statements; goose's default parser handles them. (StatementBegin/End is for migrations whose statements contain semicolons inside, like triggers.)</p>
@@ -570,21 +570,19 @@ footer {
   <h2>CLI subcommands</h2>
   <p class="lede">Two new top-level subcommands for ops visibility. Live next to the existing <code>exec</code> + <code>status</code> in <code>main.go</code>'s dispatch.</p>
 
-  <h3><code>tf migrate status</code></h3>
-  <p>Prints the goose status table — applied vs pending. Respects <code>TF_DATABASE_URL</code> for multi mode, falls back to local SQLite path.</p>
+  <h3><code>triagefactory migrate status</code></h3>
+  <p>Renders applied / pending state for each migration in the routed dialect tree. Today the tree contains a single baseline; the format scales as new migrations land.</p>
 <pre class="code">$ ./triagefactory migrate status
-   Applied At                       Migration
-   =========================================================
-   Tue May  1 12:00:00 2026 -- 202605010001_baseline.sql
-   Tue May  1 12:00:00 2026 -- 202605010002_review_drafts_human_memory.sql
-   ...
-   Pending                  -- 202605100001_orgs_table.sql
-   Pending                  -- 202605100002_teams_table.sql</pre>
+    Status                      Migration
+    ====================================
+    Applied                     migrations-sqlite/202605090001_baseline.sql
 
-  <h3><code>tf migrate up</code></h3>
-  <p>Same effect as starting the server (which auto-migrates), but exits after the migration completes. Useful for ops who want to apply schema changes during a maintenance window separately from the server restart.</p>
+    db version: 202605090001</pre>
 
-  <h3>Why no <code>tf migrate down</code> / <code>redo</code> / <code>create</code></h3>
+  <h3><code>triagefactory migrate up</code></h3>
+  <p>Same effect as starting the server (which auto-migrates on boot), but exits after the migration completes. Useful when an operator wants to apply schema changes from a maintenance window separately from the server restart.</p>
+
+  <h3>Why no <code>migrate down</code> / <code>redo</code> / <code>create</code></h3>
   <p>Forward-only policy. Down/redo would footgun real installs. <code>create</code> isn't needed — new migrations are added by writing a file directly; the IDE is sufficient (no need for goose's date-stamped scaffold).</p>
 </section>
 
@@ -592,21 +590,21 @@ footer {
 <section class="block" id="postgres">
   <div class="section-label">§8</div>
   <h2>Postgres readiness</h2>
-  <p class="lede">D1 doesn't add Postgres support to TF (D3 does). But the goose wrapper has to <em>handle</em> Postgres correctly so D3 can drop in.</p>
+  <p class="lede">D1 doesn't add Postgres support to TF (D6 does). But the goose wrapper has to <em>handle</em> Postgres correctly so D6 can drop in without rewiring the routing layer.</p>
 
   <h3>What this PR does</h3>
   <ul class="tight">
-    <li>Adds the <code>migrations-postgres/</code> directory with a <code>.gitkeep</code> README</li>
-    <li><code>migrationsFor("postgres")</code> returns the empty FS without erroring</li>
-    <li><code>detectDialect</code> recognizes the pgx driver name</li>
-    <li>Adds CI step: spin a Postgres container, open via pgx, call <code>db.Migrate()</code>, assert no error and zero migrations applied</li>
+    <li>Adds the <code>migrations-postgres/</code> directory with a non-hidden README so the <code>//go:embed migrations-postgres</code> directive doesn't fail at build time</li>
+    <li><code>migrationsFor("postgres")</code> resolves to the empty tree without erroring; goose against an empty directory is a clean no-op</li>
+    <li><code>detectDialect</code> is centralized as a function but currently returns the constant <code>"sqlite3"</code></li>
   </ul>
 
   <h3>What this PR does <em>not</em> do</h3>
   <ul class="tight">
-    <li>No actual Postgres schema yet (D3)</li>
+    <li>No pgx driver detection or Postgres CI — both land alongside the first real Postgres consumer in D6</li>
+    <li>No actual Postgres schema yet (D6)</li>
     <li>No <code>TF_MODE=multi</code> branch in <code>db.Open()</code> — that's D4 / SKY-248</li>
-    <li>No connection string parsing for Postgres URLs (D3)</li>
+    <li>No connection string parsing for Postgres URLs (D6)</li>
   </ul>
 
   <p>The CI hook is the load-bearing bit: once D3 starts adding files, CI immediately verifies they at least parse + apply against a real Postgres without anyone having to wire it up.</p>

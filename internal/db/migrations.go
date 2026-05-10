@@ -3,12 +3,10 @@ package db
 import (
 	"database/sql"
 	"embed"
-	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"log"
-	"strings"
 
 	"github.com/pressly/goose/v3"
 )
@@ -150,30 +148,28 @@ func importLegacyVersionsIfNeeded(db *sql.DB, dialect string) error {
 		return fmt.Errorf("create goose_db_version: %w", err)
 	}
 
-	stamped, err := gooseVersionExists(db, baselineVersionID)
-	if err != nil {
-		return err
-	}
-	if stamped {
-		return nil
-	}
-
-	// Bootstrap (version_id=0, is_applied=1) is the row goose itself
-	// inserts on first use of EnsureDBVersion. Insert OR IGNORE so
-	// concurrent boots (rare on a desktop binary, but cheap insurance)
-	// don't conflict if both racers reach this branch.
-	if _, err := db.Exec(
-		`INSERT OR IGNORE INTO goose_db_version (version_id, is_applied) VALUES (0, 1)`,
-	); err != nil {
+	// goose_db_version has no UNIQUE constraint on version_id (only the
+	// AUTOINCREMENT id is unique), so a check-then-insert pair would
+	// admit duplicates if two processes raced past the existence gate
+	// concurrently. INSERT ... SELECT ... WHERE NOT EXISTS folds the
+	// existence check into the same statement; SQLite serializes
+	// writes so the second racer sees the first's row and inserts
+	// nothing. The bootstrap (version_id=0) and baseline rows use the
+	// same shape — both are no-ops on the second call regardless of
+	// concurrency.
+	const stampSQL = `INSERT INTO goose_db_version (version_id, is_applied)
+		SELECT ?, 1
+		WHERE NOT EXISTS (SELECT 1 FROM goose_db_version WHERE version_id = ?)`
+	if _, err := db.Exec(stampSQL, int64(0), int64(0)); err != nil {
 		return fmt.Errorf("insert goose bootstrap row: %w", err)
 	}
-	if _, err := db.Exec(
-		`INSERT OR IGNORE INTO goose_db_version (version_id, is_applied) VALUES (?, 1)`,
-		baselineVersionID,
-	); err != nil {
+	res, err := db.Exec(stampSQL, baselineVersionID, baselineVersionID)
+	if err != nil {
 		return fmt.Errorf("stamp baseline: %w", err)
 	}
-	log.Printf("[db] stamped goose baseline %d on existing install (legacy schema_migrations had rows)", baselineVersionID)
+	if affected, _ := res.RowsAffected(); affected > 0 {
+		log.Printf("[db] stamped goose baseline %d on existing install (legacy schema_migrations had rows)", baselineVersionID)
+	}
 	return nil
 }
 
@@ -199,26 +195,6 @@ func legacyMigrationsHasRows(db *sql.DB) (bool, error) {
 		return false, fmt.Errorf("count schema_migrations: %w", err)
 	}
 	return count > 0, nil
-}
-
-// gooseVersionExists reports whether goose_db_version contains a row
-// for the given version_id. Used by importLegacyVersionsIfNeeded to
-// stay idempotent across boots.
-func gooseVersionExists(db *sql.DB, versionID int64) (bool, error) {
-	var n int
-	err := db.QueryRow(
-		`SELECT COUNT(*) FROM goose_db_version WHERE version_id = ?`, versionID,
-	).Scan(&n)
-	if err != nil {
-		// First-ever boot may race the table-create; treat "no such
-		// table" as "no, it doesn't exist" so the caller falls through
-		// to creating + stamping.
-		if isNoSuchTableErr(err) {
-			return false, nil
-		}
-		return false, fmt.Errorf("count goose_db_version: %w", err)
-	}
-	return n > 0, nil
 }
 
 // MigrationStatus prints the per-migration applied/pending state to w.
@@ -264,17 +240,4 @@ func MigrationStatus(db *sql.DB, w io.Writer) error {
 	}
 	fmt.Fprintf(w, "\n    db version: %d\n", current)
 	return nil
-}
-
-// isNoSuchTableErr matches the modernc.org/sqlite "no such table"
-// error. The driver doesn't expose a typed sentinel for this — error
-// strings are stable enough across versions to use as the probe.
-func isNoSuchTableErr(err error) bool {
-	if err == nil {
-		return false
-	}
-	// modernc returns a wrapped sqlite3.Error whose message is
-	// "no such table: <name>". Substring match keeps the check
-	// robust to wrapping changes.
-	return errors.Is(err, sql.ErrNoRows) || strings.Contains(err.Error(), "no such table")
 }
