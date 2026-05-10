@@ -4,9 +4,13 @@
 // same container and call Reset between cases to TRUNCATE state.
 //
 // Two SQL connections are exposed:
-//   - AdminDB connects as `postgres` (superuser). RLS is bypassed; use
-//     this for migrations, fixture seeding, and the explicit
-//     "this should be visible to admin" assertion.
+//   - AdminDB connects as `supabase_admin` — the real superuser in the
+//     supabase image. The image's own migrations demote `postgres` to
+//     NOSUPERUSER (see 10000000000000_demote-postgres.sql), so attempts
+//     to ALTER reserved roles like `authenticator` from a postgres
+//     connection are rejected by the supautils extension. supabase_admin
+//     bypasses RLS; use this for migrations, fixture seeding, and the
+//     explicit "this should be visible to admin" assertion.
 //   - AppDB connects as `authenticator`. Always pair with WithUser (or
 //     the SET LOCAL ROLE tf_app + claims-set ceremony directly) — raw
 //     AppDB queries without that ceremony fail because tf_app inherits

@@ -314,7 +314,7 @@ footer {
   <h1>D3 — Multi-tenant Postgres schema</h1>
   <p class="lede">Stand up the full multi-mode Postgres schema — tenancy tables, sessions, integrations, Vault wrappers, RLS helpers + policies, and every existing TF table recreated with <code>org_id NOT NULL</code> baked in. Ships as a single goose baseline against <code>internal/db/migrations-postgres/</code> (the empty tree D1 scaffolded). Local SQLite is untouched.</p>
   <div class="hero__meta">
-    <span class="meta-pill"><strong>SCOPE</strong> · Postgres schema only — no Go callsite changes</span>
+    <span class="meta-pill"><strong>SCOPE</strong> · Postgres schema + minimal Go plumbing (Migrate signature)</span>
     <span class="meta-pill"><strong>DEPENDS ON</strong> · SKY-245 (D1)</span>
     <span class="meta-pill"><strong>BLOCKS</strong> · SKY-246 (D2 Postgres impls), SKY-250 (D6 GoTrue), SKY-251 (D7)</span>
     <span class="meta-pill"><strong>EFFORT</strong> · 3–5 days</span>
@@ -355,7 +355,7 @@ footer {
   <p>D3 is also the first ticket where multi-tenant isolation becomes a thing the code can express. The architecture stance — service-role connection + <code>SET LOCAL request.jwt.claims</code> + RLS on every org-scoped table — only exists if the schema has the policies attached. D3 lays the floor: every downstream multi-mode ticket (D6 GoTrue, D7 auth middleware, D9 org-scoping pass) reads from this schema.</p>
 
   <div class="callout">
-    <strong>Carved out:</strong> nothing here touches Go callsites. D3 is purely Postgres DDL + roles + policies. D2's Postgres implementations land in their own PR; D4 (mode flag) decides when to <em>open</em> the Postgres connection; D6 (GoTrue) deploys auth on top of this schema.
+    <strong>Carved out:</strong> the only Go change here is plumbing — <code>db.Migrate(db) error</code> grows a <code>dialect string</code> parameter so callers can pass <code>"sqlite3"</code> or <code>"postgres"</code>, and <code>detectDialect</code> goes away (driver-name reflection is brittle; the caller knows what they opened with). All 9 call sites in <code>main.go</code> + <code>cmd/*</code> + tests pass <code>"sqlite3"</code> verbatim. D2's Postgres store implementations, D4 (mode flag dispatch on the new signature), D6 (GoTrue) — all separate PRs.
   </div>
 </section>
 
@@ -366,7 +366,7 @@ footer {
   <ul class="tight">
     <li><code>internal/db/migrations-sqlite/202605090001_baseline.sql</code> — the consolidated SQLite baseline that D1 landed.</li>
     <li><code>internal/db/migrations-postgres/</code> — empty tree with a placeholder README, scaffolded by D1 so the dialect router has a destination.</li>
-    <li><code>internal/db/migrations.go</code>'s <code>detectDialect</code> hardcodes <code>"sqlite3"</code>; <code>migrationsFor("postgres")</code> resolves to the empty tree without erroring.</li>
+    <li><code>internal/db/migrations.go</code>'s <code>migrationsFor</code> dialect router is in place; <code>db.Migrate(db, dialect)</code> requires the caller to pass <code>"sqlite3"</code> or <code>"postgres"</code> (the legacy <code>detectDialect</code> probe was removed in this ticket since driver-name reflection is brittle).</li>
     <li>No Postgres driver in <code>go.mod</code>. No connection-string handling for non-SQLite. No code path that opens a Postgres DB.</li>
   </ul>
   <p>So the runner, dialect routing, and embed plumbing are all in place. D3 fills the tree; D6 (GoTrue) and D4 (mode flag) decide when to point a real connection at it.</p>
@@ -476,7 +476,7 @@ $$;
   <h3>Test rig implications</h3>
   <p>The test harness needs <em>two</em> connection paths against the same testcontainer:</p>
   <ul class="tight">
-    <li><strong>Migration / setup connection</strong> — connects as <code>postgres</code> (superuser). Runs <code>goose.Up</code>, seeds tenancy data (orgs, users, memberships), creates JWT-claim values for tests. RLS is bypassed under this role; that's correct for setup.</li>
+    <li><strong>Migration / setup connection</strong> — connects as <code>supabase_admin</code> (the actual superuser in the supabase image; the image demotes <code>postgres</code> to <code>NOSUPERUSER CREATEDB CREATEROLE</code> via <code>10000000000000_demote-postgres.sql</code>). Runs <code>goose.Up</code>, seeds tenancy data (orgs, users, memberships), creates JWT-claim values for tests. <code>supabase_admin</code>'s password is set to <code>POSTGRES_PASSWORD</code> by the image's <code>migrate.sh</code>, so we can connect by reusing the env-var value. RLS is bypassed under this role; that's correct for setup.</li>
     <li><strong>Assertion connection</strong> — connects as <code>authenticator</code> with the right credentials, then <code>SET LOCAL ROLE tf_app</code> + <code>set_config('request.jwt.claims', …)</code> per test. RLS is active. Cross-org isolation tests run here.</li>
   </ul>
   <p>Conflating these — running RLS assertions through the superuser connection — silently no-ops the policies and produces false-pass results. The harness exposes both connections explicitly so test authors can't accidentally grab the wrong one.</p>
@@ -880,7 +880,7 @@ $$ <span class="kw">LANGUAGE SQL STABLE</span>;</pre>
   <pre class="code"><span class="com">// internal/db/pgtest/harness.go (sketch)</span>
 <span class="kw">type</span> Harness <span class="kw">struct</span> {
   Container *postgres.PostgresContainer
-  AdminDB   *sql.DB    <span class="com">// connects as 'postgres' (superuser) — for migrate + setup. RLS bypassed.</span>
+  AdminDB   *sql.DB    <span class="com">// connects as 'supabase_admin' (real superuser; postgres is demoted by the image) — for migrate + setup. RLS bypassed.</span>
   AppDB     *sql.DB    <span class="com">// connects as 'authenticator' — for RLS-asserting tests via SET LOCAL ROLE tf_app.</span>
 }
 
@@ -956,8 +956,8 @@ $$ <span class="kw">LANGUAGE SQL STABLE</span>;</pre>
       <span class="step-body"><code>go get github.com/jackc/pgx/v5</code>, <code>github.com/jackc/pgx/v5/stdlib</code>, <code>github.com/testcontainers/testcontainers-go</code>, <code>github.com/testcontainers/testcontainers-go/modules/postgres</code>. Pin versions; <code>go mod tidy</code>.</span>
     </li>
     <li>
-      <span class="step-title">Wire pgx into goose's dialect detection</span>
-      <span class="step-body">Update <code>detectDialect</code> in <code>internal/db/migrations.go</code> to probe the connection (driver-name interrogation via reflection or a separate <code>Open()</code> entrypoint that records the dialect). Add a <code>OpenPostgres(dsn)</code> helper alongside <code>OpenAt</code>.</span>
+      <span class="step-title">Plumb dialect through Migrate</span>
+      <span class="step-body">Change <code>db.Migrate(db) error</code> → <code>db.Migrate(db, dialect string) error</code> and remove <code>detectDialect</code>. Driver-name reflection on <code>*sql.DB</code> is brittle (no portable way to map a <code>driver.Driver</code> back to the goose dialect string without importing the driver package into <code>migrations.go</code>); threading the dialect explicitly is simpler. Update <code>MigrationStatus</code> the same way. All 9 callers (<code>main.go</code>, <code>cmd/exec</code>, <code>cmd/migrate</code>, <code>cmd/resume</code>, <code>cmd/uninstall</code>, plus the SQLite test files) pass <code>"sqlite3"</code> verbatim.</span>
     </li>
     <li>
       <span class="step-title">Author the Postgres baseline</span>
@@ -1006,7 +1006,7 @@ $$ <span class="kw">LANGUAGE SQL STABLE</span>;</pre>
     <tbody>
       <tr>
         <td>What's the role + connection pattern?</td>
-        <td>Supabase-idiomatic <code>authenticator</code> (LOGIN, NOINHERIT) + <code>tf_app</code> (NOLOGIN, NOINHERIT, BYPASSRLS=false). App connects as authenticator, <code>WithTx</code> does <code>SET LOCAL ROLE tf_app</code> + <code>set_config('request.jwt.claims', …)</code>. Migrations + test setup run as <code>postgres</code> superuser. See §4.</td>
+        <td>Supabase-idiomatic <code>authenticator</code> (LOGIN, NOINHERIT) + <code>tf_app</code> (NOLOGIN, NOINHERIT, BYPASSRLS=false). App connects as authenticator, <code>WithTx</code> does <code>SET LOCAL ROLE tf_app</code> + <code>set_config('request.jwt.claims', …)</code>. Migrations + test setup run as <code>supabase_admin</code> (the real superuser in this image — <code>postgres</code> is demoted by the image's own migrations). See §4.</td>
       </tr>
       <tr>
         <td>Auth schema dependency on GoTrue?</td>
