@@ -504,6 +504,93 @@ func TestRLS_UsersIsolation(t *testing.T) {
 	}
 }
 
+// TestRLS_UsersVisibleWithoutTeamMembership catches a regression
+// where users_select joined through memberships+teams instead of
+// org_memberships. A founder who has just created their org has an
+// org_memberships row but may not yet have any memberships row;
+// the old policy made them invisible to org-mates added afterward.
+func TestRLS_UsersVisibleWithoutTeamMembership(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	// Founder: org owner with org_memberships row, NO memberships row.
+	founder := seedUser(t, h, "founder")
+	orgID := seedOrg(t, h, "founder-org", founder)
+	teamID := seedTeam(t, h, orgID, "default")
+	mustExec(t, h.AdminDB,
+		`INSERT INTO org_memberships (user_id, org_id, role) VALUES ($1, $2, 'owner')`, founder, orgID)
+	// (deliberately no memberships row for founder)
+
+	// Joiner: org member via org_memberships AND on the team.
+	joiner := seedUser(t, h, "joiner")
+	addOrgMember(t, h, joiner, orgID, teamID, "member", "member")
+
+	// Joiner must be able to see the founder via the users table
+	// even though founder isn't on any team.
+	err := h.WithUser(t, joiner, orgID, func(tx *sql.Tx) error {
+		var name string
+		if err := tx.QueryRow(`SELECT display_name FROM users WHERE id = $1`, founder).Scan(&name); err != nil {
+			return err
+		}
+		if name != "founder" {
+			t.Errorf("got display_name = %q, want 'founder'", name)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Errorf("joiner can't see team-less founder: %v — users_select must use org_memberships, not memberships+teams", err)
+	}
+}
+
+// TestRLS_TeamSettingsIsTeamMemberOnly catches the team_settings
+// regression where SELECT was open to all org members. A member of
+// team A should not see team B's settings even within the same org.
+func TestRLS_TeamSettingsIsTeamMemberOnly(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	orgA, alice, teamA := seedOrgWithUser(t, h, "alice")
+	// teamB is a second team in the same org; bob is on teamB only.
+	teamB := seedTeam(t, h, orgA, "team-b")
+	bob := seedUser(t, h, "bob")
+	addOrgMember(t, h, bob, orgA, teamB, "member", "admin")
+
+	// Alice writes team_settings for HER team (teamA).
+	if _, err := h.AdminDB.Exec(`INSERT INTO team_settings (team_id) VALUES ($1)`, teamA); err != nil {
+		t.Fatalf("seed team_settings: %v", err)
+	}
+
+	// Bob (member of teamB, same org as teamA) must NOT see teamA's settings.
+	err := h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
+		var n int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM team_settings WHERE team_id = $1`, teamA).Scan(&n); err != nil {
+			return err
+		}
+		if n != 0 {
+			t.Errorf("bob (teamB) saw %d team_settings rows for teamA, want 0 — gate must require team membership, not just org membership", n)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("bob query: %v", err)
+	}
+
+	// Sanity: alice (on teamA) CAN see her own team's settings.
+	err = h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
+		var n int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM team_settings WHERE team_id = $1`, teamA).Scan(&n); err != nil {
+			return err
+		}
+		if n != 1 {
+			t.Errorf("alice saw %d rows for her own team's settings, want 1", n)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("alice sanity: %v", err)
+	}
+}
+
 // TestVault_GrantsLockdown — pins both the catalog state (anon /
 // authenticated / service_role lack EXECUTE on the wrappers) AND the
 // behavior (calling as one of those roles raises 42501).

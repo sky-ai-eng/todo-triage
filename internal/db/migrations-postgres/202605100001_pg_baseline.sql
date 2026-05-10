@@ -3,8 +3,16 @@
 --
 -- Targets the supabase/postgres:15.1.0.147 image, which pre-creates the
 -- auth + vault + extensions schemas and pre-loads supabase_vault,
--- pgsodium, pgcrypto, pgjwt, uuid-ossp, pg_graphql. We CREATE EXTENSION
--- defensively but it's a no-op in practice.
+-- pgsodium, pgcrypto, pgjwt, uuid-ossp, pg_graphql via
+-- shared_preload_libraries. We only issue `CREATE EXTENSION IF NOT
+-- EXISTS supabase_vault` defensively (§c below); it's a no-op against
+-- the image but makes the migration safer against future images that
+-- drop the preload. All other extensions are taken as already-loaded
+-- — pgsodium is referenced only transitively via the vault.* wrappers,
+-- and gen_random_uuid() is built into Postgres 15 itself (it moved
+-- from pgcrypto into the core in PG 13), so we don't need a defensive
+-- CREATE EXTENSION pgcrypto either. If we ever target a non-supabase
+-- Postgres image, this preamble grows.
 --
 -- Structure (mirrors spec §10 step 3):
 --   (a) tf schema
@@ -1091,14 +1099,19 @@ ALTER TABLE curator_pending_context    ENABLE ROW LEVEL SECURITY;
 -- same org can resolve display_name/avatar for task creators, etc.,
 -- but a user in orgA never sees that orgB's users exist.
 -- Modifications are restricted to the row's owner.
+-- Cross-user visibility: an org member can see other users who
+-- share at least one org with them. Joins through org_memberships
+-- (not memberships+teams) — in the two-axis model a user can be
+-- an org member without being on any team yet (bootstrap state,
+-- or just hasn't picked a team), and they should still be visible
+-- to their org-mates.
 CREATE POLICY users_select ON users FOR SELECT
   USING (
     id = tf.current_user_id()
     OR EXISTS (
-      SELECT 1 FROM memberships m
-      JOIN teams t ON t.id = m.team_id
-      WHERE m.user_id = users.id
-        AND tf.user_has_org_access(t.org_id)
+      SELECT 1 FROM org_memberships om
+      WHERE om.user_id = users.id
+        AND tf.user_has_org_access(om.org_id)
     )
   );
 CREATE POLICY users_modify ON users FOR ALL
@@ -1223,9 +1236,16 @@ CREATE POLICY org_settings_delete ON org_settings FOR DELETE
   USING (org_id = tf.current_org_id() AND tf.user_is_org_admin(org_id));
 
 -- team_settings: team members can read; team admins can write.
+-- "Team members" means a memberships row for the team — not "any
+-- org member." A member of mobile-team has no business reading
+-- billing-team's reprioritize-threshold, even though they share
+-- an org.
 CREATE POLICY team_settings_select ON team_settings FOR SELECT
-  USING (EXISTS (SELECT 1 FROM teams t WHERE t.id = team_settings.team_id AND t.org_id = tf.current_org_id()
-                                              AND tf.user_has_org_access(t.org_id)));
+  USING (EXISTS (
+    SELECT 1 FROM memberships m
+    WHERE m.team_id = team_settings.team_id
+      AND m.user_id = tf.current_user_id()
+  ));
 CREATE POLICY team_settings_insert ON team_settings FOR INSERT
   WITH CHECK (tf.user_is_team_admin(team_id));
 CREATE POLICY team_settings_update ON team_settings FOR UPDATE

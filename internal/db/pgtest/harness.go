@@ -94,27 +94,25 @@ func boot() {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
-	// Two-stage wait strategy:
-	//   1. Image's tail-of-init log marker (auth schema setup, vault key
-	//      bootstrap, etc. all happen between "database system is
-	//      ready" and "PostgreSQL init process complete").
-	//   2. SQL probe for auth.users existence — image-init only seeds
-	//      the auth schema in the POSTGRES_DB-named DB, so this must
-	//      target that DB explicitly. Probing /postgres would falsely
-	//      report ready before tf_test's auth schema is built.
-	// The supabase image's init phase (auth schema, vault key
-	// bootstrap, ~20 supabase migrations, plus a restart for
-	// shared_preload_libraries changes) takes 30-60s on warm
-	// machines and longer on first pull. WithWaitStrategy wraps
-	// strategies in a 60s deadline that overrides each strategy's
-	// own timeout — use *AndDeadline to bump it.
+	// Wait strategy: a single SQL probe for auth.users in the
+	// POSTGRES_DB-named DB. We tried a two-stage approach earlier
+	// (wait.ForLog "PostgreSQL init process complete" THEN ForSQL)
+	// but the log marker fires DURING init, before the image's
+	// post-init restart (the one that picks up shared_preload_libraries),
+	// which leaves a race where the SQL probe runs against a Postgres
+	// that's about to be shut down for restart. By contrast, the
+	// SQL probe alone can only succeed AFTER the restart — once
+	// auth.users is reachable on a stable connection, both the init
+	// scripts AND the restart cycle have completed.
 	//
-	// Single SQL probe — once `auth.users` is reachable, both
-	// the image's init scripts AND the post-init restart have
-	// finished. (ForLog on "PostgreSQL init process complete"
-	// fires DURING init, before the restart, which leaves a
-	// race where the SQL probe runs against a Postgres that's
-	// about to be shut down for restart.)
+	// Probing the POSTGRES_DB-named DB (not /postgres) matters: image
+	// init only seeds the auth schema in the configured DB.
+	//
+	// Why the long timeout: the supabase image's init phase (auth
+	// schema, vault key bootstrap, ~20 supabase migrations, restart)
+	// takes 30-60s on warm machines and longer on first pull.
+	// WithWaitStrategy wraps strategies in a 60s deadline that
+	// overrides each strategy's own timeout — *AndDeadline bumps it.
 	waitStrategies := []wait.Strategy{
 		wait.ForSQL("5432/tcp", "pgx", func(host string, port string) string {
 			// wait.ForSQL passes `network.Port.String()` here, which
