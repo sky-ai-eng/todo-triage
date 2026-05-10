@@ -1785,6 +1785,55 @@ func TestRLS_PendingReviewsInheritParentVisibility(t *testing.T) {
 	}
 }
 
+// TestPrompts_SemanticIDsAccepted — system prompts use stable
+// semantic IDs ("system-pr-review", etc.) that the application
+// references by name. prompts.id is TEXT (not UUID) so those
+// INSERTs work. User-generated prompts get gen_random_uuid()::text
+// by default; both shapes coexist in the same table.
+func TestPrompts_SemanticIDsAccepted(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	orgA, alice, _ := seedOrgWithUser(t, h, "alice")
+
+	// System prompt with a semantic ID.
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO prompts (id, org_id, creator_user_id, source, name, body)
+		VALUES ('system-pr-review', $1, $2, 'system', 'PR Review', '...')
+	`, orgA, alice); err != nil {
+		t.Fatalf("system prompt INSERT with semantic id: %v", err)
+	}
+
+	// system_prompt_versions can reference it.
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO system_prompt_versions (prompt_id, content_hash)
+		VALUES ('system-pr-review', 'sha256:abc')
+	`); err != nil {
+		t.Fatalf("system_prompt_versions INSERT: %v", err)
+	}
+
+	// User prompt picks up the default (UUID-shaped string).
+	var userPromptID string
+	if err := h.AdminDB.QueryRow(`
+		INSERT INTO prompts (org_id, creator_user_id, name, body)
+		VALUES ($1, $2, 'My Prompt', 'hello') RETURNING id
+	`, orgA, alice).Scan(&userPromptID); err != nil {
+		t.Fatalf("user prompt INSERT: %v", err)
+	}
+	if len(userPromptID) != 36 {
+		t.Errorf("user prompt id = %q (len %d), want UUID-shaped (36 chars)", userPromptID, len(userPromptID))
+	}
+
+	// Both coexist.
+	var n int
+	if err := h.AdminDB.QueryRow(`SELECT COUNT(*) FROM prompts WHERE org_id = $1`, orgA).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("got %d prompts, want 2", n)
+	}
+}
+
 // TestRLS_TeamAdminNotOrgAdmin pins the two-axis role model: a team
 // admin who is only an org member (not an org admin) can manage their
 // own team but CANNOT mutate org-wide attributes. This is the

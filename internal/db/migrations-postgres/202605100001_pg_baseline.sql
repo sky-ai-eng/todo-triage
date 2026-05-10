@@ -540,8 +540,15 @@ CREATE TABLE events_catalog (
 -- That structurally prevents cross-tenant FK references — a child
 -- in orgA cannot point at a parent in orgB even if the caller
 -- somehow knows the UUID. Defense in depth on top of RLS.
+-- prompts.id is TEXT, not UUID, because system prompts ship with
+-- semantic stable IDs (e.g. 'system-pr-review' in seed.go) that the
+-- application references by name. User-generated prompts get
+-- gen_random_uuid()::text as their default. The full row set lives
+-- in one table regardless of which side generated the ID. ID-
+-- guessing defense isn't load-bearing here — RLS + visibility
+-- already gates reads.
 CREATE TABLE prompts (
-  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  id              TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
   org_id          UUID NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
   creator_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   team_id         UUID REFERENCES teams(id) ON DELETE SET NULL,
@@ -563,7 +570,7 @@ CREATE TABLE prompts (
 
 -- system_prompt_versions — read-only global ref; written only by migrations.
 CREATE TABLE system_prompt_versions (
-  prompt_id    UUID PRIMARY KEY REFERENCES prompts(id) ON DELETE CASCADE,
+  prompt_id    TEXT PRIMARY KEY REFERENCES prompts(id) ON DELETE CASCADE,
   content_hash TEXT NOT NULL,
   applied_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -581,7 +588,7 @@ CREATE TABLE projects (
   pinned_repos              JSONB NOT NULL DEFAULT '[]'::jsonb,
   jira_project_key          TEXT,
   linear_project_key        TEXT,
-  spec_authorship_prompt_id UUID,
+  spec_authorship_prompt_id TEXT,
   created_at                TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at                TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (id, org_id),
@@ -680,7 +687,7 @@ CREATE TABLE prompt_triggers (
   team_id                  UUID REFERENCES teams(id) ON DELETE SET NULL,
   visibility               TEXT NOT NULL DEFAULT 'private' CHECK (visibility IN ('private','team','org')),
   CONSTRAINT prompt_triggers_team_visibility_requires_team CHECK (visibility <> 'team' OR team_id IS NOT NULL),
-  prompt_id                UUID NOT NULL,
+  prompt_id                TEXT NOT NULL,
   trigger_type             TEXT NOT NULL DEFAULT 'event',
   event_type               TEXT NOT NULL REFERENCES events_catalog(id) ON DELETE RESTRICT,
   scope_predicate_json     JSONB,
@@ -744,7 +751,7 @@ CREATE TABLE runs (
   -- enforce the implication so apps can't produce orphaned rows.
   CONSTRAINT runs_team_visibility_requires_team CHECK (visibility <> 'team' OR team_id IS NOT NULL),
   task_id         UUID NOT NULL,
-  prompt_id       UUID NOT NULL,
+  prompt_id       TEXT NOT NULL,
   trigger_id      UUID,
   trigger_type    TEXT NOT NULL DEFAULT 'manual',
   status          TEXT NOT NULL DEFAULT 'cloning',
