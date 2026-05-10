@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"embed"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -109,26 +110,86 @@ func migrationsFor(dialect string) (fs.FS, string, error) {
 	}
 }
 
-// importLegacyVersionsIfNeeded stamps the goose baseline as applied on
-// installs that came in through the pre-goose `schema_migrations`
-// runner. Any DB whose `schema_migrations` table exists AND contains
-// at least one row is taken to already be at head — the only release
-// users were ever on shipped after the last hand-rolled migration, so
-// "schema_migrations has rows" means "this user has every legacy
-// migration applied" (see SKY-245 spec for the explicit assumption).
+// installState classifies a SQLite DB into one of four shapes the
+// migration runner cares about. The fourth — installPreRunner — is
+// the case the binary detection (legacy table populated yes/no)
+// failed to surface: a DB that has application tables but neither
+// the goose tracker nor the pre-goose `schema_migrations` table.
+// Those installs predate the hand-rolled runner entirely (the
+// runner shipped before this PR's release; any binary that ran it
+// at least once left `schema_migrations` populated). Silently
+// stamping baseline against that shape would leave the schema
+// behind whatever ALTERs subsequent hand-rolled migrations applied,
+// because the consolidated baseline is `CREATE TABLE IF NOT EXISTS`
+// and won't add missing columns. Easier to fail fast and route the
+// operator through a known-good intermediate version.
+type installState int
+
+const (
+	installFresh                 installState = iota // empty DB
+	installAlreadyGooseManaged                       // goose_db_version exists with rows
+	installLegacyRunnerPopulated                     // schema_migrations exists with rows
+	installPreRunner                                 // app tables present, no version metadata
+)
+
+// ErrPreRunnerInstall is returned by Migrate when the DB has
+// application tables but neither goose_db_version nor a populated
+// schema_migrations. Surfaced verbatim by main.go's log.Fatalf so
+// the operator sees the upgrade-path instructions.
+var ErrPreRunnerInstall = errors.New(
+	"this database appears to predate the schema migration runner; " +
+		"to upgrade safely, install and run triagefactory v1.10.1 " +
+		"first — it stamps the migration tracking table this version " +
+		"reads — then upgrade to this version, or delete " +
+		"~/.triagefactory/triagefactory.db to perform a fresh install",
+)
+
+// detectInstallState classifies the DB by probing in priority order:
+// goose tracker first (already-managed installs short-circuit so the
+// rest of the probe sequence stays simple), then the legacy table,
+// then a known-stable application table. The application probe uses
+// `entities` because it has been load-bearing since long before the
+// migration runner existed — the same probe the old
+// stampBaselineIfNeeded used.
+func detectInstallState(db *sql.DB) (installState, error) {
+	gooseTracked, err := tableHasRows(db, "goose_db_version")
+	if err != nil {
+		return 0, err
+	}
+	if gooseTracked {
+		return installAlreadyGooseManaged, nil
+	}
+
+	legacyPopulated, err := tableHasRows(db, "schema_migrations")
+	if err != nil {
+		return 0, err
+	}
+	if legacyPopulated {
+		return installLegacyRunnerPopulated, nil
+	}
+
+	hasApp, err := tableExistsInMaster(db, "entities")
+	if err != nil {
+		return 0, err
+	}
+	if hasApp {
+		return installPreRunner, nil
+	}
+	return installFresh, nil
+}
+
+// importLegacyVersionsIfNeeded routes the boot through one of four
+// install-state branches:
 //
-// The shim is a no-op when:
-//   - schema_migrations is missing (fresh install — let goose run baseline).
-//   - schema_migrations exists but is empty (extremely unlikely; safest
-//     to treat the same as missing).
-//   - goose_db_version already has a baseline row (this boot already
-//     stamped it; nothing to do).
+//   - installAlreadyGooseManaged → no-op; goose.Up handles its own state.
+//   - installFresh               → no-op; goose.Up runs baseline.
+//   - installLegacyRunnerPopulated → stamp baseline so goose.Up no-ops.
+//   - installPreRunner           → fail fast with ErrPreRunnerInstall
+//     so the operator routes through v1.10.1 (which stamps
+//     schema_migrations) before reaching this binary.
 //
-// Idempotent across reboots: a stamped baseline is observed via the
-// goose_db_version probe and the function returns without touching
-// anything. The legacy `schema_migrations` table is intentionally
-// left in place as an audit trail / rollback safety net per the
-// design discussion.
+// The legacy `schema_migrations` table is intentionally left in
+// place as an audit trail / rollback safety net.
 func importLegacyVersionsIfNeeded(db *sql.DB, dialect string) error {
 	if dialect != "sqlite3" {
 		// Postgres path lands with D6; fresh installs there will
@@ -136,12 +197,17 @@ func importLegacyVersionsIfNeeded(db *sql.DB, dialect string) error {
 		return nil
 	}
 
-	hasLegacy, err := legacyMigrationsHasRows(db)
+	state, err := detectInstallState(db)
 	if err != nil {
 		return err
 	}
-	if !hasLegacy {
+	switch state {
+	case installAlreadyGooseManaged, installFresh:
 		return nil
+	case installPreRunner:
+		return ErrPreRunnerInstall
+	case installLegacyRunnerPopulated:
+		// fall through to the stamp logic below
 	}
 
 	if _, err := db.Exec(gooseVersionTableDDL); err != nil {
@@ -173,28 +239,37 @@ func importLegacyVersionsIfNeeded(db *sql.DB, dialect string) error {
 	return nil
 }
 
-// legacyMigrationsHasRows reports whether the pre-goose
-// `schema_migrations` table exists AND contains at least one row.
-// Non-existence is silently false — the second probe (COUNT) only
-// runs once we know the table is there, so we never error on a fresh
-// install.
-func legacyMigrationsHasRows(db *sql.DB) (bool, error) {
-	var hasTable int
-	if err := db.QueryRow(
-		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'`,
-	).Scan(&hasTable); err != nil {
-		return false, fmt.Errorf("probe sqlite_master for schema_migrations: %w", err)
+// tableHasRows reports whether the named table both exists AND
+// contains at least one row. Used by detectInstallState to probe
+// goose_db_version and schema_migrations without erroring on a
+// missing table.
+func tableHasRows(db *sql.DB, table string) (bool, error) {
+	exists, err := tableExistsInMaster(db, table)
+	if err != nil {
+		return false, err
 	}
-	if hasTable == 0 {
+	if !exists {
 		return false, nil
 	}
 	var count int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&count); err != nil {
-		// A schema_migrations that exists but isn't queryable is
-		// genuinely broken — surface it rather than swallowing.
-		return false, fmt.Errorf("count schema_migrations: %w", err)
+	if err := db.QueryRow(fmt.Sprintf(`SELECT COUNT(*) FROM %s`, table)).Scan(&count); err != nil {
+		return false, fmt.Errorf("count %s: %w", table, err)
 	}
 	return count > 0, nil
+}
+
+// tableExistsInMaster reports whether sqlite_master has a row for the
+// named table. Cheaper than the full tableHasRows when the caller
+// only cares about presence (e.g. probing for an application
+// sentinel like `entities`).
+func tableExistsInMaster(db *sql.DB, table string) (bool, error) {
+	var n int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, table,
+	).Scan(&n); err != nil {
+		return false, fmt.Errorf("probe sqlite_master for %s: %w", table, err)
+	}
+	return n > 0, nil
 }
 
 // MigrationStatus prints the per-migration applied/pending state to w.

@@ -443,13 +443,34 @@ footer {
   <h2>Mapping & compat</h2>
   <p class="lede">Existing installs come in through the pre-goose <code>schema_migrations</code> table. The cutover collapses 18 legacy migrations into a single consolidated baseline and stamps existing installs at that baseline so the consolidated DDL never re-runs against a populated DB.</p>
 
-  <h3>Why a single baseline (not an 18-file port)</h3>
-  <p>Every release that real users have ever installed shipped after the last hand-rolled migration. So in practice <em>every</em> live install's <code>schema_migrations</code> table either has rows for all 18 versions, or doesn't have the table at all (truly fresh). There's no real population sitting on, e.g., migration 14. That collapses the design space:</p>
-  <ul class="tight">
-    <li><strong>Existing install</strong> (<code>schema_migrations</code> has rows) — already at head schema. Don't re-run anything; just stamp goose at baseline.</li>
-    <li><strong>Fresh install</strong> (no <code>schema_migrations</code>, or empty) — run the consolidated baseline once. Goose tracks it from there.</li>
-  </ul>
-  <p>The trade we're making: an install with a partial legacy migration history (e.g. crashed mid-runner, or pre-release shadow build) would get silently stamped at baseline despite missing some DDL. That's a real bullet, fired into the air, but no one is in the path of it — confirmed against the release history.</p>
+  <h3>Four install states</h3>
+  <p>The shim classifies each boot into one of four shapes. Every release that real users have ever installed shipped after the last hand-rolled migration, so the live install distribution is dominated by states 1 and 2; states 3 and 4 are guards against silent corruption.</p>
+  <table class="matrix">
+    <thead><tr><th style="width: 32%;">State</th><th style="width: 30%;">Detection</th><th>Action</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>installAlreadyGooseManaged</code></td>
+        <td><code>goose_db_version</code> has rows</td>
+        <td>No-op; goose.Up is the source of truth.</td>
+      </tr>
+      <tr>
+        <td><code>installLegacyRunnerPopulated</code></td>
+        <td><code>schema_migrations</code> has rows</td>
+        <td>Stamp baseline + bootstrap rows into <code>goose_db_version</code>; goose.Up no-ops on the next call.</td>
+      </tr>
+      <tr>
+        <td><code>installFresh</code></td>
+        <td>no app tables, no version metadata</td>
+        <td>No-op; goose.Up runs the consolidated baseline.</td>
+      </tr>
+      <tr>
+        <td><code>installPreRunner</code></td>
+        <td>app tables present (sentinel: <code>entities</code>) but neither <code>goose_db_version</code> nor populated <code>schema_migrations</code></td>
+        <td>Refuse with <code>ErrPreRunnerInstall</code>. The operator must run v1.10.1 first (which stamps <code>schema_migrations</code>), or wipe the local DB.</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>The pre-runner branch closes a hole the simpler "is the legacy table populated?" probe missed: a DB with app tables but no version metadata at all (predates the hand-rolled runner) would otherwise be classified as fresh, run the consolidated baseline's <code>CREATE TABLE IF NOT EXISTS</code> against tables that already exist (no-op), get stamped at baseline by goose, and end up silently behind whatever ALTERs subsequent migrations applied. Failing fast routes the operator through v1.10.1 (the last release with the hand-rolled runner) where <code>stampBaselineIfNeeded</code> brings the DB into the legacy-runner-populated state this shim handles cleanly.</p>
 
   <h3>Version number encoding</h3>
   <p>Goose's tracking column is <code>version_id BIGINT</code>. We pick a 12-digit <code>YYYYMMDDNNNN</code> encoding so future migrations sort numerically and lexicographically the same way. The baseline is <code>202605090001</code> (today, sequence 1). Future migrations land alongside as <code>NNNNNNNNNNNN_description.sql</code>.</p>
@@ -459,20 +480,23 @@ footer {
 <pre class="code"><span class="com">// internal/db/migrations.go (sketch)</span>
 <span class="kw">func</span> <span class="fn">importLegacyVersionsIfNeeded</span>(db *sql.DB, dialect <span class="kw">string</span>) <span class="kw">error</span> {
   <span class="kw">if</span> dialect != <span class="str">"sqlite3"</span> { <span class="kw">return nil</span> }
-  hasLegacy, err := <span class="fn">legacyMigrationsHasRows</span>(db)
+  state, err := <span class="fn">detectInstallState</span>(db)
   <span class="kw">if</span> err != <span class="kw">nil</span> { <span class="kw">return</span> err }
-  <span class="kw">if</span> !hasLegacy { <span class="kw">return nil</span> }   <span class="com">// fresh install — let goose run baseline</span>
-
-  db.<span class="fn">Exec</span>(gooseVersionTableDDL)
-  <span class="kw">if</span> stamped, _ := <span class="fn">gooseVersionExists</span>(db, baselineVersionID); stamped {
-    <span class="kw">return nil</span>                  <span class="com">// idempotent across reboots</span>
+  <span class="kw">switch</span> state {
+  <span class="kw">case</span> installAlreadyGooseManaged, installFresh:
+    <span class="kw">return nil</span>
+  <span class="kw">case</span> installPreRunner:
+    <span class="kw">return</span> ErrPreRunnerInstall
+  <span class="kw">case</span> installLegacyRunnerPopulated:
+    <span class="com">// fall through to the stamp logic below</span>
   }
-  db.<span class="fn">Exec</span>(<span class="str">`INSERT OR IGNORE INTO goose_db_version (version_id, is_applied) VALUES (0, 1)`</span>)
-  db.<span class="fn">Exec</span>(<span class="str">`INSERT OR IGNORE INTO goose_db_version (version_id, is_applied) VALUES (?, 1)`</span>, baselineVersionID)
+  db.<span class="fn">Exec</span>(gooseVersionTableDDL)
+  <span class="com">// INSERT ... WHERE NOT EXISTS — atomic against concurrent boots,</span>
+  <span class="com">// idempotent across re-launches.</span>
+  db.<span class="fn">Exec</span>(stampSQL, <span class="kw">int64</span>(0), <span class="kw">int64</span>(0))
+  db.<span class="fn">Exec</span>(stampSQL, baselineVersionID, baselineVersionID)
   <span class="kw">return nil</span>
 }</pre>
-
-  <p>The shim is a no-op when there's no legacy table (fresh install — goose runs baseline normally), when the legacy table exists but is empty (treated as fresh), or when goose_db_version already has the baseline row (subsequent boots).</p>
 
   <div class="callout callout--good">
     <strong>Audit trail / rollback:</strong> the legacy <code>schema_migrations</code> table is left in place forever. It's tiny, it's the source of truth for "what did the old runner think had run," and dropping it later — when no one wants to read it — is a separate ticket if it ever matters. It's also the safety net if the stamp shim is ever found to be buggy.
@@ -669,9 +693,9 @@ footer {
         <td>Revert the PR; the old hand-rolled runner reads <code>schema_migrations</code> (untouched) and resumes.</td>
       </tr>
       <tr>
-        <td>An install with a partial pre-release migration history gets stamped at baseline despite missing some DDL → runtime errors when the missing column is touched</td>
-        <td>Confirmed against release history that no live install is in this state — every released version shipped post-migration-18. Documented as the explicit trade-off in §4.</td>
-        <td>Affected user wipes <code>~/.triagefactory/triagefactory.db</code> for a fresh install; the binary recreates the schema cleanly.</td>
+        <td>Pre-runner install (app tables, no version metadata) gets silently stamped at baseline → schema behind the baseline shape because the consolidated DDL is <code>CREATE TABLE IF NOT EXISTS</code> and won't add missing columns</td>
+        <td>Detection now classifies this state (<code>installPreRunner</code>) and returns <code>ErrPreRunnerInstall</code> before any write. Test <code>TestMigrate_PreRunnerInstallErrors</code> pins the contract.</td>
+        <td>Operator runs v1.10.1 first (which stamps <code>schema_migrations</code> via <code>stampBaselineIfNeeded</code>), then upgrades to this version. Or wipes <code>~/.triagefactory/triagefactory.db</code> for a fresh install.</td>
       </tr>
       <tr>
         <td>Goose parser chokes on the consolidated baseline (e.g. an embedded <code>-- +goose Down</code> substring inside a header comment)</td>

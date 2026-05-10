@@ -2,6 +2,8 @@ package db
 
 import (
 	"database/sql"
+	"errors"
+	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -152,6 +154,50 @@ func TestMigrate_EmptyLegacyTableRunsBaseline(t *testing.T) {
 
 	if !tableExists(t, database, "entities") {
 		t.Errorf("entities table missing — baseline should have run on empty legacy table")
+	}
+}
+
+// TestMigrate_PreRunnerInstallErrors covers the install shape that
+// would otherwise corrupt silently: application tables present
+// (entities here) but neither goose_db_version nor schema_migrations.
+// That state predates the hand-rolled runner — any binary that ran
+// it left schema_migrations behind. Migrate must refuse to stamp
+// baseline against this shape and return ErrPreRunnerInstall with a
+// pointer at the v1.10.1 intermediate-upgrade path.
+func TestMigrate_PreRunnerInstallErrors(t *testing.T) {
+	database := openMigrationsTestDB(t)
+	if _, err := database.Exec(`
+		CREATE TABLE entities (
+			id TEXT PRIMARY KEY,
+			source TEXT NOT NULL,
+			source_id TEXT NOT NULL,
+			kind TEXT NOT NULL,
+			UNIQUE(source, source_id)
+		);
+		INSERT INTO entities (id, source, source_id, kind) VALUES ('e1', 'github', 'a/b#1', 'pr');
+	`); err != nil {
+		t.Fatalf("seed pre-runner state: %v", err)
+	}
+
+	err := Migrate(database)
+	if err == nil {
+		t.Fatalf("Migrate against pre-runner DB should have errored")
+	}
+	if !errors.Is(err, ErrPreRunnerInstall) {
+		t.Fatalf("Migrate err = %v, want wraps ErrPreRunnerInstall", err)
+	}
+	if !strings.Contains(err.Error(), "v1.10.1") {
+		t.Errorf("error message must reference v1.10.1; got %q", err.Error())
+	}
+
+	// Sanity: nothing was stamped, baseline did not run, the seeded
+	// row is still there.
+	if tableExists(t, database, "goose_db_version") {
+		t.Errorf("goose_db_version was created — pre-runner detection should have refused before any write")
+	}
+	var seedID string
+	if err := database.QueryRow(`SELECT id FROM entities WHERE id = 'e1'`).Scan(&seedID); err != nil {
+		t.Fatalf("seed row not preserved: %v", err)
 	}
 }
 
