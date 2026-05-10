@@ -44,11 +44,14 @@ GRANT tf_app TO authenticator;
 
 GRANT USAGE ON SCHEMA public, tf TO tf_app;
 
--- Future tables created in public by `postgres` inherit these grants.
-ALTER DEFAULT PRIVILEGES IN SCHEMA public
-  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO tf_app;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public
-  GRANT USAGE, SELECT ON SEQUENCES TO tf_app;
+-- tf_app's per-table grants are issued explicitly at the bottom of
+-- this migration via `GRANT ... ON ALL TABLES IN SCHEMA public ...`.
+-- We deliberately don't use ALTER DEFAULT PRIVILEGES — that binds to
+-- the role running THIS migration (here `supabase_admin`); a future
+-- migration run by a different role wouldn't pick up the default and
+-- new tables would silently miss tf_app grants. Idempotent
+-- "GRANT ON ALL TABLES" at end-of-migration is role-agnostic and the
+-- convention every NNN_*.sql in this tree should follow.
 
 -- (c) ----------------------------------------------------------------
 -- Defensive — image already loads this.
@@ -749,23 +752,44 @@ CREATE TABLE curator_pending_context (
 );
 
 -- update_project_knowledge OCC function — compare-and-swap on version.
+-- last_updated_by is derived from tf.current_user_id() rather than
+-- accepted as an argument: a caller-supplied identity would let any
+-- tf_app caller forge the audit row's authorship. p_updated_by_run
+-- is caller-supplied (the application knows the run; the DB doesn't),
+-- but validated against RLS — if the run isn't visible to the caller
+-- through the runs table's policies, we refuse the write.
 -- +goose StatementBegin
 CREATE OR REPLACE FUNCTION public.update_project_knowledge(
   p_id               UUID,
   p_expected_version INT,
   p_content          TEXT,
-  p_updated_by       UUID,
   p_updated_by_run   UUID DEFAULT NULL
 ) RETURNS INT
 LANGUAGE plpgsql SECURITY INVOKER
 AS $$
 DECLARE
   v_new_version INT;
+  v_user_id     UUID := tf.current_user_id();
 BEGIN
+  IF v_user_id IS NULL THEN
+    RAISE EXCEPTION 'no current_user_id (request.jwt.claims unset)'
+      USING ERRCODE = '42501';
+  END IF;
+
+  -- If a run is being attributed, it must be one the caller can see
+  -- through runs RLS (their own, in their current org). A forged
+  -- p_updated_by_run from another user fails this check because runs
+  -- has SELECT policy `org_id = current_org_id AND creator = current_user`.
+  IF p_updated_by_run IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM runs WHERE id = p_updated_by_run) THEN
+    RAISE EXCEPTION 'run % not accessible to caller', p_updated_by_run
+      USING ERRCODE = '42501';
+  END IF;
+
   UPDATE project_knowledge
      SET content = p_content,
          version = version + 1,
-         last_updated_by = p_updated_by,
+         last_updated_by = v_user_id,
          last_updated_by_run = p_updated_by_run,
          updated_at = now()
    WHERE id = p_id
@@ -784,8 +808,18 @@ REVOKE ALL ON FUNCTION public.update_project_knowledge FROM PUBLIC, anon, authen
 GRANT EXECUTE ON FUNCTION public.update_project_knowledge TO tf_app;
 
 -- (i) ----------------------------------------------------------------
+-- tf_app needs SELECT/INSERT/UPDATE/DELETE on every TF data table.
+-- Issued explicitly here (not via ALTER DEFAULT PRIVILEGES — see
+-- comment in section (b)) so the grants are role-agnostic and don't
+-- depend on which role ran this migration. Every future
+-- internal/db/migrations-postgres/*.sql file should end with the
+-- same pair of GRANTs to pick up tables it creates.
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES    IN SCHEMA public TO tf_app;
+GRANT USAGE, SELECT                  ON ALL SEQUENCES IN SCHEMA public TO tf_app;
+
 -- Global ref tables are read-only for tf_app. Migration writes seed
--- rows; application code never INSERTs.
+-- rows; application code never INSERTs. REVOKE comes AFTER the bulk
+-- GRANT so it actually has writes to revoke.
 REVOKE INSERT, UPDATE, DELETE ON events_catalog          FROM tf_app;
 REVOKE INSERT, UPDATE, DELETE ON system_prompt_versions  FROM tf_app;
 

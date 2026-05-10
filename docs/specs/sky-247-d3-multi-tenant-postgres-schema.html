@@ -429,12 +429,18 @@ $$;
 <span class="com">-- Schema usage.</span>
 <span class="kw">GRANT USAGE ON SCHEMA</span> public, tf <span class="kw">TO</span> tf_app;
 
-<span class="com">-- Table-level grants on TF data tables — defaults applied at table creation.</span>
-<span class="kw">ALTER DEFAULT PRIVILEGES IN SCHEMA</span> public
-  <span class="kw">GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO</span> tf_app;
+<span class="com">-- Table grants happen at end-of-migration via GRANT ... ON ALL TABLES.</span>
+<span class="com">-- Deliberately NOT using ALTER DEFAULT PRIVILEGES here: the bare form</span>
+<span class="com">-- binds to current_user at execution time (= supabase_admin in tests),</span>
+<span class="com">-- so a future migration run by a different role wouldn't pick up the</span>
+<span class="com">-- default and new tables would silently miss tf_app grants. Idempotent</span>
+<span class="com">-- "GRANT ON ALL TABLES" at end-of-migration is role-agnostic.</span>
+<span class="kw">GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES</span>    <span class="kw">IN SCHEMA</span> public <span class="kw">TO</span> tf_app;
+<span class="kw">GRANT USAGE, SELECT</span>                  <span class="kw">ON ALL SEQUENCES</span> <span class="kw">IN SCHEMA</span> public <span class="kw">TO</span> tf_app;
 
 <span class="com">-- Read-only on global reference tables (events_catalog, system_prompt_versions).</span>
-<span class="com">-- Migration writes them; tf_app only reads.</span>
+<span class="com">-- Migration writes them; tf_app only reads. REVOKE comes AFTER the</span>
+<span class="com">-- bulk GRANT so it has writes to remove.</span>
 <span class="kw">REVOKE INSERT, UPDATE, DELETE ON</span> events_catalog, system_prompt_versions <span class="kw">FROM</span> tf_app;
 
 <span class="com">-- Vault wrapper EXECUTE (REVOKEd from PUBLIC; see §6).</span>
@@ -593,18 +599,33 @@ $$;
   p_id               <span class="kw">UUID</span>,
   p_expected_version <span class="kw">INT</span>,
   p_content          <span class="kw">TEXT</span>,
-  p_updated_by       <span class="kw">UUID</span>,
   p_updated_by_run   <span class="kw">UUID DEFAULT NULL</span>
 ) <span class="kw">RETURNS INT</span>
 <span class="kw">LANGUAGE</span> plpgsql <span class="kw">SECURITY INVOKER</span>
 <span class="kw">AS</span> $$
 <span class="kw">DECLARE</span>
   v_new_version <span class="kw">INT</span>;
+  v_user_id     <span class="kw">UUID</span> := tf.<span class="fn">current_user_id</span>();
 <span class="kw">BEGIN</span>
+  <span class="com">-- last_updated_by is derived from the JWT-claims user, NOT taken as</span>
+  <span class="com">-- an argument — a caller-supplied identity would let any tf_app caller</span>
+  <span class="com">-- forge the audit row's authorship.</span>
+  <span class="kw">IF</span> v_user_id <span class="kw">IS NULL THEN</span>
+    <span class="kw">RAISE EXCEPTION</span> <span class="str">'no current_user_id (request.jwt.claims unset)'</span> <span class="kw">USING ERRCODE</span> = <span class="str">'42501'</span>;
+  <span class="kw">END IF</span>;
+  <span class="com">-- p_updated_by_run is caller-supplied (the application knows the run;</span>
+  <span class="com">-- the DB doesn't), but validated against runs RLS — a forged run_id</span>
+  <span class="com">-- from another user fails this lookup because runs has SELECT policy</span>
+  <span class="com">-- (org_id = current_org_id AND creator = current_user).</span>
+  <span class="kw">IF</span> p_updated_by_run <span class="kw">IS NOT NULL</span>
+     <span class="kw">AND NOT EXISTS</span> (<span class="kw">SELECT</span> 1 <span class="kw">FROM</span> runs <span class="kw">WHERE</span> id = p_updated_by_run) <span class="kw">THEN</span>
+    <span class="kw">RAISE EXCEPTION</span> <span class="str">'run % not accessible to caller'</span>, p_updated_by_run <span class="kw">USING ERRCODE</span> = <span class="str">'42501'</span>;
+  <span class="kw">END IF</span>;
+
   <span class="kw">UPDATE</span> project_knowledge
      <span class="kw">SET</span> content = p_content,
          version = version + 1,
-         last_updated_by = p_updated_by,
+         last_updated_by = v_user_id,
          last_updated_by_run = p_updated_by_run,
          updated_at = now()
    <span class="kw">WHERE</span> id = p_id
@@ -618,7 +639,7 @@ $$;
   <span class="kw">RETURN</span> v_new_version;
 <span class="kw">END</span>;
 $$;
-<span class="kw">REVOKE ALL ON FUNCTION</span> public.update_project_knowledge <span class="kw">FROM PUBLIC</span>;
+<span class="kw">REVOKE ALL ON FUNCTION</span> public.update_project_knowledge <span class="kw">FROM PUBLIC, anon, authenticated, service_role</span>;
 <span class="kw">GRANT EXECUTE ON FUNCTION</span> public.update_project_knowledge <span class="kw">TO</span> tf_app;</pre>
 
   <p><strong>Why <code>UUID</code> over <code>BIGSERIAL</code>:</strong> primary keys are emitted to Vault paths (<code>org/&lt;uuid&gt;/&lt;key&gt;</code>), JWT claims, and external integration metadata. UUIDs prevent ID-guessing attacks and make cross-system references unambiguous. Performance overhead vs sequential IDs is acceptable at the scale this targets.</p>
@@ -1088,7 +1109,8 @@ $$ <span class="kw">LANGUAGE SQL STABLE</span>;</pre>
     <li><span class="tag tag--green">PASS</span> <code>TestVault_GrantsLockdown</code> — calling <code>vault_get_org_secret</code> as <code>anon</code> (a role <code>tf_app</code> wasn't granted to, and which we explicitly REVOKE'd to override Supabase's auto-grant event triggers) errors with SQLSTATE 42501.</li>
     <li><span class="tag tag--green">PASS</span> <code>TestVault_ClaimMismatchDenied</code> — even tf_app (with EXECUTE) can't pass an arbitrary <code>p_org_id</code>; each wrapper checks <code>p_org_id = tf.current_org_id()</code> and raises 42501 on mismatch. Closes the cross-org-by-arbitrary-UUID hole that DEFINER alone would leave open.</li>
     <li><span class="tag tag--green">PASS</span> <code>TestRLS_UsersIsolation</code> — Alice in orgA can't see Bob's <code>public.users</code> row (different org) but can see Charlie's (same org as Alice). Modify policy restricts UPDATEs to the row's owner.</li>
-    <li><span class="tag tag--green">PASS</span> <code>TestProjectKnowledge_OCC</code> — two concurrent <code>update_project_knowledge</code> calls with the same expected_version: one succeeds and returns <code>version + 1</code>; the other raises SQLSTATE 40001. Run via AppDB with two open transactions.</li>
+    <li><span class="tag tag--green">PASS</span> <code>TestProjectKnowledge_OCC</code> — two concurrent <code>update_project_knowledge</code> calls with the same expected_version: one succeeds and returns <code>version + 1</code>; the other raises SQLSTATE 40001. Run via AppDB with two open transactions. Also asserts <code>last_updated_by = tf.current_user_id()</code> rather than any caller-supplied value.</li>
+    <li><span class="tag tag--green">PASS</span> <code>TestProjectKnowledge_RunValidation</code> — passing a <code>p_updated_by_run</code> that belongs to another user raises 42501; runs RLS hides the row from the caller's session and the in-function EXISTS check refuses the write.</li>
     <li><span class="tag tag--green">PASS</span> <code>TestSeedData</code> — <code>events_catalog</code> has every event type from <code>domain.AllEventTypes()</code> (current count: 31 — assert against the slice length, not a hardcoded number, so drift surfaces at test time); <code>system_prompt_versions</code> matches shipped prompts.</li>
     <li><span class="tag tag--green">PASS</span> SQLite tests (entire existing suite) still green — D3 didn't touch the SQLite path.</li>
     <li><span class="tag">CODE</span> <code>internal/db/migrations-postgres/202605100001_pg_baseline.sql</code> contains the consolidated schema. <code>internal/db/pgtest/</code> harness exposes <code>AdminDB</code> + <code>AppDB</code> as separate fields.</li>

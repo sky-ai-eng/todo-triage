@@ -531,7 +531,8 @@ func TestVault_GrantsLockdown(t *testing.T) {
 
 // TestProjectKnowledge_OCC — two transactions both try to update
 // project_knowledge with expected_version=1. One succeeds, one raises
-// SQLSTATE 40001.
+// SQLSTATE 40001. Also asserts last_updated_by is derived from the
+// JWT-claims user, not accepted from the caller.
 func TestProjectKnowledge_OCC(t *testing.T) {
 	h := Shared(t)
 	h.Reset(t)
@@ -550,8 +551,8 @@ func TestProjectKnowledge_OCC(t *testing.T) {
 	var newVer int
 	err := h.WithUser(t, user, org, func(tx *sql.Tx) error {
 		return tx.QueryRow(
-			`SELECT update_project_knowledge($1, $2, $3, $4, NULL)`,
-			pkID, 1, "v2", user,
+			`SELECT update_project_knowledge($1, $2, $3, NULL)`,
+			pkID, 1, "v2",
 		).Scan(&newVer)
 	})
 	if err != nil {
@@ -561,11 +562,23 @@ func TestProjectKnowledge_OCC(t *testing.T) {
 		t.Errorf("first new_version = %d, want 2", newVer)
 	}
 
+	// last_updated_by must equal the JWT-claims user, not anything
+	// the caller could pass.
+	var lastBy string
+	if err := h.AdminDB.QueryRow(
+		`SELECT last_updated_by FROM project_knowledge WHERE id = $1`, pkID,
+	).Scan(&lastBy); err != nil {
+		t.Fatalf("read last_updated_by: %v", err)
+	}
+	if lastBy != user {
+		t.Errorf("last_updated_by = %s, want %s (derived from current_user_id)", lastBy, user)
+	}
+
 	// Second update with stale expected_version=1 — must raise 40001.
 	err = h.WithUser(t, user, org, func(tx *sql.Tx) error {
 		return tx.QueryRow(
-			`SELECT update_project_knowledge($1, $2, $3, $4, NULL)`,
-			pkID, 1, "v3", user,
+			`SELECT update_project_knowledge($1, $2, $3, NULL)`,
+			pkID, 1, "v3",
 		).Scan(&newVer)
 	})
 	if err == nil {
@@ -574,6 +587,62 @@ func TestProjectKnowledge_OCC(t *testing.T) {
 	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) || pgErr.Code != "40001" {
 		t.Errorf("err = %v, want SQLSTATE 40001 serialization_failure", err)
+	}
+}
+
+// TestProjectKnowledge_RunValidation — passing a p_updated_by_run that
+// belongs to another user fails because runs RLS hides it. Without
+// this gate, a caller could attribute their KB write to someone else's
+// run, polluting audit chronology.
+func TestProjectKnowledge_RunValidation(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	orgA, alice, _ := seedOrgWithUser(t, h, "alice")
+	_, bob, _ := seedOrgWithUser(t, h, "bob")
+
+	projectID := seedProject(t, h, orgA, alice, "demo")
+	var pkID string
+	if err := h.AdminDB.QueryRow(`
+		INSERT INTO project_knowledge (org_id, project_id, key, content)
+		VALUES ($1, $2, 'overview', 'v1') RETURNING id
+	`, orgA, projectID).Scan(&pkID); err != nil {
+		t.Fatalf("seed KB: %v", err)
+	}
+
+	// Seed bob's run in his own org. Use AdminDB so we don't have to
+	// build the full task/event/prompt chain.
+	bobOrg := seedOrg(t, h, "bob-other-org", bob)
+	bobTeam := seedTeam(t, h, bobOrg, "default")
+	mustExec(t, h.AdminDB,
+		`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'owner')`, bob, bobTeam)
+	bobEntity := seedEntity(t, h, bobOrg, "github", "octo/repo#99")
+	bobTask := seedTask(t, h, bobOrg, bob, bobEntity, "github:pr:opened")
+	bobPrompt := seedPrompt(t, h, bobOrg, bob, "p1")
+	var bobRun string
+	if err := h.AdminDB.QueryRow(`
+		INSERT INTO runs (org_id, creator_user_id, task_id, prompt_id)
+		VALUES ($1, $2, $3, $4) RETURNING id
+	`, bobOrg, bob, bobTask, bobPrompt).Scan(&bobRun); err != nil {
+		t.Fatalf("seed bob run: %v", err)
+	}
+
+	// Alice tries to attribute her KB update to bob's run. RLS on
+	// runs hides bob's row from alice's session, so the EXISTS check
+	// inside the function fails.
+	err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
+		var v int
+		return tx.QueryRow(
+			`SELECT update_project_knowledge($1, $2, $3, $4)`,
+			pkID, 1, "v2-with-stolen-run", bobRun,
+		).Scan(&v)
+	})
+	if err == nil {
+		t.Fatalf("update with stolen run did not error — run validation broken")
+	}
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "42501" {
+		t.Errorf("err = %v, want SQLSTATE 42501", err)
 	}
 }
 
@@ -621,6 +690,17 @@ func seedTeam(t *testing.T, h *Harness, orgID, slug string) string {
 		INSERT INTO teams (org_id, slug, name) VALUES ($1, $2, $2) RETURNING id
 	`, orgID, slug).Scan(&id); err != nil {
 		t.Fatalf("seed team: %v", err)
+	}
+	return id
+}
+
+func seedPrompt(t *testing.T, h *Harness, orgID, creatorID, name string) string {
+	t.Helper()
+	var id string
+	if err := h.AdminDB.QueryRow(`
+		INSERT INTO prompts (org_id, creator_user_id, name, body) VALUES ($1, $2, $3, '') RETURNING id
+	`, orgID, creatorID, name).Scan(&id); err != nil {
+		t.Fatalf("seed prompt: %v", err)
 	}
 	return id
 }
