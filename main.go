@@ -33,6 +33,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec"
 	"github.com/sky-ai-eng/triage-factory/cmd/install"
+	"github.com/sky-ai-eng/triage-factory/cmd/migrate"
 	"github.com/sky-ai-eng/triage-factory/cmd/resume"
 	"github.com/sky-ai-eng/triage-factory/cmd/uninstall"
 )
@@ -109,6 +110,8 @@ USER COMMANDS
   triagefactory resume [<short-id>]        resume a taken-over session
                                            (auto-resumes when there's only
                                            one; picker otherwise)
+  triagefactory migrate up                 bring the schema to head
+  triagefactory migrate status             list applied + pending migrations
 
 AGENT COMMANDS
   Used by delegated Claude Code agents inside their worktree, not
@@ -151,6 +154,9 @@ func main() {
 			return
 		case "uninstall":
 			uninstall.Handle(os.Args[2:])
+			return
+		case "migrate":
+			migrate.Handle(os.Args[2:])
 			return
 		case "-h", "--help", "help":
 			printTopLevelHelp()

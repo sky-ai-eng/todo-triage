@@ -3,157 +3,278 @@ package db
 import (
 	"database/sql"
 	"embed"
+	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
-	"sort"
 	"strings"
+
+	"github.com/pressly/goose/v3"
 )
 
-//go:embed migrations/*.sql
-var migrationsFS embed.FS
+//go:embed migrations-sqlite/*.sql
+var migrationsSQLiteFS embed.FS
 
-const migrationsDir = "migrations"
+//go:embed migrations-postgres
+var migrationsPostgresFS embed.FS
 
-// baselineVersion names the initial migration shipped when forward
-// migrations were introduced. Existing installs (a populated DB
-// predating this system) get this version stamped without execution —
-// they're already at this state, and re-executing CREATE TABLE IF NOT
-// EXISTS against a long-lived install whose schema has drifted via
-// post-baseline migrations would not be a faithful no-op. Fresh
-// installs run the file normally to bootstrap the schema.
-const baselineVersion = "20260501_001_baseline"
+// baselineVersionID is the goose version_id of the consolidated
+// baseline that absorbed the 18 hand-rolled migrations shipped before
+// SKY-245 (D1). Encoded as YYYYMMDDNNNN so future migrations get a
+// natural lexicographic / numeric ordering with the goose convention
+// of int64 version IDs. This value is also written into
+// `goose_db_version` by importLegacyVersionsIfNeeded for any existing
+// install whose pre-goose `schema_migrations` table contains rows —
+// avoids re-running the baseline against a DB that already has the
+// schema in place.
+const baselineVersionID int64 = 202605090001
 
-// runMigrations brings the on-disk schema up to head. Sequence:
-//  1. Ensure schema_migrations exists.
-//  2. If no migrations are recorded but application tables already
-//     exist, stamp the baseline as already-applied (existing-install
-//     upgrade path).
-//  3. Walk migrations/*.sql lexicographically; for each version not
-//     in schema_migrations, exec the file and insert the row in the
-//     same transaction.
+// gooseVersionTableDDL is the schema the goose-sqlite3 dialect creates
+// on first use. We pre-create it ourselves in the legacy-import shim
+// so we can INSERT the baseline stamp before goose.Up's bookkeeping
+// runs; goose's EnsureDBVersion sees the table already present and
+// proceeds without re-creating. Mirror this verbatim if a future
+// goose upgrade changes the canonical shape — divergence here would
+// make the goose-managed inserts target a different schema than the
+// runner expects.
+const gooseVersionTableDDL = `
+CREATE TABLE IF NOT EXISTS goose_db_version (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    version_id INTEGER NOT NULL,
+    is_applied INTEGER NOT NULL,
+    tstamp TIMESTAMP DEFAULT (datetime('now'))
+)`
+
+// runMigrations brings the on-disk schema up to head via goose. The
+// hand-rolled runner that walked migrations/*.sql lexicographically
+// is gone (see SKY-245's spec for the rationale); goose owns version
+// tracking via `goose_db_version` from here on out.
 //
-// File naming convention: YYYYMMDD_NNN_description.sql. The date +
-// counter prefix sorts lexicographically into chronological order;
-// the counter disambiguates same-day migrations. Forward-only — no
-// down migrations until we have a real need.
+// Sequence:
+//  1. Detect dialect (sqlite3 today; the postgres tree is scaffolded
+//     for SKY-247 / D6 but not yet exercised).
+//  2. Run importLegacyVersionsIfNeeded — for any install whose
+//     pre-goose `schema_migrations` table contains rows, stamp the
+//     baseline as already applied so goose does not re-execute its
+//     CREATE TABLE statements against the live schema.
+//  3. Hand the routed embed.FS to goose and call goose.Up.
 //
-// Failures roll back cleanly and surface the version that failed; the
-// next launch retries the same migration. Migrations should be
-// idempotent at the statement level (IF NOT EXISTS / IF EXISTS) so a
-// half-applied state from a previous run can be re-driven safely.
+// Failures roll back at the per-migration boundary goose owns; the
+// next launch retries any unapplied migration. The baseline is
+// idempotent (every CREATE uses IF NOT EXISTS) so even if the legacy
+// import shim no-ops on a borderline install — schema_migrations
+// missing or empty — the baseline runs cleanly against the existing
+// schema.
 func runMigrations(db *sql.DB) error {
-	if _, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS schema_migrations (
-			version    TEXT PRIMARY KEY,
-			applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-		)
-	`); err != nil {
-		return fmt.Errorf("create schema_migrations: %w", err)
+	dialect := detectDialect(db)
+	if err := importLegacyVersionsIfNeeded(db, dialect); err != nil {
+		return fmt.Errorf("legacy import: %w", err)
 	}
-
-	if err := stampBaselineIfNeeded(db); err != nil {
-		return err
-	}
-
-	versions, err := listMigrationVersions()
+	treeFS, treeDir, err := migrationsFor(dialect)
 	if err != nil {
 		return err
 	}
-
-	for _, version := range versions {
-		applied, err := isApplied(db, version)
-		if err != nil {
-			return fmt.Errorf("check schema_migrations[%s]: %w", version, err)
-		}
-		if applied {
-			continue
-		}
-		if err := applyMigration(db, version); err != nil {
-			return fmt.Errorf("apply migration %s: %w", version, err)
-		}
-		log.Printf("[db] applied migration %s", version)
+	goose.SetBaseFS(treeFS)
+	if err := goose.SetDialect(dialect); err != nil {
+		return fmt.Errorf("set dialect %s: %w", dialect, err)
+	}
+	if err := goose.Up(db, treeDir); err != nil {
+		return fmt.Errorf("goose up: %w", err)
 	}
 	return nil
 }
 
-// stampBaselineIfNeeded covers the existing-install upgrade path: a DB
-// with application tables but no schema_migrations row predates this
-// system, so we record the baseline as applied without executing it.
-// The probe uses the entities table because (a) it's load-bearing for
-// the data model and (b) it has been part of the schema since long
-// before forward migrations existed, so its presence is a reliable
-// "this is a real install" signal.
-func stampBaselineIfNeeded(db *sql.DB) error {
-	var migrationCount int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&migrationCount); err != nil {
-		return fmt.Errorf("count schema_migrations: %w", err)
+// detectDialect returns the goose dialect string for the connected
+// database. Today this is always sqlite3 — the Postgres path
+// (SKY-247 / D6) will plumb a real driver-name probe through here.
+// Centralizing the decision now keeps the call sites stable when that
+// happens.
+func detectDialect(_ *sql.DB) string {
+	return "sqlite3"
+}
+
+// migrationsFor returns the embedded migration tree for a goose
+// dialect. The trees are kept side-by-side so the parser only ever
+// sees DDL it can interpret — no runtime if/else inside a single
+// migration file deciding whether to emit BYTEA or BLOB. Pure-SQLite
+// builds (the only supported runtime today) never read the postgres
+// tree; once D6 lands the postgres path becomes a real consumer.
+func migrationsFor(dialect string) (fs.FS, string, error) {
+	switch dialect {
+	case "sqlite3":
+		return migrationsSQLiteFS, "migrations-sqlite", nil
+	case "postgres":
+		return migrationsPostgresFS, "migrations-postgres", nil
+	default:
+		return nil, "", fmt.Errorf("unsupported dialect %q", dialect)
 	}
-	if migrationCount > 0 {
+}
+
+// importLegacyVersionsIfNeeded stamps the goose baseline as applied on
+// installs that came in through the pre-goose `schema_migrations`
+// runner. Any DB whose `schema_migrations` table exists AND contains
+// at least one row is taken to already be at head — the only release
+// users were ever on shipped after the last hand-rolled migration, so
+// "schema_migrations has rows" means "this user has every legacy
+// migration applied" (see SKY-245 spec for the explicit assumption).
+//
+// The shim is a no-op when:
+//   - schema_migrations is missing (fresh install — let goose run baseline).
+//   - schema_migrations exists but is empty (extremely unlikely; safest
+//     to treat the same as missing).
+//   - goose_db_version already has a baseline row (this boot already
+//     stamped it; nothing to do).
+//
+// Idempotent across reboots: a stamped baseline is observed via the
+// goose_db_version probe and the function returns without touching
+// anything. The legacy `schema_migrations` table is intentionally
+// left in place as an audit trail / rollback safety net per the
+// design discussion.
+func importLegacyVersionsIfNeeded(db *sql.DB, dialect string) error {
+	if dialect != "sqlite3" {
+		// Postgres path lands with D6; fresh installs there will
+		// have no legacy table to import from.
 		return nil
 	}
-	var hasEntities int
-	if err := db.QueryRow(
-		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'entities'`,
-	).Scan(&hasEntities); err != nil {
-		return fmt.Errorf("probe sqlite_master: %w", err)
+
+	hasLegacy, err := legacyMigrationsHasRows(db)
+	if err != nil {
+		return err
 	}
-	if hasEntities == 0 {
+	if !hasLegacy {
 		return nil
+	}
+
+	if _, err := db.Exec(gooseVersionTableDDL); err != nil {
+		return fmt.Errorf("create goose_db_version: %w", err)
+	}
+
+	stamped, err := gooseVersionExists(db, baselineVersionID)
+	if err != nil {
+		return err
+	}
+	if stamped {
+		return nil
+	}
+
+	// Bootstrap (version_id=0, is_applied=1) is the row goose itself
+	// inserts on first use of EnsureDBVersion. Insert OR IGNORE so
+	// concurrent boots (rare on a desktop binary, but cheap insurance)
+	// don't conflict if both racers reach this branch.
+	if _, err := db.Exec(
+		`INSERT OR IGNORE INTO goose_db_version (version_id, is_applied) VALUES (0, 1)`,
+	); err != nil {
+		return fmt.Errorf("insert goose bootstrap row: %w", err)
 	}
 	if _, err := db.Exec(
-		`INSERT INTO schema_migrations (version) VALUES (?)`, baselineVersion,
+		`INSERT OR IGNORE INTO goose_db_version (version_id, is_applied) VALUES (?, 1)`,
+		baselineVersionID,
 	); err != nil {
 		return fmt.Errorf("stamp baseline: %w", err)
 	}
-	log.Printf("[db] stamped baseline %s on existing install (no DDL executed)", baselineVersion)
+	log.Printf("[db] stamped goose baseline %d on existing install (legacy schema_migrations had rows)", baselineVersionID)
 	return nil
 }
 
-func listMigrationVersions() ([]string, error) {
-	entries, err := fs.ReadDir(migrationsFS, migrationsDir)
-	if err != nil {
-		return nil, fmt.Errorf("read migrations dir: %w", err)
+// legacyMigrationsHasRows reports whether the pre-goose
+// `schema_migrations` table exists AND contains at least one row.
+// Non-existence is silently false — the second probe (COUNT) only
+// runs once we know the table is there, so we never error on a fresh
+// install.
+func legacyMigrationsHasRows(db *sql.DB) (bool, error) {
+	var hasTable int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'`,
+	).Scan(&hasTable); err != nil {
+		return false, fmt.Errorf("probe sqlite_master for schema_migrations: %w", err)
 	}
-	versions := make([]string, 0, len(entries))
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || !strings.HasSuffix(name, ".sql") {
-			continue
-		}
-		versions = append(versions, strings.TrimSuffix(name, ".sql"))
+	if hasTable == 0 {
+		return false, nil
 	}
-	sort.Strings(versions)
-	return versions, nil
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&count); err != nil {
+		// A schema_migrations that exists but isn't queryable is
+		// genuinely broken — surface it rather than swallowing.
+		return false, fmt.Errorf("count schema_migrations: %w", err)
+	}
+	return count > 0, nil
 }
 
-func isApplied(db *sql.DB, version string) (bool, error) {
+// gooseVersionExists reports whether goose_db_version contains a row
+// for the given version_id. Used by importLegacyVersionsIfNeeded to
+// stay idempotent across boots.
+func gooseVersionExists(db *sql.DB, versionID int64) (bool, error) {
 	var n int
-	if err := db.QueryRow(
-		`SELECT COUNT(*) FROM schema_migrations WHERE version = ?`, version,
-	).Scan(&n); err != nil {
-		return false, err
+	err := db.QueryRow(
+		`SELECT COUNT(*) FROM goose_db_version WHERE version_id = ?`, versionID,
+	).Scan(&n)
+	if err != nil {
+		// First-ever boot may race the table-create; treat "no such
+		// table" as "no, it doesn't exist" so the caller falls through
+		// to creating + stamping.
+		if isNoSuchTableErr(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("count goose_db_version: %w", err)
 	}
 	return n > 0, nil
 }
 
-func applyMigration(db *sql.DB, version string) error {
-	body, err := migrationsFS.ReadFile(fmt.Sprintf("%s/%s.sql", migrationsDir, version))
-	if err != nil {
-		return fmt.Errorf("read %s.sql: %w", version, err)
+// MigrationStatus prints the per-migration applied/pending state to w.
+// Drives the `triagefactory migrate status` operator command. Calls
+// importLegacyVersionsIfNeeded first so an existing install (whose
+// goose_db_version was stamped lazily on its next server start)
+// reports correctly even when status is the first command invoked
+// after the goose cutover.
+func MigrationStatus(db *sql.DB, w io.Writer) error {
+	dialect := detectDialect(db)
+	if err := importLegacyVersionsIfNeeded(db, dialect); err != nil {
+		return fmt.Errorf("legacy import: %w", err)
 	}
-	tx, err := db.Begin()
+	treeFS, treeDir, err := migrationsFor(dialect)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
-	if _, err := tx.Exec(string(body)); err != nil {
-		return fmt.Errorf("exec: %w", err)
+	goose.SetBaseFS(treeFS)
+	if err := goose.SetDialect(dialect); err != nil {
+		return fmt.Errorf("set dialect %s: %w", dialect, err)
 	}
-	if _, err := tx.Exec(
-		`INSERT INTO schema_migrations (version) VALUES (?)`, version,
-	); err != nil {
-		return fmt.Errorf("record applied: %w", err)
+	// We render status ourselves rather than calling goose.Status —
+	// goose.Status prints to its own logger which we don't want to
+	// thread through the CLI. Quiet goose's chatty default logger so
+	// it doesn't mix into our output.
+	goose.SetLogger(goose.NopLogger())
+	migrations, err := goose.CollectMigrations(treeDir, 0, goose.MaxVersion)
+	if err != nil {
+		return fmt.Errorf("collect migrations: %w", err)
 	}
-	return tx.Commit()
+	current, err := goose.GetDBVersion(db)
+	if err != nil {
+		return fmt.Errorf("get db version: %w", err)
+	}
+	fmt.Fprintf(w, "    Applied At                  Migration\n")
+	fmt.Fprintf(w, "    =======================================\n")
+	for _, m := range migrations {
+		state := "Pending"
+		if m.Version <= current {
+			state = "Applied"
+		}
+		fmt.Fprintf(w, "    %-27s %s\n", state, m.Source)
+	}
+	fmt.Fprintf(w, "\n    db version: %d\n", current)
+	return nil
+}
+
+// isNoSuchTableErr matches the modernc.org/sqlite "no such table"
+// error. The driver doesn't expose a typed sentinel for this — error
+// strings are stable enough across versions to use as the probe.
+func isNoSuchTableErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	// modernc returns a wrapped sqlite3.Error whose message is
+	// "no such table: <name>". Substring match keeps the check
+	// robust to wrapping changes.
+	return errors.Is(err, sql.ErrNoRows) || strings.Contains(err.Error(), "no such table")
 }

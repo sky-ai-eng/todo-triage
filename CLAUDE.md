@@ -94,7 +94,7 @@ React 19 + Vite + TypeScript + Tailwind v4. Router routes live in `frontend/src/
 
 ## Conventions to know before editing
 
-- **Schema: use proper forward migrations.** `internal/db/db.go` (especially `Migrate`) is the source of truth for upgrades. Preserve existing user data across releases: add explicit, idempotent migration steps for schema changes (including `ALTER TABLE` when needed), and keep fresh-install `CREATE TABLE` definitions in sync with the post-migration shape. `scripts/clean-slate.sh` is dev-only and not a production upgrade path.
+- **Schema: goose-managed forward migrations.** New migrations land as `internal/db/migrations-sqlite/NNNNNNNNNNNN_description.sql` (12-digit `YYYYMMDDNNNN` version) with `-- +goose Up` / `-- +goose Down` markers. Down blocks are `SELECT 'down not supported';` no-ops — we don't ship downgrades for installed user-tools. The runner (`internal/db/migrations.go`) detects pre-goose installs via the legacy `schema_migrations` table and stamps them at the consolidated baseline (see `docs/specs/sky-245-d1-goose-migrations.html`); the legacy table is left in place as an audit trail. `scripts/clean-slate.sh` is dev-only and not a production upgrade path.
 - **Events catalog** is a read-only system registry seeded from `domain.AllEventTypes()` via `db.SeedEventTypes`. New event types must be added there *and* the events_catalog table will reject emissions of unregistered types (FK from `events.event_type`).
 - **System triggers ship disabled.** They're reference examples — users opt in or replace them. See `seed.go`.
 - **Go module path:** `github.com/sky-ai-eng/triage-factory`. The GitHub org is `sky-ai-eng`.

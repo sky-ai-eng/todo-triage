@@ -86,10 +86,12 @@ func buildSchemaBundle() (string, error) {
 		return "", err
 	}
 
-	// Seed rows: schema_migrations so a follow-up Migrate sees head;
+	// Seed rows: goose_db_version so a follow-up Migrate sees head
+	// (post-SKY-245 the runner is goose-managed; the legacy
+	// schema_migrations table is no longer created on fresh installs);
 	// events_catalog because it's the FK target for task_rules.event_type
 	// and prompt_triggers.event_type and many tests insert against it.
-	if err := dumpTableInserts(template, "schema_migrations", &b); err != nil {
+	if err := dumpTableInserts(template, "goose_db_version", &b); err != nil {
 		return "", err
 	}
 	if err := dumpTableInserts(template, "events_catalog", &b); err != nil {
