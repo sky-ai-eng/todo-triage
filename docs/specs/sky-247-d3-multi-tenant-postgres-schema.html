@@ -1026,7 +1026,7 @@ $$ <span class="kw">LANGUAGE SQL STABLE</span>;</pre>
       </tr>
       <tr>
         <td>Curator scope?</td>
-        <td>Per-user-per-project chat (creator-scoped). Project knowledge writes hit the org-shared <code>project_knowledge</code> table with last-write-wins on conflicts. v2 can elevate to shared chat sessions if usage shows it's wanted. Matches arch doc §10's default-private stance.</td>
+        <td>Per-user-per-project chat (creator-scoped). Project knowledge writes hit the org-shared <code>project_knowledge</code> table and use OCC: conflicting updates fail with SQLSTATE <code>40001</code> (caller retries), rather than last-write-wins. v2 can elevate to shared chat sessions if usage shows it's wanted. Matches arch doc §10's default-private stance.</td>
       </tr>
       <tr>
         <td>Jira status rules — org or per-project?</td>
