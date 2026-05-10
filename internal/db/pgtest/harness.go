@@ -249,10 +249,10 @@ var orgScopedTables = []string{
 	"prompts",
 	// users last — most other tables FK into it.
 	"users",
-	// NOT INCLUDED: system_prompt_versions, events_catalog. Both are
-	// global reference tables (no org_id), written only by migrations.
-	// Truncating them per-test would erase shipped seed data the
-	// moment we start populating either of them.
+	// NOT INCLUDED explicitly: system_prompt_versions, events_catalog.
+	// events_catalog survives Reset, but system_prompt_versions does not:
+	// TRUNCATE ... CASCADE reaches it transitively because it FK-depends
+	// on prompts, which is truncated above.
 }
 
 // Reset truncates all org-scoped tables (CASCADE follows FKs into
