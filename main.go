@@ -25,6 +25,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/projectclassify"
 	"github.com/sky-ai-eng/triage-factory/internal/repoprofile"
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server"
 	"github.com/sky-ai-eng/triage-factory/internal/skills"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
@@ -126,6 +127,16 @@ For configuration, polling, and feature details, see docs/usage.md.`)
 }
 
 func main() {
+	// Initialize the runtime mode flag (TF_MODE env, default local)
+	// as the first thing the binary does — every dispatched
+	// subcommand below runs after this so the package-level mode is
+	// set before any subsystem touches a path or opens a DB. SKY-248
+	// (D4a) only ships the mode flag; D4b adds the path resolvers
+	// that consume it (under a separate internal/paths package).
+	if err := runmode.InitFromEnv(); err != nil {
+		log.Fatalf("runmode: %v", err)
+	}
+
 	// Dual-mode dispatch:
 	//   exec/status — CLI-only, used by Claude Code agent.
 	//   resume      — user-facing, hands the terminal back into a
