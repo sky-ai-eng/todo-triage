@@ -427,22 +427,31 @@ dir := filepath.<span class="fn">Join</span>(home, <span class="str">".triagefac
 <span class="kw">func</span> <span class="fn">SetForTest</span>(t testing.TB, m Mode, root string)</pre>
 
   <h3>Resolution rules</h3>
+  <p>The "called by" column matters in multi mode because the architecture splits the binary into <strong>TF web tier</strong> (HTTP server, no <code>/data</code> mount, reads/writes Postgres + Vault only) and <strong>agent-runner</strong> (mounts <code>/data</code>, owns the worktree filesystem). D4 keeps a single <code>paths</code> package that serves both — the binary split itself is D8's job — but resolvers tagged "runner-only" must not be called from web-tier code in multi mode. Local mode is one binary, so the distinction collapses.</p>
   <table class="matrix">
-    <thead><tr><th style="width: 22%;">Function</th><th style="width: 39%;">Local mode</th><th>Multi mode</th></tr></thead>
+    <thead><tr><th style="width: 18%;">Function</th><th style="width: 30%;">Local mode</th><th style="width: 30%;">Multi mode</th><th>Called by (multi)</th></tr></thead>
     <tbody>
-      <tr><td><code>DBPath</code></td><td><code>~/.triagefactory/triagefactory.db</code></td><td>n/a — multi mode connects to Postgres via DSN, not a file path</td></tr>
-      <tr><td><code>SDKDir</code></td><td><code>~/.triagefactory/sdk/</code></td><td><code>/opt/triagefactory/sdk/</code> (set by D13's image)</td></tr>
-      <tr><td><code>LegacyConfigPath</code></td><td><code>~/.triagefactory/config.yaml</code></td><td>n/a — multi mode reads config from settings table only</td></tr>
-      <tr><td><code>WorktreeRoot(org)</code></td><td><code>~/.triagefactory/worktrees/</code></td><td><code>/data/orgs/&lt;org&gt;/worktrees/</code></td></tr>
-      <tr><td><code>RunRoot(org, run)</code></td><td><code>/tmp/triagefactory-runs/&lt;run&gt;/</code> (unchanged)</td><td><code>/data/orgs/&lt;org&gt;/worktrees/run-&lt;run&gt;/</code></td></tr>
-      <tr><td><code>TakeoverDir(org, run)</code></td><td><code>~/.triagefactory/takeovers/run-&lt;run&gt;/</code></td><td><strong>error</strong> — takeover requires user terminal access; not in v1 multi</td></tr>
-      <tr><td><code>BareCacheDir(org, owner, repo)</code></td><td><code>~/.triagefactory/worktrees/&lt;host&gt;/&lt;owner&gt;/&lt;repo&gt;.git/</code></td><td><code>/data/orgs/&lt;org&gt;/worktrees/&lt;host&gt;/&lt;owner&gt;/&lt;repo&gt;.git/</code></td></tr>
-      <tr><td><code>ProjectKBRoot(org, proj)</code></td><td><code>~/.triagefactory/projects/&lt;proj&gt;/knowledge-base/</code></td><td>n/a — multi mode stores KB in Postgres (<code>project_knowledge</code> table from D3); the resolver returns an error so a multi-mode caller that reaches for a filesystem KB knows it's a bug</td></tr>
+      <tr><td><code>DBPath</code></td><td><code>~/.triagefactory/triagefactory.db</code></td><td>error — multi connects via DSN, not a file</td><td>n/a</td></tr>
+      <tr><td><code>SDKDir</code></td><td><code>~/.triagefactory/sdk/</code></td><td><code>/opt/triagefactory/sdk/</code> (D13 image bakes it)</td><td>both — runner exec + web delegation hooks</td></tr>
+      <tr><td><code>LegacyConfigPath</code></td><td><code>~/.triagefactory/config.yaml</code></td><td>error — multi reads config from settings table</td><td>n/a</td></tr>
+      <tr><td><code>WorktreeRoot(org)</code></td><td><code>~/.triagefactory/worktrees/</code></td><td><code>/data/orgs/&lt;org&gt;/worktrees/</code></td><td><strong>runner-only</strong></td></tr>
+      <tr><td><code>RunRoot(org, run)</code></td><td><code>/tmp/triagefactory-runs/&lt;run&gt;/</code></td><td><code>/data/orgs/&lt;org&gt;/worktrees/run-&lt;run&gt;/</code> (gVisor-bind-mounted)</td><td><strong>runner-only</strong></td></tr>
+      <tr><td><code>TakeoverDir(org, run)</code></td><td><code>~/.triagefactory/takeovers/run-&lt;run&gt;/</code></td><td>error — takeover is local-mode-only in v1</td><td>n/a</td></tr>
+      <tr><td><code>BareCacheDir(org, host, owner, repo)</code></td><td><code>~/.triagefactory/worktrees/&lt;host&gt;/&lt;owner&gt;/&lt;repo&gt;.git/</code></td><td><code>/data/orgs/&lt;org&gt;/worktrees/&lt;host&gt;/&lt;owner&gt;/&lt;repo&gt;.git/</code></td><td><strong>runner-only</strong></td></tr>
+      <tr><td><code>ProjectKBRoot(org, proj)</code></td><td><code>~/.triagefactory/projects/&lt;proj&gt;/knowledge-base/</code></td><td>error — KB lives in Postgres (<code>project_knowledge</code>, D3)</td><td>n/a</td></tr>
     </tbody>
   </table>
 
   <div class="callout">
+    <strong>What's in <code>/data/orgs/&lt;org&gt;/</code> in v1:</strong> just <code>worktrees/</code>. Bare clones (shared across runs in the org) plus per-run dirs (<code>run-&lt;uuid&gt;/</code>, gVisor-bind-mounted as <code>/work</code>). No <code>projects/</code>, no <code>takeovers/</code>, no <code>sdk/</code>, no DB file. KB, memories, sessions, secrets — all in Postgres + Vault. The volume holds <em>only</em> the operational filesystem state git tools and the sandbox need to touch as files. If a future ticket adds something to the volume, that's a deliberate decision (and probably means we got the storage model wrong).
+  </div>
+
+  <div class="callout">
     <strong>Why <code>orgID</code> is mandatory in local mode too:</strong> if the function lets local-mode callers pass empty / omit, two code paths drift. Every store-layer call (D2) takes an orgID anyway — the SQLite impl just asserts it's <code>"default"</code>. Pushing the same convention into <code>paths</code> means D2's call sites are uniform, and there's nowhere local-mode can <em>forget</em> to pass org context as it gets ported toward multi.
+  </div>
+
+  <div class="callout callout--warn">
+    <strong>The web/runner split is D8's territory.</strong> Today, all worktree-touching code (<code>internal/worktree/</code>, <code>internal/delegate/</code>) lives in the same binary that serves HTTP. In multi mode that's wrong — web tier has no <code>/data</code> mount, so calling <code>WorktreeRoot</code> from a web-tier code path would resolve to a directory the process can't see. D4 doesn't move any code between binaries; it just establishes the API. D8 (gVisor sandbox + agent-runner service) decides whether the runner becomes a separate <code>cmd/agent-runner/</code> binary or a <code>TF_ROLE=agent-runner</code> mode of the same binary, and migrates the worktree-touching files into the runner's domain. Until then: docstrings on each runner-only resolver call out the constraint, and code review enforces.
   </div>
 </section>
 
@@ -608,6 +617,7 @@ mode := paths.<span class="fn">ModeFromEnv</span>(os.<span class="fn">Getenv</sp
     <li><strong>Postgres DSN / connection-string handling</strong> — that's whatever ticket plumbs <code>db.Open()</code>'s multi-mode branch (<code>OpenPostgres(dsn)</code> from D3 / D6). <code>paths</code> doesn't speak DSNs; <code>DBPath</code> errors out in multi.</li>
     <li><strong>Org context in request handlers</strong> — D9 (Org-scoping pass) extracts <code>org_id</code> from URL paths via Go 1.22 pattern routing. D4 just gives the resolver the function shape; D9 fills in real values.</li>
     <li><strong>Filesystem migration of existing local installs</strong> — local mode's resolved paths are byte-identical to today's (orgID stripped, no <code>orgs/default/</code> segment). No on-disk data movement, no upgrade hook.</li>
+    <li><strong>Binary split between TF web tier and agent-runner</strong> — D8 owns that. D4 establishes the orgID-bearing API both halves will consume; the actual <code>git mv internal/worktree/ cmd/agent-runner/</code> (or whatever shape D8 picks) happens later. Until then, runner-only resolvers in multi mode are enforced by docstring + review, not by the type system.</li>
   </ul>
 </section>
 
