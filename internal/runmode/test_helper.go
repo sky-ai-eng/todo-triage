@@ -1,33 +1,52 @@
 package runmode
 
-import (
-	"testing"
-)
+// TestT is the minimal slice of *testing.T / *testing.B that
+// SetForTest needs. Defining it locally lets this file decline to
+// import the standard-library "testing" package — keeping production
+// builds of internal/runmode clean of the testing-package surface
+// area. *testing.T and *testing.B both satisfy this interface
+// implicitly (Go's structural typing), so callers pass them directly
+// without an adapter.
+type TestT interface {
+	Helper()
+	Cleanup(func())
+	Fatalf(format string, args ...any)
+}
 
 // SetForTest swaps the process mode for the duration of t and
-// restores the previous value via t.Cleanup. Access to currentMode
-// goes through modeMu, so this helper is data-race-free, but it is
-// not safe for overlapping parallel tests: it mutates shared global
-// state, so concurrent callers can still interfere logically. Tests
-// that call SetForTest must avoid running in parallel with each other
-// or otherwise serialize their use of the helper.
+// restores the previous (currentMode, initialized) pair via
+// t.Cleanup. Access to package state goes through modeMu so this
+// helper is data-race-free, but it is not safe for overlapping
+// parallel tests: it mutates shared global state, so concurrent
+// callers can still interfere logically. Tests that call SetForTest
+// must avoid running in parallel with each other or otherwise
+// serialize their use of the helper.
+//
+// Sets initialized=true so any subsequent Init call inside the test
+// follows the production "already initialized" branches (idempotent
+// on same mode, error on conflict). Tests that specifically want to
+// exercise Init's first-call branch can save+restore initialized
+// directly within the test body, since they're whitebox tests in
+// package runmode.
 //
 // Lives in a non-_test.go file so consumers' test packages can call
-// it (a _test.go file would only be visible to runmode_test). The
-// testing import this brings into the package is dependency-free
-// and doesn't bloat production builds.
-func SetForTest(t testing.TB, m Mode) {
+// it — a _test.go file would only be visible to runmode_test. The
+// local TestT interface (see above) keeps the testing-package import
+// out of production builds.
+func SetForTest(t TestT, m Mode) {
 	t.Helper()
 	if m != ModeLocal && m != ModeMulti {
 		t.Fatalf("runmode.SetForTest: unknown mode %q", m)
 	}
 	modeMu.Lock()
-	prev := currentMode
+	prevMode, prevInit := currentMode, initialized
 	currentMode = m
+	initialized = true
 	modeMu.Unlock()
 	t.Cleanup(func() {
 		modeMu.Lock()
-		currentMode = prev
+		currentMode = prevMode
+		initialized = prevInit
 		modeMu.Unlock()
 	})
 }

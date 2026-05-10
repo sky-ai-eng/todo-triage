@@ -15,9 +15,11 @@ func TestModeFromEnv(t *testing.T) {
 		{"local", ModeLocal, false},
 		{"Local", ModeLocal, false},
 		{"LOCAL", ModeLocal, false},
+		{"LoCaL", ModeLocal, false}, // arbitrary mixed case
 		{"multi", ModeMulti, false},
 		{"Multi", ModeMulti, false},
 		{"MULTI", ModeMulti, false},
+		{"MuLtI", ModeMulti, false},
 		{"multi-tenant", "", true},
 		{"prod", "", true},
 		{" local ", "", true}, // exact match — no whitespace tolerance
@@ -54,29 +56,68 @@ func TestCurrent_DefaultsToLocal(t *testing.T) {
 	}
 }
 
-func TestInit_AcceptsValidModes(t *testing.T) {
-	// Use SetForTest to snapshot+restore so the test doesn't leak
-	// the post-Init state into other tests.
-	SetForTest(t, ModeLocal)
+// withCleanInit clears the init flag for the duration of the test and
+// restores the previous state on cleanup. Used by tests that exercise
+// Init's first-call branch — without this, test-suite ordering would
+// determine whether Init's been called by the time we run.
+func withCleanInit(t *testing.T) {
+	t.Helper()
+	modeMu.Lock()
+	prevMode, prevInit := currentMode, initialized
+	currentMode = ModeLocal
+	initialized = false
+	modeMu.Unlock()
+	t.Cleanup(func() {
+		modeMu.Lock()
+		currentMode = prevMode
+		initialized = prevInit
+		modeMu.Unlock()
+	})
+}
 
-	if err := Init(ModeLocal); err != nil {
-		t.Errorf("Init(ModeLocal) errored: %v", err)
-	}
-	if got := Current(); got != ModeLocal {
-		t.Errorf("after Init(ModeLocal), Current() = %q", got)
-	}
-
+func TestInit_FirstCall(t *testing.T) {
+	withCleanInit(t)
 	if err := Init(ModeMulti); err != nil {
-		t.Errorf("Init(ModeMulti) errored: %v", err)
+		t.Errorf("Init(ModeMulti) errored on clean slate: %v", err)
 	}
 	if got := Current(); got != ModeMulti {
 		t.Errorf("after Init(ModeMulti), Current() = %q", got)
 	}
 }
 
-func TestInit_RejectsUnknown(t *testing.T) {
-	SetForTest(t, ModeLocal)
+func TestInit_IdempotentOnSameMode(t *testing.T) {
+	withCleanInit(t)
+	if err := Init(ModeLocal); err != nil {
+		t.Fatalf("first Init: %v", err)
+	}
+	if err := Init(ModeLocal); err != nil {
+		t.Errorf("second Init with same mode should be a no-op, errored: %v", err)
+	}
+	if got := Current(); got != ModeLocal {
+		t.Errorf("Current() = %q after double-Init(local), want %q", got, ModeLocal)
+	}
+}
 
+func TestInit_RejectsConflictingReInit(t *testing.T) {
+	withCleanInit(t)
+	if err := Init(ModeLocal); err != nil {
+		t.Fatalf("first Init: %v", err)
+	}
+	err := Init(ModeMulti)
+	if err == nil {
+		t.Fatalf("second Init with different mode should have errored")
+	}
+	if !strings.Contains(err.Error(), "already initialized") {
+		t.Errorf("error should mention 'already initialized'; got %q", err.Error())
+	}
+	// Crucially: state must NOT have been mutated.
+	if got := Current(); got != ModeLocal {
+		t.Errorf("after rejected re-init, Current() = %q (must be unchanged)", got)
+	}
+}
+
+func TestInit_RejectsUnknown(t *testing.T) {
+	withCleanInit(t)
 	err := Init(Mode("bogus"))
 	if err == nil {
 		t.Fatalf("Init(Mode(\"bogus\")) should have errored")
@@ -84,7 +125,6 @@ func TestInit_RejectsUnknown(t *testing.T) {
 	if !strings.Contains(err.Error(), "bogus") {
 		t.Errorf("error message should reference the bad value; got %q", err.Error())
 	}
-	// Mode must not have been mutated by the failed Init.
 	if got := Current(); got != ModeLocal {
 		t.Errorf("after rejected Init, Current() = %q (must be unchanged)", got)
 	}
@@ -108,5 +148,20 @@ func TestSetForTest_RestoresAfter(t *testing.T) {
 
 	if got := Current(); got != ModeLocal {
 		t.Errorf("after subtest restore: Current() = %q, want %q", got, ModeLocal)
+	}
+}
+
+// TestSetForTest_FlipsInitialized confirms SetForTest treats the test
+// as "post-init", so a subsequent Init follows the conflict / idempotent
+// branches rather than the first-call branch.
+func TestSetForTest_FlipsInitialized(t *testing.T) {
+	SetForTest(t, ModeLocal)
+	// Init with the same mode is the idempotent case.
+	if err := Init(ModeLocal); err != nil {
+		t.Errorf("Init(ModeLocal) after SetForTest(local) should be idempotent, errored: %v", err)
+	}
+	// Init with a different mode is the conflict case.
+	if err := Init(ModeMulti); err == nil {
+		t.Errorf("Init(ModeMulti) after SetForTest(local) should error, got nil")
 	}
 }

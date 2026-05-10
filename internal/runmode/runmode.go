@@ -25,6 +25,7 @@ package runmode
 import (
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 )
 
@@ -53,35 +54,61 @@ const (
 // literal string so a future rename stays grep-able.
 const LocalDefaultOrg = "default"
 
-// currentMode holds the process-wide mode after Init runs. The init()
-// default is ModeLocal so unit tests that don't bother calling Init
-// behave like a local install. Reads are unsynchronized — Init only
-// runs at startup before any goroutine spawns, and Go's memory model
-// guarantees the init-time write is visible. SetForTest mutates this
-// under a t.Cleanup so test-suite parallelism stays safe.
+// currentMode + initialized + modeMu form the package's mutable state.
+// Reads through Current() take an RLock — cheap, contention-free for
+// readers — so that SetForTest (which writes from test goroutines, in
+// parallel suites) is provably race-free against Current()'s reads.
+// Production reads are infrequent enough that the RLock overhead is
+// noise; we trade a few nanoseconds for the simpler reasoning.
+//
+// initialized tracks whether Init has been called in production. It
+// starts false; Init flips it true. SetForTest snapshots both fields
+// and restores them via t.Cleanup, so tests can flip state freely
+// without leaking into other tests or into a subsequent Init call.
 var (
-	currentMode Mode         = ModeLocal
-	modeMu      sync.RWMutex // guards currentMode for SetForTest's parallel-test use
+	currentMode Mode = ModeLocal
+	initialized bool
+	modeMu      sync.RWMutex
 )
 
-// Current returns the active mode. Always safe to call.
+// Current returns the active mode. Always safe to call from any
+// goroutine.
 func Current() Mode {
 	modeMu.RLock()
 	defer modeMu.RUnlock()
 	return currentMode
 }
 
-// Init sets the process-wide mode. Returns an error if m is not a
-// known Mode value. Production code should call this exactly once at
-// startup (via InitFromEnv); tests use SetForTest instead so the
-// previous value is restored on cleanup.
+// Init sets the process-wide mode. Production code calls this exactly
+// once, at the top of main(), via InitFromEnv. The contract:
+//
+//   - First call with a valid mode → sets currentMode, returns nil.
+//   - Subsequent call with the SAME mode → idempotent no-op, returns
+//     nil (so a stray double-init from cmd dispatch wouldn't fatal).
+//   - Subsequent call with a DIFFERENT mode → returns an error
+//     without mutating state. Catches accidental "let me re-init
+//     mid-run" bugs that would otherwise silently flip behavior under
+//     subsystems that already cached the original value.
+//   - Unknown Mode value → returns an error.
+//
+// Tests should use SetForTest instead so the cleanup restores the
+// previous (initialized, currentMode) pair. SetForTest also flips
+// initialized=true so a test's downstream Init calls follow the
+// idempotent / conflict branches above (predictable).
 func Init(m Mode) error {
 	if m != ModeLocal && m != ModeMulti {
 		return fmt.Errorf("unknown mode %q (want %q or %q)", m, ModeLocal, ModeMulti)
 	}
 	modeMu.Lock()
+	defer modeMu.Unlock()
+	if initialized {
+		if currentMode == m {
+			return nil
+		}
+		return fmt.Errorf("already initialized as %q; cannot re-init as %q", currentMode, m)
+	}
 	currentMode = m
-	modeMu.Unlock()
+	initialized = true
 	return nil
 }
 
@@ -102,13 +129,17 @@ func InitFromEnv() error {
 
 // ModeFromEnv parses a TF_MODE env-var string into a Mode. Empty
 // string maps to ModeLocal (the safe default); known values map to
-// their constants; anything else errors. Case-insensitive on the
-// known values to be forgiving of "Local" / "MULTI" typos.
+// their constants; anything else errors. Case-insensitive (any
+// mixed-case spelling of "local" / "multi" works) but not
+// whitespace-tolerant — operators that pass " local " typo'd a
+// space and we surface it rather than silently accept.
 func ModeFromEnv(s string) (Mode, error) {
-	switch s {
-	case "", "local", "Local", "LOCAL":
+	switch strings.ToLower(s) {
+	case "":
 		return ModeLocal, nil
-	case "multi", "Multi", "MULTI":
+	case "local":
+		return ModeLocal, nil
+	case "multi":
 		return ModeMulti, nil
 	default:
 		return "", fmt.Errorf("unknown TF_MODE=%q (want %q or %q, or empty for local)", s, ModeLocal, ModeMulti)
