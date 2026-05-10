@@ -12,7 +12,7 @@ import (
 
 // TestBootstrapSchemaForTest_MatchesMigrateAndSeed pins the cached
 // bootstrap path to the real Migrate + SeedEventTypes path. The cached
-// bundle only snapshots sqlite_master, schema_migrations, and
+// bundle only snapshots sqlite_master, goose_db_version, and
 // events_catalog — so a future migration that starts inserting required
 // rows into any other table (e.g. a defaults table, a settings row)
 // will silently diverge from the real bootstrap and most tests will
@@ -66,11 +66,11 @@ func TestBootstrapSchemaForTest_MatchesMigrateAndSeed(t *testing.T) {
 		t.Errorf("events_catalog content differs.\ncached: %v\nreal:   %v", got, want)
 	}
 
-	// 5. schema_migrations versions must match (applied_at is wall-clock
-	//    so we ignore it, but the set of recorded versions must be
+	// 5. goose_db_version contents must match (tstamp is wall-clock
+	//    so we ignore it, but the set of recorded version_ids must be
 	//    identical — head check on both sides).
 	if got, want := dumpMigrationVersions(t, cached), dumpMigrationVersions(t, real); !reflect.DeepEqual(got, want) {
-		t.Errorf("schema_migrations versions differ.\ncached: %v\nreal:   %v", got, want)
+		t.Errorf("goose_db_version versions differ.\ncached: %v\nreal:   %v", got, want)
 	}
 }
 
@@ -175,18 +175,21 @@ func dumpEventsCatalog(t *testing.T, db *sql.DB) []string {
 
 func dumpMigrationVersions(t *testing.T, db *sql.DB) []string {
 	t.Helper()
-	rows, err := db.Query(`SELECT version FROM schema_migrations ORDER BY version`)
+	rows, err := db.Query(`SELECT version_id, is_applied FROM goose_db_version ORDER BY version_id`)
 	if err != nil {
-		t.Fatalf("dump schema_migrations: %v", err)
+		t.Fatalf("dump goose_db_version: %v", err)
 	}
 	defer rows.Close()
 	var out []string
 	for rows.Next() {
-		var v string
-		if err := rows.Scan(&v); err != nil {
+		var (
+			version   int64
+			isApplied int
+		)
+		if err := rows.Scan(&version, &isApplied); err != nil {
 			t.Fatalf("scan: %v", err)
 		}
-		out = append(out, v)
+		out = append(out, fmt.Sprintf("%d:%d", version, isApplied))
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatalf("rows: %v", err)
