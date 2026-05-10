@@ -221,8 +221,8 @@ func TestRLS_CrossOrgIsolation(t *testing.T) {
 	})
 	if err == nil {
 		t.Errorf("alice INSERT into orgB tasks did not fail — RLS WITH CHECK broken")
-	} else if !strings.Contains(err.Error(), "row-level security") {
-		t.Errorf("expected RLS violation, got: %v", err)
+	} else {
+		assertPgCode(t, err, "42501", "alice INSERT into orgB tasks")
 	}
 
 	// Bob in orgB sees only taskB.
@@ -1197,8 +1197,8 @@ func TestRLS_OrgBootstrap(t *testing.T) {
 		`, alice)
 		if err == nil {
 			t.Errorf("dave created an org owned by alice — orgs_insert policy too loose")
-		} else if !strings.Contains(err.Error(), "row-level security") {
-			t.Errorf("expected RLS violation, got: %v", err)
+		} else {
+			assertPgCode(t, err, "42501", "dave cross-owner org INSERT")
 		}
 		return struct{}{}
 	})
@@ -1381,9 +1381,7 @@ func TestFK_CrossOrgRejected(t *testing.T) {
 	if err == nil {
 		t.Fatalf("cross-org task INSERT succeeded — composite FK broken")
 	}
-	if !strings.Contains(err.Error(), "foreign key constraint") {
-		t.Errorf("err = %v, want foreign key violation", err)
-	}
+	assertPgCode(t, err, "23503", "cross-org task→entity FK")
 
 	// Same shape: try to INSERT an event in orgA referencing
 	// entityB. Composite FK rejects.
@@ -1530,8 +1528,9 @@ func TestOrgOwnership_LastOwnerProtected(t *testing.T) {
 	)
 	if err == nil {
 		t.Errorf("demoting sole owner succeeded — invariant broken")
-	} else if !strings.Contains(err.Error(), "at least one owner") {
-		t.Errorf("expected owner-invariant error, got: %v", err)
+	} else {
+		// 23514 = check_violation (our trigger raises this).
+		assertPgCode(t, err, "23514", "demote sole owner")
 	}
 
 	// Deleting the sole owner must fail.
@@ -1577,9 +1576,8 @@ func TestOrgOwnership_OnlyOwnerCanTransfer(t *testing.T) {
 	if err == nil {
 		t.Fatalf("org admin (not owner) transferred ownership — privilege escalation")
 	}
-	if !strings.Contains(err.Error(), "current org owner") {
-		t.Errorf("expected only-owner-can-transfer error, got: %v", err)
-	}
+	// 42501 = insufficient_privilege (our trigger raises this).
+	assertPgCode(t, err, "42501", "non-owner ownership transfer")
 
 	// Alice (the actual owner) needs bob to already have 'owner'
 	// role in org_memberships before transferring. Without that,
@@ -1627,8 +1625,8 @@ func TestVisibilityCheck_TeamRequiresTeamID(t *testing.T) {
 	if pgErr.Code != "23514" {
 		t.Fatalf("expected SQLSTATE 23514 (check_violation), got %q: %v", pgErr.Code, err)
 	}
-	if pgErr.ConstraintName != "team_visibility_requires_team" {
-		t.Errorf("expected constraint team_visibility_requires_team, got %q", pgErr.ConstraintName)
+	if pgErr.ConstraintName != "prompts_team_visibility_requires_team" {
+		t.Errorf("expected constraint prompts_team_visibility_requires_team, got %q", pgErr.ConstraintName)
 	}
 }
 
@@ -2052,6 +2050,26 @@ func getEventForEntity(t *testing.T, h *Harness, entityID string) string {
 		t.Fatalf("get event for entity %s: %v", entityID, err)
 	}
 	return id
+}
+
+// assertPgCode asserts that err is a *pgconn.PgError with the given
+// SQLSTATE. Postgres error message text drifts across versions, but
+// SQLSTATE codes are spec-stable — assert codes, not text. The
+// `what` arg is just a label for the failure message.
+func assertPgCode(t *testing.T, err error, code, what string) {
+	t.Helper()
+	if err == nil {
+		t.Errorf("%s: got nil error, want SQLSTATE %s", what, code)
+		return
+	}
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		t.Errorf("%s: err is not *pgconn.PgError: %v", what, err)
+		return
+	}
+	if pgErr.Code != code {
+		t.Errorf("%s: SQLSTATE = %s (msg %q), want %s", what, pgErr.Code, pgErr.Message, code)
+	}
 }
 
 func mustExec(t *testing.T, db *sql.DB, query string, args ...any) {

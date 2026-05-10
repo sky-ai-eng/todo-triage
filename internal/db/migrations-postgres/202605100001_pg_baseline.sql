@@ -4,15 +4,17 @@
 -- Targets the supabase/postgres:15.1.0.147 image, which pre-creates the
 -- auth + vault + extensions schemas and pre-loads supabase_vault,
 -- pgsodium, pgcrypto, pgjwt, uuid-ossp, pg_graphql via
--- shared_preload_libraries. We only issue `CREATE EXTENSION IF NOT
--- EXISTS supabase_vault` defensively (§c below); it's a no-op against
--- the image but makes the migration safer against future images that
--- drop the preload. All other extensions are taken as already-loaded
--- — pgsodium is referenced only transitively via the vault.* wrappers,
--- and gen_random_uuid() is built into Postgres 15 itself (it moved
--- from pgcrypto into the core in PG 13), so we don't need a defensive
--- CREATE EXTENSION pgcrypto either. If we ever target a non-supabase
--- Postgres image, this preamble grows.
+-- shared_preload_libraries.
+--
+-- The migration's only explicit extension dependency is supabase_vault
+-- (CREATE EXTENSION IF NOT EXISTS issued defensively below). Other
+-- functions we call:
+--   - gen_random_uuid(): core PG 13+ function (lives in pg_catalog, not
+--     pgcrypto, since PG 13). Our floor is PG 15; no extension needed.
+--   - pgsodium: referenced only transitively via the vault.* wrappers,
+--     which the image loads via shared_preload_libraries.
+-- If we ever target Postgres < 13 or a non-supabase image without
+-- pgcrypto preloaded, this preamble grows.
 --
 -- Structure (mirrors spec §10 step 3):
 --   (a) tf schema
