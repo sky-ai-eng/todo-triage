@@ -377,10 +377,10 @@ footer {
   <h2>Target state</h2>
   <p>One goose baseline migration in <code>internal/db/migrations-postgres/</code> brings a fresh Postgres up to a multi-tenant-ready schema. <code>goose.Up</code> against an empty Postgres DB produces:</p>
   <ul class="tight">
-    <li><strong>Roles:</strong> <code>tf_app</code> (the role the application will connect as — no superuser, no <code>BYPASSRLS</code>).</li>
-    <li><strong>Extensions:</strong> <code>pgcrypto</code> (for <code>gen_random_uuid()</code>), <code>supabase_vault</code> (for Vault wrappers).</li>
-    <li><strong>Schemas:</strong> <code>tf</code> (RLS helper functions live here), <code>auth</code> stub (a minimal <code>auth.users</code> placeholder so our FKs resolve when GoTrue isn't running yet — see §4 callout).</li>
-    <li><strong>Tenancy tables:</strong> <code>orgs</code>, <code>teams</code>, <code>memberships</code>, <code>org_invites</code>, <code>users</code> (mirror of <code>auth.users</code>), <code>sessions</code>, <code>integrations</code>, <code>org_limits</code>, <code>project_knowledge</code>.</li>
+    <li><strong>Roles:</strong> <code>tf_app</code> (the role the application will connect as — no superuser, no <code>BYPASSRLS</code>). The image ships with <code>service_role</code> already, but it has <code>BYPASSRLS=true</code> by default, which would defeat the entire RLS posture. We keep our own role so the supabase-default services don't accidentally inherit our enforcement model.</li>
+    <li><strong>Extensions:</strong> <code>supabase_vault</code>, <code>pgsodium</code>, <code>pgcrypto</code>, <code>pg_graphql</code>, <code>pgjwt</code>, <code>uuid-ossp</code> are <strong>already loaded</strong> by the supabase/postgres image. Our migration calls <code>CREATE EXTENSION IF NOT EXISTS supabase_vault</code> defensively but it's a no-op in practice.</li>
+    <li><strong>Schemas:</strong> <code>tf</code> (RLS helper functions live here). <code>auth</code> + <code>vault</code> + <code>storage</code> + <code>graphql</code> + <code>realtime</code> + <code>extensions</code> are pre-created by the image — we don't touch them beyond FK references.</li>
+    <li><strong>Tenancy tables:</strong> <code>orgs</code>, <code>teams</code>, <code>memberships</code>, <code>org_invites</code>, <code>users</code> (mirror of <code>auth.users</code>; FK to <code>auth.users(id)</code> resolves natively because the image ships the full GoTrue schema), <code>sessions</code>, <code>integrations</code>, <code>org_limits</code>, <code>project_knowledge</code>.</li>
     <li><strong>Vault wrappers:</strong> three SECURITY INVOKER functions (<code>vault_put_org_secret</code>, <code>vault_get_org_secret</code>, <code>vault_delete_org_secret</code>) + revoked-from-PUBLIC + granted to <code>tf_app</code>.</li>
     <li><strong>RLS helpers:</strong> <code>tf.current_user_id()</code>, <code>tf.current_org_id()</code>, <code>tf.user_has_org_access(target_org)</code>.</li>
     <li><strong>TF tables (multi shape):</strong> every table from the SQLite baseline recreated with <code>org_id NOT NULL REFERENCES orgs(id) ON DELETE CASCADE</code> + (where applicable) <code>creator_user_id</code>, <code>visibility</code>, <code>team_id</code> baked in. SQLite-isms translated: <code>TEXT PRIMARY KEY</code> → <code>UUID PRIMARY KEY DEFAULT gen_random_uuid()</code>, <code>TEXT</code> JSON columns → <code>JSONB</code>, <code>BOOLEAN</code> stays, <code>DATETIME</code> → <code>TIMESTAMPTZ</code>, autoincrement → <code>BIGSERIAL</code>.</li>
@@ -396,21 +396,16 @@ footer {
   <h2>Tenancy schema</h2>
   <p class="lede">Identity, orgs, teams, memberships, sessions, integrations. Verbatim translation of the architecture doc §5 schema with light commentary on why each choice.</p>
 
-  <h3>Auth schema dependency</h3>
-  <div class="callout callout--warn">
-    <strong>The GoTrue split.</strong> Our <code>users</code> table FKs <code>id → auth.users(id) ON DELETE CASCADE</code>. GoTrue (D6) creates the <code>auth</code> schema on first boot; in production deployments GoTrue starts before the TF web tier so <code>auth.users</code> exists. For tests and standalone Postgres bootstrap, the migration creates a minimal <code>auth.users</code> stub (<code>CREATE SCHEMA IF NOT EXISTS auth; CREATE TABLE IF NOT EXISTS auth.users (id UUID PRIMARY KEY, email TEXT)</code>) so the FK resolves. When GoTrue layers in, its full schema is a superset — the stub columns are forward-compatible.
+  <h3>What the image gives us free</h3>
+  <div class="callout callout--good">
+    <strong>Verified against <code>supabase/postgres:15.1.0.147</code>:</strong> the image's init scripts pre-create the full GoTrue <code>auth</code> schema (<code>auth.users</code>, <code>auth.refresh_tokens</code>, <code>auth.audit_log_entries</code>, <code>auth.instances</code>, <code>auth.schema_migrations</code>) before any service connects. Our <code>users.id REFERENCES auth.users(id) ON DELETE CASCADE</code> resolves natively at goose.Up time. <strong>No stub needed.</strong> When GoTrue boots, it owns the schema going forward and our FKs continue to work because the image-installed schema matches what GoTrue expects.
   </div>
 
   <h3>Schema sketch</h3>
-<pre class="code"><span class="com">-- tf-namespaced helpers + a minimal auth stub for standalone bootstrap</span>
+<pre class="code"><span class="com">-- tf-namespaced helpers (auth + vault + storage are image-provided)</span>
 <span class="kw">CREATE SCHEMA IF NOT EXISTS</span> tf;
-<span class="kw">CREATE SCHEMA IF NOT EXISTS</span> auth;
-<span class="kw">CREATE TABLE IF NOT EXISTS</span> auth.users (
-  id    <span class="kw">UUID PRIMARY KEY</span>,
-  email <span class="kw">TEXT</span>
-);
 
-<span class="com">-- our user mirror — FK to auth.users for cascade-on-delete</span>
+<span class="com">-- our user mirror — FK resolves because the image ships auth.users pre-created</span>
 <span class="kw">CREATE TABLE</span> users (
   id            <span class="kw">UUID PRIMARY KEY REFERENCES</span> auth.users(id) <span class="kw">ON DELETE CASCADE</span>,
   display_name  <span class="kw">TEXT</span>,
@@ -478,7 +473,8 @@ footer {
   <h2>Vault wrappers</h2>
   <p class="lede">Three SECURITY INVOKER functions in <code>public</code> that the Go backend calls. Org-prefixed naming (<code>org/&lt;uuid&gt;/&lt;key&gt;</code>) makes leakage between orgs structurally impossible at the Vault layer.</p>
 
-<pre class="code"><span class="kw">CREATE EXTENSION IF NOT EXISTS</span> supabase_vault <span class="kw">WITH SCHEMA</span> vault;
+<pre class="code"><span class="com">-- supabase_vault is pre-loaded by the image; this is defensive only</span>
+<span class="kw">CREATE EXTENSION IF NOT EXISTS</span> supabase_vault <span class="kw">WITH SCHEMA</span> vault;
 
 <span class="kw">CREATE OR REPLACE FUNCTION</span> public.vault_put_org_secret(
   p_org_id     <span class="kw">UUID</span>,
@@ -691,7 +687,7 @@ $$ <span class="kw">LANGUAGE SQL STABLE</span>;</pre>
     </li>
     <li>
       <span class="step-title">Author the Postgres baseline</span>
-      <span class="step-body">Single goose migration <code>internal/db/migrations-postgres/202605100001_pg_baseline.sql</code> with the full DDL: extensions, schemas (<code>tf</code>, <code>auth</code> stub), <code>tf_app</code> role, tenancy tables, Vault wrappers, RLS helpers, all TF tables in multi shape, RLS policies on every org-scoped table. Use <code>-- +goose Up</code> / <code>-- +goose Down</code> markers; Down is <code>SELECT 'down not supported';</code>. Use <code>-- +goose StatementBegin/End</code> blocks for the plpgsql function bodies (they contain semicolons goose's parser would otherwise split on).</span>
+      <span class="step-body">Single goose migration <code>internal/db/migrations-postgres/202605100001_pg_baseline.sql</code>. The image hands us extensions + auth/vault schemas pre-created, so the file's responsibilities narrow to: <code>CREATE SCHEMA IF NOT EXISTS tf</code>, <code>CREATE ROLE tf_app</code> (idempotent via <code>DO $$ ... $$</code>), tenancy tables, Vault wrapper functions over <code>vault.create_secret</code> with org-prefixed naming, RLS helpers in the <code>tf</code> schema, all TF tables in multi shape, RLS policies on every org-scoped table. Use <code>-- +goose Up</code> / <code>-- +goose Down</code> markers; Down is <code>SELECT 'down not supported';</code>. Use <code>-- +goose StatementBegin/End</code> blocks for the plpgsql function bodies (they contain semicolons goose's parser would otherwise split on).</span>
     </li>
     <li>
       <span class="step-title">Build the Postgres test harness</span>
@@ -730,14 +726,9 @@ $$ <span class="kw">LANGUAGE SQL STABLE</span>;</pre>
     <thead><tr><th style="width: 28%;">Question</th><th style="width: 36%;">Default if no answer</th><th>Why it matters</th></tr></thead>
     <tbody>
       <tr>
-        <td>Does GoTrue own <code>auth.users</code>, or do we stub it?</td>
-        <td>Stub a minimal <code>auth.users</code> in our migration. GoTrue's full schema is a superset of our stub.</td>
-        <td>If we don't stub, fresh-Postgres bootstrap requires GoTrue to run first — couples test setup to GoTrue and complicates D6's sequencing.</td>
-      </tr>
-      <tr>
-        <td>Does the goose migration <code>CREATE ROLE tf_app</code>, or is that a deployment-script concern?</td>
-        <td>Migration creates the role idempotently (<code>DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'tf_app') THEN CREATE ROLE tf_app NOLOGIN; END IF; END $$;</code>).</td>
-        <td>Postgres roles are cluster-global, not per-DB. If the migration creates them, two parallel <code>goose.Up</code> against the same cluster could conflict — the IF NOT EXISTS guard handles that.</td>
+        <td>Use the image-shipped <code>service_role</code> as our app role, or create our own <code>tf_app</code>?</td>
+        <td>Create <code>tf_app NOLOGIN BYPASSRLS=false</code> in the migration. Image's <code>service_role</code> defaults to <code>BYPASSRLS=true</code> — defeats the whole RLS posture. Keeping our own role means other supabase services in the stack (PostgREST, Realtime) don't accidentally inherit our enforcement boundary, and we don't have to flip a default supabase role to a non-default setting.</td>
+        <td>Postgres roles are cluster-global, not per-DB. Migration role creation uses <code>DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'tf_app') THEN CREATE ROLE tf_app NOLOGIN; END IF; END $$;</code> for idempotency.</td>
       </tr>
       <tr>
         <td>Migration as one big file, or split (tenancy / vault / RLS-helpers / RLS-policies / TF-tables)?</td>
@@ -750,12 +741,16 @@ $$ <span class="kw">LANGUAGE SQL STABLE</span>;</pre>
         <td>Could land here as a Postgres trigger — but triggers running app logic are a smell, and D7's middleware already touches the signup path.</td>
       </tr>
       <tr>
-        <td>Test rig: testcontainers-go vs supabase/postgres GHA service container</td>
-        <td>testcontainers-go (lets local dev run the same path; better per-test isolation; supabase/postgres image bundles everything).</td>
-        <td>GHA service container is simpler in CI but doesn't help local dev, and supabase/postgres's pgsodium bootstrap doesn't always survive a stripped-down service-container env.</td>
+        <td>Test rig: testcontainers-go vs GHA service container with the supabase image</td>
+        <td>testcontainers-go (lets local dev run the same path; better per-test isolation; verified the supabase image works end-to-end out of the box).</td>
+        <td>GHA service container is simpler in CI but doesn't help local dev. The supabase image's image-init pre-creates the auth + vault tables (verified) so either path works — testcontainers wins on dev parity.</td>
       </tr>
     </tbody>
   </table>
+
+  <div class="callout callout--good">
+    <strong>Resolved (was an open question, image probe answered it):</strong> the <code>supabase/postgres:15.1.0.147</code> image pre-creates the full GoTrue <code>auth</code> schema and pre-loads <code>supabase_vault</code> + <code>pgsodium</code> at first boot. Our migration depends on neither GoTrue nor a stub — both <code>REFERENCES auth.users(id)</code> and <code>vault.create_secret(...)</code> work out of the box.
+  </div>
 
   <h3>Risks &amp; rollback</h3>
   <table class="matrix">
@@ -782,9 +777,9 @@ $$ <span class="kw">LANGUAGE SQL STABLE</span>;</pre>
         <td>—</td>
       </tr>
       <tr>
-        <td>The <code>auth.users</code> stub conflicts with what GoTrue creates on first boot</td>
-        <td>Stub uses <code>CREATE TABLE IF NOT EXISTS</code> with only <code>id UUID PRIMARY KEY</code> and <code>email TEXT</code> — both columns exist in GoTrue's full schema. GoTrue's bootstrap migrations should ALTER-add their additional columns idempotently.</td>
-        <td>If GoTrue refuses to layer in, drop the stub from a follow-up migration and require GoTrue-first deployment. Documented in D6's spec.</td>
+        <td>Image's pre-created <code>auth.users</code> drifts from what GoTrue expects in a future supabase/postgres release</td>
+        <td>Pin the image tag (<code>15.1.0.147</code>) in the testcontainer harness AND in the production compose file. Bumping the tag becomes a deliberate decision, not a transparent dependency.</td>
+        <td>Same image tag in tests + prod. Drift only happens when we choose to bump.</td>
       </tr>
     </tbody>
   </table>
