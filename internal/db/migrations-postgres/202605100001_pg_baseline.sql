@@ -260,6 +260,48 @@ $$;
 REVOKE ALL ON FUNCTION tf.user_has_org_access FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION tf.user_has_org_access TO tf_app;
 
+-- user_is_org_admin — true if the caller has owner/admin role on ANY
+-- team in the target org. Used by RLS policies that gate writes on
+-- tenancy + settings tables (orgs.UPDATE, teams.INSERT/UPDATE/DELETE,
+-- org_settings writes, jira_project_status_rules writes). NOTE:
+-- memberships.role is per-team, so "org admin" here means
+-- "admin/owner anywhere in this org" — fine for v1 with a single
+-- default team per org; a future ticket can introduce an explicit
+-- org_admins table if we want strict per-org admin scoping.
+-- +goose StatementBegin
+CREATE OR REPLACE FUNCTION tf.user_is_org_admin(target_org UUID) RETURNS BOOLEAN
+LANGUAGE SQL STABLE SECURITY DEFINER
+SET search_path = public, tf, pg_temp
+AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM memberships m
+    JOIN teams t ON t.id = m.team_id
+    WHERE m.user_id = tf.current_user_id()
+      AND t.org_id = target_org
+      AND m.role IN ('owner', 'admin')
+  );
+$$;
+-- +goose StatementEnd
+REVOKE ALL ON FUNCTION tf.user_is_org_admin FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION tf.user_is_org_admin TO tf_app;
+
+-- user_is_team_admin — owner/admin on a specific team.
+-- +goose StatementBegin
+CREATE OR REPLACE FUNCTION tf.user_is_team_admin(target_team UUID) RETURNS BOOLEAN
+LANGUAGE SQL STABLE SECURITY DEFINER
+SET search_path = public, tf, pg_temp
+AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM memberships m
+    WHERE m.user_id = tf.current_user_id()
+      AND m.team_id = target_team
+      AND m.role IN ('owner', 'admin')
+  );
+$$;
+-- +goose StatementEnd
+REVOKE ALL ON FUNCTION tf.user_is_team_admin FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION tf.user_is_team_admin TO tf_app;
+
 -- AES-GCM ciphertext columns; key = TF_SESSION_KEY env var (D6 wires it).
 CREATE TABLE sessions (
   id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -960,14 +1002,25 @@ CREATE POLICY users_modify ON users FOR ALL
 -- Tenancy + auth policies:
 CREATE POLICY orgs_select ON orgs FOR SELECT
   USING (id = tf.current_org_id() AND tf.user_has_org_access(id));
+-- Only admins can rename the org, flip sso_enforced, etc. Without the
+-- admin gate, any member could mutate org-wide attributes — including
+-- security toggles like sso_enforced.
 CREATE POLICY orgs_update ON orgs FOR UPDATE
-  USING (id = tf.current_org_id() AND tf.user_has_org_access(id));
+  USING (id = tf.current_org_id() AND tf.user_is_org_admin(id))
+  WITH CHECK (id = tf.current_org_id() AND tf.user_is_org_admin(id));
 
 CREATE POLICY teams_select ON teams FOR SELECT
   USING (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id));
-CREATE POLICY teams_modify ON teams FOR ALL
-  USING (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id))
-  WITH CHECK (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id));
+-- Team writes (create/rename/delete) are an admin operation. FOR ALL
+-- minus FOR SELECT — SELECT is already covered above and would
+-- conflict with the admin gate here.
+CREATE POLICY teams_insert ON teams FOR INSERT
+  WITH CHECK (org_id = tf.current_org_id() AND tf.user_is_org_admin(org_id));
+CREATE POLICY teams_update ON teams FOR UPDATE
+  USING      (org_id = tf.current_org_id() AND tf.user_is_org_admin(org_id))
+  WITH CHECK (org_id = tf.current_org_id() AND tf.user_is_org_admin(org_id));
+CREATE POLICY teams_delete ON teams FOR DELETE
+  USING (org_id = tf.current_org_id() AND tf.user_is_org_admin(org_id));
 
 CREATE POLICY memberships_select ON memberships FOR SELECT
   USING (user_id = tf.current_user_id()
@@ -986,37 +1039,52 @@ CREATE POLICY preferences_select ON preferences FOR SELECT USING (user_id = tf.c
 CREATE POLICY preferences_modify ON preferences FOR ALL    USING (user_id = tf.current_user_id())
                                                             WITH CHECK (user_id = tf.current_user_id());
 
+-- org_settings: any org member can read; only org admins can write
+-- (matches §8 spec text: "writable only by org owners/admins").
 CREATE POLICY org_settings_select ON org_settings FOR SELECT
   USING (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id));
-CREATE POLICY org_settings_modify ON org_settings FOR ALL
-  USING (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id))
-  WITH CHECK (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id));
+CREATE POLICY org_settings_insert ON org_settings FOR INSERT
+  WITH CHECK (org_id = tf.current_org_id() AND tf.user_is_org_admin(org_id));
+CREATE POLICY org_settings_update ON org_settings FOR UPDATE
+  USING      (org_id = tf.current_org_id() AND tf.user_is_org_admin(org_id))
+  WITH CHECK (org_id = tf.current_org_id() AND tf.user_is_org_admin(org_id));
+CREATE POLICY org_settings_delete ON org_settings FOR DELETE
+  USING (org_id = tf.current_org_id() AND tf.user_is_org_admin(org_id));
 
+-- team_settings: team members can read; team admins can write.
 CREATE POLICY team_settings_select ON team_settings FOR SELECT
   USING (EXISTS (SELECT 1 FROM teams t WHERE t.id = team_id AND t.org_id = tf.current_org_id()
                                               AND tf.user_has_org_access(t.org_id)));
-CREATE POLICY team_settings_modify ON team_settings FOR ALL
-  USING (EXISTS (SELECT 1 FROM teams t WHERE t.id = team_id AND t.org_id = tf.current_org_id()
-                                              AND tf.user_has_org_access(t.org_id)))
-  WITH CHECK (EXISTS (SELECT 1 FROM teams t WHERE t.id = team_id AND t.org_id = tf.current_org_id()
-                                                  AND tf.user_has_org_access(t.org_id)));
+CREATE POLICY team_settings_insert ON team_settings FOR INSERT
+  WITH CHECK (tf.user_is_team_admin(team_id));
+CREATE POLICY team_settings_update ON team_settings FOR UPDATE
+  USING      (tf.user_is_team_admin(team_id))
+  WITH CHECK (tf.user_is_team_admin(team_id));
+CREATE POLICY team_settings_delete ON team_settings FOR DELETE
+  USING (tf.user_is_team_admin(team_id));
 
+-- jira_project_status_rules: any org member can read; only org admins can write.
 CREATE POLICY jira_rules_select ON jira_project_status_rules FOR SELECT
   USING (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id));
-CREATE POLICY jira_rules_modify ON jira_project_status_rules FOR ALL
-  USING (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id))
-  WITH CHECK (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id));
+CREATE POLICY jira_rules_insert ON jira_project_status_rules FOR INSERT
+  WITH CHECK (org_id = tf.current_org_id() AND tf.user_is_org_admin(org_id));
+CREATE POLICY jira_rules_update ON jira_project_status_rules FOR UPDATE
+  USING      (org_id = tf.current_org_id() AND tf.user_is_org_admin(org_id))
+  WITH CHECK (org_id = tf.current_org_id() AND tf.user_is_org_admin(org_id));
+CREATE POLICY jira_rules_delete ON jira_project_status_rules FOR DELETE
+  USING (org_id = tf.current_org_id() AND tf.user_is_org_admin(org_id));
 
 -- Per-user resources: creator-scoped read + write. v1 defaults to private;
 -- visibility column lets v2 elevate to team/org without an ALTER.
 CREATE POLICY prompts_select ON prompts FOR SELECT
   USING (org_id = tf.current_org_id()
+         AND tf.user_has_org_access(org_id)
          AND (creator_user_id = tf.current_user_id()
               OR (visibility = 'team' AND team_id IS NOT NULL
                   AND EXISTS (SELECT 1 FROM memberships m WHERE m.user_id = tf.current_user_id() AND m.team_id = team_id))
               OR visibility = 'org'));
 CREATE POLICY prompts_modify ON prompts FOR ALL
-  USING (org_id = tf.current_org_id() AND creator_user_id = tf.current_user_id())
+  USING (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id) AND creator_user_id = tf.current_user_id())
   WITH CHECK (org_id = tf.current_org_id() AND creator_user_id = tf.current_user_id()
               AND tf.user_has_org_access(org_id));
 
@@ -1028,7 +1096,7 @@ CREATE POLICY projects_select ON projects FOR SELECT
                   AND EXISTS (SELECT 1 FROM memberships m WHERE m.user_id = tf.current_user_id() AND m.team_id = team_id))
               OR visibility = 'org'));
 CREATE POLICY projects_modify ON projects FOR ALL
-  USING (org_id = tf.current_org_id() AND creator_user_id = tf.current_user_id())
+  USING (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id) AND creator_user_id = tf.current_user_id())
   WITH CHECK (org_id = tf.current_org_id() AND creator_user_id = tf.current_user_id()
               AND tf.user_has_org_access(org_id));
 
@@ -1051,31 +1119,33 @@ CREATE POLICY poller_state_all ON poller_state FOR ALL USING (org_id = tf.curren
 -- Creator-scoped resources (task_rules, prompt_triggers).
 CREATE POLICY task_rules_select ON task_rules FOR SELECT
   USING (org_id = tf.current_org_id()
+         AND tf.user_has_org_access(org_id)
          AND (creator_user_id = tf.current_user_id() OR visibility IN ('team','org')));
 CREATE POLICY task_rules_modify ON task_rules FOR ALL
-  USING (org_id = tf.current_org_id() AND creator_user_id = tf.current_user_id())
+  USING (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id) AND creator_user_id = tf.current_user_id())
   WITH CHECK (org_id = tf.current_org_id() AND creator_user_id = tf.current_user_id()
               AND tf.user_has_org_access(org_id));
 
 CREATE POLICY prompt_triggers_select ON prompt_triggers FOR SELECT
   USING (org_id = tf.current_org_id()
+         AND tf.user_has_org_access(org_id)
          AND (creator_user_id = tf.current_user_id() OR visibility IN ('team','org')));
 CREATE POLICY prompt_triggers_modify ON prompt_triggers FOR ALL
-  USING (org_id = tf.current_org_id() AND creator_user_id = tf.current_user_id())
+  USING (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id) AND creator_user_id = tf.current_user_id())
   WITH CHECK (org_id = tf.current_org_id() AND creator_user_id = tf.current_user_id()
               AND tf.user_has_org_access(org_id));
 
 CREATE POLICY tasks_select ON tasks FOR SELECT
-  USING (org_id = tf.current_org_id() AND creator_user_id = tf.current_user_id());
+  USING (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id) AND creator_user_id = tf.current_user_id());
 CREATE POLICY tasks_modify ON tasks FOR ALL
-  USING (org_id = tf.current_org_id() AND creator_user_id = tf.current_user_id())
+  USING (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id) AND creator_user_id = tf.current_user_id())
   WITH CHECK (org_id = tf.current_org_id() AND creator_user_id = tf.current_user_id()
               AND tf.user_has_org_access(org_id));
 
 CREATE POLICY runs_select ON runs FOR SELECT
-  USING (org_id = tf.current_org_id() AND creator_user_id = tf.current_user_id());
+  USING (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id) AND creator_user_id = tf.current_user_id());
 CREATE POLICY runs_modify ON runs FOR ALL
-  USING (org_id = tf.current_org_id() AND creator_user_id = tf.current_user_id())
+  USING (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id) AND creator_user_id = tf.current_user_id())
   WITH CHECK (org_id = tf.current_org_id() AND creator_user_id = tf.current_user_id()
               AND tf.user_has_org_access(org_id));
 
@@ -1096,9 +1166,9 @@ CREATE POLICY run_worktrees_all   ON run_worktrees FOR ALL USING (org_id = tf.cu
 CREATE POLICY pending_prs_all     ON pending_prs FOR ALL USING (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id))
                                                           WITH CHECK (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id));
 CREATE POLICY swipe_events_select ON swipe_events FOR SELECT
-  USING (org_id = tf.current_org_id() AND creator_user_id = tf.current_user_id());
+  USING (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id) AND creator_user_id = tf.current_user_id());
 CREATE POLICY swipe_events_modify ON swipe_events FOR ALL
-  USING (org_id = tf.current_org_id() AND creator_user_id = tf.current_user_id())
+  USING (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id) AND creator_user_id = tf.current_user_id())
   WITH CHECK (org_id = tf.current_org_id() AND creator_user_id = tf.current_user_id()
               AND tf.user_has_org_access(org_id));
 CREATE POLICY pending_reviews_all          ON pending_reviews FOR ALL USING (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id))
@@ -1108,21 +1178,21 @@ CREATE POLICY pending_review_comments_all  ON pending_review_comments FOR ALL US
 
 -- Curator: per-user-per-project chat (creator-scoped).
 CREATE POLICY curator_requests_select ON curator_requests FOR SELECT
-  USING (org_id = tf.current_org_id() AND creator_user_id = tf.current_user_id());
+  USING (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id) AND creator_user_id = tf.current_user_id());
 CREATE POLICY curator_requests_modify ON curator_requests FOR ALL
-  USING (org_id = tf.current_org_id() AND creator_user_id = tf.current_user_id())
+  USING (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id) AND creator_user_id = tf.current_user_id())
   WITH CHECK (org_id = tf.current_org_id() AND creator_user_id = tf.current_user_id()
               AND tf.user_has_org_access(org_id));
 CREATE POLICY curator_messages_select ON curator_messages FOR SELECT
-  USING (org_id = tf.current_org_id() AND creator_user_id = tf.current_user_id());
+  USING (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id) AND creator_user_id = tf.current_user_id());
 CREATE POLICY curator_messages_modify ON curator_messages FOR ALL
-  USING (org_id = tf.current_org_id() AND creator_user_id = tf.current_user_id())
+  USING (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id) AND creator_user_id = tf.current_user_id())
   WITH CHECK (org_id = tf.current_org_id() AND creator_user_id = tf.current_user_id()
               AND tf.user_has_org_access(org_id));
 CREATE POLICY curator_pending_context_select ON curator_pending_context FOR SELECT
-  USING (org_id = tf.current_org_id() AND creator_user_id = tf.current_user_id());
+  USING (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id) AND creator_user_id = tf.current_user_id());
 CREATE POLICY curator_pending_context_modify ON curator_pending_context FOR ALL
-  USING (org_id = tf.current_org_id() AND creator_user_id = tf.current_user_id())
+  USING (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id) AND creator_user_id = tf.current_user_id())
   WITH CHECK (org_id = tf.current_org_id() AND creator_user_id = tf.current_user_id()
               AND tf.user_has_org_access(org_id));
 

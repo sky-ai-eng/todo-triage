@@ -646,6 +646,224 @@ func TestProjectKnowledge_RunValidation(t *testing.T) {
 	}
 }
 
+// TestRLS_RevokedMembership — if a user's session still carries
+// org_id claims after the underlying membership is gone, RLS must
+// still gate them. Without `tf.user_has_org_access(org_id)` in the
+// USING clause, alice could read tasks she created in orgA even
+// after being kicked out of orgA. The check is on top of the
+// claims match (current_org_id), giving us two independent gates.
+func TestRLS_RevokedMembership(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	orgA, alice, _ := seedOrgWithUser(t, h, "alice")
+	entityA := seedEntity(t, h, orgA, "github", "octo/repo#1")
+	taskA := seedTask(t, h, orgA, alice, entityA, "github:pr:opened")
+
+	// Sanity: alice can see her task pre-revocation.
+	err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
+		var id string
+		return tx.QueryRow(`SELECT id FROM tasks WHERE id = $1`, taskA).Scan(&id)
+	})
+	if err != nil {
+		t.Fatalf("alice pre-revocation: %v", err)
+	}
+
+	// Revoke alice's membership (admin path; tests as supabase_admin).
+	mustExec(t, h.AdminDB, `DELETE FROM memberships WHERE user_id = $1`, alice)
+
+	// Alice's session still carries claims {sub: alice, org_id: orgA}
+	// but memberships row is gone → tf.user_has_org_access(orgA) now
+	// returns false. Task SELECT must return 0 rows.
+	err = h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
+		rows, err := tx.Query(`SELECT id FROM tasks`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		count := 0
+		for rows.Next() {
+			count++
+		}
+		if count != 0 {
+			t.Errorf("alice saw %d tasks after membership revoked, want 0", count)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("alice post-revocation: %v", err)
+	}
+}
+
+// TestRLS_OrgAdminGate — non-admin members can read orgs/teams but
+// can't UPDATE the org row (rename, flip sso_enforced, etc.) or
+// CREATE/DELETE teams. Catches the original "any member could
+// mutate org-wide attributes" privilege escalation.
+func TestRLS_OrgAdminGate(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	// Alice is the owner; bob is a plain member of the same org.
+	orgA, alice, teamA := seedOrgWithUser(t, h, "alice")
+	bob := seedUser(t, h, "bob")
+	mustExec(t, h.AdminDB,
+		`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'member')`, bob, teamA)
+
+	// Alice (owner) can rename the org.
+	err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
+		res, err := tx.Exec(`UPDATE orgs SET name = 'renamed' WHERE id = $1`, orgA)
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		if n != 1 {
+			t.Errorf("alice (owner) UPDATE affected %d rows, want 1", n)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("alice rename: %v", err)
+	}
+
+	// Bob (member) CANNOT rename the org. RLS UPDATE policy filters
+	// the row out; UPDATE affects 0 rows.
+	err = h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
+		res, err := tx.Exec(`UPDATE orgs SET name = 'bob-takeover' WHERE id = $1`, orgA)
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		if n != 0 {
+			t.Errorf("bob (member) UPDATE affected %d rows, want 0 (admin gate)", n)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("bob rename attempt: %v", err)
+	}
+
+	// Bob CANNOT create a new team — INSERT WITH CHECK fails.
+	err = h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
+		_, err := tx.Exec(
+			`INSERT INTO teams (org_id, slug, name) VALUES ($1, 'bob-team', 'Bob Team')`, orgA,
+		)
+		return err
+	})
+	if err == nil {
+		t.Errorf("bob (member) created a new team — admin gate broken")
+	} else if !strings.Contains(err.Error(), "row-level security") {
+		t.Errorf("expected RLS violation on team INSERT, got: %v", err)
+	}
+
+	// Bob CANNOT delete the existing team.
+	err = h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
+		res, err := tx.Exec(`DELETE FROM teams WHERE id = $1`, teamA)
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		if n != 0 {
+			t.Errorf("bob (member) DELETE on team affected %d rows, want 0", n)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("bob team delete: %v", err)
+	}
+
+	// Bob (member) CAN still SELECT the org + team — read access
+	// is still org-wide.
+	err = h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
+		var name string
+		if err := tx.QueryRow(`SELECT name FROM orgs WHERE id = $1`, orgA).Scan(&name); err != nil {
+			t.Errorf("bob SELECT org: %v", err)
+		}
+		if err := tx.QueryRow(`SELECT name FROM teams WHERE id = $1`, teamA).Scan(&name); err != nil {
+			t.Errorf("bob SELECT team: %v", err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("bob read-only access: %v", err)
+	}
+}
+
+// TestRLS_SettingsAdminOnly — non-admin members can read org_settings
+// + jira_project_status_rules but can't write them.
+func TestRLS_SettingsAdminOnly(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	orgA, alice, teamA := seedOrgWithUser(t, h, "alice")
+	bob := seedUser(t, h, "bob")
+	mustExec(t, h.AdminDB,
+		`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'member')`, bob, teamA)
+
+	// Alice (owner) creates an org_settings row.
+	err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
+		_, err := tx.Exec(`INSERT INTO org_settings (org_id) VALUES ($1)`, orgA)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("alice (owner) INSERT org_settings: %v", err)
+	}
+
+	// Bob can SELECT (org member).
+	err = h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
+		var poll string
+		return tx.QueryRow(
+			`SELECT github_poll_interval::text FROM org_settings WHERE org_id = $1`, orgA,
+		).Scan(&poll)
+	})
+	if err != nil {
+		t.Errorf("bob SELECT org_settings: %v", err)
+	}
+
+	// Bob cannot UPDATE — UPDATE policy admin-gated; filters row out.
+	err = h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
+		res, err := tx.Exec(
+			`UPDATE org_settings SET github_poll_interval = '1 minute' WHERE org_id = $1`, orgA,
+		)
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		if n != 0 {
+			t.Errorf("bob UPDATE org_settings affected %d rows, want 0", n)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("bob update attempt: %v", err)
+	}
+
+	// Bob cannot INSERT a jira rule — WITH CHECK fails.
+	err = h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
+		_, err := tx.Exec(`
+			INSERT INTO jira_project_status_rules (org_id, project_key)
+			VALUES ($1, 'SKY')
+		`, orgA)
+		return err
+	})
+	if err == nil {
+		t.Errorf("bob INSERT jira rule succeeded — admin gate broken")
+	} else if !strings.Contains(err.Error(), "row-level security") {
+		t.Errorf("expected RLS violation, got: %v", err)
+	}
+
+	// Alice (owner) can INSERT a jira rule.
+	err = h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
+		_, err := tx.Exec(`
+			INSERT INTO jira_project_status_rules (org_id, project_key)
+			VALUES ($1, 'SKY')
+		`, orgA)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("alice INSERT jira rule: %v", err)
+	}
+}
+
 // --- fixture helpers ---
 
 func seedOrgWithUser(t *testing.T, h *Harness, displayName string) (orgID, userID, teamID string) {

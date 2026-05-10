@@ -25,7 +25,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -68,14 +67,25 @@ var (
 // the first call. Subsequent calls return the same instance. Tests
 // that need isolation should call h.Reset(t) at the top of the test.
 //
-// If Docker is unavailable or the boot fails, t.Skip is called rather
-// than Fatal — this lets the SQLite test suite run cleanly in CI
-// environments that don't ship a Docker daemon.
+// Two outcomes are distinct on purpose:
+//   - Docker is genuinely unreachable → t.Skip. Lets the SQLite suite
+//     run cleanly in CI environments without a Docker daemon.
+//   - Docker is healthy but boot failed (migration error, SQL bug,
+//     image regression, anything else) → t.Fatalf. Treating these as
+//     skips would let a real schema regression silently turn the
+//     Postgres suite into a green-but-empty pass.
 func Shared(t *testing.T) *Harness {
 	t.Helper()
+	// Probe Docker first so unreachable-daemon failures are
+	// disambiguated from boot failures. The probe is cheap — pings the
+	// Docker socket via the testcontainers provider — and runs on
+	// every Shared() call (cheap is fine; sharedOnce guards the
+	// expensive boot itself).
+	testcontainers.SkipIfProviderIsNotHealthy(t)
+
 	sharedOnce.Do(boot)
 	if sharedErr != nil {
-		t.Skipf("pgtest: docker unavailable, skipping postgres tests (%v)", sharedErr)
+		t.Fatalf("pgtest: boot failed (Docker is reachable but bring-up errored — this is NOT a skip-worthy condition): %v", sharedErr)
 	}
 	return shared
 }
@@ -331,8 +341,3 @@ func rewriteUser(dsn, user, password string) (string, error) {
 	u.User = url.UserPassword(user, password)
 	return u.String(), nil
 }
-
-// Errs the user-facing build hint when a test that needs Postgres is
-// invoked and Docker isn't reachable. Exposed for tests that want to
-// assert the skip behavior.
-var ErrDockerUnavailable = errors.New("pgtest: docker not available")
