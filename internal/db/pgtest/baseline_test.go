@@ -646,6 +646,109 @@ func TestProjectKnowledge_RunValidation(t *testing.T) {
 	}
 }
 
+// TestRLS_TeamVisibilityIsTeamScoped — a row with visibility='team'
+// must only be visible to members of that specific team_id, not to
+// every org member. Covers all four tables that use this pattern:
+// prompts, projects, task_rules, prompt_triggers.
+//
+// Subtle bug this guards against: in the EXISTS subquery,
+// `m.team_id = team_id` is ambiguous — SQL name resolution binds the
+// unqualified `team_id` to memberships.team_id (innermost scope),
+// making the predicate `m.team_id = m.team_id` which is always true
+// for any membership row the EXISTS scans. The correct form
+// qualifies the outer table explicitly: `m.team_id = <outer>.team_id`.
+// All four policies had this footgun; this test exercises each.
+func TestRLS_TeamVisibilityIsTeamScoped(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	orgA, alice, teamA := seedOrgWithUser(t, h, "alice")
+	bob := seedUser(t, h, "bob")
+	carol := seedUser(t, h, "carol")
+	// Bob joins teamA; carol joins a NEW team in the same org.
+	mustExec(t, h.AdminDB,
+		`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'member')`, bob, teamA)
+	teamB := seedTeam(t, h, orgA, "team-b")
+	mustExec(t, h.AdminDB,
+		`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'member')`, carol, teamB)
+
+	// Seed one team-scoped row in each of the four tables.
+	prompt := seedPrompt(t, h, orgA, alice, "p1")
+	var teamPromptID, teamProjectID, teamRuleID, teamTriggerID string
+
+	if err := h.AdminDB.QueryRow(`
+		INSERT INTO prompts (org_id, creator_user_id, team_id, visibility, name, body)
+		VALUES ($1, $2, $3, 'team', 'team-prompt', '') RETURNING id
+	`, orgA, alice, teamA).Scan(&teamPromptID); err != nil {
+		t.Fatalf("seed team prompt: %v", err)
+	}
+	if err := h.AdminDB.QueryRow(`
+		INSERT INTO projects (org_id, creator_user_id, team_id, visibility, name)
+		VALUES ($1, $2, $3, 'team', 'team-proj') RETURNING id
+	`, orgA, alice, teamA).Scan(&teamProjectID); err != nil {
+		t.Fatalf("seed team project: %v", err)
+	}
+	if err := h.AdminDB.QueryRow(`
+		INSERT INTO task_rules (org_id, creator_user_id, team_id, visibility, event_type, name)
+		VALUES ($1, $2, $3, 'team', 'github:pr:opened', 'team-rule') RETURNING id
+	`, orgA, alice, teamA).Scan(&teamRuleID); err != nil {
+		t.Fatalf("seed team rule: %v", err)
+	}
+	if err := h.AdminDB.QueryRow(`
+		INSERT INTO prompt_triggers (org_id, creator_user_id, team_id, visibility, prompt_id, event_type)
+		VALUES ($1, $2, $3, 'team', $4, 'github:pr:opened') RETURNING id
+	`, orgA, alice, teamA, prompt).Scan(&teamTriggerID); err != nil {
+		t.Fatalf("seed team trigger: %v", err)
+	}
+
+	// Bob (in teamA) should see all four.
+	err := h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
+		for _, c := range []struct {
+			label, query, id string
+		}{
+			{"prompts", `SELECT 1 FROM prompts WHERE id = $1`, teamPromptID},
+			{"projects", `SELECT 1 FROM projects WHERE id = $1`, teamProjectID},
+			{"task_rules", `SELECT 1 FROM task_rules WHERE id = $1`, teamRuleID},
+			{"prompt_triggers", `SELECT 1 FROM prompt_triggers WHERE id = $1`, teamTriggerID},
+		} {
+			var n int
+			if err := tx.QueryRow(c.query, c.id).Scan(&n); err != nil {
+				t.Errorf("bob can't see teamA-scoped %s row: %v", c.label, err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("bob query: %v", err)
+	}
+
+	// Carol (in teamB, same org, DIFFERENT team) must NOT see any of
+	// the four. The unqualified-team_id bug would let her see all of
+	// them.
+	err = h.WithUser(t, carol, orgA, func(tx *sql.Tx) error {
+		for _, c := range []struct {
+			label, query, id string
+		}{
+			{"prompts", `SELECT COUNT(*) FROM prompts WHERE id = $1`, teamPromptID},
+			{"projects", `SELECT COUNT(*) FROM projects WHERE id = $1`, teamProjectID},
+			{"task_rules", `SELECT COUNT(*) FROM task_rules WHERE id = $1`, teamRuleID},
+			{"prompt_triggers", `SELECT COUNT(*) FROM prompt_triggers WHERE id = $1`, teamTriggerID},
+		} {
+			var n int
+			if err := tx.QueryRow(c.query, c.id).Scan(&n); err != nil {
+				return err
+			}
+			if n != 0 {
+				t.Errorf("carol (different team) saw teamA-scoped %s row — outer-table-qualified team_id check broken", c.label)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("carol query: %v", err)
+	}
+}
+
 // TestRLS_RevokedMembership — if a user's session still carries
 // org_id claims after the underlying membership is gone, RLS must
 // still gate them. Without `tf.user_has_org_access(org_id)` in the

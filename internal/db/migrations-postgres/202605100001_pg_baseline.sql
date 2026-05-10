@@ -1076,12 +1076,17 @@ CREATE POLICY jira_rules_delete ON jira_project_status_rules FOR DELETE
 
 -- Per-user resources: creator-scoped read + write. v1 defaults to private;
 -- visibility column lets v2 elevate to team/org without an ALTER.
+-- NOTE on the EXISTS subquery: unqualified `team_id` would resolve to
+-- memberships.team_id (innermost scope wins per SQL name resolution),
+-- making the predicate `m.team_id = m.team_id` — always true. The
+-- outer table's column MUST be qualified explicitly. Same rule
+-- applies to projects_select, task_rules_select, prompt_triggers_select.
 CREATE POLICY prompts_select ON prompts FOR SELECT
   USING (org_id = tf.current_org_id()
          AND tf.user_has_org_access(org_id)
          AND (creator_user_id = tf.current_user_id()
               OR (visibility = 'team' AND team_id IS NOT NULL
-                  AND EXISTS (SELECT 1 FROM memberships m WHERE m.user_id = tf.current_user_id() AND m.team_id = team_id))
+                  AND EXISTS (SELECT 1 FROM memberships m WHERE m.user_id = tf.current_user_id() AND m.team_id = prompts.team_id))
               OR visibility = 'org'));
 CREATE POLICY prompts_modify ON prompts FOR ALL
   USING (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id) AND creator_user_id = tf.current_user_id())
@@ -1093,7 +1098,7 @@ CREATE POLICY projects_select ON projects FOR SELECT
          AND tf.user_has_org_access(org_id)
          AND (creator_user_id = tf.current_user_id()
               OR (visibility = 'team' AND team_id IS NOT NULL
-                  AND EXISTS (SELECT 1 FROM memberships m WHERE m.user_id = tf.current_user_id() AND m.team_id = team_id))
+                  AND EXISTS (SELECT 1 FROM memberships m WHERE m.user_id = tf.current_user_id() AND m.team_id = projects.team_id))
               OR visibility = 'org'));
 CREATE POLICY projects_modify ON projects FOR ALL
   USING (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id) AND creator_user_id = tf.current_user_id())
@@ -1120,7 +1125,10 @@ CREATE POLICY poller_state_all ON poller_state FOR ALL USING (org_id = tf.curren
 CREATE POLICY task_rules_select ON task_rules FOR SELECT
   USING (org_id = tf.current_org_id()
          AND tf.user_has_org_access(org_id)
-         AND (creator_user_id = tf.current_user_id() OR visibility IN ('team','org')));
+         AND (creator_user_id = tf.current_user_id()
+              OR (visibility = 'team' AND team_id IS NOT NULL
+                  AND EXISTS (SELECT 1 FROM memberships m WHERE m.user_id = tf.current_user_id() AND m.team_id = task_rules.team_id))
+              OR visibility = 'org'));
 CREATE POLICY task_rules_modify ON task_rules FOR ALL
   USING (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id) AND creator_user_id = tf.current_user_id())
   WITH CHECK (org_id = tf.current_org_id() AND creator_user_id = tf.current_user_id()
@@ -1129,7 +1137,10 @@ CREATE POLICY task_rules_modify ON task_rules FOR ALL
 CREATE POLICY prompt_triggers_select ON prompt_triggers FOR SELECT
   USING (org_id = tf.current_org_id()
          AND tf.user_has_org_access(org_id)
-         AND (creator_user_id = tf.current_user_id() OR visibility IN ('team','org')));
+         AND (creator_user_id = tf.current_user_id()
+              OR (visibility = 'team' AND team_id IS NOT NULL
+                  AND EXISTS (SELECT 1 FROM memberships m WHERE m.user_id = tf.current_user_id() AND m.team_id = prompt_triggers.team_id))
+              OR visibility = 'org'));
 CREATE POLICY prompt_triggers_modify ON prompt_triggers FOR ALL
   USING (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id) AND creator_user_id = tf.current_user_id())
   WITH CHECK (org_id = tf.current_org_id() AND creator_user_id = tf.current_user_id()

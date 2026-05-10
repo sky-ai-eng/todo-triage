@@ -59,11 +59,15 @@ CREATE TABLE IF NOT EXISTS goose_db_version (
 //  2. Hand the routed embed.FS to goose and call goose.Up.
 //
 // Failures roll back at the per-migration boundary goose owns; the
-// next launch retries any unapplied migration. The baseline is
-// idempotent (every CREATE uses IF NOT EXISTS) so even if the legacy
-// import shim no-ops on a borderline install — schema_migrations
-// missing or empty — the baseline runs cleanly against the existing
-// schema.
+// next launch retries any unapplied migration. The SQLite baseline
+// is idempotent via `CREATE TABLE IF NOT EXISTS` on every statement,
+// so even a borderline-detected install (legacy `schema_migrations`
+// table missing or empty) runs cleanly against an already-populated
+// schema. The Postgres baseline does NOT use IF NOT EXISTS — fresh
+// installs are the only supported shape there, and goose's
+// `goose_db_version` tracker prevents re-runs after first success;
+// running the Postgres baseline against a non-fresh DB would error
+// on the first CREATE.
 func runMigrations(db *sql.DB, dialect string) error {
 	if err := importLegacyVersionsIfNeeded(db, dialect); err != nil {
 		return fmt.Errorf("legacy import: %w", err)

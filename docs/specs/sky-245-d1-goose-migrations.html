@@ -563,10 +563,9 @@ footer {
 <span class="com">//go:embed migrations-postgres</span>
 <span class="kw">var</span> migrationsPostgresFS embed.FS  <span class="com">// directory embed — README only for now</span>
 
-<span class="com">// Migrate brings the schema to head via goose. Dialect is sqlite3 today;</span>
-<span class="com">// the postgres path is scaffolded but not yet exercised (SKY-247 / D3).</span>
-<span class="kw">func</span> <span class="fn">runMigrations</span>(db *sql.DB) <span class="kw">error</span> {
-  dialect := <span class="fn">detectDialect</span>(db)
+<span class="com">// Migrate brings the schema to head via goose. The dialect is</span>
+<span class="com">// caller-provided rather than auto-detected; see the post-D3 note below.</span>
+<span class="kw">func</span> <span class="fn">runMigrations</span>(db *sql.DB, dialect string) <span class="kw">error</span> {
   <span class="kw">if</span> err := <span class="fn">importLegacyVersionsIfNeeded</span>(db, dialect); err != <span class="kw">nil</span> {
     <span class="kw">return</span> fmt.Errorf(<span class="str">"legacy import: %w"</span>, err)
   }
@@ -578,7 +577,7 @@ footer {
 }</pre>
 
   <h3>Dialect detection</h3>
-  <p>This PR hardcodes <code>detectDialect</code> to return <code>"sqlite3"</code>. The pgx-based driver-name probe lands in SKY-247 (D3) alongside the first real Postgres consumer; centralizing the decision behind a function now keeps the call sites stable when that switch happens. Treat <code>detectDialect</code> as the seam, not a finished implementation.</p>
+  <p><strong>D1 shipped a placeholder <code>detectDialect</code> returning <code>"sqlite3"</code></strong>; SKY-247 (D3) removed that function entirely and changed the exported entrypoint to <code>db.Migrate(db, dialect string) error</code>. Driver-name reflection on <code>*sql.DB</code> is brittle — there's no portable way to map <code>driver.Driver</code> back to the goose dialect string without importing the driver package — so the caller (which opened the connection and knows what driver it used) passes the dialect verbatim. All call sites in <code>main.go</code> + <code>cmd/*</code> pass <code>"sqlite3"</code>; the pgtest harness passes <code>"postgres"</code>.</p>
 
   <h3>Baseline body shape</h3>
   <p>Plain semicolon-delimited DDL with goose's <code>-- +goose Up</code> opener and a <code>-- +goose Down</code> block holding <code>SELECT 'down not supported';</code>. No <code>StatementBegin/End</code> blocks needed — the baseline is just <code>CREATE TABLE</code> and <code>CREATE INDEX</code> statements; goose's default parser handles them. (StatementBegin/End is for migrations whose statements contain semicolons inside, like triggers.)</p>
