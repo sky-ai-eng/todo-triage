@@ -1039,8 +1039,11 @@ func TestRLS_OrgAdminGate(t *testing.T) {
 	})
 	if err == nil {
 		t.Errorf("bob (member) created a new team — admin gate broken")
-	} else if !strings.Contains(err.Error(), "row-level security") {
-		t.Errorf("expected RLS violation on team INSERT, got: %v", err)
+	} else {
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "42501" {
+			t.Errorf("expected RLS violation (SQLSTATE 42501) on team INSERT, got: %v", err)
+		}
 	}
 
 	// Bob CANNOT delete the existing team.
