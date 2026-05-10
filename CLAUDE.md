@@ -100,6 +100,7 @@ React 19 + Vite + TypeScript + Tailwind v4. Router routes live in `frontend/src/
 - **Go module path:** `github.com/sky-ai-eng/triage-factory`. The GitHub org is `sky-ai-eng`.
 - **Go version:** `go.mod` says 1.26.1, README says 1.23+; keep the floor modern but don't bump without reason.
 - **Credentials never touch disk.** `internal/auth` wraps the keychain. Token fields in Settings show "leave blank to keep current" when a token is stored.
+- **Runtime mode flag.** `TF_MODE=local|multi` is read once at startup by `internal/runmode` (called from `main()` before the argv-dispatch switch). Default is `local`. Downstream packages branch on `runmode.Current()`: `internal/db` picks SQLite vs Postgres, `internal/paths` (forthcoming with SKY-248 D4b) resolves state-root paths, future auth + sandbox tickets gate multi-only behavior. `runmode.LocalDefaultOrg` ("default") is the synthetic org-context value local-mode callers pass everywhere a real `orgID` is expected.
 
 ## Reference docs
 

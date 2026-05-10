@@ -315,9 +315,9 @@ footer {
   <p class="lede">Introduce <code>internal/paths</code> as the single source of truth for state-root resolution. Today every callsite reaches for <code>os.UserHomeDir()</code> and joins <code>.triagefactory</code> directly; multi mode needs <code>/data/orgs/&lt;org_id&gt;/</code> instead. Mode is set once at startup via <code>TF_MODE=local|multi</code>; local mode strips the org segment so existing installs see no on-disk change.</p>
   <div class="hero__meta">
     <span class="meta-pill"><strong>SCOPE</strong> · new package + ~8 entry-point migrations</span>
+    <span class="meta-pill"><strong>SHIPS IN 2 PRs</strong> · D4a (mode flag) + D4b (resolvers + sweep) — see §0</span>
     <span class="meta-pill"><strong>DEPENDS ON</strong> · none (Linear lists D2; soft dep — see §1)</span>
     <span class="meta-pill"><strong>BLOCKS</strong> · SKY-246 (D2), SKY-247 (D3 path tests)</span>
-    <span class="meta-pill"><strong>EFFORT</strong> · 1–2 days</span>
   </div>
 </header>
 
@@ -326,6 +326,7 @@ footer {
 <nav class="toc">
   <div class="toc-group">Spec</div>
   <ol>
+    <li><a href="#phasing">Phasing (D4a / D4b)</a></li>
     <li><a href="#why">Why now</a></li>
     <li><a href="#current">Current state</a></li>
     <li><a href="#target">Target state</a></li>
@@ -343,6 +344,59 @@ footer {
 </nav>
 
 <article>
+
+<!-- ===================================================== -->
+<section class="block" id="phasing">
+  <div class="section-label">§0</div>
+  <h2>Phasing (D4a / D4b)</h2>
+  <p class="lede">D4 ships across two PRs against the same Linear ticket. D4a lands the mode-flag infrastructure (small, fast, unblocks D2's mode-dispatch wiring); D3 + D2 land in between; D4b finishes the resolver functions + the caller sweep against a settled codebase.</p>
+
+  <table class="matrix">
+    <thead><tr><th style="width: 16%;">Slice</th><th style="width: 48%;">In scope</th><th>Deferred to next slice</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><strong>D4a</strong> <span class="tag tag--cyan">this PR</span></td>
+        <td>
+          <ul class="tight">
+            <li><strong>New package <code>internal/runmode/</code></strong> — owns the deployment-posture flag (consumed by D2 stores, D5 secrets, D7 auth, D8 sandbox, plus D4b paths). Reading <code>runmode.Current() == runmode.ModeMulti</code> from non-path consumers reads naturally; <code>paths.Current()</code> would have been a name pun.</li>
+            <li><code>Mode</code> type, <code>ModeLocal</code> / <code>ModeMulti</code> constants, <code>LocalDefaultOrg</code> constant</li>
+            <li><code>Init(m Mode)</code> + <code>Current()</code> + <code>ModeFromEnv(s string)</code> + <code>InitFromEnv()</code> convenience wrapper</li>
+            <li><code>SetForTest(t, m Mode)</code> test helper with t.Cleanup restore</li>
+            <li>Wire <code>runmode.InitFromEnv()</code> at the top of <code>main()</code> before the argv dispatch, fatal on init error — every dispatched subcommand inherits the initialized state, so per-Handle wiring isn't needed</li>
+            <li>Unit tests for env parsing, default-to-local, init guards, SetForTest restore</li>
+            <li><code>CLAUDE.md</code> bullet documenting <code>TF_MODE</code> + <code>internal/runmode</code> as the seam, with a forward-pointer to D4b's <code>internal/paths</code></li>
+          </ul>
+        </td>
+        <td>Resolvers, caller sweep, lint rule, the <code>internal/paths</code> package itself</td>
+      </tr>
+      <tr>
+        <td><strong>D4b</strong> <span class="tag">later</span></td>
+        <td>
+          <ul class="tight">
+            <li><strong>New package <code>internal/paths/</code></strong> — depends on <code>internal/runmode</code>; pure path resolution</li>
+            <li>All resolver functions (<code>DBPath</code>, <code>SDKDir</code>, <code>LegacyConfigPath</code>, <code>WorktreeRoot</code>, <code>RunRoot</code>, <code>BareCacheDir</code>, <code>ProjectKBRoot</code>, <code>TakeoverDir</code>) per §3's matrix</li>
+            <li>Per-resource caller migration with <code>runmode.LocalDefaultOrg</code> threading</li>
+            <li><code>forbidigo</code> lint rule banning raw <code>".triagefactory"</code> / <code>os.UserHomeDir()</code> outside <code>internal/paths/</code></li>
+            <li>Per-resolver unit tests + fixture test pinning local-mode output byte-for-byte</li>
+            <li><code>cmd/uninstall</code> multi-mode refusal</li>
+            <li><code>SetForTest</code> for paths (state-root override) — separate from runmode's <code>SetForTest</code></li>
+          </ul>
+        </td>
+        <td>—</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout">
+    <strong>Why two packages, not one:</strong> mode is consumed by ~7 unrelated concerns (stores, secrets, auth, sandbox, image, paths, anywhere we add multi-only behavior). Hosting the flag inside <code>internal/paths</code> would mean every store-wiring or auth-middleware file imports <code>paths</code> just to read the mode — naming pun + fake dependency. Splitting keeps each package focused and reads naturally at every call site. Cost is one extra package + one extra import line for paths; benefit is the naming clarity persists across the whole project.
+  </div>
+
+  <div class="callout">
+    <strong>Sequencing rationale:</strong> mini-D4a unblocks D2's wiring code to dispatch between SQLite and Postgres impls based on mode, but D2 (SQLite-only first PR) and D3 (pure SQL) don't actually need the resolvers. The resolver targets — <code>worktree.go</code>, <code>delegate/</code>, <code>curator/</code>, <code>repoprofile/</code> — sit unchanged through D3 and D2's first PR, so deferring D4b doesn't expand the eventual sweep surface.
+  </div>
+
+  <p>Sections §1–§9 describe the <em>full</em> D4 design as originally written for one package. Read with the runmode/paths split in mind: the <code>Mode</code> / <code>Current</code> / <code>Init</code> / <code>LocalDefaultOrg</code> primitives live in <code>internal/runmode</code> (D4a); the resolvers + caller sweep live in <code>internal/paths</code> and import runmode (D4b).</p>
+</section>
 
 <!-- ===================================================== -->
 <section class="block" id="why">
@@ -625,35 +679,52 @@ mode := paths.<span class="fn">ModeFromEnv</span>(os.<span class="fn">Getenv</sp
 <section class="block" id="steps">
   <div class="section-label">§8</div>
   <h2>Implementation steps</h2>
+  <p class="lede"><strong>D4a checklist</strong> (this PR). D4b's steps land in a follow-up PR — see §0's phasing table.</p>
 
   <ol class="steps">
     <li>
-      <span class="step-title">Create <code>internal/paths/</code> package</span>
-      <span class="step-body">Three files: <code>paths.go</code> (Mode type, Init, Current, all resolvers), <code>test_helper.go</code> (SetForTest), <code>doc.go</code> (package-level docstring). All public functions return <code>(string, error)</code>; the error path is exclusively for mode-mismatch + missing UserHomeDir.</span>
+      <span class="step-title">Create <code>internal/runmode/</code> package skeleton</span>
+      <span class="step-body">Two files: <code>runmode.go</code> (<code>Mode</code> type, <code>ModeLocal</code> / <code>ModeMulti</code> constants, <code>LocalDefaultOrg</code> constant, <code>Init(m Mode) error</code>, <code>Current() Mode</code>, <code>ModeFromEnv(s string) (Mode, error)</code>, <code>InitFromEnv() error</code>, package-level <code>currentMode</code> defaulting to <code>ModeLocal</code> via package-init) and <code>test_helper.go</code> (<code>SetForTest(t, m Mode)</code> with <code>t.Cleanup</code> restore). Note this is <em>not</em> <code>internal/paths/</code> — see §0's "why two packages" callout.</span>
     </li>
     <li>
-      <span class="step-title">Wire <code>paths.Init</code> into every entry point</span>
-      <span class="step-body"><code>main.go</code> + each <code>cmd/*/Handle()</code> — call <code>paths.Init(modeFromEnv)</code> as the first thing they do, before <code>db.Open()</code>. Fatal on init failure. Five entry points total: server (<code>main.go</code>), <code>cmd/exec</code>, <code>cmd/migrate</code>, <code>cmd/resume</code>, <code>cmd/install</code>, <code>cmd/uninstall</code>.</span>
+      <span class="step-title">Wire <code>runmode.InitFromEnv()</code> into <code>main()</code></span>
+      <span class="step-body">Just at the top of <code>main()</code> in <code>main.go</code>, before the argv-dispatch switch. Every dispatched subcommand (<code>exec</code>, <code>migrate</code>, <code>resume</code>, <code>install</code>, <code>uninstall</code>) inherits the initialized package-level mode, so per-Handle wiring isn't needed. Fatal on init error so an invalid <code>TF_MODE</code> doesn't lead to ambiguous downstream behavior.</span>
     </li>
     <li>
-      <span class="step-title">Migrate the ~8 entry-point sites</span>
-      <span class="step-body">One commit per file (or grouped by logical area: db+config+agentproc, worktree, curator+projectclassify+projectbundle, cmd/*). Each is a one-line substitution at the resolution site plus an orgID parameter through any caller layer that didn't have it. Use <code>paths.LocalDefaultOrg</code> at the new call sites until D9.</span>
+      <span class="step-title">Unit tests</span>
+      <span class="step-body"><code>internal/runmode/runmode_test.go</code>: <code>TestModeFromEnv</code> (table-driven for "" / "local" / "multi" / "MULTI" / unknown), <code>TestCurrent_DefaultsToLocal</code>, <code>TestInit_AcceptsValidModes</code>, <code>TestInit_RejectsUnknown</code>, <code>TestSetForTest_RestoresAfter</code>.</span>
     </li>
     <li>
-      <span class="step-title">Unit tests for resolution</span>
-      <span class="step-body"><code>internal/paths/paths_test.go</code>: table-driven test against every (mode, function, args) combination. Multi-mode test seeds a <code>SetForTest(t, ModeMulti, "/tmp/x")</code> and asserts <code>WorktreeRoot("orgA")</code> ≠ <code>WorktreeRoot("orgB")</code> (the architecture's "two orgs non-overlapping" acceptance criterion). Local-mode test asserts the resolved paths match today's hand-rolled output byte-for-byte against a fixture.</span>
+      <span class="step-title">Document</span>
+      <span class="step-body"><code>CLAUDE.md</code> — add a "Mode flag" bullet: <code>TF_MODE=local|multi</code> read once at startup; <code>internal/runmode</code> owns the flag; <code>internal/paths</code> (D4b) consumes it for state-root resolution.</span>
     </li>
     <li>
-      <span class="step-title">Integration smoke</span>
-      <span class="step-body">Boot the binary in local mode against a clean <code>$HOME</code>, confirm <code>~/.triagefactory/triagefactory.db</code> is created at the expected path. Boot with <code>TF_MODE=multi</code> against a tmp <code>/data</code> mount (or override the state root via env for local dev), confirm the worktree root resolves under <code>/data/orgs/default/...</code> when fed <code>LocalDefaultOrg</code> — and rejects when fed an empty orgID.</span>
+      <span class="step-title">Build, test, lint, ship</span>
+      <span class="step-body"><code>go build ./...</code>, <code>go test ./...</code>, <code>./scripts/lint.sh</code>. Push aa/SKY-248, open PR pointing at the SKY-248 ticket and noting the D4b follow-up.</span>
+    </li>
+  </ol>
+
+  <h3>D4b checklist (next PR)</h3>
+  <ol class="steps">
+    <li>
+      <span class="step-title">Add resolver functions per §3</span>
+      <span class="step-body"><code>DBPath</code>, <code>SDKDir</code>, <code>LegacyConfigPath</code>, <code>WorktreeRoot</code>, <code>RunRoot</code>, <code>BareCacheDir</code>, <code>ProjectKBRoot</code>, <code>TakeoverDir</code>. Mode-mismatch returns <code>ErrModeMismatch</code> (new sentinel). Extend <code>SetForTest</code> with the <code>root string</code> override.</span>
     </li>
     <li>
-      <span class="step-title">Update <code>cmd/uninstall</code> for multi-mode refusal</span>
-      <span class="step-body">Add the early-exit check: if <code>paths.Current() == ModeMulti</code>, print the "uninstall is local-only; tear down the deployment via your orchestrator" message and exit non-zero. Doesn't try to wipe <code>/data</code>.</span>
+      <span class="step-title">Migrate the ~8 entry-point sites per §6</span>
+      <span class="step-body">One commit per logical area (db+config+agentproc, worktree, curator+projectclassify+projectbundle, cmd/*). Each is a one-line substitution plus orgID threading; use <code>paths.LocalDefaultOrg</code> at new call sites until D9.</span>
     </li>
     <li>
-      <span class="step-title">Documentation</span>
-      <span class="step-body"><code>CLAUDE.md</code> — add a "Mode flag &amp; paths" bullet pointing at <code>internal/paths</code> as the single source of truth. <code>docs/usage.md</code> — document <code>TF_MODE=local|multi</code> for operators (multi mode isn't user-deployable yet, but the env var is read).</span>
+      <span class="step-title">Lint rule</span>
+      <span class="step-body"><code>forbidigo</code> rule rejecting raw <code>".triagefactory"</code> string literals + <code>os.UserHomeDir()</code> calls outside <code>internal/paths/</code>.</span>
+    </li>
+    <li>
+      <span class="step-title">Resolver tests</span>
+      <span class="step-body">Per-resolver table-driven tests; fixture test pinning local-mode output byte-for-byte; multi-mode "two orgs non-overlapping" assertion against tmp state root.</span>
+    </li>
+    <li>
+      <span class="step-title">cmd/uninstall multi-mode refusal</span>
+      <span class="step-body">Early-exit if <code>paths.Current() == ModeMulti</code> with a clear message routing the operator to their orchestrator.</span>
     </li>
   </ol>
 </section>
