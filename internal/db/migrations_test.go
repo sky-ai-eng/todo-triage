@@ -72,26 +72,18 @@ func TestMigrate_Idempotent(t *testing.T) {
 	}
 }
 
-// TestMigrate_StampsBaselineOnExistingInstall is the existing-user
-// upgrade regression: a DB that came in through the pre-goose
-// `schema_migrations` runner gets the baseline stamped in
-// goose_db_version without re-executing the consolidated baseline's
-// CREATE statements (which would error against tables that already
-// exist with data).
-//
-// Simulates the pre-goose state by manually creating
-// `schema_migrations` with one row and an `entities` table with data.
-// Migrate must (1) detect the legacy table, (2) stamp the goose
-// baseline, (3) leave the existing data intact.
-func TestMigrate_StampsBaselineOnExistingInstall(t *testing.T) {
-	database := openMigrationsTestDB(t)
-
+// seedFullLegacyState writes all 18 expected legacy version strings
+// into a freshly-created schema_migrations table plus an entities row
+// that survives the upgrade. Used by tests covering the
+// installLegacyRunnerPopulated path; the partial-legacy variant uses
+// a similar helper but omits one of the expected versions.
+func seedFullLegacyState(t *testing.T, database *sql.DB) {
+	t.Helper()
 	if _, err := database.Exec(`
 		CREATE TABLE schema_migrations (
 			version    TEXT PRIMARY KEY,
 			applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);
-		INSERT INTO schema_migrations (version) VALUES ('20260507_002_entities_classified_at');
 		CREATE TABLE entities (
 			id TEXT PRIMARY KEY,
 			source TEXT NOT NULL,
@@ -102,8 +94,24 @@ func TestMigrate_StampsBaselineOnExistingInstall(t *testing.T) {
 		);
 		INSERT INTO entities (id, source, source_id, kind) VALUES ('e1', 'github', 'owner/repo#1', 'pr');
 	`); err != nil {
-		t.Fatalf("seed legacy state: %v", err)
+		t.Fatalf("seed schema + data: %v", err)
 	}
+	for _, v := range expectedLegacyVersions {
+		if _, err := database.Exec(`INSERT INTO schema_migrations (version) VALUES (?)`, v); err != nil {
+			t.Fatalf("seed legacy version %q: %v", v, err)
+		}
+	}
+}
+
+// TestMigrate_StampsBaselineOnExistingInstall is the existing-user
+// upgrade regression: a DB that came in through the pre-goose
+// `schema_migrations` runner with all 18 expected versions gets the
+// baseline stamped in goose_db_version without re-executing the
+// consolidated baseline's CREATE statements (which would error
+// against tables that already exist with data).
+func TestMigrate_StampsBaselineOnExistingInstall(t *testing.T) {
+	database := openMigrationsTestDB(t)
+	seedFullLegacyState(t, database)
 
 	if err := Migrate(database); err != nil {
 		t.Fatalf("Migrate on simulated upgrade: %v", err)
@@ -122,13 +130,69 @@ func TestMigrate_StampsBaselineOnExistingInstall(t *testing.T) {
 	}
 
 	// Legacy schema_migrations is intentionally left in place as an
-	// audit trail / rollback safety net.
+	// audit trail / rollback safety net — every expected version
+	// stays populated post-stamp.
 	var legacyCount int
 	if err := database.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&legacyCount); err != nil {
 		t.Fatalf("query legacy schema_migrations: %v", err)
 	}
-	if legacyCount != 1 {
-		t.Errorf("legacy schema_migrations rows = %d, want 1 (audit trail must be preserved)", legacyCount)
+	if legacyCount != len(expectedLegacyVersions) {
+		t.Errorf("legacy schema_migrations rows = %d, want %d (audit trail must be preserved in full)", legacyCount, len(expectedLegacyVersions))
+	}
+}
+
+// TestMigrate_PartialLegacyInstallErrors covers the case where
+// schema_migrations is populated but missing one of the 18 expected
+// versions — the silent-corruption hole flagged when a real user hit
+// it (their DB had 17 of 18 rows, missing
+// 20260507_001_prompt_allowed_tools, so the prompts table never got
+// the allowed_tools column despite goose stamping baseline as
+// applied). Migrate must refuse with ErrPartialLegacyInstall pointing
+// the operator at v1.10.1 and must NOT create goose_db_version (no
+// half-stamping).
+func TestMigrate_PartialLegacyInstallErrors(t *testing.T) {
+	database := openMigrationsTestDB(t)
+	if _, err := database.Exec(`
+		CREATE TABLE schema_migrations (
+			version    TEXT PRIMARY KEY,
+			applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);
+		CREATE TABLE entities (
+			id TEXT PRIMARY KEY,
+			source TEXT NOT NULL,
+			source_id TEXT NOT NULL,
+			kind TEXT NOT NULL,
+			UNIQUE(source, source_id)
+		);
+	`); err != nil {
+		t.Fatalf("seed bare schema: %v", err)
+	}
+	// Seed 17 of 18 — omit 20260507_001_prompt_allowed_tools, the
+	// exact version the real user's DB was missing.
+	for _, v := range expectedLegacyVersions {
+		if v == "20260507_001_prompt_allowed_tools" {
+			continue
+		}
+		if _, err := database.Exec(`INSERT INTO schema_migrations (version) VALUES (?)`, v); err != nil {
+			t.Fatalf("seed version %q: %v", v, err)
+		}
+	}
+
+	err := Migrate(database)
+	if err == nil {
+		t.Fatalf("Migrate against partial-legacy DB should have errored")
+	}
+	if !errors.Is(err, ErrPartialLegacyInstall) {
+		t.Fatalf("Migrate err = %v, want wraps ErrPartialLegacyInstall", err)
+	}
+	if !strings.Contains(err.Error(), "v1.10.1") {
+		t.Errorf("error message must reference v1.10.1; got %q", err.Error())
+	}
+
+	// Sanity: nothing was stamped — partial-state must not lead to
+	// half-applied goose state.
+	if tableExists(t, database, "goose_db_version") {
+		t.Errorf("goose_db_version was created — partial-legacy detection should have refused before any write")
 	}
 }
 
