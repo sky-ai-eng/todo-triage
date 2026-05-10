@@ -20,7 +20,7 @@ func TestBaseline_AppliesCleanly(t *testing.T) {
 	h.Reset(t)
 
 	expectedTables := []string{
-		"orgs", "teams", "users", "memberships", "sessions", "project_knowledge",
+		"orgs", "teams", "users", "memberships", "org_memberships", "sessions", "project_knowledge",
 		"org_settings", "team_settings", "user_settings", "jira_project_status_rules",
 		"prompts", "projects", "events_catalog", "entities", "entity_links", "events",
 		"task_rules", "prompt_triggers", "tasks", "task_events", "runs", "run_artifacts",
@@ -42,7 +42,11 @@ func TestBaseline_AppliesCleanly(t *testing.T) {
 		}
 	}
 
-	for _, fn := range []string{"current_user_id", "current_org_id", "user_has_org_access"} {
+	for _, fn := range []string{
+		"current_user_id", "current_org_id",
+		"user_has_org_access", "user_is_org_admin", "user_is_team_admin",
+		"user_owns_org", "user_is_org_admin_via_team",
+	} {
 		var n int
 		if err := h.AdminDB.QueryRow(
 			`SELECT COUNT(*) FROM pg_proc p JOIN pg_namespace n ON p.pronamespace = n.oid
@@ -251,10 +255,9 @@ func TestRLS_CuratorChatPerUserIsolation(t *testing.T) {
 
 	org, alice, _ := seedOrgWithUser(t, h, "alice")
 	bob := seedUser(t, h, "bob")
-	// Add bob to the same team.
+	// Add bob to the same team (org member + team member).
 	teamID := getOrgTeam(t, h, org)
-	mustExec(t, h.AdminDB,
-		`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'member')`, bob, teamID)
+	addOrgMember(t, h, bob, org, teamID, "member", "member")
 
 	projectID := seedProject(t, h, org, alice, "demo")
 	aliceReq := seedCuratorRequest(t, h, org, alice, projectID, "alice asking")
@@ -439,8 +442,7 @@ func TestRLS_UsersIsolation(t *testing.T) {
 	// Co-worker: charlie joins alice's team.
 	charlie := seedUser(t, h, "charlie")
 	teamA := getOrgTeam(t, h, orgA)
-	mustExec(t, h.AdminDB,
-		`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'member')`, charlie, teamA)
+	addOrgMember(t, h, charlie, orgA, teamA, "member", "member")
 
 	err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
 		var ids []string
@@ -685,8 +687,7 @@ func TestProjectKnowledge_RunValidation(t *testing.T) {
 	// build the full task/event/prompt chain.
 	bobOrg := seedOrg(t, h, "bob-other-org", bob)
 	bobTeam := seedTeam(t, h, bobOrg, "default")
-	mustExec(t, h.AdminDB,
-		`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'owner')`, bob, bobTeam)
+	addOrgMember(t, h, bob, bobOrg, bobTeam, "owner", "admin")
 	bobEntity := seedEntity(t, h, bobOrg, "github", "octo/repo#99")
 	bobTask := seedTask(t, h, bobOrg, bob, bobEntity, "github:pr:opened")
 	bobPrompt := seedPrompt(t, h, bobOrg, bob, "p1")
@@ -736,12 +737,11 @@ func TestRLS_TeamVisibilityIsTeamScoped(t *testing.T) {
 	orgA, alice, teamA := seedOrgWithUser(t, h, "alice")
 	bob := seedUser(t, h, "bob")
 	carol := seedUser(t, h, "carol")
-	// Bob joins teamA; carol joins a NEW team in the same org.
-	mustExec(t, h.AdminDB,
-		`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'member')`, bob, teamA)
+	// Bob joins teamA; carol joins a NEW team in the same org. Both
+	// are org-level 'member' (only alice as founder is org-level admin).
+	addOrgMember(t, h, bob, orgA, teamA, "member", "member")
 	teamB := seedTeam(t, h, orgA, "team-b")
-	mustExec(t, h.AdminDB,
-		`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'member')`, carol, teamB)
+	addOrgMember(t, h, carol, orgA, teamB, "member", "member")
 
 	// Seed one team-scoped row in each of the four tables.
 	prompt := seedPrompt(t, h, orgA, alice, "p1")
@@ -843,11 +843,15 @@ func TestRLS_RevokedMembership(t *testing.T) {
 		t.Fatalf("alice pre-revocation: %v", err)
 	}
 
-	// Revoke alice's membership (admin path; tests as supabase_admin).
+	// Revoke alice's membership at BOTH levels (admin path; tests as
+	// supabase_admin). Removing the team membership alone is no
+	// longer enough — user_has_org_access queries org_memberships in
+	// the two-axis model.
+	mustExec(t, h.AdminDB, `DELETE FROM org_memberships WHERE user_id = $1`, alice)
 	mustExec(t, h.AdminDB, `DELETE FROM memberships WHERE user_id = $1`, alice)
 
 	// Alice's session still carries claims {sub: alice, org_id: orgA}
-	// but memberships row is gone → tf.user_has_org_access(orgA) now
+	// but org_memberships row is gone → tf.user_has_org_access(orgA) now
 	// returns false. Task SELECT must return 0 rows.
 	err = h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
 		rows, err := tx.Query(`SELECT id FROM tasks`)
@@ -877,11 +881,10 @@ func TestRLS_OrgAdminGate(t *testing.T) {
 	h := Shared(t)
 	h.Reset(t)
 
-	// Alice is the owner; bob is a plain member of the same org.
+	// Alice is the org owner; bob is a plain org+team member.
 	orgA, alice, teamA := seedOrgWithUser(t, h, "alice")
 	bob := seedUser(t, h, "bob")
-	mustExec(t, h.AdminDB,
-		`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'member')`, bob, teamA)
+	addOrgMember(t, h, bob, orgA, teamA, "member", "member")
 
 	// Alice (owner) can rename the org.
 	err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
@@ -970,8 +973,7 @@ func TestRLS_SettingsAdminOnly(t *testing.T) {
 
 	orgA, alice, teamA := seedOrgWithUser(t, h, "alice")
 	bob := seedUser(t, h, "bob")
-	mustExec(t, h.AdminDB,
-		`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'member')`, bob, teamA)
+	addOrgMember(t, h, bob, orgA, teamA, "member", "member")
 
 	// Alice (owner) creates an org_settings row.
 	err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
@@ -1082,39 +1084,49 @@ func TestRLS_OrgBootstrap(t *testing.T) {
 		return struct{}{}
 	})
 
-	// Phase 3 (negative): dave CANNOT yet create a team in his own
-	// org — teams_insert is gated by tf.user_is_org_admin, which
-	// requires an existing admin membership. This is D7's role:
-	// bootstrap the first team via supabase_admin.
+	// Phase 3 (negative): dave CANNOT yet create a team — teams_insert
+	// requires user_is_org_admin, which queries org_memberships, and
+	// dave has no row there yet.
 	withDaveTx(t, h, dave, func(tx *sql.Tx) struct{} {
 		_, err := tx.Exec(`
 			INSERT INTO teams (org_id, slug, name) VALUES ($1, 'default', 'Default')
 		`, orgID)
 		if err == nil {
-			t.Errorf("dave (no membership yet) created a team — admin gate broken")
+			t.Errorf("dave (no org_memberships yet) created a team — admin gate broken")
 		}
 		return struct{}{}
 	})
 
-	// Phase 4: AdminDB seeds the team (modeling D7 bootstrap via
-	// supabase_admin / service_role).
-	var teamID string
-	if err := h.AdminDB.QueryRow(`
-		INSERT INTO teams (org_id, slug, name) VALUES ($1, 'default', 'Default') RETURNING id
-	`, orgID).Scan(&teamID); err != nil {
-		t.Fatalf("AdminDB seed team: %v", err)
-	}
+	// Phase 4: dave self-inserts his org_memberships row as 'owner'.
+	// The org_memberships_insert bootstrap branch (tf.user_owns_org)
+	// permits this — he founded the org per orgs.owner_user_id.
+	withDaveTx(t, h, dave, func(tx *sql.Tx) struct{} {
+		if _, err := tx.Exec(`
+			INSERT INTO org_memberships (user_id, org_id, role) VALUES ($1, $2, 'owner')
+		`, dave, orgID); err != nil {
+			t.Fatalf("dave self-insert org_memberships (bootstrap): %v", err)
+		}
+		return struct{}{}
+	})
 
-	// Phase 5: dave self-inserts his owner membership via tf_app —
-	// the bootstrap branch (owner-of-parent-org can self-insert)
-	// permits this even though he isn't a team admin yet.
+	// Phase 5: dave is now an org admin (via org_memberships). He can
+	// create teams and self-insert team memberships, all through
+	// tf_app — no supabase_admin needed.
+	var teamID string
 	if err := h.WithUser(t, dave, orgID, func(tx *sql.Tx) error {
-		_, err := tx.Exec(`
-			INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'owner')
-		`, dave, teamID)
-		return err
+		if err := tx.QueryRow(`
+			INSERT INTO teams (org_id, slug, name) VALUES ($1, 'default', 'Default') RETURNING id
+		`, orgID).Scan(&teamID); err != nil {
+			return fmt.Errorf("INSERT team: %w", err)
+		}
+		if _, err := tx.Exec(`
+			INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'admin')
+		`, dave, teamID); err != nil {
+			return fmt.Errorf("INSERT memberships: %w", err)
+		}
+		return nil
 	}); err != nil {
-		t.Fatalf("dave self-insert owner membership (bootstrap): %v", err)
+		t.Fatalf("dave team + memberships bootstrap: %v", err)
 	}
 }
 
@@ -1155,8 +1167,15 @@ func TestRLS_MembershipManagement(t *testing.T) {
 	orgA, alice, teamA := seedOrgWithUser(t, h, "alice")
 	bob := seedUser(t, h, "bob")
 	carol := seedUser(t, h, "carol")
+	// Bob and carol are org members but not yet on any team. This
+	// test asserts the team-membership write policies; the org-
+	// membership ones are exercised by TestRLS_OrgBootstrap.
+	mustExec(t, h.AdminDB,
+		`INSERT INTO org_memberships (user_id, org_id, role) VALUES ($1, $2, 'member')`, bob, orgA)
+	mustExec(t, h.AdminDB,
+		`INSERT INTO org_memberships (user_id, org_id, role) VALUES ($1, $2, 'member')`, carol, orgA)
 
-	// 1. Alice (team admin / owner) can add bob.
+	// 1. Alice (team admin / org owner) can add bob to the team.
 	err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
 		_, err := tx.Exec(
 			`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'member')`,
@@ -1219,15 +1238,147 @@ func TestRLS_MembershipManagement(t *testing.T) {
 	}
 }
 
+// TestRLS_TeamAdminNotOrgAdmin pins the two-axis role model: a team
+// admin who is only an org member (not an org admin) can manage their
+// own team but CANNOT mutate org-wide attributes. This is the
+// scenario the previous one-axis model silently allowed — anyone
+// promoted to admin of any subteam got org-wide write access.
+func TestRLS_TeamAdminNotOrgAdmin(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	// Alice founds the org. Carol is added as a regular org member,
+	// then made admin of a subteam (mobile-team).
+	orgA, alice, teamMain := seedOrgWithUser(t, h, "alice")
+	carol := seedUser(t, h, "carol")
+	teamMobile := seedTeam(t, h, orgA, "mobile-team")
+	addOrgMember(t, h, carol, orgA, teamMobile, "member", "admin")
+	_ = teamMain // unused; alice's team
+
+	// Carol CAN manage her team's settings.
+	err := h.WithUser(t, carol, orgA, func(tx *sql.Tx) error {
+		_, err := tx.Exec(`
+			INSERT INTO team_settings (team_id, jira_projects)
+			VALUES ($1, ARRAY['SKY','MOB'])
+		`, teamMobile)
+		return err
+	})
+	if err != nil {
+		t.Errorf("carol (team admin) INSERT team_settings on her own team: %v", err)
+	}
+
+	// Carol CANNOT rename the org (org admin only).
+	err = h.WithUser(t, carol, orgA, func(tx *sql.Tx) error {
+		res, err := tx.Exec(`UPDATE orgs SET name = 'carol-takeover' WHERE id = $1`, orgA)
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		if n != 0 {
+			t.Errorf("team-admin-only carol UPDATE'd orgs.name (%d rows) — two-axis broken", n)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("carol rename attempt: %v", err)
+	}
+
+	// Carol CANNOT flip sso_enforced.
+	err = h.WithUser(t, carol, orgA, func(tx *sql.Tx) error {
+		res, err := tx.Exec(`UPDATE orgs SET sso_enforced = TRUE WHERE id = $1`, orgA)
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		if n != 0 {
+			t.Errorf("team-admin-only carol flipped sso_enforced (%d rows) — two-axis broken", n)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("carol sso_enforced attempt: %v", err)
+	}
+
+	// Carol CANNOT write org_settings.
+	err = h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
+		_, err := tx.Exec(`INSERT INTO org_settings (org_id) VALUES ($1)`, orgA)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("alice seed org_settings: %v", err)
+	}
+	err = h.WithUser(t, carol, orgA, func(tx *sql.Tx) error {
+		res, err := tx.Exec(
+			`UPDATE org_settings SET github_poll_interval = '1 minute' WHERE org_id = $1`, orgA,
+		)
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		if n != 0 {
+			t.Errorf("team-admin-only carol UPDATE'd org_settings (%d rows)", n)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("carol org_settings attempt: %v", err)
+	}
+
+	// Carol CANNOT create a new team in the org.
+	err = h.WithUser(t, carol, orgA, func(tx *sql.Tx) error {
+		_, err := tx.Exec(
+			`INSERT INTO teams (org_id, slug, name) VALUES ($1, 'sneaky', 'Sneaky')`, orgA,
+		)
+		return err
+	})
+	if err == nil {
+		t.Errorf("team-admin-only carol created a new team — should require org admin")
+	}
+
+	// Sanity: alice (org owner) can do all of the above.
+	err = h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
+		res, err := tx.Exec(`UPDATE orgs SET name = 'renamed-by-alice' WHERE id = $1`, orgA)
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		if n != 1 {
+			t.Errorf("alice (org owner) rename affected %d rows, want 1", n)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("alice sanity rename: %v", err)
+	}
+}
+
 // --- fixture helpers ---
+
+// addOrgMember adds a user to an org with the given org_role and the
+// given team_role on the named team. Modeled on the production
+// "admin invites a user" flow (D7's auth middleware will materialize
+// both rows together).
+func addOrgMember(t *testing.T, h *Harness, userID, orgID, teamID, orgRole, teamRole string) {
+	t.Helper()
+	mustExec(t, h.AdminDB,
+		`INSERT INTO org_memberships (user_id, org_id, role) VALUES ($1, $2, $3)`, userID, orgID, orgRole)
+	mustExec(t, h.AdminDB,
+		`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, $3)`, userID, teamID, teamRole)
+}
 
 func seedOrgWithUser(t *testing.T, h *Harness, displayName string) (orgID, userID, teamID string) {
 	t.Helper()
 	userID = seedUser(t, h, displayName)
 	orgID = seedOrg(t, h, displayName+"-org", userID)
 	teamID = seedTeam(t, h, orgID, "default")
+	// Two-axis roles (matches GitHub/GitLab/Linear): the founder is
+	// org-level 'owner' (via org_memberships) AND team-level 'admin'
+	// (via memberships). Membership_role no longer has 'owner';
+	// owning is an org concept now.
 	mustExec(t, h.AdminDB,
-		`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'owner')`, userID, teamID)
+		`INSERT INTO org_memberships (user_id, org_id, role) VALUES ($1, $2, 'owner')`, userID, orgID)
+	mustExec(t, h.AdminDB,
+		`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'admin')`, userID, teamID)
 	return
 }
 

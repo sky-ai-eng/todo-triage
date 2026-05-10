@@ -229,6 +229,7 @@ var orgScopedTables = []string{
 	// Tenancy:
 	"sessions",
 	"memberships",
+	"org_memberships",
 	"teams",
 	"orgs",
 	// users + auth.users handled separately (auth.users is image-owned).

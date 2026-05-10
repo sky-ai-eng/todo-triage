@@ -229,7 +229,24 @@ CREATE TABLE teams (
   UNIQUE (org_id, slug)
 );
 
-CREATE TYPE membership_role AS ENUM ('owner', 'admin', 'member', 'viewer');
+-- Two-axis role model (matches GitHub/GitLab/Linear/etc):
+--   org_memberships.role  → owner / admin / member  (org-wide power)
+--   memberships.role      → admin  / member / viewer (per-team power)
+-- The two axes are independent: someone can be a team admin and only
+-- an org member, or an org owner with zero team memberships.
+CREATE TYPE org_role AS ENUM ('owner', 'admin', 'member');
+CREATE TYPE membership_role AS ENUM ('admin', 'member', 'viewer');
+
+-- Org-level membership: every user with any access to an org has a
+-- row here. Team membership is layered on top via the memberships
+-- table; team membership requires (but doesn't imply) org membership.
+CREATE TABLE org_memberships (
+  user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  org_id     UUID NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  role       org_role NOT NULL DEFAULT 'member',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, org_id)
+);
 
 CREATE TABLE memberships (
   user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -239,51 +256,60 @@ CREATE TABLE memberships (
   PRIMARY KEY (user_id, team_id)
 );
 
--- user_has_org_access — joins memberships+teams. MUST be
--- SECURITY DEFINER: without it, the function call inside an RLS policy
--- on (say) tasks would invoke RLS on memberships/teams, whose own
--- policies invoke this function again, recursing until stack
--- exhaustion. SECURITY DEFINER runs the body as the function owner
--- (postgres superuser, who bypasses RLS), breaking the cycle.
+-- user_has_org_access — caller has any org_memberships row in the
+-- target org. MUST be SECURITY DEFINER so the lookup bypasses
+-- org_memberships' own RLS (otherwise the policy on org_memberships
+-- would call this function which would call the policy → recursion).
 -- +goose StatementBegin
 CREATE OR REPLACE FUNCTION tf.user_has_org_access(target_org UUID) RETURNS BOOLEAN
 LANGUAGE SQL STABLE SECURITY DEFINER
 SET search_path = public, tf, pg_temp
 AS $$
   SELECT EXISTS (
-    SELECT 1 FROM memberships m
-    JOIN teams t ON t.id = m.team_id
-    WHERE m.user_id = tf.current_user_id() AND t.org_id = target_org
+    SELECT 1 FROM org_memberships
+    WHERE user_id = tf.current_user_id() AND org_id = target_org
   );
 $$;
 -- +goose StatementEnd
 REVOKE ALL ON FUNCTION tf.user_has_org_access FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION tf.user_has_org_access TO tf_app;
 
--- user_is_org_admin — true if the caller has owner/admin role on ANY
--- team in the target org. Used by RLS policies that gate writes on
--- tenancy + settings tables (orgs.UPDATE, teams.INSERT/UPDATE/DELETE,
--- org_settings writes, jira_project_status_rules writes). NOTE:
--- memberships.role is per-team, so "org admin" here means
--- "admin/owner anywhere in this org" — fine for v1 with a single
--- default team per org; a future ticket can introduce an explicit
--- org_admins table if we want strict per-org admin scoping.
+-- user_is_org_admin — caller has org_role in ('owner','admin') for
+-- target org. Distinct from user_is_team_admin: this is an org-wide
+-- power (rename org, flip sso_enforced, etc.) independent of which
+-- team(s) the user belongs to. Matches GitHub's Owner/Member +
+-- Maintainer/Member two-axis model.
 -- +goose StatementBegin
 CREATE OR REPLACE FUNCTION tf.user_is_org_admin(target_org UUID) RETURNS BOOLEAN
 LANGUAGE SQL STABLE SECURITY DEFINER
 SET search_path = public, tf, pg_temp
 AS $$
   SELECT EXISTS (
-    SELECT 1 FROM memberships m
-    JOIN teams t ON t.id = m.team_id
-    WHERE m.user_id = tf.current_user_id()
-      AND t.org_id = target_org
-      AND m.role IN ('owner', 'admin')
+    SELECT 1 FROM org_memberships
+    WHERE user_id = tf.current_user_id()
+      AND org_id = target_org
+      AND role IN ('owner', 'admin')
   );
 $$;
 -- +goose StatementEnd
 REVOKE ALL ON FUNCTION tf.user_is_org_admin FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION tf.user_is_org_admin TO tf_app;
+
+-- user_owns_org — caller is the org's founder (orgs.owner_user_id).
+-- Used for the org_memberships bootstrap branch (founder self-inserts
+-- their first org_memberships row before any other admin row exists).
+-- +goose StatementBegin
+CREATE OR REPLACE FUNCTION tf.user_owns_org(target_org UUID) RETURNS BOOLEAN
+LANGUAGE SQL STABLE SECURITY DEFINER
+SET search_path = public, tf, pg_temp
+AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM orgs WHERE id = target_org AND owner_user_id = tf.current_user_id()
+  );
+$$;
+-- +goose StatementEnd
+REVOKE ALL ON FUNCTION tf.user_owns_org FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION tf.user_owns_org TO tf_app;
 
 -- user_is_team_admin — owner/admin on a specific team.
 -- +goose StatementBegin
@@ -295,32 +321,32 @@ AS $$
     SELECT 1 FROM memberships m
     WHERE m.user_id = tf.current_user_id()
       AND m.team_id = target_team
-      AND m.role IN ('owner', 'admin')
+      AND m.role = 'admin'
   );
 $$;
 -- +goose StatementEnd
 REVOKE ALL ON FUNCTION tf.user_is_team_admin FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION tf.user_is_team_admin TO tf_app;
 
--- user_owns_org_via_team — caller owns the org that owns this team.
--- Used by the memberships_insert bootstrap branch: when a brand-new
--- user creates their first org, they have no membership yet, so a
--- direct SELECT against teams/orgs would be RLS-filtered to empty.
--- SECURITY DEFINER bypasses RLS for this specific lookup.
+-- user_is_org_admin_via_team — admin check that lifts a team_id to its
+-- parent org_id and asks user_is_org_admin. Used by memberships
+-- write policies; the JOIN must run as SECURITY DEFINER because the
+-- caller may not yet have a memberships row (bootstrap), so direct
+-- SELECT on teams would be RLS-empty.
 -- +goose StatementBegin
-CREATE OR REPLACE FUNCTION tf.user_owns_org_via_team(target_team UUID) RETURNS BOOLEAN
+CREATE OR REPLACE FUNCTION tf.user_is_org_admin_via_team(target_team UUID) RETURNS BOOLEAN
 LANGUAGE SQL STABLE SECURITY DEFINER
 SET search_path = public, tf, pg_temp
 AS $$
   SELECT EXISTS (
-    SELECT 1 FROM teams t JOIN orgs o ON o.id = t.org_id
+    SELECT 1 FROM teams t
     WHERE t.id = target_team
-      AND o.owner_user_id = tf.current_user_id()
+      AND tf.user_is_org_admin(t.org_id)
   );
 $$;
 -- +goose StatementEnd
-REVOKE ALL ON FUNCTION tf.user_owns_org_via_team FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION tf.user_owns_org_via_team TO tf_app;
+REVOKE ALL ON FUNCTION tf.user_is_org_admin_via_team FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION tf.user_is_org_admin_via_team TO tf_app;
 
 -- AES-GCM ciphertext columns; key = TF_SESSION_KEY env var (D6 wires it).
 CREATE TABLE sessions (
@@ -966,6 +992,7 @@ CREATE INDEX project_knowledge_org_idx ON project_knowledge(org_id, project_id);
 ALTER TABLE users                      ENABLE ROW LEVEL SECURITY;
 ALTER TABLE orgs                       ENABLE ROW LEVEL SECURITY;
 ALTER TABLE teams                      ENABLE ROW LEVEL SECURITY;
+ALTER TABLE org_memberships            ENABLE ROW LEVEL SECURITY;
 ALTER TABLE memberships                ENABLE ROW LEVEL SECURITY;
 ALTER TABLE sessions                   ENABLE ROW LEVEL SECURITY;
 ALTER TABLE org_settings               ENABLE ROW LEVEL SECURITY;
@@ -1074,28 +1101,43 @@ CREATE POLICY memberships_select ON memberships FOR SELECT
 -- self-insert if the user owns the parent org. After bootstrap,
 -- adding/promoting/removing other members goes through the team-admin
 -- branch.
+-- Team membership writes: team admins manage their own team; org
+-- admins (one role-axis up) can manage any team. Self-leave remains
+-- open to all members.
 CREATE POLICY memberships_insert ON memberships FOR INSERT
   WITH CHECK (
-    -- Bootstrap: org owner can insert their own first membership.
-    -- The EXISTS lookup uses a SECURITY DEFINER helper because
-    -- direct SELECT on teams/orgs would hit RLS (the user has no
-    -- membership yet, so user_has_org_access is false).
-    (user_id = tf.current_user_id() AND tf.user_owns_org_via_team(memberships.team_id))
-    -- OR a team admin (already-bootstrapped) adding others.
+    tf.user_is_team_admin(memberships.team_id)
+    OR tf.user_is_org_admin_via_team(memberships.team_id)
+  );
+CREATE POLICY memberships_update ON memberships FOR UPDATE
+  USING      (tf.user_is_team_admin(memberships.team_id) OR tf.user_is_org_admin_via_team(memberships.team_id))
+  WITH CHECK (tf.user_is_team_admin(memberships.team_id) OR tf.user_is_org_admin_via_team(memberships.team_id));
+CREATE POLICY memberships_delete ON memberships FOR DELETE
+  USING (
+    user_id = tf.current_user_id()
     OR tf.user_is_team_admin(memberships.team_id)
+    OR tf.user_is_org_admin_via_team(memberships.team_id)
   );
 
--- Role changes are admin-only (a non-admin promoting themselves would
--- be a privilege escalation).
-CREATE POLICY memberships_update ON memberships FOR UPDATE
-  USING (tf.user_is_team_admin(memberships.team_id))
-  WITH CHECK (tf.user_is_team_admin(memberships.team_id));
-
--- DELETE: team admins remove members; users can also remove themselves
--- (self-leave). Self-leave is necessary for offboarding flows that
--- run without an admin in the loop.
-CREATE POLICY memberships_delete ON memberships FOR DELETE
-  USING (user_id = tf.current_user_id() OR tf.user_is_team_admin(memberships.team_id));
+-- org_memberships: same shape as memberships, gated by org-level
+-- power. Bootstrap branch lets the org founder self-insert their
+-- first row before any other admin exists.
+CREATE POLICY org_memberships_select ON org_memberships FOR SELECT
+  USING (user_id = tf.current_user_id() OR tf.user_has_org_access(org_memberships.org_id));
+CREATE POLICY org_memberships_insert ON org_memberships FOR INSERT
+  WITH CHECK (
+    -- Bootstrap: org founder self-inserts as 'owner'. The
+    -- tf.user_owns_org helper bypasses RLS on orgs to break the
+    -- chicken-and-egg.
+    (user_id = tf.current_user_id() AND tf.user_owns_org(org_memberships.org_id))
+    -- OR an existing org admin/owner adds others.
+    OR tf.user_is_org_admin(org_memberships.org_id)
+  );
+CREATE POLICY org_memberships_update ON org_memberships FOR UPDATE
+  USING      (tf.user_is_org_admin(org_memberships.org_id))
+  WITH CHECK (tf.user_is_org_admin(org_memberships.org_id));
+CREATE POLICY org_memberships_delete ON org_memberships FOR DELETE
+  USING (user_id = tf.current_user_id() OR tf.user_is_org_admin(org_memberships.org_id));
 
 CREATE POLICY sessions_select ON sessions FOR SELECT USING (user_id = tf.current_user_id());
 CREATE POLICY sessions_modify ON sessions FOR ALL    USING (user_id = tf.current_user_id())
