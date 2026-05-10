@@ -195,6 +195,9 @@ func TestRLS_CrossOrgIsolation(t *testing.T) {
 			}
 			ids = append(ids, id)
 		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
 		if len(ids) != 1 || ids[0] != taskA {
 			t.Errorf("alice saw tasks %v, want [%s]", ids, taskA)
 		}
@@ -235,6 +238,9 @@ func TestRLS_CrossOrgIsolation(t *testing.T) {
 				return err
 			}
 			ids = append(ids, id)
+		}
+		if err := rows.Err(); err != nil {
+			return err
 		}
 		if len(ids) != 1 || ids[0] != taskB {
 			t.Errorf("bob saw tasks %v, want [%s]", ids, taskB)
@@ -283,6 +289,9 @@ func TestRLS_CuratorChatPerUserIsolation(t *testing.T) {
 			}
 			ids = append(ids, id)
 		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
 		if len(ids) != 1 || ids[0] != aliceReq {
 			t.Errorf("alice saw curator_requests %v, want [%s]", ids, aliceReq)
 		}
@@ -315,6 +324,9 @@ func TestRLS_CuratorChatPerUserIsolation(t *testing.T) {
 				return err
 			}
 			ids = append(ids, id)
+		}
+		if err := rows.Err(); err != nil {
+			return err
 		}
 		if len(ids) != 1 || ids[0] != bobReq {
 			t.Errorf("bob saw curator_requests %v, want [%s]", ids, bobReq)
@@ -457,6 +469,9 @@ func TestRLS_UsersIsolation(t *testing.T) {
 				return err
 			}
 			ids = append(ids, id)
+		}
+		if err := rows.Err(); err != nil {
+			return err
 		}
 		// Alice should see herself + charlie (same org), but NOT bob.
 		seen := make(map[string]bool)
@@ -949,6 +964,9 @@ func TestRLS_RevokedMembership(t *testing.T) {
 		count := 0
 		for rows.Next() {
 			count++
+		}
+		if err := rows.Err(); err != nil {
+			return err
 		}
 		if count != 0 {
 			t.Errorf("alice saw %d tasks after membership revoked, want 0", count)

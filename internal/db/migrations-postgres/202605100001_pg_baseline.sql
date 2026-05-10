@@ -1166,16 +1166,17 @@ CREATE POLICY memberships_select ON memberships FOR SELECT
          OR EXISTS (SELECT 1 FROM teams t WHERE t.id = memberships.team_id AND t.org_id = tf.current_org_id()
                                               AND tf.user_has_org_access(t.org_id)));
 
--- memberships writes have a chicken-and-egg around bootstrap: when a
--- user creates their first org, they need to INSERT a (themselves,
--- team, 'owner') row, but at that moment they have no membership yet
--- so tf.user_is_team_admin returns false. Resolve by allowing
--- self-insert if the user owns the parent org. After bootstrap,
--- adding/promoting/removing other members goes through the team-admin
--- branch.
 -- Team membership writes: team admins manage their own team; org
 -- admins (one role-axis up) can manage any team. Self-leave remains
 -- open to all members.
+--
+-- Bootstrap path in the two-axis model: when a user founds an org,
+-- they first INSERT their own org_memberships row as 'owner' (via
+-- the org_memberships_insert bootstrap branch backed by
+-- tf.user_owns_org). That instantly makes them an org admin, so
+-- tf.user_is_org_admin_via_team returns true for any team in the
+-- org — including a freshly-created team they want to add themselves
+-- to as 'admin'. No self-insert branch needed on memberships.
 CREATE POLICY memberships_insert ON memberships FOR INSERT
   WITH CHECK (
     tf.user_is_team_admin(memberships.team_id)
