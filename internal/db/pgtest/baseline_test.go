@@ -1137,8 +1137,13 @@ func TestRLS_SettingsAdminOnly(t *testing.T) {
 	})
 	if err == nil {
 		t.Errorf("bob INSERT jira rule succeeded — admin gate broken")
-	} else if !strings.Contains(err.Error(), "row-level security") {
-		t.Errorf("expected RLS violation, got: %v", err)
+	} else {
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) {
+			t.Errorf("expected PostgreSQL permission error, got: %v", err)
+		} else if pgErr.Code != "42501" {
+			t.Errorf("expected SQLSTATE 42501 for RLS violation, got %s: %v", pgErr.Code, err)
+		}
 	}
 
 	// Alice (owner) can INSERT a jira rule.
