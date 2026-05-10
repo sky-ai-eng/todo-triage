@@ -53,7 +53,7 @@ const authPassword = "auth_test_pw"
 // All tests that touch Postgres acquire it via Shared(t).
 type Harness struct {
 	Container *postgres.PostgresContainer
-	AdminDB   *sql.DB // postgres superuser; bypasses RLS
+	AdminDB   *sql.DB // supabase_admin; bypasses RLS
 	AppDB     *sql.DB // authenticator; use WithUser for RLS-active txns
 }
 
