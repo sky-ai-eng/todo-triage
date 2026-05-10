@@ -253,8 +253,8 @@ func MigrationStatus(db *sql.DB, w io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("get db version: %w", err)
 	}
-	fmt.Fprintf(w, "    Applied At                  Migration\n")
-	fmt.Fprintf(w, "    =======================================\n")
+	fmt.Fprintf(w, "    Status                      Migration\n")
+	fmt.Fprintf(w, "    ====================================\n")
 	for _, m := range migrations {
 		state := "Pending"
 		if m.Version <= current {
