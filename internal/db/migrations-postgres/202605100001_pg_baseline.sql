@@ -1078,6 +1078,27 @@ GRANT USAGE, SELECT                  ON ALL SEQUENCES IN SCHEMA public TO tf_app
 -- Global ref tables are read-only for tf_app. Migration writes seed
 -- rows; application code never INSERTs. REVOKE comes AFTER the bulk
 -- GRANT so it actually has writes to revoke.
+--
+-- system_prompt_versions specifically: in SQLite mode, seedDefault-
+-- Prompts() (main.go) runs at startup against the request-pool
+-- connection and calls SeedOrUpdateSystemPrompt, which writes both
+-- the prompts row and a version row. That model collapses to one
+-- connection because SQLite has no role concept.
+--
+-- In Postgres mode, system prompt seeding is a DEPLOY-TIME operation
+-- (just like running goose), not a request-time one. D2's store
+-- wiring must call seedDefaultPrompts on the same connection that
+-- ran db.Migrate(...) (supabase_admin in tests; the deploy role in
+-- prod) — NOT on the tf_app request pool. The revoke below is what
+-- enforces that separation: a misconfigured app that tried to seed
+-- via tf_app at request time would error here, which is the right
+-- failure mode.
+--
+-- system rows in `prompts` are also written by the deploy-time actor;
+-- the revoke below covers system_prompt_versions but not prompts
+-- (since user prompts ARE written by tf_app). System row creation
+-- bypasses RLS because the deploy actor has BYPASSRLS; user prompts
+-- go through RLS as normal.
 REVOKE INSERT, UPDATE, DELETE ON events_catalog          FROM tf_app;
 REVOKE INSERT, UPDATE, DELETE ON system_prompt_versions  FROM tf_app;
 

@@ -1834,6 +1834,75 @@ func TestPrompts_SemanticIDsAccepted(t *testing.T) {
 	}
 }
 
+// TestSystemPromptSeeding_DeployActorOnly — system prompt seeding is
+// a deploy-time operation that must run on the migration actor
+// (supabase_admin in tests, deploy role in prod), NOT on tf_app at
+// request time. Test pins the boundary: AdminDB can write
+// system_prompt_versions; tf_app cannot.
+//
+// This is the rule D2 will rely on when it wires up the Postgres
+// store: seedDefaultPrompts(database) must take the connection that
+// ran db.Migrate(...), not the app's tf_app request pool.
+func TestSystemPromptSeeding_DeployActorOnly(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	orgA, alice, _ := seedOrgWithUser(t, h, "alice")
+
+	// Deploy actor (AdminDB) can INSERT both prompts and
+	// system_prompt_versions.
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO prompts (id, org_id, creator_user_id, source, name, body)
+		VALUES ('system-pr-review', $1, $2, 'system', 'PR Review', 'v1 body')
+	`, orgA, alice); err != nil {
+		t.Fatalf("AdminDB system prompt INSERT: %v", err)
+	}
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO system_prompt_versions (prompt_id, content_hash)
+		VALUES ('system-pr-review', 'sha256:abc')
+	`); err != nil {
+		t.Fatalf("AdminDB system_prompt_versions INSERT: %v", err)
+	}
+
+	// tf_app (the request-time actor) cannot. Even with full claims
+	// (alice + orgA), system_prompt_versions writes are REVOKE'd.
+	err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
+		_, err := tx.Exec(`
+			INSERT INTO system_prompt_versions (prompt_id, content_hash)
+			VALUES ('system-pr-review', 'sha256:xyz')
+			ON CONFLICT (prompt_id) DO UPDATE SET content_hash = excluded.content_hash
+		`)
+		return err
+	})
+	if err == nil {
+		t.Fatalf("tf_app wrote to system_prompt_versions — revoke broken")
+	}
+	assertPgCode(t, err, "42501", "tf_app write to system_prompt_versions")
+
+	// Same for UPDATE.
+	err = h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
+		_, err := tx.Exec(
+			`UPDATE system_prompt_versions SET content_hash = 'forged' WHERE prompt_id = 'system-pr-review'`,
+		)
+		return err
+	})
+	if err == nil {
+		t.Fatalf("tf_app UPDATE'd system_prompt_versions — revoke broken")
+	}
+	assertPgCode(t, err, "42501", "tf_app UPDATE system_prompt_versions")
+
+	// tf_app CAN read (SELECT remains granted via the bulk GRANT).
+	err = h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
+		var hash string
+		return tx.QueryRow(
+			`SELECT content_hash FROM system_prompt_versions WHERE prompt_id = 'system-pr-review'`,
+		).Scan(&hash)
+	})
+	if err != nil {
+		t.Errorf("tf_app SELECT on system_prompt_versions failed (should be allowed): %v", err)
+	}
+}
+
 // TestRLS_TeamAdminNotOrgAdmin pins the two-axis role model: a team
 // admin who is only an org member (not an org admin) can manage their
 // own team but CANNOT mutate org-wide attributes. This is the
