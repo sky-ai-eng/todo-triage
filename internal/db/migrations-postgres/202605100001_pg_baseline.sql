@@ -1022,7 +1022,11 @@ CREATE POLICY prompts_modify ON prompts FOR ALL
 
 CREATE POLICY projects_select ON projects FOR SELECT
   USING (org_id = tf.current_org_id()
-         AND (creator_user_id = tf.current_user_id() OR visibility IN ('team','org')));
+         AND tf.user_has_org_access(org_id)
+         AND (creator_user_id = tf.current_user_id()
+              OR (visibility = 'team' AND team_id IS NOT NULL
+                  AND EXISTS (SELECT 1 FROM memberships m WHERE m.user_id = tf.current_user_id() AND m.team_id = team_id))
+              OR visibility = 'org'));
 CREATE POLICY projects_modify ON projects FOR ALL
   USING (org_id = tf.current_org_id() AND creator_user_id = tf.current_user_id())
   WITH CHECK (org_id = tf.current_org_id() AND creator_user_id = tf.current_user_id()
