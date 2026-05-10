@@ -445,10 +445,10 @@ dir := filepath.<span class="fn">Join</span>(home, <span class="str">".triagefac
 <section class="block" id="target">
   <div class="section-label">§3</div>
   <h2>Target state</h2>
-  <p>One package. Eight functions. Mode flag set once at startup.</p>
+  <p>Two packages. Mode flag set once at startup; resolvers consume it.</p>
 
-<pre class="code"><span class="com">// internal/paths/paths.go (sketch)</span>
-<span class="kw">package</span> paths
+<pre class="code"><span class="com">// internal/runmode/runmode.go (D4a — landed)</span>
+<span class="kw">package</span> runmode
 
 <span class="kw">type</span> Mode <span class="kw">string</span>
 
@@ -457,17 +457,30 @@ dir := filepath.<span class="fn">Join</span>(home, <span class="str">".triagefac
   ModeMulti Mode = <span class="str">"multi"</span>
 )
 
-<span class="com">// LocalDefaultOrg is the synthetic org id used in local mode. Storage</span>
-<span class="com">// layer treats it as "no real org context"; path layer strips it from</span>
+<span class="com">// LocalDefaultOrg is the synthetic org id local-mode callers pass at</span>
+<span class="com">// every D2 store call + D4b path resolver. The store layer's SQLite</span>
+<span class="com">// impls assert it equals this constant; the path layer strips it from</span>
 <span class="com">// resolved paths so existing local installs see no disk-layout change.</span>
 <span class="kw">const</span> LocalDefaultOrg = <span class="str">"default"</span>
 
-<span class="kw">func</span> <span class="fn">Init</span>(m Mode) error    <span class="com">// called once from main.go</span>
+<span class="kw">func</span> <span class="fn">Init</span>(m Mode) error          <span class="com">// idempotent on same mode; errors on conflicting re-init</span>
+<span class="kw">func</span> <span class="fn">InitFromEnv</span>() error          <span class="com">// reads TF_MODE; called once at top of main()</span>
+<span class="kw">func</span> <span class="fn">ModeFromEnv</span>(s <span class="kw">string</span>) (Mode, error)
 <span class="kw">func</span> <span class="fn">Current</span>() Mode
 
-<span class="com">// Per-resource resolvers. orgID is required everywhere; in local mode</span>
-<span class="com">// the package strips it (when == LocalDefaultOrg) so paths look the</span>
-<span class="com">// same as today.</span>
+<span class="com">// internal/runmode/test_helper.go</span>
+<span class="kw">type</span> TestT <span class="kw">interface</span> { <span class="fn">Helper</span>(); <span class="fn">Cleanup</span>(<span class="kw">func</span>()); <span class="fn">Fatalf</span>(<span class="kw">string</span>, ...<span class="kw">any</span>) }
+<span class="kw">func</span> <span class="fn">SetForTest</span>(t TestT, m Mode)
+</pre>
+
+<pre class="code"><span class="com">// internal/paths/paths.go (D4b — coming next)</span>
+<span class="kw">package</span> paths
+
+<span class="kw">import</span> <span class="str">"github.com/sky-ai-eng/triage-factory/internal/runmode"</span>
+
+<span class="com">// Per-resource resolvers. orgID is required everywhere it's accepted;</span>
+<span class="com">// in local mode the package strips runmode.LocalDefaultOrg so paths</span>
+<span class="com">// look the same as today.</span>
 <span class="kw">func</span> <span class="fn">DBPath</span>() (string, error)                              <span class="com">// state-root-relative; not org-scoped</span>
 <span class="kw">func</span> <span class="fn">SDKDir</span>() (string, error)                              <span class="com">// state-root-relative; not org-scoped</span>
 <span class="kw">func</span> <span class="fn">LegacyConfigPath</span>() (string, error)                    <span class="com">// state-root-relative; not org-scoped</span>
@@ -477,8 +490,8 @@ dir := filepath.<span class="fn">Join</span>(home, <span class="str">".triagefac
 <span class="kw">func</span> <span class="fn">BareCacheDir</span>(orgID, owner, repo <span class="kw">string</span>) (string, error)
 <span class="kw">func</span> <span class="fn">ProjectKBRoot</span>(orgID, projectID <span class="kw">string</span>) (string, error)
 
-<span class="com">// Test helper.</span>
-<span class="kw">func</span> <span class="fn">SetForTest</span>(t testing.TB, m Mode, root string)</pre>
+<span class="com">// Test helper (D4b's own — separate from runmode.SetForTest).</span>
+<span class="kw">func</span> <span class="fn">SetForTest</span>(t runmode.TestT, m runmode.Mode, root <span class="kw">string</span>)</pre>
 
   <h3>Resolution rules</h3>
   <p>The "called by" column matters in multi mode because the architecture splits the binary into <strong>TF web tier</strong> (HTTP server, no <code>/data</code> mount, reads/writes Postgres + Vault only) and <strong>agent-runner</strong> (mounts <code>/data</code>, owns the worktree filesystem). D4 keeps a single <code>paths</code> package that serves both — the binary split itself is D8's job — but resolvers tagged "runner-only" must not be called from web-tier code in multi mode. Local mode is one binary, so the distinction collapses.</p>
@@ -518,12 +531,12 @@ dir := filepath.<span class="fn">Join</span>(home, <span class="str">".triagefac
 <pre class="code"><span class="com">// stateRoot returns the root under which DBPath/SDKDir/etc. resolve.</span>
 <span class="com">// Local: ~/.triagefactory/. Multi: /data/.</span>
 <span class="kw">func</span> stateRoot() (<span class="kw">string</span>, error) {
-  <span class="kw">switch</span> currentMode {
-  <span class="kw">case</span> ModeLocal:
+  <span class="kw">switch</span> runmode.<span class="fn">Current</span>() {
+  <span class="kw">case</span> runmode.ModeLocal:
     home, err := os.<span class="fn">UserHomeDir</span>()
     <span class="kw">if</span> err != <span class="kw">nil</span> { <span class="kw">return</span> <span class="str">""</span>, err }
     <span class="kw">return</span> filepath.<span class="fn">Join</span>(home, <span class="str">".triagefactory"</span>), <span class="kw">nil</span>
-  <span class="kw">case</span> ModeMulti:
+  <span class="kw">case</span> runmode.ModeMulti:
     <span class="kw">return</span> <span class="str">"/data"</span>, <span class="kw">nil</span>
   }
   <span class="kw">return</span> <span class="str">""</span>, fmt.<span class="fn">Errorf</span>(<span class="str">"paths: mode not initialized"</span>)
@@ -535,16 +548,16 @@ dir := filepath.<span class="fn">Join</span>(home, <span class="str">".triagefac
 <span class="com">// from the orgs table — no LocalDefaultOrg in multi).</span>
 <span class="kw">func</span> orgScopedSubdir(orgID <span class="kw">string</span>) (<span class="kw">string</span>, error) {
   <span class="kw">if</span> orgID == <span class="str">""</span> {
-    <span class="kw">return</span> <span class="str">""</span>, fmt.<span class="fn">Errorf</span>(<span class="str">"paths: orgID required (use LocalDefaultOrg in local mode)"</span>)
+    <span class="kw">return</span> <span class="str">""</span>, fmt.<span class="fn">Errorf</span>(<span class="str">"paths: orgID required (use runmode.LocalDefaultOrg in local mode)"</span>)
   }
-  <span class="kw">switch</span> currentMode {
-  <span class="kw">case</span> ModeLocal:
-    <span class="kw">if</span> orgID != LocalDefaultOrg {
-      <span class="kw">return</span> <span class="str">""</span>, fmt.<span class="fn">Errorf</span>(<span class="str">"paths: local mode received orgID=%q (must be %q)"</span>, orgID, LocalDefaultOrg)
+  <span class="kw">switch</span> runmode.<span class="fn">Current</span>() {
+  <span class="kw">case</span> runmode.ModeLocal:
+    <span class="kw">if</span> orgID != runmode.LocalDefaultOrg {
+      <span class="kw">return</span> <span class="str">""</span>, fmt.<span class="fn">Errorf</span>(<span class="str">"paths: local mode received orgID=%q (must be %q)"</span>, orgID, runmode.LocalDefaultOrg)
     }
     <span class="kw">return</span> <span class="str">""</span>, <span class="kw">nil</span>                          <span class="com">// strip in local mode</span>
-  <span class="kw">case</span> ModeMulti:
-    <span class="kw">if</span> orgID == LocalDefaultOrg {
+  <span class="kw">case</span> runmode.ModeMulti:
+    <span class="kw">if</span> orgID == runmode.LocalDefaultOrg {
       <span class="kw">return</span> <span class="str">""</span>, fmt.<span class="fn">Errorf</span>(<span class="str">"paths: multi mode received LocalDefaultOrg sentinel — caller forgot to pass real org"</span>)
     }
     <span class="kw">return</span> filepath.<span class="fn">Join</span>(<span class="str">"orgs"</span>, orgID), <span class="kw">nil</span>
@@ -577,32 +590,48 @@ dir := filepath.<span class="fn">Join</span>(home, <span class="str">".triagefac
   <div class="section-label">§5</div>
   <h2>Mode flag wiring</h2>
 
-  <h3>How TF_MODE is read</h3>
-  <p>One env-var read in <code>main.go</code> before any subsystem opens a path:</p>
+  <h3>How TF_MODE is read (D4a)</h3>
+  <p>One <code>InitFromEnv</code> call at the top of <code>main()</code>, before the argv-dispatch switch. Every dispatched subcommand inherits the package-level mode through the in-process global, so per-Handle wiring isn't needed:</p>
 
-<pre class="code"><span class="com">// main.go (server entry, before db.Open())</span>
-mode := paths.<span class="fn">ModeFromEnv</span>(os.<span class="fn">Getenv</span>(<span class="str">"TF_MODE"</span>))   <span class="com">// "" → ModeLocal, "local" → ModeLocal, "multi" → ModeMulti, anything else → fatal</span>
-<span class="kw">if</span> err := paths.<span class="fn">Init</span>(mode); err != <span class="kw">nil</span> {
-  log.<span class="fn">Fatalf</span>(<span class="str">"paths: %v"</span>, err)
-}</pre>
+<pre class="code"><span class="com">// main.go — first thing main() does</span>
+<span class="kw">if</span> err := runmode.<span class="fn">InitFromEnv</span>(); err != <span class="kw">nil</span> {
+  log.<span class="fn">Fatalf</span>(<span class="str">"runmode: %v"</span>, err)
+}
+<span class="com">// argv dispatch (exec / migrate / resume / install / uninstall) follows…</span></pre>
 
-  <p>CLI subcommands (<code>exec</code>, <code>migrate</code>, <code>resume</code>, <code>install</code>, <code>uninstall</code>) call the same <code>paths.Init</code> in their entry. Any unset / unrecognized value is fatal — better than booting with an ambiguous mode.</p>
+  <p>Empty <code>TF_MODE</code> → <code>ModeLocal</code> (so existing local installs see no behavior change). <code>local</code> / <code>multi</code> map to their constants (case-insensitive via <code>strings.ToLower</code>). Anything else is fatal — better than booting with an ambiguous mode that downstream subsystems would interpret inconsistently.</p>
+
+  <p><code>Init</code> itself is mostly idempotent: a second call with the same mode returns nil; a second call with a different mode returns an error without mutating state. That guards against accidental re-init mid-run that would silently flip behavior under subsystems already cached the original.</p>
 
   <h3>Where the mode lives at runtime</h3>
-  <p>Package-level <code>var currentMode Mode</code>, set by <code>Init</code> and never reassigned. Reads are unsynchronized because writes only happen at startup (before any goroutine spawns) and Go's memory model guarantees the init-time write is visible. If a future ticket needs runtime mode flips (it shouldn't), the field becomes <code>atomic.Value</code> at that point.</p>
+  <p>Two package-level vars in <code>internal/runmode</code>: <code>currentMode Mode</code> and <code>initialized bool</code>, both guarded by <code>modeMu sync.RWMutex</code>. Reads through <code>Current()</code> take an RLock — contention-free for parallel readers. The lock keeps <code>SetForTest</code>'s writes provably race-free against any production read; production reads are infrequent enough that the RLock overhead is noise. The package-init default is <code>ModeLocal</code> so unit tests that don't bother calling <code>Init</code> behave like a local install.</p>
 
   <h3>Tests</h3>
-  <p><code>paths.SetForTest(t, ModeMulti, "/tmp/test-root")</code> swaps mode + state root for the duration of <code>t</code>, with a <code>t.Cleanup</code> that restores the previous values. Lets a test exercise multi-mode path resolution against a real tmpdir without polluting the suite's mode.</p>
+  <p><code>runmode.SetForTest(t, ModeMulti)</code> swaps the mode for the duration of <code>t</code>, with a <code>t.Cleanup</code> that restores the previous <code>(currentMode, initialized)</code> pair. <code>t</code> is typed as the local <code>runmode.TestT</code> interface (<code>Helper</code> / <code>Cleanup</code> / <code>Fatalf</code>) rather than <code>testing.TB</code> — production builds of <code>runmode</code> don't need the testing-package import.</p>
 
-<pre class="code"><span class="com">// internal/paths/test_helper.go</span>
-<span class="kw">func</span> <span class="fn">SetForTest</span>(t testing.TB, m Mode, root <span class="kw">string</span>) {
+<pre class="code"><span class="com">// internal/runmode/test_helper.go</span>
+<span class="kw">type</span> TestT <span class="kw">interface</span> {
+  <span class="fn">Helper</span>()
+  <span class="fn">Cleanup</span>(<span class="kw">func</span>())
+  <span class="fn">Fatalf</span>(format <span class="kw">string</span>, args ...<span class="kw">any</span>)
+}
+
+<span class="kw">func</span> <span class="fn">SetForTest</span>(t TestT, m Mode) {
   t.<span class="fn">Helper</span>()
-  prevMode, prevRoot := currentMode, testStateRoot
-  currentMode, testStateRoot = m, root
-  t.<span class="fn">Cleanup</span>(<span class="kw">func</span>() { currentMode, testStateRoot = prevMode, prevRoot })
+  modeMu.<span class="fn">Lock</span>()
+  prevMode, prevInit := currentMode, initialized
+  currentMode = m
+  initialized = <span class="kw">true</span>     <span class="com">// tests treat themselves as post-init so Init's idempotent / conflict branches stay predictable</span>
+  modeMu.<span class="fn">Unlock</span>()
+  t.<span class="fn">Cleanup</span>(<span class="kw">func</span>() {
+    modeMu.<span class="fn">Lock</span>()
+    currentMode, initialized = prevMode, prevInit
+    modeMu.<span class="fn">Unlock</span>()
+  })
 }</pre>
 
-  <p><code>testStateRoot</code> is consulted by <code>stateRoot()</code> when set; otherwise the function falls through to the env-driven path. This keeps tests hermetic.</p>
+  <h3>What D4b adds on top</h3>
+  <p>D4b lands a separate <code>internal/paths</code> package that imports <code>runmode</code>. Its own <code>SetForTest</code> takes an additional <code>root string</code> argument so resolver tests can point <code>stateRoot()</code> at a tmpdir without polluting the host filesystem. The two test helpers are independent: a test that needs both flips mode via <code>runmode.SetForTest</code> AND state root via <code>paths.SetForTest</code>.</p>
 </section>
 
 <!-- ===================================================== -->
@@ -627,7 +656,7 @@ mode := paths.<span class="fn">ModeFromEnv</span>(os.<span class="fn">Getenv</sp
       <tr>
         <td><code>internal/worktree/worktree.go</code></td>
         <td>Multiple <code>UserHomeDir + ".triagefactory" + ...</code> compositions for run roots, takeover dirs, bare-clone caches</td>
-        <td><code>paths.RunRoot(orgID, runID)</code>, <code>paths.TakeoverDir(orgID, runID)</code>, <code>paths.BareCacheDir(orgID, owner, repo)</code>. Functions that don't currently take orgID gain it as a leading argument; callers up the stack pass <code>paths.LocalDefaultOrg</code> until D9 wires real org context.</td>
+        <td><code>paths.RunRoot(orgID, runID)</code>, <code>paths.TakeoverDir(orgID, runID)</code>, <code>paths.BareCacheDir(orgID, owner, repo)</code>. Functions that don't currently take orgID gain it as a leading argument; callers up the stack pass <code>runmode.LocalDefaultOrg</code> until D9 wires real org context.</td>
       </tr>
       <tr>
         <td><code>internal/curator/knowledge.go</code></td>
@@ -658,7 +687,7 @@ mode := paths.<span class="fn">ModeFromEnv</span>(os.<span class="fn">Getenv</sp
   </table>
 
   <h3>Adding orgID up the call stack</h3>
-  <p>Most worktree/curator/projectclassify callers don't have an orgID today. Until D9 wires real orgs into request context, every call site passes <code>paths.LocalDefaultOrg</code>. That's a one-line addition per call. The lint rule (added in D2 for stores) extends here: a literal <code>"default"</code> string outside <code>paths</code> is an antipattern — callers should reference <code>paths.LocalDefaultOrg</code>.</p>
+  <p>Most worktree/curator/projectclassify callers don't have an orgID today. Until D9 wires real orgs into request context, every call site passes <code>runmode.LocalDefaultOrg</code>. That's a one-line addition per call. The lint rule (added in D2 for stores) extends here: a literal <code>"default"</code> string outside <code>internal/runmode</code> is an antipattern — callers should reference <code>runmode.LocalDefaultOrg</code>.</p>
 </section>
 
 <!-- ===================================================== -->
@@ -712,7 +741,7 @@ mode := paths.<span class="fn">ModeFromEnv</span>(os.<span class="fn">Getenv</sp
     </li>
     <li>
       <span class="step-title">Migrate the ~8 entry-point sites per §6</span>
-      <span class="step-body">One commit per logical area (db+config+agentproc, worktree, curator+projectclassify+projectbundle, cmd/*). Each is a one-line substitution plus orgID threading; use <code>paths.LocalDefaultOrg</code> at new call sites until D9.</span>
+      <span class="step-body">One commit per logical area (db+config+agentproc, worktree, curator+projectclassify+projectbundle, cmd/*). Each is a one-line substitution plus orgID threading; use <code>runmode.LocalDefaultOrg</code> at new call sites until D9.</span>
     </li>
     <li>
       <span class="step-title">Lint rule</span>
@@ -724,7 +753,7 @@ mode := paths.<span class="fn">ModeFromEnv</span>(os.<span class="fn">Getenv</sp
     </li>
     <li>
       <span class="step-title">cmd/uninstall multi-mode refusal</span>
-      <span class="step-body">Early-exit if <code>paths.Current() == ModeMulti</code> with a clear message routing the operator to their orchestrator.</span>
+      <span class="step-body">Early-exit if <code>runmode.Current() == runmode.ModeMulti</code> with a clear message routing the operator to their orchestrator.</span>
     </li>
   </ol>
 </section>
@@ -776,8 +805,8 @@ mode := paths.<span class="fn">ModeFromEnv</span>(os.<span class="fn">Getenv</sp
         <td>Add the missed caller to the next migration commit.</td>
       </tr>
       <tr>
-        <td>A test runs without <code>paths.Init</code> being called → resolution panics or returns "mode not initialized"</td>
-        <td><code>init()</code>-level default of <code>ModeLocal</code> so tests don't have to opt in. Tests that need multi-mode use <code>SetForTest</code>.</td>
+        <td>A test mutates package state without calling <code>runmode.SetForTest</code> → leaks into other tests</td>
+        <td>Package-level default of <code>ModeLocal</code> so tests that don't bother behave like local. Tests that flip mode use <code>runmode.SetForTest</code> which snapshots both <code>currentMode</code> and <code>initialized</code> under <code>t.Cleanup</code>.</td>
         <td>—</td>
       </tr>
       <tr>
@@ -792,7 +821,7 @@ mode := paths.<span class="fn">ModeFromEnv</span>(os.<span class="fn">Getenv</sp
       </tr>
       <tr>
         <td>Adding <code>orgID</code> through call chains touches a lot of signatures → review fatigue, merge conflicts vs in-flight branches</td>
-        <td>One commit per logical area (worktree, curator, etc.). PR is mechanical — the diff reads as "every <code>foo()</code> becomes <code>foo(orgID)</code>" with one new constant <code>paths.LocalDefaultOrg</code> at every new call site.</td>
+        <td>One commit per logical area (worktree, curator, etc.). PR is mechanical — the diff reads as "every <code>foo()</code> becomes <code>foo(orgID)</code>" with one new constant <code>runmode.LocalDefaultOrg</code> at every new call site.</td>
         <td>—</td>
       </tr>
     </tbody>
