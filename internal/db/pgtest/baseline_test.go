@@ -1238,6 +1238,162 @@ func TestRLS_MembershipManagement(t *testing.T) {
 	}
 }
 
+// TestFK_CrossOrgRejected pins the composite-FK defense-in-depth.
+// Even via AdminDB (RLS bypassed!) a row cannot be inserted that
+// FK-references a parent in a different org. This catches bugs in
+// app code or compromised internal calls that RLS alone wouldn't.
+func TestFK_CrossOrgRejected(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	orgA, alice, _ := seedOrgWithUser(t, h, "alice")
+	orgB, bob, _ := seedOrgWithUser(t, h, "bob")
+
+	entityB := seedEntity(t, h, orgB, "github", "octo/repo#1")
+
+	// Try to INSERT a task in orgA referencing entityB (which is in
+	// orgB). Composite FK (entity_id, org_id) → entities(id, org_id)
+	// rejects: there's no entities row with (entityB, orgA).
+	// AdminDB bypasses RLS but FKs are enforced regardless of role.
+	_, err := h.AdminDB.Exec(`
+		INSERT INTO tasks (org_id, creator_user_id, entity_id, event_type, primary_event_id)
+		VALUES ($1, $2, $3, 'github:pr:opened', gen_random_uuid())
+	`, orgA, alice, entityB)
+	if err == nil {
+		t.Fatalf("cross-org task INSERT succeeded — composite FK broken")
+	}
+	if !strings.Contains(err.Error(), "foreign key constraint") {
+		t.Errorf("err = %v, want foreign key violation", err)
+	}
+
+	// Same shape: try to INSERT an event in orgA referencing
+	// entityB. Composite FK rejects.
+	_, err = h.AdminDB.Exec(`
+		INSERT INTO events (org_id, entity_id, event_type) VALUES ($1, $2, 'github:pr:opened')
+	`, orgA, entityB)
+	if err == nil {
+		t.Fatalf("cross-org event INSERT succeeded — composite FK broken")
+	}
+
+	// And a project in orgA referencing a prompt in orgB.
+	bobPrompt := seedPrompt(t, h, orgB, bob, "bob-prompt")
+	_, err = h.AdminDB.Exec(`
+		INSERT INTO projects (org_id, creator_user_id, name, spec_authorship_prompt_id)
+		VALUES ($1, $2, 'p', $3)
+	`, orgA, alice, bobPrompt)
+	if err == nil {
+		t.Fatalf("cross-org project→prompt INSERT succeeded — composite FK broken")
+	}
+}
+
+// TestRLS_ChildTablesInheritParentVisibility — denormalized child
+// rows (task_events, run_artifacts, run_messages, run_memory,
+// run_worktrees, pending_prs, pending_firings) must NOT be visible
+// to org members who can't see the parent task/run. Earlier policies
+// gated only on org_id, leaking metadata across users in the same org.
+// EXISTS-on-parent inherits the parent table's RLS.
+func TestRLS_ChildTablesInheritParentVisibility(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	orgA, alice, teamA := seedOrgWithUser(t, h, "alice")
+	bob := seedUser(t, h, "bob")
+	addOrgMember(t, h, bob, orgA, teamA, "member", "member")
+
+	// Alice creates a task + a run + child rows. All in orgA.
+	entityA := seedEntity(t, h, orgA, "github", "octo/repo#1")
+	taskID := seedTask(t, h, orgA, alice, entityA, "github:pr:opened")
+	prompt := seedPrompt(t, h, orgA, alice, "p1")
+	var runID string
+	if err := h.AdminDB.QueryRow(`
+		INSERT INTO runs (org_id, creator_user_id, task_id, prompt_id) VALUES ($1, $2, $3, $4) RETURNING id
+	`, orgA, alice, taskID, prompt).Scan(&runID); err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+	// Seed one child row per parent kind we care about.
+	mustExec(t, h.AdminDB, `INSERT INTO task_events (org_id, task_id, event_id, kind)
+		SELECT $1, $2, e.id, 'closed' FROM events e WHERE e.entity_id = $3 LIMIT 1`,
+		orgA, taskID, entityA)
+	mustExec(t, h.AdminDB, `INSERT INTO run_artifacts (org_id, run_id, kind) VALUES ($1, $2, 'pr')`,
+		orgA, runID)
+	mustExec(t, h.AdminDB, `INSERT INTO run_messages (org_id, run_id, role, content) VALUES ($1, $2, 'assistant', 'hi')`,
+		orgA, runID)
+	mustExec(t, h.AdminDB, `INSERT INTO run_memory (org_id, run_id, entity_id, agent_content) VALUES ($1, $2, $3, 'note')`,
+		orgA, runID, entityA)
+	mustExec(t, h.AdminDB, `INSERT INTO run_worktrees (org_id, run_id, repo_id, path, feature_branch) VALUES ($1, $2, 'octo/repo', '/tmp/x', 'feat/x')`,
+		orgA, runID)
+	mustExec(t, h.AdminDB, `INSERT INTO pending_prs (org_id, run_id, owner, repo, head_branch, head_sha, base_branch, title) VALUES ($1, $2, 'octo', 'repo', 'feat/x', 'sha', 'main', 'PR')`,
+		orgA, runID)
+
+	// Alice sees all her child rows.
+	err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
+		for _, table := range []string{"task_events", "run_artifacts", "run_messages", "run_memory", "run_worktrees", "pending_prs"} {
+			var n int
+			if err := tx.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&n); err != nil {
+				return err
+			}
+			if n != 1 {
+				t.Errorf("alice saw %d %s rows, want 1", n, table)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("alice query: %v", err)
+	}
+
+	// Bob (same org, NOT the run/task creator) must see ZERO of these
+	// child rows — tasks_select and runs_select gate on creator, so
+	// the EXISTS-on-parent in each child policy returns false for him.
+	err = h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
+		for _, table := range []string{"task_events", "run_artifacts", "run_messages", "run_memory", "run_worktrees", "pending_prs"} {
+			var n int
+			if err := tx.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&n); err != nil {
+				return err
+			}
+			if n != 0 {
+				t.Errorf("bob saw %d %s rows, want 0 — child policy leaked across users", n, table)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("bob query: %v", err)
+	}
+}
+
+// TestGooseDBVersionLockdown — tf_app must not have any privileges
+// on the goose migration tracking table. The bulk
+// `GRANT ... ON ALL TABLES IN SCHEMA public TO tf_app` accidentally
+// covered goose_db_version (created in public by goose itself); the
+// migration's REVOKE locks it back down so the application role can't
+// fake migration state.
+func TestGooseDBVersionLockdown(t *testing.T) {
+	h := Shared(t)
+
+	for _, priv := range []string{"SELECT", "INSERT", "UPDATE", "DELETE"} {
+		var has bool
+		if err := h.AdminDB.QueryRow(
+			`SELECT has_table_privilege('tf_app', 'public.goose_db_version', $1)`, priv,
+		).Scan(&has); err != nil {
+			t.Fatalf("has_table_privilege(tf_app, goose_db_version, %s): %v", priv, err)
+		}
+		if has {
+			t.Errorf("tf_app has %s on goose_db_version — migration state tampering vector", priv)
+		}
+	}
+	// Sequence too.
+	var seqHas bool
+	if err := h.AdminDB.QueryRow(
+		`SELECT has_sequence_privilege('tf_app', 'public.goose_db_version_id_seq', 'USAGE')`,
+	).Scan(&seqHas); err != nil {
+		t.Fatalf("has_sequence_privilege: %v", err)
+	}
+	if seqHas {
+		t.Errorf("tf_app has USAGE on goose_db_version_id_seq")
+	}
+}
+
 // TestRLS_TeamAdminNotOrgAdmin pins the two-axis role model: a team
 // admin who is only an org member (not an org admin) can manage their
 // own team but CANNOT mutate org-wide attributes. This is the

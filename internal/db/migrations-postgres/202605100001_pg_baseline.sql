@@ -431,6 +431,11 @@ CREATE TABLE events_catalog (
 );
 
 -- Prompts — org/team/user-scoped with visibility toggle.
+-- Parent tables get a `UNIQUE (id, org_id)` so children can use a
+-- composite FK `(child_col, org_id) REFERENCES parent(id, org_id)`.
+-- That structurally prevents cross-tenant FK references — a child
+-- in orgA cannot point at a parent in orgB even if the caller
+-- somehow knows the UUID. Defense in depth on top of RLS.
 CREATE TABLE prompts (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   org_id          UUID NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
@@ -445,7 +450,8 @@ CREATE TABLE prompts (
   user_modified   BOOLEAN NOT NULL DEFAULT FALSE,
   allowed_tools   TEXT NOT NULL DEFAULT '',
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (id, org_id)
 );
 
 -- system_prompt_versions — read-only global ref; written only by migrations.
@@ -467,16 +473,19 @@ CREATE TABLE projects (
   pinned_repos              JSONB NOT NULL DEFAULT '[]'::jsonb,
   jira_project_key          TEXT,
   linear_project_key        TEXT,
-  spec_authorship_prompt_id UUID REFERENCES prompts(id) ON DELETE SET NULL,
+  spec_authorship_prompt_id UUID,
   created_at                TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at                TIMESTAMPTZ NOT NULL DEFAULT now()
+  updated_at                TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (id, org_id),
+  -- Composite FK: a project can only reference a prompt in the same org.
+  FOREIGN KEY (spec_authorship_prompt_id, org_id) REFERENCES prompts(id, org_id) ON DELETE SET NULL
 );
 
 -- project_knowledge — durable curator artifact, org-shared with OCC.
 CREATE TABLE project_knowledge (
   id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   org_id              UUID NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-  project_id          UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  project_id          UUID NOT NULL,
   key                 TEXT NOT NULL,
   content             TEXT NOT NULL DEFAULT '',
   version             INT NOT NULL DEFAULT 1,
@@ -484,7 +493,8 @@ CREATE TABLE project_knowledge (
   last_updated_by_run UUID,                                            -- FK added when runs exists below
   created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (project_id, key)
+  UNIQUE (project_id, key),
+  FOREIGN KEY (project_id, org_id) REFERENCES projects(id, org_id) ON DELETE CASCADE
 );
 
 -- entities — org-shared infrastructure, no creator scope.
@@ -499,34 +509,42 @@ CREATE TABLE entities (
   snapshot_json            JSONB,
   description              TEXT NOT NULL DEFAULT '',
   state                    TEXT NOT NULL DEFAULT 'active',
-  project_id               UUID REFERENCES projects(id) ON DELETE SET NULL,
+  project_id               UUID,
   classified_at            TIMESTAMPTZ,
   classification_rationale TEXT,
   last_polled_at           TIMESTAMPTZ,
   closed_at                TIMESTAMPTZ,
   created_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (org_id, source, source_id)
+  UNIQUE (org_id, source, source_id),
+  UNIQUE (id, org_id),
+  FOREIGN KEY (project_id, org_id) REFERENCES projects(id, org_id) ON DELETE SET NULL
 );
 
+-- entity_links: org_id is shared by both endpoints. Two composite
+-- FKs ensure both linked entities live in this row's org.
 CREATE TABLE entity_links (
-  from_entity_id UUID NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
-  to_entity_id   UUID NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+  from_entity_id UUID NOT NULL,
+  to_entity_id   UUID NOT NULL,
   kind           TEXT NOT NULL,
   origin         TEXT NOT NULL,
   org_id         UUID NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
   created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (from_entity_id, to_entity_id, kind)
+  PRIMARY KEY (from_entity_id, to_entity_id, kind),
+  FOREIGN KEY (from_entity_id, org_id) REFERENCES entities(id, org_id) ON DELETE CASCADE,
+  FOREIGN KEY (to_entity_id,   org_id) REFERENCES entities(id, org_id) ON DELETE CASCADE
 );
 
 CREATE TABLE events (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   org_id        UUID NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-  entity_id     UUID REFERENCES entities(id),
+  entity_id     UUID,
   event_type    TEXT NOT NULL REFERENCES events_catalog(id),
   dedup_key     TEXT NOT NULL DEFAULT '',
   metadata_json JSONB,
   occurred_at   TIMESTAMPTZ,
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (id, org_id),
+  FOREIGN KEY (entity_id, org_id) REFERENCES entities(id, org_id)
 );
 
 CREATE TABLE task_rules (
@@ -552,7 +570,7 @@ CREATE TABLE prompt_triggers (
   creator_user_id          UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   team_id                  UUID REFERENCES teams(id) ON DELETE SET NULL,
   visibility               TEXT NOT NULL DEFAULT 'private' CHECK (visibility IN ('private','team','org')),
-  prompt_id                UUID NOT NULL REFERENCES prompts(id) ON DELETE CASCADE,
+  prompt_id                UUID NOT NULL,
   trigger_type             TEXT NOT NULL DEFAULT 'event',
   event_type               TEXT NOT NULL REFERENCES events_catalog(id) ON DELETE RESTRICT,
   scope_predicate_json     JSONB,
@@ -560,7 +578,9 @@ CREATE TABLE prompt_triggers (
   min_autonomy_suitability REAL NOT NULL DEFAULT 0.0,
   enabled                  BOOLEAN NOT NULL DEFAULT TRUE,
   created_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at               TIMESTAMPTZ NOT NULL DEFAULT now()
+  updated_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (id, org_id),
+  FOREIGN KEY (prompt_id, org_id) REFERENCES prompts(id, org_id) ON DELETE CASCADE
 );
 
 CREATE TABLE tasks (
@@ -569,10 +589,10 @@ CREATE TABLE tasks (
   creator_user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   team_id              UUID REFERENCES teams(id) ON DELETE SET NULL,
   visibility           TEXT NOT NULL DEFAULT 'private' CHECK (visibility IN ('private','team','org')),
-  entity_id            UUID NOT NULL REFERENCES entities(id),
+  entity_id            UUID NOT NULL,
   event_type           TEXT NOT NULL REFERENCES events_catalog(id) ON DELETE RESTRICT,
   dedup_key            TEXT NOT NULL DEFAULT '',
-  primary_event_id     UUID NOT NULL REFERENCES events(id),
+  primary_event_id     UUID NOT NULL,
   status               TEXT NOT NULL DEFAULT 'queued',
   priority_score       REAL,
   ai_summary           TEXT,
@@ -586,16 +606,21 @@ CREATE TABLE tasks (
   close_reason         TEXT,
   close_event_type     TEXT REFERENCES events_catalog(id),
   closed_at            TIMESTAMPTZ,
-  created_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (id, org_id),
+  FOREIGN KEY (entity_id, org_id)        REFERENCES entities(id, org_id),
+  FOREIGN KEY (primary_event_id, org_id) REFERENCES events(id, org_id)
 );
 
 CREATE TABLE task_events (
-  task_id    UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-  event_id   UUID NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  task_id    UUID NOT NULL,
+  event_id   UUID NOT NULL,
   org_id     UUID NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
   kind       TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (task_id, event_id)
+  PRIMARY KEY (task_id, event_id),
+  FOREIGN KEY (task_id, org_id)  REFERENCES tasks(id, org_id)  ON DELETE CASCADE,
+  FOREIGN KEY (event_id, org_id) REFERENCES events(id, org_id) ON DELETE CASCADE
 );
 
 CREATE TABLE runs (
@@ -604,9 +629,9 @@ CREATE TABLE runs (
   creator_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   team_id         UUID REFERENCES teams(id) ON DELETE SET NULL,
   visibility      TEXT NOT NULL DEFAULT 'private' CHECK (visibility IN ('private','team','org')),
-  task_id         UUID NOT NULL REFERENCES tasks(id),
-  prompt_id       UUID NOT NULL REFERENCES prompts(id),
-  trigger_id      UUID REFERENCES prompt_triggers(id),
+  task_id         UUID NOT NULL,
+  prompt_id       UUID NOT NULL,
+  trigger_id      UUID,
   trigger_type    TEXT NOT NULL DEFAULT 'manual',
   status          TEXT NOT NULL DEFAULT 'cloning',
   model           TEXT,
@@ -618,30 +643,35 @@ CREATE TABLE runs (
   completed_at    TIMESTAMPTZ,
   duration_ms     INT,
   num_turns       INT,
-  total_cost_usd  REAL
+  total_cost_usd  REAL,
+  UNIQUE (id, org_id),
+  FOREIGN KEY (task_id, org_id)    REFERENCES tasks(id, org_id),
+  FOREIGN KEY (prompt_id, org_id)  REFERENCES prompts(id, org_id),
+  FOREIGN KEY (trigger_id, org_id) REFERENCES prompt_triggers(id, org_id)
 );
 
 -- Now that runs exists, attach the FK for project_knowledge.last_updated_by_run.
 ALTER TABLE project_knowledge
   ADD CONSTRAINT project_knowledge_last_updated_by_run_fkey
-  FOREIGN KEY (last_updated_by_run) REFERENCES runs(id) ON DELETE SET NULL;
+  FOREIGN KEY (last_updated_by_run, org_id) REFERENCES runs(id, org_id) ON DELETE SET NULL;
 
 CREATE TABLE run_artifacts (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   org_id        UUID NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-  run_id        UUID NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  run_id        UUID NOT NULL,
   kind          TEXT NOT NULL,
   url           TEXT,
   title         TEXT,
   metadata_json JSONB,
   is_primary    BOOLEAN NOT NULL DEFAULT FALSE,
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  FOREIGN KEY (run_id, org_id) REFERENCES runs(id, org_id) ON DELETE CASCADE
 );
 
 CREATE TABLE run_messages (
   id                    BIGSERIAL PRIMARY KEY,
   org_id                UUID NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-  run_id                UUID NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  run_id                UUID NOT NULL,
   role                  TEXT NOT NULL,
   content               TEXT,
   subtype               TEXT DEFAULT 'text',
@@ -654,49 +684,58 @@ CREATE TABLE run_messages (
   output_tokens         INT,
   cache_read_tokens     INT,
   cache_creation_tokens INT,
-  created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  FOREIGN KEY (run_id, org_id) REFERENCES runs(id, org_id) ON DELETE CASCADE
 );
 
 CREATE TABLE run_memory (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   org_id        UUID NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-  run_id        UUID NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-  entity_id     UUID NOT NULL REFERENCES entities(id),
+  run_id        UUID NOT NULL,
+  entity_id     UUID NOT NULL,
   agent_content TEXT,
   human_content TEXT,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (run_id)
+  UNIQUE (run_id),
+  FOREIGN KEY (run_id, org_id)    REFERENCES runs(id, org_id) ON DELETE CASCADE,
+  FOREIGN KEY (entity_id, org_id) REFERENCES entities(id, org_id)
 );
 
 CREATE TABLE pending_firings (
   id                  BIGSERIAL PRIMARY KEY,
   org_id              UUID NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
   creator_user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  entity_id           UUID NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
-  task_id             UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-  trigger_id          UUID NOT NULL REFERENCES prompt_triggers(id) ON DELETE CASCADE,
-  triggering_event_id UUID NOT NULL REFERENCES events(id),
+  entity_id           UUID NOT NULL,
+  task_id             UUID NOT NULL,
+  trigger_id          UUID NOT NULL,
+  triggering_event_id UUID NOT NULL,
   status              TEXT NOT NULL DEFAULT 'pending',
   skip_reason         TEXT,
   queued_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
   drained_at          TIMESTAMPTZ,
-  fired_run_id        UUID REFERENCES runs(id)
+  fired_run_id        UUID,
+  FOREIGN KEY (entity_id, org_id)           REFERENCES entities(id, org_id)        ON DELETE CASCADE,
+  FOREIGN KEY (task_id, org_id)             REFERENCES tasks(id, org_id)           ON DELETE CASCADE,
+  FOREIGN KEY (trigger_id, org_id)          REFERENCES prompt_triggers(id, org_id) ON DELETE CASCADE,
+  FOREIGN KEY (triggering_event_id, org_id) REFERENCES events(id, org_id),
+  FOREIGN KEY (fired_run_id, org_id)        REFERENCES runs(id, org_id)
 );
 
 CREATE TABLE run_worktrees (
-  run_id         UUID NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  run_id         UUID NOT NULL,
   org_id         UUID NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
   repo_id        TEXT NOT NULL,
   path           TEXT NOT NULL,
   feature_branch TEXT NOT NULL,
   created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (run_id, repo_id)
+  PRIMARY KEY (run_id, repo_id),
+  FOREIGN KEY (run_id, org_id) REFERENCES runs(id, org_id) ON DELETE CASCADE
 );
 
 CREATE TABLE pending_prs (
   id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   org_id         UUID NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-  run_id         UUID NOT NULL UNIQUE REFERENCES runs(id) ON DELETE CASCADE,
+  run_id         UUID NOT NULL UNIQUE,
   owner          TEXT NOT NULL,
   repo           TEXT NOT NULL,
   head_branch    TEXT NOT NULL,
@@ -709,17 +748,19 @@ CREATE TABLE pending_prs (
   locked         BOOLEAN NOT NULL DEFAULT FALSE,
   draft          BOOLEAN NOT NULL DEFAULT FALSE,
   submitted_at   TIMESTAMPTZ,
-  created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  FOREIGN KEY (run_id, org_id) REFERENCES runs(id, org_id) ON DELETE CASCADE
 );
 
 CREATE TABLE swipe_events (
   id              BIGSERIAL PRIMARY KEY,
   org_id          UUID NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
   creator_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  task_id         UUID NOT NULL REFERENCES tasks(id),
+  task_id         UUID NOT NULL,
   action          TEXT NOT NULL,
   hesitation_ms   INT,
-  created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  FOREIGN KEY (task_id, org_id) REFERENCES tasks(id, org_id)
 );
 
 CREATE TABLE poller_state (
@@ -760,25 +801,28 @@ CREATE TABLE pending_reviews (
   repo                  TEXT NOT NULL,
   commit_sha            TEXT NOT NULL,
   diff_lines            TEXT,
-  run_id                UUID REFERENCES runs(id) ON DELETE SET NULL,
+  run_id                UUID,
   review_body           TEXT,
   review_event          TEXT,
   original_review_body  TEXT,
   original_review_event TEXT,
   diff_hunks            TEXT NOT NULL DEFAULT '',
-  created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (id, org_id),
+  FOREIGN KEY (run_id, org_id) REFERENCES runs(id, org_id) ON DELETE SET NULL
 );
 
 CREATE TABLE pending_review_comments (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   org_id        UUID NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
-  review_id     UUID NOT NULL REFERENCES pending_reviews(id) ON DELETE CASCADE,
+  review_id     UUID NOT NULL,
   path          TEXT NOT NULL,
   line          INT NOT NULL,
   start_line    INT,
   body          TEXT NOT NULL,
   original_body TEXT,
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  FOREIGN KEY (review_id, org_id) REFERENCES pending_reviews(id, org_id) ON DELETE CASCADE
 );
 
 -- preferences — per-user AI behavioral preferences, no org scope (one
@@ -794,7 +838,7 @@ CREATE TABLE curator_requests (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   org_id          UUID NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
   creator_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  project_id      UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  project_id      UUID NOT NULL,
   status          TEXT NOT NULL DEFAULT 'queued',
   user_input      TEXT NOT NULL,
   error_msg       TEXT,
@@ -803,14 +847,16 @@ CREATE TABLE curator_requests (
   num_turns       INT NOT NULL DEFAULT 0,
   started_at      TIMESTAMPTZ,
   finished_at     TIMESTAMPTZ,
-  created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (id, org_id),
+  FOREIGN KEY (project_id, org_id) REFERENCES projects(id, org_id) ON DELETE CASCADE
 );
 
 CREATE TABLE curator_messages (
   id                    BIGSERIAL PRIMARY KEY,
   org_id                UUID NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
   creator_user_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  request_id            UUID NOT NULL REFERENCES curator_requests(id) ON DELETE CASCADE,
+  request_id            UUID NOT NULL,
   role                  TEXT NOT NULL,
   subtype               TEXT NOT NULL DEFAULT 'text',
   content               TEXT NOT NULL DEFAULT '',
@@ -823,20 +869,23 @@ CREATE TABLE curator_messages (
   output_tokens         INT,
   cache_read_tokens     INT,
   cache_creation_tokens INT,
-  created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  FOREIGN KEY (request_id, org_id) REFERENCES curator_requests(id, org_id) ON DELETE CASCADE
 );
 
 CREATE TABLE curator_pending_context (
   id                     BIGSERIAL PRIMARY KEY,
   org_id                 UUID NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
   creator_user_id        UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  project_id             UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  project_id             UUID NOT NULL,
   curator_session_id     TEXT NOT NULL,
   change_type            TEXT NOT NULL,
   baseline_value         TEXT NOT NULL,
   consumed_at            TIMESTAMPTZ,
-  consumed_by_request_id UUID REFERENCES curator_requests(id) ON DELETE SET NULL,
-  created_at             TIMESTAMPTZ NOT NULL DEFAULT now()
+  consumed_by_request_id UUID,
+  created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+  FOREIGN KEY (project_id, org_id)             REFERENCES projects(id, org_id)         ON DELETE CASCADE,
+  FOREIGN KEY (consumed_by_request_id, org_id) REFERENCES curator_requests(id, org_id) ON DELETE SET NULL
 );
 
 -- update_project_knowledge OCC function — compare-and-swap on version.
@@ -910,6 +959,16 @@ GRANT USAGE, SELECT                  ON ALL SEQUENCES IN SCHEMA public TO tf_app
 -- GRANT so it actually has writes to revoke.
 REVOKE INSERT, UPDATE, DELETE ON events_catalog          FROM tf_app;
 REVOKE INSERT, UPDATE, DELETE ON system_prompt_versions  FROM tf_app;
+
+-- goose_db_version is created by goose itself in schema public on
+-- first migration. The bulk GRANT above accidentally hands tf_app
+-- full DML on it — which would let the application role tamper with
+-- migration state (e.g., insert a fake "applied" stamp to skip a
+-- future migration, or DELETE rows to force re-runs). Lock it down
+-- to the migration role only. Same treatment for the auto-generated
+-- sequence behind goose_db_version.id.
+REVOKE ALL ON TABLE    goose_db_version           FROM tf_app;
+REVOKE ALL ON SEQUENCE goose_db_version_id_seq    FROM tf_app;
 
 -- (j) ----------------------------------------------------------------
 -- Indexes. Org-scoped tables get org_id-leading variants; partial
@@ -1272,22 +1331,42 @@ CREATE POLICY runs_modify ON runs FOR ALL
   WITH CHECK (org_id = tf.current_org_id() AND creator_user_id = tf.current_user_id()
               AND tf.user_has_org_access(org_id));
 
--- Resources denormalized from parents (org_id baked for RLS efficiency).
--- Visibility inherited from parent via app code; RLS gates on org_id alone.
-CREATE POLICY task_events_all     ON task_events FOR ALL USING (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id))
-                                                         WITH CHECK (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id));
-CREATE POLICY run_artifacts_all   ON run_artifacts FOR ALL USING (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id))
-                                                            WITH CHECK (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id));
-CREATE POLICY run_messages_all    ON run_messages FOR ALL USING (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id))
-                                                           WITH CHECK (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id));
-CREATE POLICY run_memory_all      ON run_memory FOR ALL USING (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id))
-                                                         WITH CHECK (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id));
-CREATE POLICY pending_firings_all ON pending_firings FOR ALL USING (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id))
-                                                              WITH CHECK (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id));
-CREATE POLICY run_worktrees_all   ON run_worktrees FOR ALL USING (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id))
-                                                            WITH CHECK (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id));
-CREATE POLICY pending_prs_all     ON pending_prs FOR ALL USING (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id))
-                                                          WITH CHECK (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id));
+-- Resources whose parents are creator-scoped (tasks, runs). Gating
+-- only on org_id would let any org member read/write task_events,
+-- run_artifacts, run_messages, run_memory, etc. for tasks/runs they
+-- can't see — leaking metadata across users in the same org.
+-- Solution: USING + WITH CHECK both run an EXISTS on the parent
+-- table, which inherits the parent's RLS. If the parent isn't
+-- visible to the caller, the EXISTS returns false → policy denies.
+CREATE POLICY task_events_all ON task_events FOR ALL
+  USING      (EXISTS (SELECT 1 FROM tasks t WHERE t.id = task_events.task_id))
+  WITH CHECK (EXISTS (SELECT 1 FROM tasks t WHERE t.id = task_events.task_id));
+
+CREATE POLICY run_artifacts_all ON run_artifacts FOR ALL
+  USING      (EXISTS (SELECT 1 FROM runs r WHERE r.id = run_artifacts.run_id))
+  WITH CHECK (EXISTS (SELECT 1 FROM runs r WHERE r.id = run_artifacts.run_id));
+
+CREATE POLICY run_messages_all ON run_messages FOR ALL
+  USING      (EXISTS (SELECT 1 FROM runs r WHERE r.id = run_messages.run_id))
+  WITH CHECK (EXISTS (SELECT 1 FROM runs r WHERE r.id = run_messages.run_id));
+
+CREATE POLICY run_memory_all ON run_memory FOR ALL
+  USING      (EXISTS (SELECT 1 FROM runs r WHERE r.id = run_memory.run_id))
+  WITH CHECK (EXISTS (SELECT 1 FROM runs r WHERE r.id = run_memory.run_id));
+
+CREATE POLICY run_worktrees_all ON run_worktrees FOR ALL
+  USING      (EXISTS (SELECT 1 FROM runs r WHERE r.id = run_worktrees.run_id))
+  WITH CHECK (EXISTS (SELECT 1 FROM runs r WHERE r.id = run_worktrees.run_id));
+
+CREATE POLICY pending_prs_all ON pending_prs FOR ALL
+  USING      (EXISTS (SELECT 1 FROM runs r WHERE r.id = pending_prs.run_id))
+  WITH CHECK (EXISTS (SELECT 1 FROM runs r WHERE r.id = pending_prs.run_id));
+
+-- pending_firings ties together a task + trigger + run. The task is
+-- creator-scoped; gating on its visibility is sufficient.
+CREATE POLICY pending_firings_all ON pending_firings FOR ALL
+  USING      (EXISTS (SELECT 1 FROM tasks t WHERE t.id = pending_firings.task_id))
+  WITH CHECK (EXISTS (SELECT 1 FROM tasks t WHERE t.id = pending_firings.task_id));
 CREATE POLICY swipe_events_select ON swipe_events FOR SELECT
   USING (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id) AND creator_user_id = tf.current_user_id());
 CREATE POLICY swipe_events_modify ON swipe_events FOR ALL
