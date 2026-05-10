@@ -184,8 +184,9 @@ func boot() {
 	// The image ships authenticator LOGIN but with no password. Set
 	// one so AppDB can connect. Reserved-role ALTERs only succeed as
 	// the real superuser.
+	escapedAuthPassword := strings.ReplaceAll(authPassword, "'", "''")
 	if _, err := adminDB.ExecContext(ctx,
-		fmt.Sprintf("ALTER ROLE authenticator WITH PASSWORD '%s'", authPassword),
+		fmt.Sprintf("ALTER ROLE authenticator WITH PASSWORD '%s'", escapedAuthPassword),
 	); err != nil {
 		_ = adminDB.Close()
 		_ = pg.Terminate(ctx)
