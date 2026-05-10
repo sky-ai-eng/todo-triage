@@ -496,26 +496,42 @@ $$;
 <span class="kw">CREATE SCHEMA IF NOT EXISTS</span> tf;
 
 <span class="com">-- our user mirror — FK resolves because the image ships auth.users pre-created</span>
+<span class="com">-- authn state (email, password, last_sign_in, etc.) lives in auth.users; this is the profile sidecar</span>
 <span class="kw">CREATE TABLE</span> users (
-  id            <span class="kw">UUID PRIMARY KEY REFERENCES</span> auth.users(id) <span class="kw">ON DELETE CASCADE</span>,
-  display_name  <span class="kw">TEXT</span>,
-  avatar_url    <span class="kw">TEXT</span>,
-  created_at    <span class="kw">TIMESTAMPTZ NOT NULL DEFAULT</span> now()
+  id              <span class="kw">UUID PRIMARY KEY REFERENCES</span> auth.users(id) <span class="kw">ON DELETE CASCADE</span>,
+  display_name    <span class="kw">TEXT</span>,
+  avatar_url      <span class="kw">TEXT</span>,
+  timezone        <span class="kw">TEXT NOT NULL DEFAULT</span> <span class="str">'UTC'</span>,
+  default_org_id  <span class="kw">UUID REFERENCES</span> orgs(id) <span class="kw">ON DELETE SET NULL</span>,
+  external_id     <span class="kw">TEXT</span>,  <span class="com">-- IdP NameID/sub for SAML/OIDC users; NULL for non-SSO</span>
+  created_at      <span class="kw">TIMESTAMPTZ NOT NULL DEFAULT</span> now(),
+  updated_at      <span class="kw">TIMESTAMPTZ NOT NULL DEFAULT</span> now()
 );
+<span class="kw">CREATE UNIQUE INDEX</span> users_external_id_idx <span class="kw">ON</span> users(external_id) <span class="kw">WHERE</span> external_id <span class="kw">IS NOT NULL</span>;
 
 <span class="kw">CREATE TABLE</span> orgs (
-  id           <span class="kw">UUID PRIMARY KEY DEFAULT</span> gen_random_uuid(),
-  slug         <span class="kw">TEXT NOT NULL UNIQUE</span>,
-  name         <span class="kw">TEXT NOT NULL</span>,
-  created_at   <span class="kw">TIMESTAMPTZ NOT NULL DEFAULT</span> now(),
-  deleted_at   <span class="kw">TIMESTAMPTZ</span>
+  id               <span class="kw">UUID PRIMARY KEY DEFAULT</span> gen_random_uuid(),
+  slug             <span class="kw">TEXT NOT NULL UNIQUE</span>,
+  name             <span class="kw">TEXT NOT NULL</span>,
+  description      <span class="kw">TEXT</span>,
+  billing_email    <span class="kw">TEXT</span>,  <span class="com">-- canonical invoice contact; decoupled from any member's email</span>
+  owner_user_id    <span class="kw">UUID NOT NULL REFERENCES</span> users(id),  <span class="com">-- founder; transferable</span>
+  sso_provider_id  <span class="kw">UUID REFERENCES</span> auth.sso_providers(id) <span class="kw">ON DELETE SET NULL</span>,  <span class="com">-- SAML/OIDC, 1:1; NULL until configured</span>
+  sso_enforced     <span class="kw">BOOLEAN NOT NULL DEFAULT FALSE</span>,  <span class="com">-- block password login when true; org_domains (HRD) lands in SSO feature ticket</span>
+  created_at       <span class="kw">TIMESTAMPTZ NOT NULL DEFAULT</span> now(),
+  updated_at       <span class="kw">TIMESTAMPTZ NOT NULL DEFAULT</span> now(),
+  deleted_at       <span class="kw">TIMESTAMPTZ</span>
 );
 
 <span class="kw">CREATE TABLE</span> teams (
-  id      <span class="kw">UUID PRIMARY KEY DEFAULT</span> gen_random_uuid(),
-  org_id  <span class="kw">UUID NOT NULL REFERENCES</span> orgs(id) <span class="kw">ON DELETE CASCADE</span>,
-  slug    <span class="kw">TEXT NOT NULL</span>,
-  name    <span class="kw">TEXT NOT NULL</span>,
+  id                  <span class="kw">UUID PRIMARY KEY DEFAULT</span> gen_random_uuid(),
+  org_id              <span class="kw">UUID NOT NULL REFERENCES</span> orgs(id) <span class="kw">ON DELETE CASCADE</span>,
+  slug                <span class="kw">TEXT NOT NULL</span>,
+  name                <span class="kw">TEXT NOT NULL</span>,
+  description         <span class="kw">TEXT</span>,
+  created_by_user_id  <span class="kw">UUID REFERENCES</span> users(id) <span class="kw">ON DELETE SET NULL</span>,
+  created_at          <span class="kw">TIMESTAMPTZ NOT NULL DEFAULT</span> now(),
+  updated_at          <span class="kw">TIMESTAMPTZ NOT NULL DEFAULT</span> now(),
   <span class="kw">UNIQUE</span> (org_id, slug)
 );
 
