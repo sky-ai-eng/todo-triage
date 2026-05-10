@@ -329,6 +329,7 @@ footer {
     <li><a href="#why">Why now</a></li>
     <li><a href="#current">Current state</a></li>
     <li><a href="#target">Target state</a></li>
+    <li><a href="#roles">Roles & connection pattern</a></li>
     <li><a href="#tenancy">Tenancy schema</a></li>
     <li><a href="#vault">Vault wrappers</a></li>
     <li><a href="#rls">RLS pattern</a></li>
@@ -336,7 +337,7 @@ footer {
     <li><a href="#testing">Test rig</a></li>
   </ol>
   <div class="toc-group">Plan</div>
-  <ol start="9">
+  <ol start="10">
     <li><a href="#steps">Implementation steps</a></li>
     <li><a href="#risks">Risks & open questions</a></li>
     <li><a href="#acceptance">Acceptance</a></li>
@@ -377,22 +378,111 @@ footer {
   <h2>Target state</h2>
   <p>One goose baseline migration in <code>internal/db/migrations-postgres/</code> brings a fresh Postgres up to a multi-tenant-ready schema. <code>goose.Up</code> against an empty Postgres DB produces:</p>
   <ul class="tight">
-    <li><strong>Roles:</strong> <code>tf_app</code> (the role the application will connect as — no superuser, no <code>BYPASSRLS</code>). The image ships with <code>service_role</code> already, but it has <code>BYPASSRLS=true</code> by default, which would defeat the entire RLS posture. We keep our own role so the supabase-default services don't accidentally inherit our enforcement model.</li>
+    <li><strong>Roles:</strong> <code>tf_app</code> (NOLOGIN, NOINHERIT, BYPASSRLS=false) — the role the app's transactions execute under. The migration also <code>GRANT tf_app TO authenticator</code> (the image's pre-shipped LOGIN role) so the connection-as-authenticator + <code>SET LOCAL ROLE tf_app</code> pattern works. See §4 for the full ceremony.</li>
     <li><strong>Extensions:</strong> <code>supabase_vault</code>, <code>pgsodium</code>, <code>pgcrypto</code>, <code>pg_graphql</code>, <code>pgjwt</code>, <code>uuid-ossp</code> are <strong>already loaded</strong> by the supabase/postgres image. Our migration calls <code>CREATE EXTENSION IF NOT EXISTS supabase_vault</code> defensively but it's a no-op in practice.</li>
     <li><strong>Schemas:</strong> <code>tf</code> (RLS helper functions live here). <code>auth</code> + <code>vault</code> + <code>storage</code> + <code>graphql</code> + <code>realtime</code> + <code>extensions</code> are pre-created by the image — we don't touch them beyond FK references.</li>
     <li><strong>Tenancy tables:</strong> <code>orgs</code>, <code>teams</code>, <code>memberships</code>, <code>org_invites</code>, <code>users</code> (mirror of <code>auth.users</code>; FK to <code>auth.users(id)</code> resolves natively because the image ships the full GoTrue schema), <code>sessions</code>, <code>integrations</code>, <code>org_limits</code>, <code>project_knowledge</code>.</li>
+    <li><strong>Settings tables:</strong> <code>org_settings</code>, <code>team_settings</code>, <code>user_settings</code> (columnar, one row per scope-key) plus <code>jira_project_status_rules</code> for per-project Jira workflow vocabularies. See §8 for the column mapping.</li>
     <li><strong>Vault wrappers:</strong> three SECURITY INVOKER functions (<code>vault_put_org_secret</code>, <code>vault_get_org_secret</code>, <code>vault_delete_org_secret</code>) + revoked-from-PUBLIC + granted to <code>tf_app</code>.</li>
     <li><strong>RLS helpers:</strong> <code>tf.current_user_id()</code>, <code>tf.current_org_id()</code>, <code>tf.user_has_org_access(target_org)</code>.</li>
-    <li><strong>TF tables (multi shape):</strong> every table from the SQLite baseline recreated with <code>org_id NOT NULL REFERENCES orgs(id) ON DELETE CASCADE</code> + (where applicable) <code>creator_user_id</code>, <code>visibility</code>, <code>team_id</code> baked in. SQLite-isms translated: <code>TEXT PRIMARY KEY</code> → <code>UUID PRIMARY KEY DEFAULT gen_random_uuid()</code>, <code>TEXT</code> JSON columns → <code>JSONB</code>, <code>BOOLEAN</code> stays, <code>DATETIME</code> → <code>TIMESTAMPTZ</code>, autoincrement → <code>BIGSERIAL</code>.</li>
-    <li><strong>RLS policies</strong> on every org-scoped table: <code>FOR SELECT USING (org_id = tf.current_org_id() AND ...)</code>, <code>FOR INSERT WITH CHECK (...)</code>, etc.</li>
+    <li><strong>TF tables (multi shape):</strong> every table from the SQLite baseline recreated with <code>org_id NOT NULL REFERENCES orgs(id) ON DELETE CASCADE</code> + (where applicable) <code>creator_user_id</code>, <code>visibility</code>, <code>team_id</code> baked in. SQLite-isms translated per §8. Indexes replicated with <code>org_id</code> as the leading column on org-scoped tables.</li>
+    <li><strong>RLS policies</strong> on every org-scoped table: <code>FOR SELECT USING (org_id = tf.current_org_id() AND ...)</code>, <code>FOR INSERT WITH CHECK (...)</code>, etc. Test harness exercises them as <code>tf_app</code> (RLS active), not as <code>postgres</code> superuser (RLS bypassed).</li>
+    <li><strong>Reference data baked in:</strong> <code>events_catalog</code> seeded via <code>INSERT</code>s in the migration itself (mirrors supabase convention; avoids requiring app-layer seeding privileges on a table tf_app has no INSERT grant on). Same treatment for <code>system_prompt_versions</code> if shipping with system prompts pre-loaded.</li>
   </ul>
+
+  <p><strong>D4a is merged but D3 doesn't import it.</strong> <code>internal/runmode</code> is the deployment-posture flag; D3 is pure SQL DDL with no Go integration. D4b will be the first runmode consumer (paths package). Leaving the runmode reference here only as forward-context.</p>
 
   <p>Local SQLite migrations are untouched. The two trees never interact at runtime — <code>migrationsFor</code> picks one based on dialect.</p>
 </section>
 
 <!-- ===================================================== -->
-<section class="block" id="tenancy">
+<section class="block" id="roles">
   <div class="section-label">§4</div>
+  <h2>Roles &amp; connection pattern</h2>
+  <p class="lede">The supabase-idiomatic <code>authenticator</code> + <code>SET LOCAL ROLE</code> pattern, adapted for our Go-backend-on-Postgres setup. One LOGIN role at the connection level (image-shipped <code>authenticator</code>); one NOLOGIN role at the transaction level (<code>tf_app</code>) that RLS policies actually gate against. Migrations and tests both run as <code>postgres</code> superuser, which bypasses RLS — that's intentional for setup, but it means RLS-asserting tests must <code>SET LOCAL ROLE tf_app</code> or the assertions are silently meaningless.</p>
+
+  <h3>Role inventory</h3>
+  <table class="matrix">
+    <thead><tr><th style="width: 22%;">Role</th><th style="width: 18%;">Origin</th><th style="width: 18%;">Login / bypassrls</th><th>Used for</th></tr></thead>
+    <tbody>
+      <tr><td><code>postgres</code></td><td>Image default</td><td>LOGIN, BYPASSRLS</td><td>Goose migrations + test setup. Never serves user requests.</td></tr>
+      <tr><td><code>supabase_admin</code></td><td>Image</td><td>LOGIN, SUPERUSER</td><td>Image-internal admin; we don't connect as this.</td></tr>
+      <tr><td><code>authenticator</code></td><td>Image</td><td>LOGIN, NOINHERIT, no privileges of its own</td><td>The connection role. App's pgx pool dials as authenticator. NOINHERIT means it has no privileges until it <code>SET ROLE</code>s into a granted member.</td></tr>
+      <tr><td><code>tf_app</code></td><td><strong>Created by our migration</strong></td><td>NOLOGIN, NOINHERIT, BYPASSRLS=false</td><td>The transaction role. Every <code>WithTx</code> opens a tx, <code>SET LOCAL ROLE tf_app</code>, sets <code>request.jwt.claims</code>, runs queries. RLS policies gate against this role's identity.</td></tr>
+      <tr><td><code>service_role</code> / <code>authenticated</code> / <code>anon</code></td><td>Image (Supabase convention)</td><td>NOLOGIN, varying</td><td>Reserved for PostgREST/Realtime if we ever add them. We don't grant them anything; we don't connect through them. Untouched by our migration.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Migration-time grants</h3>
+<pre class="code"><span class="com">-- Idempotent role creation (cluster-global, so guard).</span>
+<span class="kw">DO</span> $$
+<span class="kw">BEGIN</span>
+  <span class="kw">IF NOT EXISTS</span> (<span class="kw">SELECT FROM</span> pg_roles <span class="kw">WHERE</span> rolname = <span class="str">'tf_app'</span>) <span class="kw">THEN</span>
+    <span class="kw">CREATE ROLE</span> tf_app <span class="kw">NOLOGIN NOINHERIT</span>;
+  <span class="kw">END IF</span>;
+<span class="kw">END</span>
+$$;
+
+<span class="com">-- Let the LOGIN role switch into tf_app.</span>
+<span class="kw">GRANT</span> tf_app <span class="kw">TO</span> authenticator;
+
+<span class="com">-- Schema usage.</span>
+<span class="kw">GRANT USAGE ON SCHEMA</span> public, tf <span class="kw">TO</span> tf_app;
+
+<span class="com">-- Table-level grants on TF data tables — defaults applied at table creation.</span>
+<span class="kw">ALTER DEFAULT PRIVILEGES IN SCHEMA</span> public
+  <span class="kw">GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO</span> tf_app;
+
+<span class="com">-- Read-only on global reference tables (events_catalog, system_prompt_versions).</span>
+<span class="com">-- Migration writes them; tf_app only reads.</span>
+<span class="kw">REVOKE INSERT, UPDATE, DELETE ON</span> events_catalog, system_prompt_versions <span class="kw">FROM</span> tf_app;
+
+<span class="com">-- Vault wrapper EXECUTE (REVOKEd from PUBLIC; see §6).</span>
+<span class="kw">GRANT EXECUTE ON FUNCTION</span> public.vault_put_org_secret, public.vault_get_org_secret, public.vault_delete_org_secret <span class="kw">TO</span> tf_app;</pre>
+
+  <h3>Per-transaction ceremony (D2's <code>WithTx</code>)</h3>
+<pre class="code"><span class="com">// internal/store/postgres/tx.go (sketch — D2's territory, included here for context)</span>
+<span class="kw">func</span> WithTx(ctx context.Context, db *sql.DB, fn <span class="kw">func</span>(s TxStores) error) error {
+  tx, err := db.<span class="fn">BeginTx</span>(ctx, <span class="kw">nil</span>)
+  <span class="kw">if</span> err != <span class="kw">nil</span> { <span class="kw">return</span> err }
+  <span class="kw">defer</span> tx.<span class="fn">Rollback</span>()
+
+  <span class="com">// 1. Drop into tf_app — no superuser, no BYPASSRLS, RLS is now active.</span>
+  <span class="kw">if</span> _, err := tx.<span class="fn">ExecContext</span>(ctx, <span class="str">`SET LOCAL ROLE tf_app`</span>); err != <span class="kw">nil</span> {
+    <span class="kw">return</span> err
+  }
+
+  <span class="com">// 2. Set the JWT claims so RLS helpers (tf.current_user_id, tf.current_org_id) can read them.</span>
+  claims := <span class="fn">ctxClaims</span>(ctx)
+  payload, _ := json.<span class="fn">Marshal</span>(claims)
+  <span class="kw">if</span> _, err := tx.<span class="fn">ExecContext</span>(ctx,
+    <span class="str">`SELECT set_config('request.jwt.claims', $1, true)`</span>, <span class="kw">string</span>(payload)); err != <span class="kw">nil</span> {
+    <span class="kw">return</span> err
+  }
+
+  <span class="com">// 3. Run the user's transaction body — RLS now in effect.</span>
+  <span class="kw">if</span> err := <span class="fn">fn</span>(<span class="fn">newTxStores</span>(tx)); err != <span class="kw">nil</span> { <span class="kw">return</span> err }
+  <span class="kw">return</span> tx.<span class="fn">Commit</span>()
+}</pre>
+
+  <p>The <code>SET LOCAL ROLE</code> and <code>SET LOCAL request.jwt.claims</code> are both transaction-scoped — when the tx commits/rolls back, they reset on the next checkout from the connection pool. That's the load-bearing property: pgbouncer in transaction mode can multiplex many requests over one underlying connection, and each one sees a clean role + claims state.</p>
+
+  <h3>Test rig implications</h3>
+  <p>The test harness needs <em>two</em> connection paths against the same testcontainer:</p>
+  <ul class="tight">
+    <li><strong>Migration / setup connection</strong> — connects as <code>postgres</code> (superuser). Runs <code>goose.Up</code>, seeds tenancy data (orgs, users, memberships), creates JWT-claim values for tests. RLS is bypassed under this role; that's correct for setup.</li>
+    <li><strong>Assertion connection</strong> — connects as <code>authenticator</code> with the right credentials, then <code>SET LOCAL ROLE tf_app</code> + <code>set_config('request.jwt.claims', …)</code> per test. RLS is active. Cross-org isolation tests run here.</li>
+  </ul>
+  <p>Conflating these — running RLS assertions through the superuser connection — silently no-ops the policies and produces false-pass results. The harness exposes both connections explicitly so test authors can't accidentally grab the wrong one.</p>
+
+  <div class="callout callout--warn">
+    <strong>Why <code>NOINHERIT</code> on <code>tf_app</code>:</strong> <code>NOINHERIT</code> means privileges granted to <code>tf_app</code> aren't automatically inherited by roles that <em>have</em> <code>tf_app</code> as a member (like <code>authenticator</code>). The privileges only apply once the inheriting role explicitly does <code>SET ROLE tf_app</code>. Without this, <code>authenticator</code> would silently inherit <code>tf_app</code>'s grants by default, and connections that forgot to <code>SET LOCAL ROLE</code> would still work — masking the bug rather than surfacing it. NOINHERIT makes "forgot to SET ROLE" a permission denial, which is what we want.
+  </div>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="tenancy">
+  <div class="section-label">§5</div>
   <h2>Tenancy schema</h2>
   <p class="lede">Identity, orgs, teams, memberships, sessions, integrations. Verbatim translation of the architecture doc §5 schema with light commentary on why each choice.</p>
 
@@ -469,7 +559,7 @@ footer {
 
 <!-- ===================================================== -->
 <section class="block" id="vault">
-  <div class="section-label">§5</div>
+  <div class="section-label">§6</div>
   <h2>Vault wrappers</h2>
   <p class="lede">Three SECURITY INVOKER functions in <code>public</code> that the Go backend calls. Org-prefixed naming (<code>org/&lt;uuid&gt;/&lt;key&gt;</code>) makes leakage between orgs structurally impossible at the Vault layer.</p>
 
@@ -518,7 +608,7 @@ $$;
 
 <!-- ===================================================== -->
 <section class="block" id="rls">
-  <div class="section-label">§6</div>
+  <div class="section-label">§7</div>
   <h2>RLS pattern</h2>
   <p class="lede">Three helper functions live in <code>tf</code> schema; every org-scoped table gets <code>ENABLE ROW LEVEL SECURITY</code> + per-operation policies. The application sets <code>request.jwt.claims</code> per-transaction via <code>SET LOCAL</code>; helpers extract user_id and org_id from there.</p>
 
@@ -568,9 +658,12 @@ $$ <span class="kw">LANGUAGE SQL STABLE</span>;</pre>
       <tr><td><code>projects</code></td><td>private (creator only)</td><td>toggle exposed in v1 UI</td></tr>
       <tr><td><code>memories</code> (run_memory)</td><td>forced private</td><td>per-memory elevation by author</td></tr>
       <tr><td><code>task_rules</code> + <code>prompt_triggers</code></td><td>creator-scoped</td><td>team-scoped</td></tr>
+      <tr><td><code>curator_requests</code> + <code>curator_messages</code> + <code>curator_pending_context</code></td><td>per-user-per-project (creator-scoped chat); writes to <code>project_knowledge</code> are org-shared</td><td>per-conversation visibility elevation if usage shows shared chats are wanted</td></tr>
+      <tr><td><code>project_knowledge</code></td><td>org-shared (the durable artifact the curator maintains)</td><td>—</td></tr>
       <tr><td><code>entities</code> + <code>events</code></td><td>org-visible (no creator scope)</td><td>—</td></tr>
     </tbody>
   </table>
+  <p>The curator-chat scoping deserves an explicit callout: each user has their own ongoing conversation with the curator about a project (own <code>creator_user_id</code> on <code>curator_requests</code>; children denormalize <code>org_id</code> from the parent). Both Alice and Bob can teach the curator about the same project; their chats stay separate but the resulting writes to <code>project_knowledge</code> land in the shared, org-visible table with last-write-wins on conflicts. <code>project_knowledge.last_updated_by</code> retains the run id so the chronology is auditable. v2 can introduce shared/team-visible curator chats if usage shows people want them — same elevation pattern as memories.</p>
 
   <div class="callout callout--warn">
     <strong>Service-role caveat:</strong> The Postgres role TF connects as (<code>tf_app</code>) must NOT be a superuser and must NOT have <code>BYPASSRLS</code>. Both bypass row-level security. The migration role (used by goose) can be more privileged because it never serves user requests — but at minimum it needs CREATE on the relevant schemas, plus permission to CREATE EXTENSION.
@@ -579,7 +672,7 @@ $$ <span class="kw">LANGUAGE SQL STABLE</span>;</pre>
 
 <!-- ===================================================== -->
 <section class="block" id="tftables">
-  <div class="section-label">§7</div>
+  <div class="section-label">§8</div>
   <h2>TF tables in multi shape</h2>
   <p class="lede">Every table from the SQLite baseline gets a Postgres counterpart with multi-tenant columns baked in from inception. Translation is mostly mechanical, but a few SQLite-isms need explicit decisions.</p>
 
@@ -611,26 +704,68 @@ $$ <span class="kw">LANGUAGE SQL STABLE</span>;</pre>
         <td><code>org_id UUID NOT NULL</code> only — no creator scope (these are org-shared infrastructure)</td>
       </tr>
       <tr>
-        <td><code>run_artifacts</code>, <code>run_messages</code>, <code>run_memory</code>, <code>run_worktrees</code>, <code>pending_prs</code>, <code>pending_reviews</code>, <code>pending_review_comments</code>, <code>curator_messages</code>, <code>curator_pending_context</code></td>
-        <td><code>org_id UUID NOT NULL</code> denormalized from the parent (<code>runs</code> / <code>pending_reviews</code> / <code>curator_requests</code>) for RLS-policy efficiency — avoids policies that have to JOIN to figure out access</td>
+        <td><code>curator_requests</code></td>
+        <td>Parent of curator chat. Carries <code>org_id UUID NOT NULL</code>, <code>project_id UUID NOT NULL</code>, <code>creator_user_id UUID NOT NULL</code> directly. RLS gates by <code>(org_id, creator_user_id)</code> so each user only sees their own conversations with the curator.</td>
       </tr>
       <tr>
-        <td><code>system_prompt_versions</code>, <code>events_catalog</code></td>
-        <td>Global tables — no <code>org_id</code>. Read-only for <code>tf_app</code>; written only by the migration / seeder. RLS not enabled.</td>
+        <td><code>run_artifacts</code>, <code>run_messages</code>, <code>run_memory</code>, <code>run_worktrees</code>, <code>pending_prs</code>, <code>pending_reviews</code>, <code>pending_review_comments</code>, <code>curator_messages</code>, <code>curator_pending_context</code></td>
+        <td><code>org_id UUID NOT NULL</code> denormalized from the parent (<code>runs</code> / <code>pending_reviews</code> / <code>curator_requests</code>) for RLS-policy efficiency — avoids policies that have to JOIN to figure out access. <code>curator_messages</code> + <code>curator_pending_context</code> additionally inherit <code>creator_user_id</code> from <code>curator_requests</code> via FK; RLS gates against the joined value.</td>
+      </tr>
+      <tr>
+        <td><code>events_catalog</code>, <code>system_prompt_versions</code></td>
+        <td>Global reference tables — no <code>org_id</code>. Read-only for <code>tf_app</code>; written only by the migration itself (<code>INSERT</code>s baked into the goose baseline, not by application code). RLS not enabled. <code>tf_app</code>'s grants are <code>SELECT</code> only — INSERT/UPDATE/DELETE are revoked at migration time.</td>
       </tr>
       <tr>
         <td><code>settings</code></td>
-        <td>Dropped from multi schema — settings are per-org (a future ticket) rather than per-binary.</td>
+        <td><strong>Replaced</strong> by three scoped tables (<code>org_settings</code>, <code>team_settings</code>, <code>user_settings</code>) plus <code>jira_project_status_rules</code>. See subsection below.</td>
       </tr>
     </tbody>
   </table>
 
   <p>Every <code>org_id</code> column references <code>orgs(id) ON DELETE CASCADE</code>. Deleting an org takes its entire data graph with it (modulo soft-delete on <code>orgs.deleted_at</code> for the 30-day retention window).</p>
+
+  <h3>Settings tables (replacing today's singleton)</h3>
+  <p>Today's <code>settings</code> is a single row with a JSONB blob holding all per-binary config. Multi-tenant needs proper scoping; we use three columnar tables (one per scope) plus a separate per-project Jira rules table since Jira workflows are project-keyed in reality.</p>
+
+  <table class="matrix">
+    <thead><tr><th style="width: 30%;">Table</th><th>Columns</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>org_settings</code><br><span style="font-size: 11px; color: var(--muted-2);">PK = org_id; FK ON DELETE CASCADE</span></td>
+        <td><code>org_id UUID PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE</code>, <code>github_base_url TEXT</code>, <code>github_poll_interval INTERVAL NOT NULL DEFAULT '5 minutes'</code>, <code>github_clone_protocol TEXT NOT NULL DEFAULT 'https' CHECK (github_clone_protocol IN ('https','ssh'))</code>, <code>jira_base_url TEXT</code>, <code>jira_poll_interval INTERVAL NOT NULL DEFAULT '5 minutes'</code>, <code>ai_reprioritize_threshold_default INT</code>, <code>ai_preference_update_interval_default INTERVAL</code>, <code>updated_at TIMESTAMPTZ NOT NULL DEFAULT now()</code></td>
+      </tr>
+      <tr>
+        <td><code>team_settings</code><br><span style="font-size: 11px; color: var(--muted-2);">PK = team_id</span></td>
+        <td><code>team_id UUID PRIMARY KEY REFERENCES teams(id) ON DELETE CASCADE</code>, <code>jira_projects TEXT[] NOT NULL DEFAULT '{}'</code>, <code>ai_reprioritize_threshold INT</code> (overrides org default), <code>ai_preference_update_interval INTERVAL</code> (overrides org default), <code>updated_at TIMESTAMPTZ NOT NULL DEFAULT now()</code></td>
+      </tr>
+      <tr>
+        <td><code>user_settings</code><br><span style="font-size: 11px; color: var(--muted-2);">PK = user_id</span></td>
+        <td><code>user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE</code>, <code>ai_model TEXT NOT NULL DEFAULT 'haiku'</code>, <code>ai_auto_delegate_enabled BOOLEAN NOT NULL DEFAULT FALSE</code>, <code>updated_at TIMESTAMPTZ NOT NULL DEFAULT now()</code></td>
+      </tr>
+      <tr>
+        <td><code>jira_project_status_rules</code><br><span style="font-size: 11px; color: var(--muted-2);">PK = (org_id, project_key)</span></td>
+        <td><code>org_id UUID NOT NULL REFERENCES orgs(id) ON DELETE CASCADE</code>, <code>project_key TEXT NOT NULL</code> (Jira's <code>SKY</code>, <code>ENG</code>, etc.), <code>pickup_members TEXT[] NOT NULL DEFAULT '{}'</code>, <code>in_progress_members TEXT[] NOT NULL DEFAULT '{}'</code>, <code>in_progress_canonical TEXT</code>, <code>done_members TEXT[] NOT NULL DEFAULT '{}'</code>, <code>done_canonical TEXT</code>, <code>updated_at TIMESTAMPTZ NOT NULL DEFAULT now()</code>, <code>PRIMARY KEY (org_id, project_key)</code></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>RLS posture per scope:</p>
+  <ul class="tight">
+    <li><strong><code>org_settings</code></strong> — readable by any user with org membership; writable only by org owners/admins (enforced via memberships role check in the policy).</li>
+    <li><strong><code>team_settings</code></strong> — readable by team members; writable by team admins.</li>
+    <li><strong><code>user_settings</code></strong> — readable + writable only by the owning user.</li>
+    <li><strong><code>jira_project_status_rules</code></strong> — readable by any user with org membership; writable by org admins. Status rules are global per-Jira-project, not per-team — multiple teams tracking the same project share one rule set.</li>
+  </ul>
+
+  <p>Deferred to a follow-up: the SettingsResolver application layer (which precedence layer wins per key, the merge logic, the UI surface). The schema gives us room without prescribing application behavior.</p>
+
+  <h3>Indexes</h3>
+  <p>Every SQLite index from the consolidated baseline gets a Postgres counterpart. On org-scoped tables, <code>org_id</code> is added as the leading column on the index — Postgres queries always filter by <code>org_id</code> via RLS, so the leading column matches the access pattern. Partial indexes (<code>WHERE</code> clauses on the existing SQLite indexes, e.g. <code>idx_entities_closed_at WHERE closed_at IS NOT NULL</code>) are preserved verbatim. Indexes that exist purely for SQLite-specific query patterns (rare) are dropped if a <code>org_id</code>-leading equivalent already covers the access path.</p>
 </section>
 
 <!-- ===================================================== -->
 <section class="block" id="testing">
-  <div class="section-label">§8</div>
+  <div class="section-label">§9</div>
   <h2>Test rig</h2>
   <p class="lede">D3 is the first ticket that needs Postgres at runtime. Picking the test rig now sets the pattern D2 (Postgres impls) and every later multi-mode ticket inherits.</p>
 
@@ -638,26 +773,63 @@ $$ <span class="kw">LANGUAGE SQL STABLE</span>;</pre>
   <p>Pinned to the version the production compose stack uses (architecture §5). It bundles <code>supabase_vault</code>, <code>pgsodium</code>, <code>pgcrypto</code>, <code>pgvector</code>, <code>pg_graphql</code>, etc. — vanilla Postgres + manually-installed extensions is fragile because the Vault extension's pgsodium key bootstrap is finicky. Using the same image as production also collapses test-vs-prod parity questions.</p>
 
   <h3>Harness: <code>testcontainers-go</code></h3>
-  <p>Spins ephemeral Postgres containers per test package via <code>testcontainers/testcontainers-go</code>. One container per test binary (cached across <code>go test</code> invocations within the same package), with <code>tc.Reset()</code> between tests — way faster than per-test container churn. The harness lives in <code>internal/db/pgtest/</code> so any package that needs Postgres can import it.</p>
+  <p>One container per test package, started once at <code>TestMain</code> time and torn down in cleanup. Inter-test isolation via explicit <code>TRUNCATE</code> of org-scoped tables in <code>Reset(db)</code> — testcontainers-go has no built-in reset API, so we own it. The harness lives in <code>internal/db/pgtest/</code> so any package needing Postgres can import it.</p>
 
   <pre class="code"><span class="com">// internal/db/pgtest/harness.go (sketch)</span>
-<span class="kw">func</span> <span class="fn">NewPostgres</span>(t *testing.T) *sql.DB {
+<span class="kw">type</span> Harness <span class="kw">struct</span> {
+  Container *postgres.PostgresContainer
+  AdminDB   *sql.DB    <span class="com">// connects as 'postgres' (superuser) — for migrate + setup. RLS bypassed.</span>
+  AppDB     *sql.DB    <span class="com">// connects as 'authenticator' — for RLS-asserting tests via SET LOCAL ROLE tf_app.</span>
+}
+
+<span class="kw">func</span> <span class="fn">New</span>(t *testing.T) *Harness {
   ctx := context.Background()
   pg, err := postgres.Run(ctx,
     <span class="str">"supabase/postgres:15.1.0.147"</span>,
     postgres.WithDatabase(<span class="str">"tf_test"</span>),
-    postgres.WithUsername(<span class="str">"tf"</span>),
-    postgres.WithPassword(<span class="str">"tf"</span>),
-    testcontainers.WithWaitStrategy(wait.ForLog(<span class="str">"database system is ready"</span>)),
+    postgres.WithUsername(<span class="str">"postgres"</span>),
+    postgres.WithPassword(<span class="str">"postgres"</span>),
+    <span class="com">// "database system is ready" fires before image-init scripts complete</span>
+    <span class="com">// (auth schema setup, role bootstrap, etc.). Wait for image-init's tail</span>
+    <span class="com">// marker AND probe for auth.users existence as a belt-and-suspenders check.</span>
+    testcontainers.<span class="fn">WithWaitStrategy</span>(wait.<span class="fn">ForAll</span>(
+      wait.<span class="fn">ForLog</span>(<span class="str">"PostgreSQL init process complete"</span>).<span class="fn">WithStartupTimeout</span>(2*time.Minute),
+      wait.<span class="fn">ForSQL</span>(<span class="str">"5432/tcp"</span>, <span class="str">"pgx"</span>, <span class="kw">func</span>(host string, port nat.Port) string {
+        <span class="kw">return</span> fmt.<span class="fn">Sprintf</span>(<span class="str">"postgres://postgres:postgres@%s:%s/tf_test?sslmode=disable"</span>, host, port.<span class="fn">Port</span>())
+      }).<span class="fn">WithQuery</span>(<span class="str">"SELECT 1 FROM auth.users LIMIT 1"</span>).<span class="fn">WithStartupTimeout</span>(2*time.Minute),
+    )),
   )
-  <span class="kw">if</span> err != <span class="kw">nil</span> { t.Fatal(err) }
-  t.Cleanup(<span class="kw">func</span>() { pg.Terminate(ctx) })
+  <span class="kw">if</span> err != <span class="kw">nil</span> { t.<span class="fn">Fatal</span>(err) }
+  t.<span class="fn">Cleanup</span>(<span class="kw">func</span>() { pg.<span class="fn">Terminate</span>(ctx) })
 
-  dsn, _ := pg.ConnectionString(ctx, <span class="str">"sslmode=disable"</span>)
-  db, _ := sql.Open(<span class="str">"pgx"</span>, dsn)
-  <span class="kw">if</span> err := db.<span class="fn">MigrateForTest</span>(); err != <span class="kw">nil</span> { t.Fatal(err) }
-  <span class="kw">return</span> db
+  adminDSN, _ := pg.<span class="fn">ConnectionString</span>(ctx, <span class="str">"sslmode=disable"</span>)   <span class="com">// user=postgres</span>
+  adminDB, _ := sql.<span class="fn">Open</span>(<span class="str">"pgx"</span>, adminDSN)
+
+  <span class="com">// Run goose migrations as superuser (creates tf_app + grants).</span>
+  <span class="kw">if</span> err := db.<span class="fn">Migrate</span>(adminDB); err != <span class="kw">nil</span> { t.<span class="fn">Fatal</span>(err) }
+
+  <span class="com">// Set authenticator's password (image leaves it unset) and open a second</span>
+  <span class="com">// connection as authenticator. Tests use AppDB for RLS-asserting work and</span>
+  <span class="com">// always do SET LOCAL ROLE tf_app inside their transactions.</span>
+  <span class="kw">if</span> _, err := adminDB.<span class="fn">Exec</span>(<span class="str">`ALTER ROLE authenticator WITH LOGIN PASSWORD 'auth_test_pw'`</span>); err != <span class="kw">nil</span> { t.<span class="fn">Fatal</span>(err) }
+  appDSN := <span class="fn">rewriteUser</span>(adminDSN, <span class="str">"authenticator"</span>, <span class="str">"auth_test_pw"</span>)
+  appDB, _ := sql.<span class="fn">Open</span>(<span class="str">"pgx"</span>, appDSN)
+
+  <span class="kw">return</span> &Harness{Container: pg, AdminDB: adminDB, AppDB: appDB}
+}
+
+<span class="com">// Reset truncates all org-scoped tables. Tests call this between cases</span>
+<span class="com">// when they're sharing the package-scoped harness (typical pattern).</span>
+<span class="kw">func</span> (h *Harness) <span class="fn">Reset</span>(t *testing.T) {
+  _, err := h.AdminDB.<span class="fn">Exec</span>(<span class="str">`TRUNCATE orgs, teams, users, ... RESTART IDENTITY CASCADE`</span>)
+  <span class="kw">if</span> err != <span class="kw">nil</span> { t.<span class="fn">Fatal</span>(err) }
 }</pre>
+
+  <p>The two-connection model is load-bearing: a test that connects through <code>AdminDB</code> when it should be using <code>AppDB</code> will silently bypass RLS and pass even when policies are wrong. The harness exposes both as separate fields so the failure mode is "test author picked the wrong connection" (visible in code review) rather than "test silently lied" (invisible until a real RLS bug ships).</p>
+
+  <div class="callout callout--warn">
+    <strong>Wait strategy is non-trivial.</strong> The supabase/postgres image runs init scripts (auth schema setup, GoTrue's migrations, role bootstrap) <em>after</em> Postgres logs "database system is ready." A naive wait on that log races image-init and produces flaky tests where <code>auth.users</code> doesn't exist yet. Two-stage wait above (log marker + SQL probe for <code>auth.users</code>) makes the failure mode explicit.
+  </div>
 
   <h3>CI</h3>
   <p>GitHub Actions runner already has Docker available; testcontainers-go uses the host daemon. No service-container declaration needed — the test process boots its own Postgres. First-run pulls the image (~400MB); subsequent runs hit the layer cache.</p>
@@ -673,7 +845,7 @@ $$ <span class="kw">LANGUAGE SQL STABLE</span>;</pre>
 
 <!-- ===================================================== -->
 <section class="block" id="steps">
-  <div class="section-label">§9</div>
+  <div class="section-label">§10</div>
   <h2>Implementation steps</h2>
 
   <ol class="steps">
@@ -687,19 +859,23 @@ $$ <span class="kw">LANGUAGE SQL STABLE</span>;</pre>
     </li>
     <li>
       <span class="step-title">Author the Postgres baseline</span>
-      <span class="step-body">Single goose migration <code>internal/db/migrations-postgres/202605100001_pg_baseline.sql</code>. The image hands us extensions + auth/vault schemas pre-created, so the file's responsibilities narrow to: <code>CREATE SCHEMA IF NOT EXISTS tf</code>, <code>CREATE ROLE tf_app</code> (idempotent via <code>DO $$ ... $$</code>), tenancy tables, Vault wrapper functions over <code>vault.create_secret</code> with org-prefixed naming, RLS helpers in the <code>tf</code> schema, all TF tables in multi shape, RLS policies on every org-scoped table. Use <code>-- +goose Up</code> / <code>-- +goose Down</code> markers; Down is <code>SELECT 'down not supported';</code>. Use <code>-- +goose StatementBegin/End</code> blocks for the plpgsql function bodies (they contain semicolons goose's parser would otherwise split on).</span>
+      <span class="step-body">Single goose migration <code>internal/db/migrations-postgres/202605100001_pg_baseline.sql</code>. Sections, in order: (a) <code>CREATE SCHEMA IF NOT EXISTS tf</code>; (b) idempotent <code>CREATE ROLE tf_app</code> via <code>DO $$ ... $$</code> + <code>GRANT tf_app TO authenticator</code> + schema/default-privilege grants per §4; (c) Vault wrappers + REVOKE/GRANT EXECUTE on tf_app per §6; (d) RLS helpers in <code>tf</code> schema per §7; (e) tenancy tables (orgs/teams/users/memberships/sessions/integrations/org_limits/project_knowledge); (f) settings tables (org/team/user) + jira_project_status_rules per §8; (g) all TF tables in multi shape with org_id/creator_user_id/visibility/team_id where applicable; (h) all indexes (org_id leading on org-scoped tables); (i) <code>ALTER TABLE … ENABLE ROW LEVEL SECURITY</code> + per-table RLS policies; (j) <code>INSERT</code> seed data into <code>events_catalog</code> and <code>system_prompt_versions</code>. Use <code>-- +goose Up</code> / <code>-- +goose Down</code> markers; Down is <code>SELECT 'down not supported';</code>. Use <code>-- +goose StatementBegin/End</code> blocks for the plpgsql function bodies.</span>
     </li>
     <li>
       <span class="step-title">Build the Postgres test harness</span>
-      <span class="step-body">New package <code>internal/db/pgtest/</code>: <code>NewPostgres(t)</code> spins a testcontainer + runs the goose baseline + returns a <code>*sql.DB</code>. <code>Reset(db)</code> truncates all org-scoped tables for inter-test cleanup. Skip flag for environments where Docker isn't available — degrade to "test was skipped, not failed."</span>
+      <span class="step-body">New package <code>internal/db/pgtest/</code>: <code>New(t)</code> spins the testcontainer with the two-stage wait strategy from §9, runs the goose baseline as <code>postgres</code>, and exposes BOTH a superuser <code>AdminDB</code> and an authenticator <code>AppDB</code>. <code>Reset(t)</code> TRUNCATEs all org-scoped tables. Skip-with-reason if Docker isn't available so non-container CI degrades cleanly.</span>
     </li>
     <li>
       <span class="step-title">Migration parity tests</span>
-      <span class="step-body"><code>TestPostgresBaseline_AppliesCleanly</code> — fresh DB → goose.Up → assert all expected tables/extensions/roles/policies exist. <code>TestPostgresBaseline_Idempotent</code> — second goose.Up no-ops. <code>TestVault_PutGetDelete</code> — exercises the three wrapper functions end-to-end against a seeded org.</span>
+      <span class="step-body"><code>TestPostgresBaseline_AppliesCleanly</code> — fresh DB → goose.Up → assert all expected tables/extensions/roles/policies/seed-rows exist. <code>TestPostgresBaseline_Idempotent</code> — second goose.Up no-ops. <code>TestVault_PutGetDelete</code> — exercises the three wrapper functions end-to-end against a seeded org. Tests use <code>AdminDB</code> here (this is setup-shape verification, not RLS).</span>
     </li>
     <li>
       <span class="step-title">RLS policy tests</span>
-      <span class="step-body">Cross-org isolation: seed two orgs with one user each, set <code>request.jwt.claims</code> for user A, INSERT/SELECT against tasks, confirm user A cannot see user B's rows even when issuing raw queries with the wrong <code>org_id</code> hand-set. Same shape for projects, prompts, runs, memory.</span>
+      <span class="step-body">Use <code>AppDB</code>, not <code>AdminDB</code>. Per test: <code>BEGIN</code>, <code>SET LOCAL ROLE tf_app</code>, <code>set_config('request.jwt.claims', $1, true)</code> with user A's claims, INSERT/SELECT, <code>COMMIT</code>. Seed two orgs with one user each via <code>AdminDB</code> setup; assert user A's queries can't see org B's rows even when issuing raw queries with the wrong <code>org_id</code> hand-set. Same shape for projects, prompts, runs, memory, curator chat (verifying per-user-per-project isolation), settings tables (verifying per-scope visibility).</span>
+    </li>
+    <li>
+      <span class="step-title">Vault grants test</span>
+      <span class="step-body">Open a fresh connection, <code>SET ROLE authenticated</code> (a role <code>tf_app</code> wasn't granted to), attempt to call <code>vault_get_org_secret(...)</code>, assert permission denied. Pins the REVOKE-from-PUBLIC + GRANT-to-tf_app contract.</span>
     </li>
     <li>
       <span class="step-title">Update <code>migrations-postgres/README.md</code></span>
@@ -718,39 +894,56 @@ $$ <span class="kw">LANGUAGE SQL STABLE</span>;</pre>
 
 <!-- ===================================================== -->
 <section class="block" id="risks">
-  <div class="section-label">§10</div>
+  <div class="section-label">§11</div>
   <h2>Risks &amp; open questions</h2>
 
-  <h3>Open questions for the owner</h3>
+  <h3>Resolved decisions</h3>
+  <p>All open questions answered before implementation. Recording the resolutions here so the rationale survives in the spec rather than being buried in chat history.</p>
   <table class="matrix">
-    <thead><tr><th style="width: 28%;">Question</th><th style="width: 36%;">Default if no answer</th><th>Why it matters</th></tr></thead>
+    <thead><tr><th style="width: 30%;">Question</th><th>Resolution</th></tr></thead>
     <tbody>
       <tr>
-        <td>Use the image-shipped <code>service_role</code> as our app role, or create our own <code>tf_app</code>?</td>
-        <td>Create <code>tf_app NOLOGIN BYPASSRLS=false</code> in the migration. Image's <code>service_role</code> defaults to <code>BYPASSRLS=true</code> — defeats the whole RLS posture. Keeping our own role means other supabase services in the stack (PostgREST, Realtime) don't accidentally inherit our enforcement boundary, and we don't have to flip a default supabase role to a non-default setting.</td>
-        <td>Postgres roles are cluster-global, not per-DB. Migration role creation uses <code>DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'tf_app') THEN CREATE ROLE tf_app NOLOGIN; END IF; END $$;</code> for idempotency.</td>
+        <td>What's the role + connection pattern?</td>
+        <td>Supabase-idiomatic <code>authenticator</code> (LOGIN, NOINHERIT) + <code>tf_app</code> (NOLOGIN, NOINHERIT, BYPASSRLS=false). App connects as authenticator, <code>WithTx</code> does <code>SET LOCAL ROLE tf_app</code> + <code>set_config('request.jwt.claims', …)</code>. Migrations + test setup run as <code>postgres</code> superuser. See §4.</td>
       </tr>
       <tr>
-        <td>Migration as one big file, or split (tenancy / vault / RLS-helpers / RLS-policies / TF-tables)?</td>
-        <td>One big file. Mirrors D1's single-baseline approach, easier to review as a unit, no inter-file ordering concerns.</td>
-        <td>Splitting buys reviewability per concern but introduces ordering fragility (Vault wrappers reference orgs(id), so they can't run before tenancy).</td>
+        <td>Auth schema dependency on GoTrue?</td>
+        <td>None. Image probe (<code>docker run supabase/postgres:15.1.0.147</code>) confirmed the image pre-creates the full GoTrue <code>auth</code> schema (with <code>auth.users</code> already shaped to GoTrue's expectations) and pre-loads <code>supabase_vault</code> + <code>pgsodium</code>. Our migration depends on neither.</td>
       </tr>
       <tr>
-        <td>First-org bootstrap mechanism</td>
-        <td>Out of scope for D3. D7 (auth middleware) detects empty <code>orgs</code> on first user signup and creates one. D3 just guarantees the schema supports it.</td>
-        <td>Could land here as a Postgres trigger — but triggers running app logic are a smell, and D7's middleware already touches the signup path.</td>
+        <td>Migration file layout — one or split?</td>
+        <td>One big file (<code>202605100001_pg_baseline.sql</code>) mirroring D1's single-baseline approach. Inter-section ordering (roles before grants before policies) makes split files fragile.</td>
       </tr>
       <tr>
-        <td>Test rig: testcontainers-go vs GHA service container with the supabase image</td>
-        <td>testcontainers-go (lets local dev run the same path; better per-test isolation; verified the supabase image works end-to-end out of the box).</td>
-        <td>GHA service container is simpler in CI but doesn't help local dev. The supabase image's image-init pre-creates the auth + vault tables (verified) so either path works — testcontainers wins on dev parity.</td>
+        <td>How is <code>events_catalog</code> seeded?</td>
+        <td>Seed <code>INSERT</code>s baked into the migration itself. Avoids requiring app-layer write privileges on a global reference table that <code>tf_app</code> only needs to read. Same treatment for <code>system_prompt_versions</code>.</td>
+      </tr>
+      <tr>
+        <td>Settings shape — JSONB blob or columnar?</td>
+        <td>Columnar. Three tables per scope (<code>org_settings</code>, <code>team_settings</code>, <code>user_settings</code>) plus <code>jira_project_status_rules</code> for per-project Jira workflow. Settings keys are a fixed set, so columnar wins on type safety, discoverability, and future-reorg ergonomics. See §8.</td>
+      </tr>
+      <tr>
+        <td>Curator scope?</td>
+        <td>Per-user-per-project chat (creator-scoped). Project knowledge writes hit the org-shared <code>project_knowledge</code> table with last-write-wins on conflicts. v2 can elevate to shared chat sessions if usage shows it's wanted. Matches arch doc §10's default-private stance.</td>
+      </tr>
+      <tr>
+        <td>Jira status rules — org or per-project?</td>
+        <td>Per-project. Jira workflows are project-keyed in reality (different projects can use different workflow schemes), so storing rules at org level is wrong for any org with mixed project workflows. New table <code>jira_project_status_rules</code>; UI rework for setting per-project rules lands with D9 / settings UI overhaul.</td>
+      </tr>
+      <tr>
+        <td>First-org bootstrap?</td>
+        <td>Out of scope for D3. D7 (auth middleware) detects empty <code>orgs</code> on first user signup and creates one. Schema only needs to support it.</td>
+      </tr>
+      <tr>
+        <td>Test rig — testcontainers-go vs GHA service container?</td>
+        <td>testcontainers-go. Local dev parity, per-test isolation, image-init compatibility (verified by probe).</td>
+      </tr>
+      <tr>
+        <td>Wait strategy?</td>
+        <td>Two-stage: <code>wait.ForLog("PostgreSQL init process complete")</code> + SQL probe for <code>auth.users</code> existence. The default <code>"database system is ready"</code> log fires before image-init (auth schema setup, role bootstrap) is done, so a naive wait races and produces flaky tests.</td>
       </tr>
     </tbody>
   </table>
-
-  <div class="callout callout--good">
-    <strong>Resolved (was an open question, image probe answered it):</strong> the <code>supabase/postgres:15.1.0.147</code> image pre-creates the full GoTrue <code>auth</code> schema and pre-loads <code>supabase_vault</code> + <code>pgsodium</code> at first boot. Our migration depends on neither GoTrue nor a stub — both <code>REFERENCES auth.users(id)</code> and <code>vault.create_secret(...)</code> work out of the box.
-  </div>
 
   <h3>Risks &amp; rollback</h3>
   <table class="matrix">
@@ -787,28 +980,34 @@ $$ <span class="kw">LANGUAGE SQL STABLE</span>;</pre>
 
 <!-- ===================================================== -->
 <section class="block" id="acceptance">
-  <div class="section-label">§11</div>
+  <div class="section-label">§12</div>
   <h2>Acceptance</h2>
 
   <ul class="tight">
-    <li><span class="tag tag--green">PASS</span> Fresh Postgres (testcontainer) + <code>goose.Up</code> against <code>migrations-postgres/</code> → all tenancy tables, Vault wrappers, RLS helpers, TF tables, and policies present.</li>
+    <li><span class="tag tag--green">PASS</span> Fresh Postgres (testcontainer) + <code>goose.Up</code> against <code>migrations-postgres/</code> → all tenancy tables, settings tables, Vault wrappers, RLS helpers, TF tables, indexes, RLS policies, and seed data present.</li>
     <li><span class="tag tag--green">PASS</span> <code>TestPostgresBaseline_Idempotent</code> — second <code>goose.Up</code> is a no-op.</li>
-    <li><span class="tag tag--green">PASS</span> <code>TestRLS_CrossOrgIsolation</code> — User A authenticated against org A cannot SELECT or INSERT rows for org B, even with the wrong <code>org_id</code> hand-set in the query.</li>
+    <li><span class="tag tag--green">PASS</span> <code>TestRoles_TfAppShape</code> — <code>tf_app</code> exists with <code>NOLOGIN, NOINHERIT, BYPASSRLS=false</code>; <code>authenticator</code> has been granted <code>tf_app</code>.</li>
+    <li><span class="tag tag--green">PASS</span> <code>TestRLS_CrossOrgIsolation</code> — using the harness's <code>AppDB</code> (authenticator + <code>SET LOCAL ROLE tf_app</code>), User A in org A cannot SELECT or INSERT rows for org B, even with the wrong <code>org_id</code> hand-set in the query. Cover tasks, projects, prompts, runs, run_memory.</li>
+    <li><span class="tag tag--green">PASS</span> <code>TestRLS_AdminConnectionBypassesRLS</code> — explicit assertion that <code>AdminDB</code> (postgres superuser) sees both orgs. Pins the harness contract that test authors using AdminDB are bypassing RLS by design.</li>
+    <li><span class="tag tag--green">PASS</span> <code>TestRLS_CuratorChatPerUserIsolation</code> — User A and User B in the same org, same project, can each only see their own <code>curator_requests</code>/<code>curator_messages</code>; both can read the shared <code>project_knowledge</code>.</li>
+    <li><span class="tag tag--green">PASS</span> <code>TestRLS_SettingsScoping</code> — user_settings readable only by owner; team_settings readable by team members; org_settings readable by org members.</li>
     <li><span class="tag tag--green">PASS</span> <code>TestVault_CrossOrgIsolation</code> — <code>vault_get_org_secret(orgA, 'github_pat')</code> from a session whose claims have <code>org_id = orgB</code> returns nothing.</li>
-    <li><span class="tag tag--green">PASS</span> <code>tf_app</code> role exists, has no <code>BYPASSRLS</code>, has no superuser flag.</li>
+    <li><span class="tag tag--green">PASS</span> <code>TestVault_GrantsLockdown</code> — calling <code>vault_get_org_secret</code> as <code>authenticated</code> (a role <code>tf_app</code> wasn't granted to) errors with permission denial.</li>
+    <li><span class="tag tag--green">PASS</span> <code>TestSeedData</code> — <code>events_catalog</code> has the expected 31 event types from <code>domain.AllEventTypes()</code>; <code>system_prompt_versions</code> matches shipped prompts.</li>
     <li><span class="tag tag--green">PASS</span> SQLite tests (entire existing suite) still green — D3 didn't touch the SQLite path.</li>
-    <li><span class="tag">CODE</span> <code>internal/db/migrations-postgres/202605100001_pg_baseline.sql</code> contains the consolidated schema. <code>internal/db/pgtest/</code> harness is the only test-facing entrypoint for Postgres.</li>
-    <li><span class="tag">DOC</span> <code>CLAUDE.md</code> schema bullet extended; Postgres tree's README updated; spec html attached to SKY-247.</li>
+    <li><span class="tag">CODE</span> <code>internal/db/migrations-postgres/202605100001_pg_baseline.sql</code> contains the consolidated schema. <code>internal/db/pgtest/</code> harness exposes <code>AdminDB</code> + <code>AppDB</code> as separate fields.</li>
+    <li><span class="tag">DOC</span> <code>CLAUDE.md</code> schema bullet extended; <code>migrations-postgres/README.md</code> updated; spec html attached to SKY-247.</li>
   </ul>
 
   <h3>Out of scope (do NOT do here)</h3>
   <ul class="tight">
     <li>Go store implementations (<code>internal/store/postgres/*</code>) — that's D2 (SKY-246)</li>
-    <li>Mode flag / TF_MODE plumbing — that's D4 (SKY-248)</li>
+    <li>Path resolvers + caller sweep — that's D4b under <code>internal/paths</code> (D4a / runmode is already merged but doesn't enter D3's loop)</li>
     <li>GoTrue deployment, JWKS verification — that's D6 (SKY-250)</li>
     <li>Auth middleware, session creation, first-org bootstrap — that's D7 (SKY-251)</li>
     <li>Docker / docker-compose / GHCR — that's D13 (SKY-256)</li>
-    <li>Per-org settings table — separate ticket; v1 ships without it</li>
+    <li>Settings UI rework + per-project Jira rules UI — D9 / settings UI overhaul. D3 ships the schema; the UI rebuilt in a follow-up.</li>
+    <li>SettingsResolver application layer (precedence + merge logic across user/team/org settings) — design exercise punted to a follow-up app-layer ticket once D2 stores land.</li>
   </ul>
 </section>
 
