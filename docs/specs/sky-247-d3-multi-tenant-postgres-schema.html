@@ -1,0 +1,827 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SKY-247 — D3: Multi-tenant Postgres schema</title>
+<style>
+:root {
+  --bg: #030712;
+  --fg: #f8fafc;
+  --surface: rgba(17, 24, 39, 0.30);
+  --surface-2: rgba(31, 41, 55, 0.50);
+  --surface-floating: rgba(3, 7, 18, 0.80);
+  --border: #1f2937;
+  --border-2: #1e293b;
+  --border-3: #374151;
+  --muted: #94a3b8;
+  --muted-2: #6b7280;
+  --muted-3: #4b5563;
+  --accent: #22d3ee;
+  --accent-2: #06b6d4;
+  --accent-3: #0e7490;
+  --violet: #a78bfa;
+  --violet-2: #8b5cf6;
+  --purple: #a855f7;
+  --pink: #f472b6;
+  --green: #22c55e;
+  --green-2: #4ade80;
+  --amber: #fbbf24;
+  --red: #ef4444;
+  --red-2: #f87171;
+  --radius: 8px;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, "Cascadia Mono", monospace;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+.mono, code, pre { font-family: var(--mono); }
+code { background: rgba(31, 41, 55, 0.5); padding: 1px 5px; border-radius: 3px; font-size: 0.92em; }
+a { color: var(--accent); text-underline-offset: 4px; }
+a:hover { text-decoration: underline; }
+
+.topbar {
+  position: sticky; top: 0; z-index: 40;
+  width: 100%;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-floating);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+.topbar__inner {
+  margin: 0 auto; max-width: 1100px;
+  padding: 0 24px;
+  height: 56px;
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 12px;
+  color: var(--muted);
+}
+.topbar__brand { display: flex; align-items: center; gap: 12px; }
+.topbar__brand .dot {
+  width: 8px; height: 8px; border-radius: 9999px;
+  background: linear-gradient(to bottom right, var(--accent-2), var(--purple));
+  box-shadow: 0 0 12px rgba(6, 182, 212, 0.6);
+}
+.topbar__brand strong { color: var(--fg); font-weight: 600; font-size: 13px; }
+.topbar__crumb { color: var(--muted-2); }
+.topbar__meta { display: flex; gap: 8px; align-items: center; }
+.pill {
+  font-size: 11px;
+  padding: 2px 10px;
+  border-radius: 9999px;
+  font-family: var(--mono);
+}
+.pill--draft { background: rgba(251, 191, 36, 0.20); color: var(--amber); border: 1px solid rgba(251, 191, 36, 0.30); }
+.pill--size  { background: rgba(167, 139, 250, 0.20); color: var(--violet); border: 1px solid rgba(167, 139, 250, 0.30); }
+
+.hero {
+  margin: 0 auto; max-width: 1100px;
+  padding: 56px 24px 24px;
+}
+.hero h1 {
+  font-size: 30px; font-weight: 200; letter-spacing: -0.02em;
+  margin: 0 0 12px;
+  background: linear-gradient(to right, var(--accent), var(--violet), var(--pink));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.hero .sub { color: var(--muted-2); font-family: var(--mono); font-size: 12px; margin-bottom: 16px; }
+.hero p.lede { color: var(--muted); font-size: 15px; margin: 0; max-width: 760px; }
+.hero__meta {
+  display: flex; gap: 10px; margin-top: 18px; flex-wrap: wrap;
+  font-family: var(--mono); font-size: 12px;
+}
+.hero__meta .meta-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 11px; border-radius: 9999px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+.hero__meta .meta-pill strong { color: var(--fg); font-weight: 500; }
+
+main {
+  margin: 0 auto; max-width: 1100px;
+  padding: 0 24px 96px;
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  gap: 32px;
+}
+nav.toc {
+  position: sticky; top: 80px;
+  height: fit-content;
+  padding: 16px 0;
+}
+.toc ol { list-style: none; padding: 0; margin: 0; counter-reset: item; }
+.toc li {
+  font-size: 12px;
+  margin-bottom: 4px;
+  counter-increment: item;
+}
+.toc a {
+  display: block;
+  padding: 6px 12px;
+  border-radius: 6px;
+  color: var(--muted);
+  text-decoration: none;
+  border-left: 2px solid transparent;
+  transition: all 150ms;
+}
+.toc a:hover { color: var(--fg); background: var(--surface); border-left-color: var(--accent); text-decoration: none; }
+.toc a::before { content: counter(item, decimal-leading-zero) "  "; color: var(--muted-3); font-family: var(--mono); }
+.toc-group {
+  font-size: 10px;
+  color: var(--muted-3);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  padding: 12px 12px 6px;
+  margin-top: 8px;
+}
+
+article { min-width: 0; }
+section.block {
+  margin-bottom: 48px;
+  scroll-margin-top: 80px;
+}
+section.block > h2 {
+  font-size: 22px;
+  font-weight: 300;
+  margin: 0 0 4px;
+  letter-spacing: -0.01em;
+}
+section.block > .lede {
+  color: var(--muted);
+  font-size: 14px;
+  margin: 0 0 24px;
+  max-width: 760px;
+}
+section.block h3 {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 28px 0 10px;
+  color: var(--fg);
+}
+section.block h4 {
+  font-size: 12px;
+  font-weight: 600;
+  margin: 20px 0 6px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.section-label {
+  font-size: 10px;
+  color: var(--muted-3);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  margin-bottom: 8px;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  margin-bottom: 16px;
+}
+.callout {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 14px 18px;
+  margin: 14px 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+.callout strong { color: var(--fg); }
+.callout--warn { border-left-color: var(--amber); }
+.callout--bad  { border-left-color: var(--red); }
+.callout--good { border-left-color: var(--green-2); }
+
+pre.code {
+  background: rgba(3, 7, 18, 0.60);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 14px 16px;
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-x: auto;
+  color: #cbd5e1;
+  margin: 0 0 12px;
+}
+pre.code .kw  { color: var(--violet); }
+pre.code .str { color: var(--green-2); }
+pre.code .num { color: var(--amber); }
+pre.code .com { color: var(--muted-3); }
+pre.code .fn  { color: var(--accent); }
+
+.steps { counter-reset: step; padding-left: 0; list-style: none; }
+.steps > li {
+  counter-increment: step;
+  position: relative;
+  padding: 10px 0 14px 40px;
+  border-bottom: 1px dashed var(--border);
+}
+.steps > li:last-child { border-bottom: none; }
+.steps > li::before {
+  content: counter(step, decimal-leading-zero);
+  position: absolute; left: 0; top: 10px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--accent);
+  background: rgba(6, 182, 212, 0.08);
+  border: 1px solid rgba(6, 182, 212, 0.30);
+  padding: 2px 7px;
+  border-radius: 4px;
+}
+.steps > li > .step-title { font-weight: 500; color: var(--fg); display: block; margin-bottom: 2px; }
+.steps > li > .step-body  { color: var(--muted); font-size: 13px; }
+
+table.matrix {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+table.matrix thead th {
+  text-align: left;
+  padding: 8px 12px;
+  font-weight: 500;
+  font-size: 11px;
+  color: var(--muted-2);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-bottom: 1px solid var(--border);
+}
+table.matrix tbody td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+table.matrix tbody tr:hover { background: var(--surface-2); }
+table.matrix .col-key { color: var(--muted); white-space: nowrap; font-family: var(--mono); }
+
+ul.tight { padding-left: 20px; margin: 6px 0; }
+ul.tight li { margin-bottom: 4px; }
+
+.tag {
+  display: inline-block; font-family: var(--mono); font-size: 11px;
+  padding: 1px 7px; border-radius: 4px;
+  background: rgba(139, 92, 246, 0.15);
+  color: var(--violet);
+  border: 1px solid rgba(139, 92, 246, 0.25);
+}
+.tag--cyan  { background: rgba(6, 182, 212, 0.15); color: var(--accent); border-color: rgba(6, 182, 212, 0.30); }
+.tag--green { background: rgba(34, 197, 94, 0.15); color: var(--green-2); border-color: rgba(34, 197, 94, 0.30); }
+.tag--red   { background: rgba(239, 68, 68, 0.15); color: var(--red-2); border-color: rgba(239, 68, 68, 0.30); }
+
+footer {
+  margin: 0 auto; max-width: 1100px;
+  padding: 24px 24px 64px;
+  font-size: 11px; color: var(--muted-3);
+  font-family: var(--mono);
+  border-top: 1px solid var(--border);
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar__inner">
+    <div class="topbar__brand">
+      <span class="dot"></span>
+      <strong>Triage Factory</strong>
+      <span class="topbar__crumb">/ specs / SKY-247 D3</span>
+    </div>
+    <div class="topbar__meta">
+      <span class="pill pill--size">SIZE · L</span>
+      <span class="pill pill--draft">DRAFT v0.1</span>
+    </div>
+  </div>
+</div>
+
+<header class="hero">
+  <div class="sub">SKY-247 · child of SKY-242 · v1 critical-path enabler</div>
+  <h1>D3 — Multi-tenant Postgres schema</h1>
+  <p class="lede">Stand up the full multi-mode Postgres schema — tenancy tables, sessions, integrations, Vault wrappers, RLS helpers + policies, and every existing TF table recreated with <code>org_id NOT NULL</code> baked in. Ships as a single goose baseline against <code>internal/db/migrations-postgres/</code> (the empty tree D1 scaffolded). Local SQLite is untouched.</p>
+  <div class="hero__meta">
+    <span class="meta-pill"><strong>SCOPE</strong> · Postgres schema only — no Go callsite changes</span>
+    <span class="meta-pill"><strong>DEPENDS ON</strong> · SKY-245 (D1)</span>
+    <span class="meta-pill"><strong>BLOCKS</strong> · SKY-246 (D2 Postgres impls), SKY-250 (D6 GoTrue), SKY-251 (D7)</span>
+    <span class="meta-pill"><strong>EFFORT</strong> · 3–5 days</span>
+  </div>
+</header>
+
+<main>
+
+<nav class="toc">
+  <div class="toc-group">Spec</div>
+  <ol>
+    <li><a href="#why">Why now</a></li>
+    <li><a href="#current">Current state</a></li>
+    <li><a href="#target">Target state</a></li>
+    <li><a href="#tenancy">Tenancy schema</a></li>
+    <li><a href="#vault">Vault wrappers</a></li>
+    <li><a href="#rls">RLS pattern</a></li>
+    <li><a href="#tftables">TF tables in multi shape</a></li>
+    <li><a href="#testing">Test rig</a></li>
+  </ol>
+  <div class="toc-group">Plan</div>
+  <ol start="9">
+    <li><a href="#steps">Implementation steps</a></li>
+    <li><a href="#risks">Risks & open questions</a></li>
+    <li><a href="#acceptance">Acceptance</a></li>
+  </ol>
+</nav>
+
+<article>
+
+<!-- ===================================================== -->
+<section class="block" id="why">
+  <div class="section-label">§1</div>
+  <h2>Why now</h2>
+  <p class="lede">D1 (goose) and D2 (per-resource store interfaces) need a real Postgres schema to work against — D2's whole acceptance is "tests pass against both SQLite and Postgres impls." Without D3, the Postgres side of D2 has nothing to compile against and the `internal/store/postgres/*` files are pure speculation.</p>
+
+  <p>D3 is also the first ticket where multi-tenant isolation becomes a thing the code can express. The architecture stance — service-role connection + <code>SET LOCAL request.jwt.claims</code> + RLS on every org-scoped table — only exists if the schema has the policies attached. D3 lays the floor: every downstream multi-mode ticket (D6 GoTrue, D7 auth middleware, D9 org-scoping pass) reads from this schema.</p>
+
+  <div class="callout">
+    <strong>Carved out:</strong> nothing here touches Go callsites. D3 is purely Postgres DDL + roles + policies. D2's Postgres implementations land in their own PR; D4 (mode flag) decides when to <em>open</em> the Postgres connection; D6 (GoTrue) deploys auth on top of this schema.
+  </div>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="current">
+  <div class="section-label">§2</div>
+  <h2>Current state</h2>
+  <ul class="tight">
+    <li><code>internal/db/migrations-sqlite/202605090001_baseline.sql</code> — the consolidated SQLite baseline that D1 landed.</li>
+    <li><code>internal/db/migrations-postgres/</code> — empty tree with a placeholder README, scaffolded by D1 so the dialect router has a destination.</li>
+    <li><code>internal/db/migrations.go</code>'s <code>detectDialect</code> hardcodes <code>"sqlite3"</code>; <code>migrationsFor("postgres")</code> resolves to the empty tree without erroring.</li>
+    <li>No Postgres driver in <code>go.mod</code>. No connection-string handling for non-SQLite. No code path that opens a Postgres DB.</li>
+  </ul>
+  <p>So the runner, dialect routing, and embed plumbing are all in place. D3 fills the tree; D6 (GoTrue) and D4 (mode flag) decide when to point a real connection at it.</p>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="target">
+  <div class="section-label">§3</div>
+  <h2>Target state</h2>
+  <p>One goose baseline migration in <code>internal/db/migrations-postgres/</code> brings a fresh Postgres up to a multi-tenant-ready schema. <code>goose.Up</code> against an empty Postgres DB produces:</p>
+  <ul class="tight">
+    <li><strong>Roles:</strong> <code>tf_app</code> (the role the application will connect as — no superuser, no <code>BYPASSRLS</code>).</li>
+    <li><strong>Extensions:</strong> <code>pgcrypto</code> (for <code>gen_random_uuid()</code>), <code>supabase_vault</code> (for Vault wrappers).</li>
+    <li><strong>Schemas:</strong> <code>tf</code> (RLS helper functions live here), <code>auth</code> stub (a minimal <code>auth.users</code> placeholder so our FKs resolve when GoTrue isn't running yet — see §4 callout).</li>
+    <li><strong>Tenancy tables:</strong> <code>orgs</code>, <code>teams</code>, <code>memberships</code>, <code>org_invites</code>, <code>users</code> (mirror of <code>auth.users</code>), <code>sessions</code>, <code>integrations</code>, <code>org_limits</code>, <code>project_knowledge</code>.</li>
+    <li><strong>Vault wrappers:</strong> three SECURITY INVOKER functions (<code>vault_put_org_secret</code>, <code>vault_get_org_secret</code>, <code>vault_delete_org_secret</code>) + revoked-from-PUBLIC + granted to <code>tf_app</code>.</li>
+    <li><strong>RLS helpers:</strong> <code>tf.current_user_id()</code>, <code>tf.current_org_id()</code>, <code>tf.user_has_org_access(target_org)</code>.</li>
+    <li><strong>TF tables (multi shape):</strong> every table from the SQLite baseline recreated with <code>org_id NOT NULL REFERENCES orgs(id) ON DELETE CASCADE</code> + (where applicable) <code>creator_user_id</code>, <code>visibility</code>, <code>team_id</code> baked in. SQLite-isms translated: <code>TEXT PRIMARY KEY</code> → <code>UUID PRIMARY KEY DEFAULT gen_random_uuid()</code>, <code>TEXT</code> JSON columns → <code>JSONB</code>, <code>BOOLEAN</code> stays, <code>DATETIME</code> → <code>TIMESTAMPTZ</code>, autoincrement → <code>BIGSERIAL</code>.</li>
+    <li><strong>RLS policies</strong> on every org-scoped table: <code>FOR SELECT USING (org_id = tf.current_org_id() AND ...)</code>, <code>FOR INSERT WITH CHECK (...)</code>, etc.</li>
+  </ul>
+
+  <p>Local SQLite migrations are untouched. The two trees never interact at runtime — <code>migrationsFor</code> picks one based on dialect.</p>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="tenancy">
+  <div class="section-label">§4</div>
+  <h2>Tenancy schema</h2>
+  <p class="lede">Identity, orgs, teams, memberships, sessions, integrations. Verbatim translation of the architecture doc §5 schema with light commentary on why each choice.</p>
+
+  <h3>Auth schema dependency</h3>
+  <div class="callout callout--warn">
+    <strong>The GoTrue split.</strong> Our <code>users</code> table FKs <code>id → auth.users(id) ON DELETE CASCADE</code>. GoTrue (D6) creates the <code>auth</code> schema on first boot; in production deployments GoTrue starts before the TF web tier so <code>auth.users</code> exists. For tests and standalone Postgres bootstrap, the migration creates a minimal <code>auth.users</code> stub (<code>CREATE SCHEMA IF NOT EXISTS auth; CREATE TABLE IF NOT EXISTS auth.users (id UUID PRIMARY KEY, email TEXT)</code>) so the FK resolves. When GoTrue layers in, its full schema is a superset — the stub columns are forward-compatible.
+  </div>
+
+  <h3>Schema sketch</h3>
+<pre class="code"><span class="com">-- tf-namespaced helpers + a minimal auth stub for standalone bootstrap</span>
+<span class="kw">CREATE SCHEMA IF NOT EXISTS</span> tf;
+<span class="kw">CREATE SCHEMA IF NOT EXISTS</span> auth;
+<span class="kw">CREATE TABLE IF NOT EXISTS</span> auth.users (
+  id    <span class="kw">UUID PRIMARY KEY</span>,
+  email <span class="kw">TEXT</span>
+);
+
+<span class="com">-- our user mirror — FK to auth.users for cascade-on-delete</span>
+<span class="kw">CREATE TABLE</span> users (
+  id            <span class="kw">UUID PRIMARY KEY REFERENCES</span> auth.users(id) <span class="kw">ON DELETE CASCADE</span>,
+  display_name  <span class="kw">TEXT</span>,
+  avatar_url    <span class="kw">TEXT</span>,
+  created_at    <span class="kw">TIMESTAMPTZ NOT NULL DEFAULT</span> now()
+);
+
+<span class="kw">CREATE TABLE</span> orgs (
+  id           <span class="kw">UUID PRIMARY KEY DEFAULT</span> gen_random_uuid(),
+  slug         <span class="kw">TEXT NOT NULL UNIQUE</span>,
+  name         <span class="kw">TEXT NOT NULL</span>,
+  created_at   <span class="kw">TIMESTAMPTZ NOT NULL DEFAULT</span> now(),
+  deleted_at   <span class="kw">TIMESTAMPTZ</span>
+);
+
+<span class="kw">CREATE TABLE</span> teams (
+  id      <span class="kw">UUID PRIMARY KEY DEFAULT</span> gen_random_uuid(),
+  org_id  <span class="kw">UUID NOT NULL REFERENCES</span> orgs(id) <span class="kw">ON DELETE CASCADE</span>,
+  slug    <span class="kw">TEXT NOT NULL</span>,
+  name    <span class="kw">TEXT NOT NULL</span>,
+  <span class="kw">UNIQUE</span> (org_id, slug)
+);
+
+<span class="kw">CREATE TYPE</span> membership_role <span class="kw">AS ENUM</span> (<span class="str">'owner'</span>, <span class="str">'admin'</span>, <span class="str">'member'</span>, <span class="str">'viewer'</span>);
+
+<span class="kw">CREATE TABLE</span> memberships (
+  user_id    <span class="kw">UUID NOT NULL REFERENCES</span> users(id) <span class="kw">ON DELETE CASCADE</span>,
+  team_id    <span class="kw">UUID NOT NULL REFERENCES</span> teams(id) <span class="kw">ON DELETE CASCADE</span>,
+  role       membership_role <span class="kw">NOT NULL DEFAULT</span> <span class="str">'member'</span>,
+  created_at <span class="kw">TIMESTAMPTZ NOT NULL DEFAULT</span> now(),
+  <span class="kw">PRIMARY KEY</span> (user_id, team_id)
+);
+
+<span class="com">-- sessions: opaque ID, AES-GCM-encrypted JWT/refresh (key = TF_SESSION_KEY)</span>
+<span class="kw">CREATE TABLE</span> sessions (
+  id                <span class="kw">UUID PRIMARY KEY DEFAULT</span> gen_random_uuid(),
+  user_id           <span class="kw">UUID NOT NULL REFERENCES</span> users(id) <span class="kw">ON DELETE CASCADE</span>,
+  jwt_enc           <span class="kw">BYTEA NOT NULL</span>,
+  jwt_nonce         <span class="kw">BYTEA NOT NULL</span>,
+  refresh_token_enc <span class="kw">BYTEA NOT NULL</span>,
+  refresh_nonce     <span class="kw">BYTEA NOT NULL</span>,
+  jwt_expires_at    <span class="kw">TIMESTAMPTZ NOT NULL</span>,
+  expires_at        <span class="kw">TIMESTAMPTZ NOT NULL</span>,
+  created_at        <span class="kw">TIMESTAMPTZ NOT NULL DEFAULT</span> now(),
+  last_seen_at      <span class="kw">TIMESTAMPTZ NOT NULL DEFAULT</span> now(),
+  revoked_at        <span class="kw">TIMESTAMPTZ</span>,
+  user_agent        <span class="kw">TEXT</span>,
+  ip_addr           <span class="kw">INET</span>,
+  <span class="kw">CHECK</span> (expires_at &gt; created_at),
+  <span class="kw">CHECK</span> (jwt_expires_at &lt;= expires_at)
+);
+<span class="kw">CREATE INDEX</span> sessions_user_idx    <span class="kw">ON</span> sessions(user_id)    <span class="kw">WHERE</span> revoked_at <span class="kw">IS NULL</span>;
+<span class="kw">CREATE INDEX</span> sessions_expires_idx <span class="kw">ON</span> sessions(expires_at) <span class="kw">WHERE</span> revoked_at <span class="kw">IS NULL</span>;
+
+<span class="com">-- integrations + org_limits + project_knowledge — see arch doc §5 verbatim</span></pre>
+
+  <p><strong>Why <code>UUID</code> over <code>BIGSERIAL</code>:</strong> primary keys are emitted to Vault paths (<code>org/&lt;uuid&gt;/&lt;key&gt;</code>), JWT claims, and external integration metadata. UUIDs prevent ID-guessing attacks and make cross-system references unambiguous. Performance overhead vs sequential IDs is acceptable at the scale this targets.</p>
+
+  <p><strong>Why <code>JSONB</code> for <code>integrations.config</code>:</strong> shape varies per integration (<code>github_app</code>'s installation_id vs <code>jira_oauth</code>'s site URL); a JSONB column with key extraction at query time beats a sparse columnar layout, and pg's JSONB indexing handles selective lookups when needed.</p>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="vault">
+  <div class="section-label">§5</div>
+  <h2>Vault wrappers</h2>
+  <p class="lede">Three SECURITY INVOKER functions in <code>public</code> that the Go backend calls. Org-prefixed naming (<code>org/&lt;uuid&gt;/&lt;key&gt;</code>) makes leakage between orgs structurally impossible at the Vault layer.</p>
+
+<pre class="code"><span class="kw">CREATE EXTENSION IF NOT EXISTS</span> supabase_vault <span class="kw">WITH SCHEMA</span> vault;
+
+<span class="kw">CREATE OR REPLACE FUNCTION</span> public.vault_put_org_secret(
+  p_org_id     <span class="kw">UUID</span>,
+  p_key        <span class="kw">TEXT</span>,
+  p_secret     <span class="kw">TEXT</span>,
+  p_description <span class="kw">TEXT DEFAULT NULL</span>
+) <span class="kw">RETURNS UUID</span>
+<span class="kw">LANGUAGE</span> plpgsql <span class="kw">SECURITY INVOKER</span>
+<span class="kw">SET search_path TO</span> public, vault
+<span class="kw">AS</span> $$
+<span class="kw">DECLARE</span>
+  v_full_name <span class="kw">TEXT</span> := <span class="str">'org/'</span> || p_org_id::text || <span class="str">'/'</span> || p_key;
+  v_existing  <span class="kw">UUID</span>;
+<span class="kw">BEGIN</span>
+  <span class="kw">SELECT</span> id <span class="kw">INTO</span> v_existing <span class="kw">FROM</span> vault.decrypted_secrets <span class="kw">WHERE</span> name = v_full_name;
+  <span class="kw">IF</span> v_existing <span class="kw">IS NOT NULL THEN</span>
+    <span class="kw">PERFORM</span> vault.update_secret(v_existing, p_secret, v_full_name, p_description);
+    <span class="kw">RETURN</span> v_existing;
+  <span class="kw">END IF</span>;
+  <span class="kw">RETURN</span> vault.create_secret(p_secret, v_full_name, p_description);
+<span class="kw">END</span>;
+$$;
+
+<span class="com">-- vault_get_org_secret + vault_delete_org_secret — same shape, see arch doc §5</span>
+
+<span class="kw">REVOKE ALL ON FUNCTION</span> public.vault_put_org_secret    <span class="kw">FROM PUBLIC</span>;
+<span class="kw">REVOKE ALL ON FUNCTION</span> public.vault_get_org_secret    <span class="kw">FROM PUBLIC</span>;
+<span class="kw">REVOKE ALL ON FUNCTION</span> public.vault_delete_org_secret <span class="kw">FROM PUBLIC</span>;
+<span class="kw">GRANT EXECUTE ON FUNCTION</span> public.vault_put_org_secret    <span class="kw">TO</span> tf_app;
+<span class="kw">GRANT EXECUTE ON FUNCTION</span> public.vault_get_org_secret    <span class="kw">TO</span> tf_app;
+<span class="kw">GRANT EXECUTE ON FUNCTION</span> public.vault_delete_org_secret <span class="kw">TO</span> tf_app;</pre>
+
+  <div class="callout">
+    <strong>Why SECURITY INVOKER, not DEFINER:</strong> the function runs with the caller's privileges. <code>tf_app</code> can call it; nothing else can (because of the REVOKE/GRANT). DEFINER would let anyone with EXECUTE bypass the row-level Vault gates that pgsodium enforces. INVOKER keeps the security model uniform — whatever privileges we grant <code>tf_app</code> are exactly what it has.
+  </div>
+
+  <div class="callout callout--warn">
+    <strong>Sessions stay app-layer-encrypted, not Vault.</strong> The <code>sessions</code> table holds AES-GCM ciphertext (key = <code>TF_SESSION_KEY</code> env var) directly in BYTEA columns. Vault is too high-frequency for per-request RPC overhead. Org secrets (PATs, API tokens) go through Vault because they're written once per integration setup and read at most a few times per minute.
+  </div>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="rls">
+  <div class="section-label">§6</div>
+  <h2>RLS pattern</h2>
+  <p class="lede">Three helper functions live in <code>tf</code> schema; every org-scoped table gets <code>ENABLE ROW LEVEL SECURITY</code> + per-operation policies. The application sets <code>request.jwt.claims</code> per-transaction via <code>SET LOCAL</code>; helpers extract user_id and org_id from there.</p>
+
+  <h3>Helpers</h3>
+<pre class="code"><span class="kw">CREATE FUNCTION</span> tf.current_user_id() <span class="kw">RETURNS UUID AS</span> $$
+  <span class="kw">SELECT</span> NULLIF(current_setting(<span class="str">'request.jwt.claims'</span>, <span class="kw">true</span>)::jsonb -&gt;&gt; <span class="str">'sub'</span>, <span class="str">''</span>)::uuid;
+$$ <span class="kw">LANGUAGE SQL STABLE</span>;
+
+<span class="kw">CREATE FUNCTION</span> tf.current_org_id() <span class="kw">RETURNS UUID AS</span> $$
+  <span class="kw">SELECT</span> NULLIF(current_setting(<span class="str">'request.jwt.claims'</span>, <span class="kw">true</span>)::jsonb -&gt;&gt; <span class="str">'org_id'</span>, <span class="str">''</span>)::uuid;
+$$ <span class="kw">LANGUAGE SQL STABLE</span>;
+
+<span class="kw">CREATE FUNCTION</span> tf.user_has_org_access(target_org <span class="kw">UUID</span>) <span class="kw">RETURNS BOOLEAN AS</span> $$
+  <span class="kw">SELECT EXISTS</span> (
+    <span class="kw">SELECT</span> 1 <span class="kw">FROM</span> memberships m
+    <span class="kw">JOIN</span> teams t <span class="kw">ON</span> t.id = m.team_id
+    <span class="kw">WHERE</span> m.user_id = tf.current_user_id() <span class="kw">AND</span> t.org_id = target_org
+  );
+$$ <span class="kw">LANGUAGE SQL STABLE</span>;</pre>
+
+  <h3>Policy template</h3>
+<pre class="code"><span class="kw">ALTER TABLE</span> tasks <span class="kw">ENABLE ROW LEVEL SECURITY</span>;
+
+<span class="kw">CREATE POLICY</span> tasks_select <span class="kw">ON</span> tasks
+  <span class="kw">FOR SELECT USING</span> (
+    org_id = tf.current_org_id()
+    <span class="kw">AND</span> creator_user_id = tf.current_user_id()    <span class="com">-- v1: tasks user-scoped</span>
+  );
+
+<span class="kw">CREATE POLICY</span> tasks_insert <span class="kw">ON</span> tasks
+  <span class="kw">FOR INSERT WITH CHECK</span> (
+    org_id = tf.current_org_id()
+    <span class="kw">AND</span> creator_user_id = tf.current_user_id()
+    <span class="kw">AND</span> tf.user_has_org_access(org_id)
+  );
+
+<span class="com">-- update + delete policies follow the same shape; full enumeration in the migration</span></pre>
+
+  <h3>Per-resource visibility</h3>
+  <p>Architecture §10 lays out the v1 default visibility per resource. The schema lands those columns now (<code>visibility TEXT NOT NULL DEFAULT 'private'</code> + nullable <code>team_id</code>) so v2 doesn't need an ALTER pass:</p>
+  <table class="matrix">
+    <thead><tr><th style="width: 26%;">Resource</th><th style="width: 22%;">v1 default</th><th>v2 elevation</th></tr></thead>
+    <tbody>
+      <tr><td><code>tasks</code></td><td>private (creator only)</td><td>"my team's work" board view</td></tr>
+      <tr><td><code>runs</code></td><td>private (creator only)</td><td>team-visible</td></tr>
+      <tr><td><code>prompts</code></td><td>private (creator only)</td><td>toggle exposed in v1 UI</td></tr>
+      <tr><td><code>projects</code></td><td>private (creator only)</td><td>toggle exposed in v1 UI</td></tr>
+      <tr><td><code>memories</code> (run_memory)</td><td>forced private</td><td>per-memory elevation by author</td></tr>
+      <tr><td><code>task_rules</code> + <code>prompt_triggers</code></td><td>creator-scoped</td><td>team-scoped</td></tr>
+      <tr><td><code>entities</code> + <code>events</code></td><td>org-visible (no creator scope)</td><td>—</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout--warn">
+    <strong>Service-role caveat:</strong> The Postgres role TF connects as (<code>tf_app</code>) must NOT be a superuser and must NOT have <code>BYPASSRLS</code>. Both bypass row-level security. The migration role (used by goose) can be more privileged because it never serves user requests — but at minimum it needs CREATE on the relevant schemas, plus permission to CREATE EXTENSION.
+  </div>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="tftables">
+  <div class="section-label">§7</div>
+  <h2>TF tables in multi shape</h2>
+  <p class="lede">Every table from the SQLite baseline gets a Postgres counterpart with multi-tenant columns baked in from inception. Translation is mostly mechanical, but a few SQLite-isms need explicit decisions.</p>
+
+  <h3>Translation rules</h3>
+  <table class="matrix">
+    <thead><tr><th style="width: 28%;">SQLite</th><th>Postgres</th></tr></thead>
+    <tbody>
+      <tr><td><code>TEXT PRIMARY KEY</code> (UUID strings)</td><td><code>UUID PRIMARY KEY DEFAULT gen_random_uuid()</code></td></tr>
+      <tr><td><code>INTEGER PRIMARY KEY AUTOINCREMENT</code></td><td><code>BIGSERIAL PRIMARY KEY</code> (or <code>BIGINT GENERATED ALWAYS AS IDENTITY</code>)</td></tr>
+      <tr><td><code>TEXT</code> (JSON payloads)</td><td><code>JSONB</code></td></tr>
+      <tr><td><code>DATETIME</code></td><td><code>TIMESTAMPTZ</code></td></tr>
+      <tr><td><code>BOOLEAN DEFAULT 0</code></td><td><code>BOOLEAN NOT NULL DEFAULT FALSE</code></td></tr>
+      <tr><td><code>BLOB</code></td><td><code>BYTEA</code></td></tr>
+      <tr><td>Partial UNIQUE INDEX (e.g. one-per-run primary)</td><td>Same syntax — partial indexes are core PG, not a SQLite extension</td></tr>
+      <tr><td><code>CHECK (id = 1)</code> singleton (settings)</td><td>Drop — multi mode has no per-binary settings table; settings live per-org</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Multi-tenant columns by category</h3>
+  <table class="matrix">
+    <thead><tr><th style="width: 38%;">Tables</th><th>Columns added on top of the SQLite shape</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>tasks</code>, <code>runs</code>, <code>prompts</code>, <code>projects</code>, <code>task_rules</code>, <code>prompt_triggers</code>, <code>swipe_events</code>, <code>pending_firings</code></td>
+        <td><code>org_id UUID NOT NULL</code>, <code>creator_user_id UUID NOT NULL</code>, <code>visibility TEXT NOT NULL DEFAULT 'private'</code>, <code>team_id UUID NULL REFERENCES teams(id) ON DELETE SET NULL</code></td>
+      </tr>
+      <tr>
+        <td><code>entities</code>, <code>events</code>, <code>entity_links</code>, <code>task_events</code>, <code>repo_profiles</code>, <code>poller_state</code></td>
+        <td><code>org_id UUID NOT NULL</code> only — no creator scope (these are org-shared infrastructure)</td>
+      </tr>
+      <tr>
+        <td><code>run_artifacts</code>, <code>run_messages</code>, <code>run_memory</code>, <code>run_worktrees</code>, <code>pending_prs</code>, <code>pending_reviews</code>, <code>pending_review_comments</code>, <code>curator_messages</code>, <code>curator_pending_context</code></td>
+        <td><code>org_id UUID NOT NULL</code> denormalized from the parent (<code>runs</code> / <code>pending_reviews</code> / <code>curator_requests</code>) for RLS-policy efficiency — avoids policies that have to JOIN to figure out access</td>
+      </tr>
+      <tr>
+        <td><code>system_prompt_versions</code>, <code>events_catalog</code></td>
+        <td>Global tables — no <code>org_id</code>. Read-only for <code>tf_app</code>; written only by the migration / seeder. RLS not enabled.</td>
+      </tr>
+      <tr>
+        <td><code>settings</code></td>
+        <td>Dropped from multi schema — settings are per-org (a future ticket) rather than per-binary.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>Every <code>org_id</code> column references <code>orgs(id) ON DELETE CASCADE</code>. Deleting an org takes its entire data graph with it (modulo soft-delete on <code>orgs.deleted_at</code> for the 30-day retention window).</p>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="testing">
+  <div class="section-label">§8</div>
+  <h2>Test rig</h2>
+  <p class="lede">D3 is the first ticket that needs Postgres at runtime. Picking the test rig now sets the pattern D2 (Postgres impls) and every later multi-mode ticket inherits.</p>
+
+  <h3>Image: <code>supabase/postgres:15.1.0.147</code></h3>
+  <p>Pinned to the version the production compose stack uses (architecture §5). It bundles <code>supabase_vault</code>, <code>pgsodium</code>, <code>pgcrypto</code>, <code>pgvector</code>, <code>pg_graphql</code>, etc. — vanilla Postgres + manually-installed extensions is fragile because the Vault extension's pgsodium key bootstrap is finicky. Using the same image as production also collapses test-vs-prod parity questions.</p>
+
+  <h3>Harness: <code>testcontainers-go</code></h3>
+  <p>Spins ephemeral Postgres containers per test package via <code>testcontainers/testcontainers-go</code>. One container per test binary (cached across <code>go test</code> invocations within the same package), with <code>tc.Reset()</code> between tests — way faster than per-test container churn. The harness lives in <code>internal/db/pgtest/</code> so any package that needs Postgres can import it.</p>
+
+  <pre class="code"><span class="com">// internal/db/pgtest/harness.go (sketch)</span>
+<span class="kw">func</span> <span class="fn">NewPostgres</span>(t *testing.T) *sql.DB {
+  ctx := context.Background()
+  pg, err := postgres.Run(ctx,
+    <span class="str">"supabase/postgres:15.1.0.147"</span>,
+    postgres.WithDatabase(<span class="str">"tf_test"</span>),
+    postgres.WithUsername(<span class="str">"tf"</span>),
+    postgres.WithPassword(<span class="str">"tf"</span>),
+    testcontainers.WithWaitStrategy(wait.ForLog(<span class="str">"database system is ready"</span>)),
+  )
+  <span class="kw">if</span> err != <span class="kw">nil</span> { t.Fatal(err) }
+  t.Cleanup(<span class="kw">func</span>() { pg.Terminate(ctx) })
+
+  dsn, _ := pg.ConnectionString(ctx, <span class="str">"sslmode=disable"</span>)
+  db, _ := sql.Open(<span class="str">"pgx"</span>, dsn)
+  <span class="kw">if</span> err := db.<span class="fn">MigrateForTest</span>(); err != <span class="kw">nil</span> { t.Fatal(err) }
+  <span class="kw">return</span> db
+}</pre>
+
+  <h3>CI</h3>
+  <p>GitHub Actions runner already has Docker available; testcontainers-go uses the host daemon. No service-container declaration needed — the test process boots its own Postgres. First-run pulls the image (~400MB); subsequent runs hit the layer cache.</p>
+
+  <div class="callout">
+    <strong>Why not GHA service container:</strong> service containers can't easily install <code>supabase_vault</code> on a vanilla postgres image (requires pgsodium extension at compile time). Using the supabase/postgres image as a service container is doable, but testcontainers gives us better per-test isolation and lets local dev run the same path without docker-compose.
+  </div>
+
+  <div class="callout">
+    <strong>pgx, not lib/pq:</strong> the modern Postgres driver. Better connection pooling, native LISTEN/NOTIFY, COPY support. Add <code>github.com/jackc/pgx/v5</code> + the <code>stdlib</code> sub-package so <code>database/sql</code> works.
+  </div>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="steps">
+  <div class="section-label">§9</div>
+  <h2>Implementation steps</h2>
+
+  <ol class="steps">
+    <li>
+      <span class="step-title">Add dependencies</span>
+      <span class="step-body"><code>go get github.com/jackc/pgx/v5</code>, <code>github.com/jackc/pgx/v5/stdlib</code>, <code>github.com/testcontainers/testcontainers-go</code>, <code>github.com/testcontainers/testcontainers-go/modules/postgres</code>. Pin versions; <code>go mod tidy</code>.</span>
+    </li>
+    <li>
+      <span class="step-title">Wire pgx into goose's dialect detection</span>
+      <span class="step-body">Update <code>detectDialect</code> in <code>internal/db/migrations.go</code> to probe the connection (driver-name interrogation via reflection or a separate <code>Open()</code> entrypoint that records the dialect). Add a <code>OpenPostgres(dsn)</code> helper alongside <code>OpenAt</code>.</span>
+    </li>
+    <li>
+      <span class="step-title">Author the Postgres baseline</span>
+      <span class="step-body">Single goose migration <code>internal/db/migrations-postgres/202605100001_pg_baseline.sql</code> with the full DDL: extensions, schemas (<code>tf</code>, <code>auth</code> stub), <code>tf_app</code> role, tenancy tables, Vault wrappers, RLS helpers, all TF tables in multi shape, RLS policies on every org-scoped table. Use <code>-- +goose Up</code> / <code>-- +goose Down</code> markers; Down is <code>SELECT 'down not supported';</code>. Use <code>-- +goose StatementBegin/End</code> blocks for the plpgsql function bodies (they contain semicolons goose's parser would otherwise split on).</span>
+    </li>
+    <li>
+      <span class="step-title">Build the Postgres test harness</span>
+      <span class="step-body">New package <code>internal/db/pgtest/</code>: <code>NewPostgres(t)</code> spins a testcontainer + runs the goose baseline + returns a <code>*sql.DB</code>. <code>Reset(db)</code> truncates all org-scoped tables for inter-test cleanup. Skip flag for environments where Docker isn't available — degrade to "test was skipped, not failed."</span>
+    </li>
+    <li>
+      <span class="step-title">Migration parity tests</span>
+      <span class="step-body"><code>TestPostgresBaseline_AppliesCleanly</code> — fresh DB → goose.Up → assert all expected tables/extensions/roles/policies exist. <code>TestPostgresBaseline_Idempotent</code> — second goose.Up no-ops. <code>TestVault_PutGetDelete</code> — exercises the three wrapper functions end-to-end against a seeded org.</span>
+    </li>
+    <li>
+      <span class="step-title">RLS policy tests</span>
+      <span class="step-body">Cross-org isolation: seed two orgs with one user each, set <code>request.jwt.claims</code> for user A, INSERT/SELECT against tasks, confirm user A cannot see user B's rows even when issuing raw queries with the wrong <code>org_id</code> hand-set. Same shape for projects, prompts, runs, memory.</span>
+    </li>
+    <li>
+      <span class="step-title">Update <code>migrations-postgres/README.md</code></span>
+      <span class="step-body">Replace the "empty until SKY-247 lands" placeholder with the actual conventions: file naming, where to add new Postgres migrations, why Down is a no-op. Mirror the SQLite tree's docstring style.</span>
+    </li>
+    <li>
+      <span class="step-title">CI gate</span>
+      <span class="step-body">No new GHA service container — testcontainers handles Docker bring-up itself. But add an explicit Docker-availability probe in the test harness so the failure mode in a Docker-less CI environment is "skip with reason" rather than panic.</span>
+    </li>
+    <li>
+      <span class="step-title">Document</span>
+      <span class="step-body"><code>CLAUDE.md</code> schema bullet: extend with "Postgres migrations live in <code>migrations-postgres/</code>; tests use <code>internal/db/pgtest</code>." Spec attached to the Linear ticket as a link.</span>
+    </li>
+  </ol>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="risks">
+  <div class="section-label">§10</div>
+  <h2>Risks &amp; open questions</h2>
+
+  <h3>Open questions for the owner</h3>
+  <table class="matrix">
+    <thead><tr><th style="width: 28%;">Question</th><th style="width: 36%;">Default if no answer</th><th>Why it matters</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>Does GoTrue own <code>auth.users</code>, or do we stub it?</td>
+        <td>Stub a minimal <code>auth.users</code> in our migration. GoTrue's full schema is a superset of our stub.</td>
+        <td>If we don't stub, fresh-Postgres bootstrap requires GoTrue to run first — couples test setup to GoTrue and complicates D6's sequencing.</td>
+      </tr>
+      <tr>
+        <td>Does the goose migration <code>CREATE ROLE tf_app</code>, or is that a deployment-script concern?</td>
+        <td>Migration creates the role idempotently (<code>DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'tf_app') THEN CREATE ROLE tf_app NOLOGIN; END IF; END $$;</code>).</td>
+        <td>Postgres roles are cluster-global, not per-DB. If the migration creates them, two parallel <code>goose.Up</code> against the same cluster could conflict — the IF NOT EXISTS guard handles that.</td>
+      </tr>
+      <tr>
+        <td>Migration as one big file, or split (tenancy / vault / RLS-helpers / RLS-policies / TF-tables)?</td>
+        <td>One big file. Mirrors D1's single-baseline approach, easier to review as a unit, no inter-file ordering concerns.</td>
+        <td>Splitting buys reviewability per concern but introduces ordering fragility (Vault wrappers reference orgs(id), so they can't run before tenancy).</td>
+      </tr>
+      <tr>
+        <td>First-org bootstrap mechanism</td>
+        <td>Out of scope for D3. D7 (auth middleware) detects empty <code>orgs</code> on first user signup and creates one. D3 just guarantees the schema supports it.</td>
+        <td>Could land here as a Postgres trigger — but triggers running app logic are a smell, and D7's middleware already touches the signup path.</td>
+      </tr>
+      <tr>
+        <td>Test rig: testcontainers-go vs supabase/postgres GHA service container</td>
+        <td>testcontainers-go (lets local dev run the same path; better per-test isolation; supabase/postgres image bundles everything).</td>
+        <td>GHA service container is simpler in CI but doesn't help local dev, and supabase/postgres's pgsodium bootstrap doesn't always survive a stripped-down service-container env.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Risks &amp; rollback</h3>
+  <table class="matrix">
+    <thead><tr><th style="width: 26%;">Risk</th><th style="width: 30%;">Mitigation</th><th>Rollback</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>An RLS policy is wrong → user sees other orgs' data, or can't see their own</td>
+        <td>Cross-org isolation tests for every org-scoped resource. Tests run in CI; failures block merge.</td>
+        <td>Patch the policy in a follow-up migration; <code>DROP POLICY foo ON tasks; CREATE POLICY ...</code> in a forward-only migration.</td>
+      </tr>
+      <tr>
+        <td>Vault wrapper grants drift → unprivileged role can call wrappers without going through application auth</td>
+        <td>Migration explicitly REVOKEs from PUBLIC and GRANTs only to <code>tf_app</code>. Test that calling as a non-<code>tf_app</code> role errors.</td>
+        <td>Re-run the REVOKE/GRANT pair in a follow-up migration.</td>
+      </tr>
+      <tr>
+        <td>SQLite-vs-Postgres schema drifts (e.g. a future migration only updates one tree)</td>
+        <td>Conformance tests in D2 run identical assertions against both backends; a column added to one and not the other breaks the suite.</td>
+        <td>—</td>
+      </tr>
+      <tr>
+        <td>Test image pull (~400MB) bloats CI runtime</td>
+        <td>GHA's Docker layer cache persists across runs in a workflow; first PR pays the cost, subsequent ones don't. Pin the image tag so the cache stays warm.</td>
+        <td>—</td>
+      </tr>
+      <tr>
+        <td>The <code>auth.users</code> stub conflicts with what GoTrue creates on first boot</td>
+        <td>Stub uses <code>CREATE TABLE IF NOT EXISTS</code> with only <code>id UUID PRIMARY KEY</code> and <code>email TEXT</code> — both columns exist in GoTrue's full schema. GoTrue's bootstrap migrations should ALTER-add their additional columns idempotently.</td>
+        <td>If GoTrue refuses to layer in, drop the stub from a follow-up migration and require GoTrue-first deployment. Documented in D6's spec.</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ===================================================== -->
+<section class="block" id="acceptance">
+  <div class="section-label">§11</div>
+  <h2>Acceptance</h2>
+
+  <ul class="tight">
+    <li><span class="tag tag--green">PASS</span> Fresh Postgres (testcontainer) + <code>goose.Up</code> against <code>migrations-postgres/</code> → all tenancy tables, Vault wrappers, RLS helpers, TF tables, and policies present.</li>
+    <li><span class="tag tag--green">PASS</span> <code>TestPostgresBaseline_Idempotent</code> — second <code>goose.Up</code> is a no-op.</li>
+    <li><span class="tag tag--green">PASS</span> <code>TestRLS_CrossOrgIsolation</code> — User A authenticated against org A cannot SELECT or INSERT rows for org B, even with the wrong <code>org_id</code> hand-set in the query.</li>
+    <li><span class="tag tag--green">PASS</span> <code>TestVault_CrossOrgIsolation</code> — <code>vault_get_org_secret(orgA, 'github_pat')</code> from a session whose claims have <code>org_id = orgB</code> returns nothing.</li>
+    <li><span class="tag tag--green">PASS</span> <code>tf_app</code> role exists, has no <code>BYPASSRLS</code>, has no superuser flag.</li>
+    <li><span class="tag tag--green">PASS</span> SQLite tests (entire existing suite) still green — D3 didn't touch the SQLite path.</li>
+    <li><span class="tag">CODE</span> <code>internal/db/migrations-postgres/202605100001_pg_baseline.sql</code> contains the consolidated schema. <code>internal/db/pgtest/</code> harness is the only test-facing entrypoint for Postgres.</li>
+    <li><span class="tag">DOC</span> <code>CLAUDE.md</code> schema bullet extended; Postgres tree's README updated; spec html attached to SKY-247.</li>
+  </ul>
+
+  <h3>Out of scope (do NOT do here)</h3>
+  <ul class="tight">
+    <li>Go store implementations (<code>internal/store/postgres/*</code>) — that's D2 (SKY-246)</li>
+    <li>Mode flag / TF_MODE plumbing — that's D4 (SKY-248)</li>
+    <li>GoTrue deployment, JWKS verification — that's D6 (SKY-250)</li>
+    <li>Auth middleware, session creation, first-org bootstrap — that's D7 (SKY-251)</li>
+    <li>Docker / docker-compose / GHCR — that's D13 (SKY-256)</li>
+    <li>Per-org settings table — separate ticket; v1 ships without it</li>
+  </ul>
+</section>
+
+</article>
+</main>
+
+<footer>
+  SKY-247 · D3 · Multi-tenant Postgres schema · v0.1 · 2026-05-10
+</footer>
+</body>
+</html>

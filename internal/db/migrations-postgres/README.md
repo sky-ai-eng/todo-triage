@@ -1,9 +1,10 @@
 # Postgres migrations
 
-Empty by design until SKY-247 (D6 — Postgres bootstrap) lands. Once the
-Postgres backend has a real consumer, this tree gets a Postgres baseline
-that mirrors `migrations-sqlite/202605090001_baseline.sql` translated to
-Postgres dialect (BYTEA, GENERATED columns, etc.).
+Empty by design until SKY-247 (D3 — multi-tenant Postgres schema) lands.
+Once the Postgres backend has a real consumer, this tree gets the
+multi-tenant baseline (orgs, teams, memberships, sessions, integrations,
+Vault wrappers, RLS helpers + policies, and every TF table recreated
+with `org_id NOT NULL` baked in).
 
 The directory is checked in early — and embedded by `migrations.go`'s
 dialect router — so the SQLite-vs-Postgres routing code is reviewable in

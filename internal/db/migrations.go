@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS goose_db_version (
 //
 // Sequence:
 //  1. Detect dialect (sqlite3 today; the postgres tree is scaffolded
-//     for SKY-247 / D6 but not yet exercised).
+//     for SKY-247 / D3 but not yet exercised).
 //  2. Run importLegacyVersionsIfNeeded — for any install whose
 //     pre-goose `schema_migrations` table contains rows, stamp the
 //     baseline as already applied so goose does not re-execute its
@@ -86,7 +86,7 @@ func runMigrations(db *sql.DB) error {
 
 // detectDialect returns the goose dialect string for the connected
 // database. Today this is always sqlite3 — the Postgres path
-// (SKY-247 / D6) will plumb a real driver-name probe through here.
+// (SKY-247 / D3) will plumb a real driver-name probe through here.
 // Centralizing the decision now keeps the call sites stable when that
 // happens.
 func detectDialect(_ *sql.DB) string {
@@ -98,7 +98,7 @@ func detectDialect(_ *sql.DB) string {
 // sees DDL it can interpret — no runtime if/else inside a single
 // migration file deciding whether to emit BYTEA or BLOB. Pure-SQLite
 // builds (the only supported runtime today) never read the postgres
-// tree; once D6 lands the postgres path becomes a real consumer.
+// tree; once D3 lands the postgres path becomes a real consumer.
 func migrationsFor(dialect string) (fs.FS, string, error) {
 	switch dialect {
 	case "sqlite3":
@@ -279,7 +279,7 @@ func legacyMigrationsComplete(db *sql.DB) (bool, error) {
 // place as an audit trail / rollback safety net.
 func importLegacyVersionsIfNeeded(db *sql.DB, dialect string) error {
 	if dialect != "sqlite3" {
-		// Postgres path lands with D6; fresh installs there will
+		// Postgres path lands with D3; fresh installs there will
 		// have no legacy table to import from.
 		return nil
 	}
