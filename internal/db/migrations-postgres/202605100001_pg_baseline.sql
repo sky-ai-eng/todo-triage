@@ -302,6 +302,26 @@ $$;
 REVOKE ALL ON FUNCTION tf.user_is_team_admin FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION tf.user_is_team_admin TO tf_app;
 
+-- user_owns_org_via_team — caller owns the org that owns this team.
+-- Used by the memberships_insert bootstrap branch: when a brand-new
+-- user creates their first org, they have no membership yet, so a
+-- direct SELECT against teams/orgs would be RLS-filtered to empty.
+-- SECURITY DEFINER bypasses RLS for this specific lookup.
+-- +goose StatementBegin
+CREATE OR REPLACE FUNCTION tf.user_owns_org_via_team(target_team UUID) RETURNS BOOLEAN
+LANGUAGE SQL STABLE SECURITY DEFINER
+SET search_path = public, tf, pg_temp
+AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM teams t JOIN orgs o ON o.id = t.org_id
+    WHERE t.id = target_team
+      AND o.owner_user_id = tf.current_user_id()
+  );
+$$;
+-- +goose StatementEnd
+REVOKE ALL ON FUNCTION tf.user_owns_org_via_team FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION tf.user_owns_org_via_team TO tf_app;
+
 -- AES-GCM ciphertext columns; key = TF_SESSION_KEY env var (D6 wires it).
 CREATE TABLE sessions (
   id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1000,11 +1020,31 @@ CREATE POLICY users_modify ON users FOR ALL
   WITH CHECK (id = tf.current_user_id());
 
 -- Tenancy + auth policies:
+-- Org visibility: members can see the org their session is in, AND
+-- owners can always see orgs they own (for the org-picker UI and so
+-- INSERT ... RETURNING can read the row back during bootstrap when
+-- current_org_id is unset). Note: the owner branch is read-only;
+-- orgs_update still requires tf.user_is_org_admin on the active org.
 CREATE POLICY orgs_select ON orgs FOR SELECT
-  USING (id = tf.current_org_id() AND tf.user_has_org_access(id));
+  USING (
+    (id = tf.current_org_id() AND tf.user_has_org_access(id))
+    OR owner_user_id = tf.current_user_id()
+  );
+-- Org creation: any authenticated user can create an org they will
+-- own (owner_user_id MUST equal the caller). This is the "first-org
+-- bootstrap" path D7's auth middleware will use, and the "create
+-- another org" path for users who want a second tenant. Note this
+-- INSERT runs with claims that haven't yet been re-issued with the
+-- new org_id — the policy intentionally does NOT check
+-- current_org_id, only the owner identity.
+CREATE POLICY orgs_insert ON orgs FOR INSERT
+  WITH CHECK (owner_user_id = tf.current_user_id());
 -- Only admins can rename the org, flip sso_enforced, etc. Without the
 -- admin gate, any member could mutate org-wide attributes — including
--- security toggles like sso_enforced.
+-- security toggles like sso_enforced. Soft-delete (setting deleted_at)
+-- goes through UPDATE; hard DELETE is intentionally NOT permitted to
+-- tf_app — destructive ops are operations-only and run as
+-- supabase_admin outside the normal RLS path.
 CREATE POLICY orgs_update ON orgs FOR UPDATE
   USING (id = tf.current_org_id() AND tf.user_is_org_admin(id))
   WITH CHECK (id = tf.current_org_id() AND tf.user_is_org_admin(id));
@@ -1024,8 +1064,38 @@ CREATE POLICY teams_delete ON teams FOR DELETE
 
 CREATE POLICY memberships_select ON memberships FOR SELECT
   USING (user_id = tf.current_user_id()
-         OR EXISTS (SELECT 1 FROM teams t WHERE t.id = team_id AND t.org_id = tf.current_org_id()
+         OR EXISTS (SELECT 1 FROM teams t WHERE t.id = memberships.team_id AND t.org_id = tf.current_org_id()
                                               AND tf.user_has_org_access(t.org_id)));
+
+-- memberships writes have a chicken-and-egg around bootstrap: when a
+-- user creates their first org, they need to INSERT a (themselves,
+-- team, 'owner') row, but at that moment they have no membership yet
+-- so tf.user_is_team_admin returns false. Resolve by allowing
+-- self-insert if the user owns the parent org. After bootstrap,
+-- adding/promoting/removing other members goes through the team-admin
+-- branch.
+CREATE POLICY memberships_insert ON memberships FOR INSERT
+  WITH CHECK (
+    -- Bootstrap: org owner can insert their own first membership.
+    -- The EXISTS lookup uses a SECURITY DEFINER helper because
+    -- direct SELECT on teams/orgs would hit RLS (the user has no
+    -- membership yet, so user_has_org_access is false).
+    (user_id = tf.current_user_id() AND tf.user_owns_org_via_team(memberships.team_id))
+    -- OR a team admin (already-bootstrapped) adding others.
+    OR tf.user_is_team_admin(memberships.team_id)
+  );
+
+-- Role changes are admin-only (a non-admin promoting themselves would
+-- be a privilege escalation).
+CREATE POLICY memberships_update ON memberships FOR UPDATE
+  USING (tf.user_is_team_admin(memberships.team_id))
+  WITH CHECK (tf.user_is_team_admin(memberships.team_id));
+
+-- DELETE: team admins remove members; users can also remove themselves
+-- (self-leave). Self-leave is necessary for offboarding flows that
+-- run without an admin in the loop.
+CREATE POLICY memberships_delete ON memberships FOR DELETE
+  USING (user_id = tf.current_user_id() OR tf.user_is_team_admin(memberships.team_id));
 
 CREATE POLICY sessions_select ON sessions FOR SELECT USING (user_id = tf.current_user_id());
 CREATE POLICY sessions_modify ON sessions FOR ALL    USING (user_id = tf.current_user_id())
@@ -1053,7 +1123,7 @@ CREATE POLICY org_settings_delete ON org_settings FOR DELETE
 
 -- team_settings: team members can read; team admins can write.
 CREATE POLICY team_settings_select ON team_settings FOR SELECT
-  USING (EXISTS (SELECT 1 FROM teams t WHERE t.id = team_id AND t.org_id = tf.current_org_id()
+  USING (EXISTS (SELECT 1 FROM teams t WHERE t.id = team_settings.team_id AND t.org_id = tf.current_org_id()
                                               AND tf.user_has_org_access(t.org_id)));
 CREATE POLICY team_settings_insert ON team_settings FOR INSERT
   WITH CHECK (tf.user_is_team_admin(team_id));

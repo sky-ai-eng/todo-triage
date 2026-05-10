@@ -1,8 +1,10 @@
 package pgtest
 
 import (
+	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -500,16 +502,77 @@ func TestRLS_UsersIsolation(t *testing.T) {
 	}
 }
 
-// TestVault_GrantsLockdown — calling vault_get_org_secret as a role
-// that wasn't granted EXECUTE on the wrapper raises permission denial.
-// Pins the REVOKE-from-PUBLIC + GRANT-only-to-tf_app contract.
+// TestVault_GrantsLockdown — pins both the catalog state (anon /
+// authenticated / service_role lack EXECUTE on the wrappers) AND the
+// behavior (calling as one of those roles raises 42501).
+//
+// Why both: the wrappers internally raise 42501 on cross-org claim
+// mismatch (TestVault_ClaimMismatchDenied). If anon retained EXECUTE
+// via a Supabase auto-grant we missed, behavior alone (42501 raised)
+// wouldn't distinguish "permission denied at function entry" from
+// "claim check inside the function rejected." The has_function_privilege
+// assertion locks down the actual ACL state regardless of behavior.
 func TestVault_GrantsLockdown(t *testing.T) {
 	h := Shared(t)
 
-	// authenticator inherits no privileges (NOINHERIT) and tf_app
-	// wasn't granted EXECUTE to anon. Open a transaction on AppDB,
-	// SET ROLE to 'anon' (which tf_app is NOT granted to), then call
-	// the wrapper — must error with permission denial.
+	// 1. Catalog-level pin: every restricted role lacks EXECUTE on
+	//    every wrapper. has_function_privilege checks the actual ACL.
+	//    (PUBLIC isn't a real role, so it's not a valid arg to
+	//    has_function_privilege; we cover the PUBLIC revoke by
+	//    asserting proacl has no empty-grantee entry below.)
+	wrappers := []string{
+		"vault_put_org_secret(uuid,text,text,text)",
+		"vault_get_org_secret(uuid,text)",
+		"vault_delete_org_secret(uuid,text)",
+	}
+	deniedRoles := []string{"anon", "authenticated", "service_role"}
+	for _, fn := range wrappers {
+		for _, role := range deniedRoles {
+			var has bool
+			if err := h.AdminDB.QueryRow(
+				`SELECT has_function_privilege($1, $2, 'EXECUTE')`, role, fn,
+			).Scan(&has); err != nil {
+				t.Fatalf("has_function_privilege(%s, %s): %v", role, fn, err)
+			}
+			if has {
+				t.Errorf("%s has EXECUTE on %s — lockdown broken", role, fn)
+			}
+		}
+		// Assert no PUBLIC grant. In pg_proc.proacl, PUBLIC grants
+		// render as entries with an empty grantee, e.g. "=X/owner".
+		// If any such entry exists, PUBLIC has EXECUTE.
+		var publicGranted bool
+		if err := h.AdminDB.QueryRow(`
+			SELECT EXISTS (
+			  SELECT 1 FROM (
+			    SELECT unnest(proacl)::text AS aclitem
+			      FROM pg_proc
+			     WHERE oid = ('public.' || $1)::regprocedure
+			  ) a
+			  WHERE a.aclitem LIKE '=%'
+			)
+		`, fn).Scan(&publicGranted); err != nil {
+			t.Fatalf("probe PUBLIC grant on %s: %v", fn, err)
+		}
+		if publicGranted {
+			t.Errorf("PUBLIC has a grant entry on %s — lockdown broken", fn)
+		}
+		// Sanity: tf_app DOES have EXECUTE (the only role that should).
+		var tfHas bool
+		if err := h.AdminDB.QueryRow(
+			`SELECT has_function_privilege('tf_app', $1, 'EXECUTE')`, fn,
+		).Scan(&tfHas); err != nil {
+			t.Fatalf("has_function_privilege(tf_app, %s): %v", fn, err)
+		}
+		if !tfHas {
+			t.Errorf("tf_app LACKS EXECUTE on %s — break the call path", fn)
+		}
+	}
+
+	// 2. Behavior-level pin: calling as a denied role produces a
+	//    PostgreSQL permission-denied error specifically (not the
+	//    function's own 42501 on claim mismatch). The two are
+	//    distinguishable via the error message.
 	tx, err := h.AppDB.Begin()
 	if err != nil {
 		t.Fatalf("begin: %v", err)
@@ -525,7 +588,15 @@ func TestVault_GrantsLockdown(t *testing.T) {
 	}
 	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) || pgErr.Code != "42501" {
-		t.Errorf("err = %v, want permission denied (SQLSTATE 42501)", err)
+		t.Fatalf("err = %v, want SQLSTATE 42501", err)
+	}
+	// "permission denied for function" comes from the PG executor when
+	// the role lacks EXECUTE, BEFORE the body runs. "cross-org Vault
+	// access denied" comes from inside the function. Pinning the
+	// message distinguishes catalog-level denial from in-function
+	// authorization.
+	if !strings.Contains(pgErr.Message, "permission denied for function") {
+		t.Errorf("err message = %q, want 'permission denied for function ...' (catalog-level denial, not in-function check)", pgErr.Message)
 	}
 }
 
@@ -964,6 +1035,187 @@ func TestRLS_SettingsAdminOnly(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("alice INSERT jira rule: %v", err)
+	}
+}
+
+// TestRLS_OrgBootstrap — a logged-in user can create a brand-new org
+// (where they will be owner), the first team, and their own initial
+// membership row, all from within a single tf_app transaction.
+// Without an INSERT policy on orgs and bootstrap-aware INSERT policy
+// on memberships, the entire signup flow would fail and force
+// service_role / supabase_admin code paths.
+//
+// Pre-bootstrap, the user has no membership anywhere, so claims
+// include sub but org_id is unset — the user is "logged in but no
+// active tenant context".
+func TestRLS_OrgBootstrap(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	// Seed a fresh auth.users + public.users row but no memberships.
+	dave := seedUser(t, h, "dave")
+	alice := seedUser(t, h, "alice") // for the negative cross-owner test
+
+	// Phase 1: dave creates an org where HE is owner. Each negative
+	// assertion gets its own tx so a Postgres tx-abort doesn't
+	// invalidate the prior successful INSERT.
+	orgID := withDaveTx(t, h, dave, func(tx *sql.Tx) string {
+		var id string
+		if err := tx.QueryRow(`
+			INSERT INTO orgs (slug, name, owner_user_id) VALUES ('dave-org', 'Dave Org', $1) RETURNING id
+		`, dave).Scan(&id); err != nil {
+			t.Fatalf("dave INSERT org: %v", err)
+		}
+		return id
+	})
+
+	// Phase 2 (negative): dave CANNOT create an org owned by alice.
+	withDaveTx(t, h, dave, func(tx *sql.Tx) struct{} {
+		_, err := tx.Exec(`
+			INSERT INTO orgs (slug, name, owner_user_id) VALUES ('alice-stolen', 'Stolen', $1)
+		`, alice)
+		if err == nil {
+			t.Errorf("dave created an org owned by alice — orgs_insert policy too loose")
+		} else if !strings.Contains(err.Error(), "row-level security") {
+			t.Errorf("expected RLS violation, got: %v", err)
+		}
+		return struct{}{}
+	})
+
+	// Phase 3 (negative): dave CANNOT yet create a team in his own
+	// org — teams_insert is gated by tf.user_is_org_admin, which
+	// requires an existing admin membership. This is D7's role:
+	// bootstrap the first team via supabase_admin.
+	withDaveTx(t, h, dave, func(tx *sql.Tx) struct{} {
+		_, err := tx.Exec(`
+			INSERT INTO teams (org_id, slug, name) VALUES ($1, 'default', 'Default')
+		`, orgID)
+		if err == nil {
+			t.Errorf("dave (no membership yet) created a team — admin gate broken")
+		}
+		return struct{}{}
+	})
+
+	// Phase 4: AdminDB seeds the team (modeling D7 bootstrap via
+	// supabase_admin / service_role).
+	var teamID string
+	if err := h.AdminDB.QueryRow(`
+		INSERT INTO teams (org_id, slug, name) VALUES ($1, 'default', 'Default') RETURNING id
+	`, orgID).Scan(&teamID); err != nil {
+		t.Fatalf("AdminDB seed team: %v", err)
+	}
+
+	// Phase 5: dave self-inserts his owner membership via tf_app —
+	// the bootstrap branch (owner-of-parent-org can self-insert)
+	// permits this even though he isn't a team admin yet.
+	if err := h.WithUser(t, dave, orgID, func(tx *sql.Tx) error {
+		_, err := tx.Exec(`
+			INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'owner')
+		`, dave, teamID)
+		return err
+	}); err != nil {
+		t.Fatalf("dave self-insert owner membership (bootstrap): %v", err)
+	}
+}
+
+// withDaveTx runs fn in a fresh tf_app tx with no active org context
+// (org_id claim = ""). Used by TestRLS_OrgBootstrap to model the
+// post-signup, pre-first-org state where the user is logged in but
+// hasn't joined any org yet.
+func withDaveTx[T any](t *testing.T, h *Harness, userID string, fn func(tx *sql.Tx) T) T {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := h.AppDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // best-effort cleanup
+	if _, err := tx.Exec(`SET LOCAL ROLE tf_app`); err != nil {
+		t.Fatalf("SET LOCAL ROLE: %v", err)
+	}
+	claims := fmt.Sprintf(`{"sub":"%s","org_id":""}`, userID)
+	if _, err := tx.Exec(`SELECT set_config('request.jwt.claims', $1, true)`, claims); err != nil {
+		t.Fatalf("set_config: %v", err)
+	}
+	result := fn(tx)
+	// Commit so subsequent calls see what fn wrote (matters for the
+	// positive-INSERT branch; negative branches abort the tx via the
+	// failed statement and commit silently no-ops).
+	_ = tx.Commit()
+	return result
+}
+
+// TestRLS_MembershipManagement — exercises the four write policies on
+// memberships. Admin can add/promote/remove; non-admin can only
+// self-leave.
+func TestRLS_MembershipManagement(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	orgA, alice, teamA := seedOrgWithUser(t, h, "alice")
+	bob := seedUser(t, h, "bob")
+	carol := seedUser(t, h, "carol")
+
+	// 1. Alice (team admin / owner) can add bob.
+	err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
+		_, err := tx.Exec(
+			`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'member')`,
+			bob, teamA,
+		)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("alice (admin) INSERT bob: %v", err)
+	}
+
+	// 2. Bob (now a plain member, not admin) cannot add carol.
+	err = h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
+		_, err := tx.Exec(
+			`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'member')`,
+			carol, teamA,
+		)
+		return err
+	})
+	if err == nil {
+		t.Errorf("bob (non-admin) INSERT carol succeeded — admin gate broken")
+	}
+
+	// 3. Bob cannot promote himself.
+	err = h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
+		res, err := tx.Exec(
+			`UPDATE memberships SET role = 'admin' WHERE user_id = $1 AND team_id = $2`,
+			bob, teamA,
+		)
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		if n != 0 {
+			t.Errorf("bob self-promotion affected %d rows, want 0", n)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("bob self-promotion attempt: %v", err)
+	}
+
+	// 4. Bob CAN self-leave (DELETE his own membership).
+	err = h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
+		res, err := tx.Exec(
+			`DELETE FROM memberships WHERE user_id = $1 AND team_id = $2`,
+			bob, teamA,
+		)
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		if n != 1 {
+			t.Errorf("bob self-leave affected %d rows, want 1", n)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("bob self-leave: %v", err)
 	}
 }
 
