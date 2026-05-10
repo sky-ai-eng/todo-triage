@@ -383,7 +383,7 @@ footer {
     <li><strong>Schemas:</strong> <code>tf</code> (RLS helper functions live here). <code>auth</code> + <code>vault</code> + <code>storage</code> + <code>graphql</code> + <code>realtime</code> + <code>extensions</code> are pre-created by the image — we don't touch them beyond FK references.</li>
     <li><strong>Tenancy tables:</strong> <code>orgs</code>, <code>teams</code>, <code>memberships</code>, <code>users</code> (mirror of <code>auth.users</code>; FK to <code>auth.users(id)</code> resolves natively because the image ships the GoTrue baseline schema), <code>sessions</code>, <code>project_knowledge</code>. <strong>Invites are out of scope for D3</strong> — the flow lives in GoTrue (<code>POST /invite</code> + <code>auth.users.confirmation_token</code> + <code>POST /verify</code>); our org-scoped sidecar (<code>org_invites</code>) is deferred to its own ticket since multi-mode launches without SMTP wired up. <strong><code>integrations</code> and <code>org_limits</code> also deferred</strong> — neither has a v1 consumer in D3's scope. They land alongside the first integration migration ticket (PAT → Vault wiring) and the per-org billing-limits ticket respectively.</li>
     <li><strong>Settings tables:</strong> <code>org_settings</code>, <code>team_settings</code>, <code>user_settings</code> (columnar, one row per scope-key) plus <code>jira_project_status_rules</code> for per-project Jira workflow vocabularies. See §8 for the column mapping.</li>
-    <li><strong>Vault wrappers:</strong> three SECURITY INVOKER functions (<code>vault_put_org_secret</code>, <code>vault_get_org_secret</code>, <code>vault_delete_org_secret</code>) + revoked-from-PUBLIC + granted to <code>tf_app</code>.</li>
+    <li><strong>Vault wrappers:</strong> three <code>SECURITY DEFINER</code> functions (<code>vault_put_org_secret</code>, <code>vault_get_org_secret</code>, <code>vault_delete_org_secret</code>) + REVOKE from PUBLIC/anon/authenticated/service_role + GRANT to <code>tf_app</code>. Each wrapper checks <code>p_org_id = tf.current_org_id()</code> internally and raises SQLSTATE 42501 on mismatch — without that check, a DEFINER + arbitrary <code>p_org_id</code> would let any tf_app caller read any org's secrets.</li>
     <li><strong>RLS helpers:</strong> <code>tf.current_user_id()</code>, <code>tf.current_org_id()</code>, <code>tf.user_has_org_access(target_org)</code>.</li>
     <li><strong>TF tables (multi shape):</strong> every table from the SQLite baseline recreated with <code>org_id NOT NULL REFERENCES orgs(id) ON DELETE CASCADE</code> + (where applicable) <code>creator_user_id</code>, <code>visibility</code>, <code>team_id</code> baked in. SQLite-isms translated per §8. Indexes replicated with <code>org_id</code> as the leading column on org-scoped tables.</li>
     <li><strong>RLS policies</strong> on every org-scoped table: <code>FOR SELECT USING (org_id = tf.current_org_id() AND ...)</code>, <code>FOR INSERT WITH CHECK (...)</code>, etc. Test harness exercises them as <code>tf_app</code> (RLS active), not as <code>postgres</code> superuser (RLS bypassed).</li>
@@ -630,7 +630,7 @@ $$;
 <section class="block" id="vault">
   <div class="section-label">§6</div>
   <h2>Vault wrappers</h2>
-  <p class="lede">Three SECURITY INVOKER functions in <code>public</code> that the Go backend calls. Org-prefixed naming (<code>org/&lt;uuid&gt;/&lt;key&gt;</code>) makes leakage between orgs structurally impossible at the Vault layer.</p>
+  <p class="lede">Three <code>SECURITY DEFINER</code> functions in <code>public</code> that the Go backend calls. Org-prefixed naming (<code>org/&lt;uuid&gt;/&lt;key&gt;</code>) keeps secrets namespaced; an in-function check that <code>p_org_id = tf.current_org_id()</code> closes the cross-org-by-arbitrary-UUID hole that DEFINER alone would leave open.</p>
 
 <pre class="code"><span class="com">-- supabase_vault is pre-loaded by the image; this is defensive only</span>
 <span class="kw">CREATE EXTENSION IF NOT EXISTS</span> supabase_vault <span class="kw">WITH SCHEMA</span> vault;
@@ -641,33 +641,44 @@ $$;
   p_secret     <span class="kw">TEXT</span>,
   p_description <span class="kw">TEXT DEFAULT NULL</span>
 ) <span class="kw">RETURNS UUID</span>
-<span class="kw">LANGUAGE</span> plpgsql <span class="kw">SECURITY INVOKER</span>
-<span class="kw">SET search_path TO</span> public, vault
+<span class="kw">LANGUAGE</span> plpgsql <span class="kw">SECURITY DEFINER</span>
+<span class="kw">SET search_path TO</span> public, vault, pg_temp
 <span class="kw">AS</span> $$
 <span class="kw">DECLARE</span>
   v_full_name <span class="kw">TEXT</span> := <span class="str">'org/'</span> || p_org_id::text || <span class="str">'/'</span> || p_key;
   v_existing  <span class="kw">UUID</span>;
+  v_desc      <span class="kw">TEXT</span> := <span class="fn">COALESCE</span>(p_description, <span class="str">''</span>);
 <span class="kw">BEGIN</span>
+  <span class="com">-- DEFINER + arbitrary p_org_id would let any tf_app caller read/write</span>
+  <span class="com">-- ANY org's secrets; gate on the JWT-claims org so the wrapper only</span>
+  <span class="com">-- ever touches the active session's tenant.</span>
+  <span class="kw">IF</span> p_org_id <span class="kw">IS DISTINCT FROM</span> tf.<span class="fn">current_org_id</span>() <span class="kw">THEN</span>
+    <span class="kw">RAISE EXCEPTION</span> <span class="str">'cross-org Vault access denied'</span> <span class="kw">USING ERRCODE</span> = <span class="str">'42501'</span>;
+  <span class="kw">END IF</span>;
   <span class="kw">SELECT</span> id <span class="kw">INTO</span> v_existing <span class="kw">FROM</span> vault.decrypted_secrets <span class="kw">WHERE</span> name = v_full_name;
   <span class="kw">IF</span> v_existing <span class="kw">IS NOT NULL THEN</span>
-    <span class="kw">PERFORM</span> vault.update_secret(v_existing, p_secret, v_full_name, p_description);
+    <span class="kw">PERFORM</span> vault.<span class="fn">update_secret</span>(v_existing, p_secret, v_full_name, v_desc);
     <span class="kw">RETURN</span> v_existing;
   <span class="kw">END IF</span>;
-  <span class="kw">RETURN</span> vault.create_secret(p_secret, v_full_name, p_description);
+  <span class="kw">RETURN</span> vault.<span class="fn">create_secret</span>(p_secret, v_full_name, v_desc);
 <span class="kw">END</span>;
 $$;
 
-<span class="com">-- vault_get_org_secret + vault_delete_org_secret — same shape, see arch doc §5</span>
+<span class="com">-- vault_get_org_secret + vault_delete_org_secret — same shape, same in-function p_org_id check.</span>
 
-<span class="kw">REVOKE ALL ON FUNCTION</span> public.vault_put_org_secret    <span class="kw">FROM PUBLIC</span>;
-<span class="kw">REVOKE ALL ON FUNCTION</span> public.vault_get_org_secret    <span class="kw">FROM PUBLIC</span>;
-<span class="kw">REVOKE ALL ON FUNCTION</span> public.vault_delete_org_secret <span class="kw">FROM PUBLIC</span>;
+<span class="kw">REVOKE ALL ON FUNCTION</span> public.vault_put_org_secret    <span class="kw">FROM PUBLIC, anon, authenticated, service_role</span>;
+<span class="kw">REVOKE ALL ON FUNCTION</span> public.vault_get_org_secret    <span class="kw">FROM PUBLIC, anon, authenticated, service_role</span>;
+<span class="kw">REVOKE ALL ON FUNCTION</span> public.vault_delete_org_secret <span class="kw">FROM PUBLIC, anon, authenticated, service_role</span>;
 <span class="kw">GRANT EXECUTE ON FUNCTION</span> public.vault_put_org_secret    <span class="kw">TO</span> tf_app;
 <span class="kw">GRANT EXECUTE ON FUNCTION</span> public.vault_get_org_secret    <span class="kw">TO</span> tf_app;
 <span class="kw">GRANT EXECUTE ON FUNCTION</span> public.vault_delete_org_secret <span class="kw">TO</span> tf_app;</pre>
 
   <div class="callout">
-    <strong>Why SECURITY INVOKER, not DEFINER:</strong> the function runs with the caller's privileges. <code>tf_app</code> can call it; nothing else can (because of the REVOKE/GRANT). DEFINER would let anyone with EXECUTE bypass the row-level Vault gates that pgsodium enforces. INVOKER keeps the security model uniform — whatever privileges we grant <code>tf_app</code> are exactly what it has.
+    <strong>Why SECURITY DEFINER + in-function gate:</strong> tf_app has no USAGE on the <code>vault</code> schema (and intentionally so — direct <code>vault.create_secret</code> calls would bypass our org-prefix discipline). DEFINER lets the wrapper run with the function-owner's elevated privileges so it can reach <code>vault.*</code>, while the <code>p_org_id = tf.current_org_id()</code> check inside the body prevents that elevation from being abused. Without the in-function check, any tf_app caller in any session could pass any org UUID and exfiltrate secrets — DEFINER would happily run.
+  </div>
+
+  <div class="callout">
+    <strong>Why REVOKE from anon/authenticated/service_role specifically:</strong> the supabase image installs event triggers that auto-grant EXECUTE on every new <code>public.*</code> function to <code>anon</code>, <code>authenticated</code>, and <code>service_role</code>. A bare <code>REVOKE FROM PUBLIC</code> removes the implicit PUBLIC grant but leaves those explicit per-role grants intact, so <code>anon</code> can still call the wrapper. Listing the roles by name in the REVOKE catches the auto-grants.
   </div>
 
   <div class="callout callout--warn">
@@ -730,6 +741,7 @@ $$ <span class="kw">LANGUAGE SQL STABLE</span>;</pre>
       <tr><td><code>curator_requests</code> + <code>curator_messages</code> + <code>curator_pending_context</code></td><td>per-user-per-project (creator-scoped chat); writes to <code>project_knowledge</code> are org-shared</td><td>per-conversation visibility elevation if usage shows shared chats are wanted</td></tr>
       <tr><td><code>project_knowledge</code></td><td>org-shared (the durable artifact the curator maintains)</td><td>—</td></tr>
       <tr><td><code>entities</code> + <code>events</code></td><td>org-visible (no creator scope)</td><td>—</td></tr>
+      <tr><td><code>users</code></td><td>self + co-workers (anyone in an org the caller has access to); modify only own row</td><td>—</td></tr>
     </tbody>
   </table>
   <p>The curator-chat scoping deserves an explicit callout: each user has their own ongoing conversation with the curator about a project (own <code>creator_user_id</code> on <code>curator_requests</code>; children denormalize <code>org_id</code> from the parent). Both Alice and Bob can teach the curator about the same project; their chats stay separate but the resulting writes to <code>project_knowledge</code> land in the shared, org-visible table — with <strong>OCC versioning</strong> rather than last-write-wins, so concurrent edits surface as 40001 conflicts the curator can re-resolve. <code>project_knowledge.last_updated_by</code> (FK → users) + <code>last_updated_by_run</code> (UUID, FK added with runs table) retain the chronology for audit. v2 can introduce shared/team-visible curator chats if usage shows people want them — same elevation pattern as memories.</p>
@@ -1073,7 +1085,9 @@ $$ <span class="kw">LANGUAGE SQL STABLE</span>;</pre>
     <li><span class="tag tag--green">PASS</span> <code>TestRLS_CuratorChatPerUserIsolation</code> — User A and User B in the same org, same project, can each only see their own <code>curator_requests</code>/<code>curator_messages</code>; both can read the shared <code>project_knowledge</code>.</li>
     <li><span class="tag tag--green">PASS</span> <code>TestRLS_SettingsScoping</code> — user_settings readable only by owner; team_settings readable by team members; org_settings readable by org members.</li>
     <li><span class="tag tag--green">PASS</span> <code>TestVault_CrossOrgIsolation</code> — <code>vault_get_org_secret(orgA, 'github_pat')</code> from a session whose claims have <code>org_id = orgB</code> returns nothing.</li>
-    <li><span class="tag tag--green">PASS</span> <code>TestVault_GrantsLockdown</code> — calling <code>vault_get_org_secret</code> as <code>authenticated</code> (a role <code>tf_app</code> wasn't granted to) errors with permission denial.</li>
+    <li><span class="tag tag--green">PASS</span> <code>TestVault_GrantsLockdown</code> — calling <code>vault_get_org_secret</code> as <code>anon</code> (a role <code>tf_app</code> wasn't granted to, and which we explicitly REVOKE'd to override Supabase's auto-grant event triggers) errors with SQLSTATE 42501.</li>
+    <li><span class="tag tag--green">PASS</span> <code>TestVault_ClaimMismatchDenied</code> — even tf_app (with EXECUTE) can't pass an arbitrary <code>p_org_id</code>; each wrapper checks <code>p_org_id = tf.current_org_id()</code> and raises 42501 on mismatch. Closes the cross-org-by-arbitrary-UUID hole that DEFINER alone would leave open.</li>
+    <li><span class="tag tag--green">PASS</span> <code>TestRLS_UsersIsolation</code> — Alice in orgA can't see Bob's <code>public.users</code> row (different org) but can see Charlie's (same org as Alice). Modify policy restricts UPDATEs to the row's owner.</li>
     <li><span class="tag tag--green">PASS</span> <code>TestProjectKnowledge_OCC</code> — two concurrent <code>update_project_knowledge</code> calls with the same expected_version: one succeeds and returns <code>version + 1</code>; the other raises SQLSTATE 40001. Run via AppDB with two open transactions.</li>
     <li><span class="tag tag--green">PASS</span> <code>TestSeedData</code> — <code>events_catalog</code> has every event type from <code>domain.AllEventTypes()</code> (current count: 31 — assert against the slice length, not a hardcoded number, so drift surfaces at test time); <code>system_prompt_versions</code> matches shipped prompts.</li>
     <li><span class="tag tag--green">PASS</span> SQLite tests (entire existing suite) still green — D3 didn't touch the SQLite path.</li>

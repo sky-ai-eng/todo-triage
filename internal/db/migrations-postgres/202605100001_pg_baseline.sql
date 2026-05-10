@@ -73,6 +73,13 @@ DECLARE
   -- can pass NULL ergonomically.
   v_desc      TEXT := COALESCE(p_description, '');
 BEGIN
+  -- DEFINER + arbitrary p_org_id would let any tf_app caller read/write
+  -- ANY org's secrets; gate on the JWT-claims org so the wrapper only
+  -- ever touches the active session's tenant.
+  IF p_org_id IS DISTINCT FROM tf.current_org_id() THEN
+    RAISE EXCEPTION 'cross-org Vault access denied: p_org_id=% does not match request.jwt.claims.org_id', p_org_id
+      USING ERRCODE = '42501';
+  END IF;
   SELECT id INTO v_existing FROM vault.decrypted_secrets WHERE name = v_full_name;
   IF v_existing IS NOT NULL THEN
     PERFORM vault.update_secret(v_existing, p_secret, v_full_name, v_desc);
@@ -95,6 +102,10 @@ DECLARE
   v_full_name TEXT := 'org/' || p_org_id::text || '/' || p_key;
   v_secret    TEXT;
 BEGIN
+  IF p_org_id IS DISTINCT FROM tf.current_org_id() THEN
+    RAISE EXCEPTION 'cross-org Vault access denied: p_org_id=% does not match request.jwt.claims.org_id', p_org_id
+      USING ERRCODE = '42501';
+  END IF;
   SELECT decrypted_secret INTO v_secret
     FROM vault.decrypted_secrets
    WHERE name = v_full_name;
@@ -115,6 +126,10 @@ DECLARE
   v_full_name TEXT := 'org/' || p_org_id::text || '/' || p_key;
   v_existing  UUID;
 BEGIN
+  IF p_org_id IS DISTINCT FROM tf.current_org_id() THEN
+    RAISE EXCEPTION 'cross-org Vault access denied: p_org_id=% does not match request.jwt.claims.org_id', p_org_id
+      USING ERRCODE = '42501';
+  END IF;
   SELECT id INTO v_existing FROM vault.decrypted_secrets WHERE name = v_full_name;
   IF v_existing IS NULL THEN
     RETURN FALSE;
@@ -852,6 +867,7 @@ CREATE INDEX project_knowledge_org_idx ON project_knowledge(org_id, project_id);
 -- (k) ----------------------------------------------------------------
 -- Enable RLS on every org-scoped table. Policies follow.
 -- Tenancy + settings:
+ALTER TABLE users                      ENABLE ROW LEVEL SECURITY;
 ALTER TABLE orgs                       ENABLE ROW LEVEL SECURITY;
 ALTER TABLE teams                      ENABLE ROW LEVEL SECURITY;
 ALTER TABLE memberships                ENABLE ROW LEVEL SECURITY;
@@ -887,6 +903,25 @@ ALTER TABLE pending_review_comments    ENABLE ROW LEVEL SECURITY;
 ALTER TABLE curator_requests           ENABLE ROW LEVEL SECURITY;
 ALTER TABLE curator_messages           ENABLE ROW LEVEL SECURITY;
 ALTER TABLE curator_pending_context    ENABLE ROW LEVEL SECURITY;
+
+-- Users: a user always sees themselves. Cross-user reads are scoped
+-- to "shares at least one org with the caller" — so co-workers in the
+-- same org can resolve display_name/avatar for task creators, etc.,
+-- but a user in orgA never sees that orgB's users exist.
+-- Modifications are restricted to the row's owner.
+CREATE POLICY users_select ON users FOR SELECT
+  USING (
+    id = tf.current_user_id()
+    OR EXISTS (
+      SELECT 1 FROM memberships m
+      JOIN teams t ON t.id = m.team_id
+      WHERE m.user_id = users.id
+        AND tf.user_has_org_access(t.org_id)
+    )
+  );
+CREATE POLICY users_modify ON users FOR ALL
+  USING (id = tf.current_user_id())
+  WITH CHECK (id = tf.current_user_id());
 
 -- Tenancy + auth policies:
 CREATE POLICY orgs_select ON orgs FOR SELECT

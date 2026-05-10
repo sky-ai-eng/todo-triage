@@ -321,28 +321,24 @@ func TestRLS_CuratorChatPerUserIsolation(t *testing.T) {
 	}
 }
 
-// TestVault_CrossOrgIsolation — a secret stored under orgA's path
-// can't be retrieved with orgB's id.
-func TestVault_CrossOrgIsolation(t *testing.T) {
+// TestVault_PutGetDelete — happy-path round-trip on the wrapper. Cross-
+// org access is covered by TestVault_ClaimMismatchDenied, which exercises
+// the in-function p_org_id = current_org_id() gate added on top of the
+// path-prefix isolation.
+func TestVault_PutGetDelete(t *testing.T) {
 	h := Shared(t)
 	h.Reset(t)
 
 	orgA, userA, _ := seedOrgWithUser(t, h, "alice")
-	orgB, _, _ := seedOrgWithUser(t, h, "bob")
 
-	// Alice stores a secret for orgA via tf_app.
 	err := h.WithUser(t, userA, orgA, func(tx *sql.Tx) error {
 		var id string
-		return tx.QueryRow(
+		if err := tx.QueryRow(
 			`SELECT vault_put_org_secret($1, $2, $3, NULL)`, orgA, "github_pat", "ghp_alice_secret",
-		).Scan(&id)
-	})
-	if err != nil {
-		t.Fatalf("alice put: %v", err)
-	}
+		).Scan(&id); err != nil {
+			return err
+		}
 
-	// Alice retrieves it correctly.
-	err = h.WithUser(t, userA, orgA, func(tx *sql.Tx) error {
 		var secret sql.NullString
 		if err := tx.QueryRow(
 			`SELECT vault_get_org_secret($1, $2)`, orgA, "github_pat",
@@ -350,32 +346,157 @@ func TestVault_CrossOrgIsolation(t *testing.T) {
 			return err
 		}
 		if !secret.Valid || secret.String != "ghp_alice_secret" {
-			t.Errorf("alice get = %v, want ghp_alice_secret", secret)
+			t.Errorf("get after put = %v, want ghp_alice_secret", secret)
 		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("alice get: %v", err)
-	}
 
-	// Querying orgB's namespace returns nothing — secret is structurally
-	// inaccessible regardless of caller's claims, because the secret
-	// is stored under "org/<orgA>/github_pat" and the lookup builds
-	// "org/<orgB>/github_pat".
-	err = h.WithUser(t, userA, orgA, func(tx *sql.Tx) error {
-		var secret sql.NullString
+		var deleted bool
 		if err := tx.QueryRow(
-			`SELECT vault_get_org_secret($1, $2)`, orgB, "github_pat",
-		).Scan(&secret); err != nil {
+			`SELECT vault_delete_org_secret($1, $2)`, orgA, "github_pat",
+		).Scan(&deleted); err != nil {
 			return err
 		}
-		if secret.Valid {
-			t.Errorf("orgB lookup returned secret %q, want NULL — Vault path isolation broken", secret.String)
+		if !deleted {
+			t.Errorf("delete returned false, want true")
+		}
+
+		// Subsequent get returns NULL.
+		var afterDelete sql.NullString
+		if err := tx.QueryRow(
+			`SELECT vault_get_org_secret($1, $2)`, orgA, "github_pat",
+		).Scan(&afterDelete); err != nil {
+			return err
+		}
+		if afterDelete.Valid {
+			t.Errorf("get after delete returned %q, want NULL", afterDelete.String)
 		}
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("orgB lookup: %v", err)
+		t.Fatalf("round-trip: %v", err)
+	}
+}
+
+// TestVault_ClaimMismatchDenied — even tf_app (with EXECUTE) cannot
+// pass an arbitrary p_org_id; the wrapper checks p_org_id against
+// the JWT-claims org_id and raises 42501 on mismatch. Without this
+// in-function gate, a SECURITY DEFINER wrapper would let any caller
+// with EXECUTE retrieve secrets for any org UUID they happened to
+// know — defeating the org-prefix isolation.
+func TestVault_ClaimMismatchDenied(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	orgA, userA, _ := seedOrgWithUser(t, h, "alice")
+	orgB, _, _ := seedOrgWithUser(t, h, "bob")
+
+	// Alice's session (claims org_id = orgA) tries to put a secret
+	// with p_org_id = orgB. Must error.
+	err := h.WithUser(t, userA, orgA, func(tx *sql.Tx) error {
+		var id string
+		return tx.QueryRow(
+			`SELECT vault_put_org_secret($1, $2, $3, NULL)`, orgB, "github_pat", "stolen",
+		).Scan(&id)
+	})
+	if err == nil {
+		t.Fatalf("vault_put_org_secret with mismatched org did not error — claim check broken")
+	}
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "42501" {
+		t.Errorf("err = %v, want SQLSTATE 42501", err)
+	}
+
+	// Same for get + delete.
+	err = h.WithUser(t, userA, orgA, func(tx *sql.Tx) error {
+		var s sql.NullString
+		return tx.QueryRow(`SELECT vault_get_org_secret($1, $2)`, orgB, "k").Scan(&s)
+	})
+	if err == nil || !errors.As(err, &pgErr) || pgErr.Code != "42501" {
+		t.Errorf("get cross-org err = %v, want 42501", err)
+	}
+
+	err = h.WithUser(t, userA, orgA, func(tx *sql.Tx) error {
+		var b bool
+		return tx.QueryRow(`SELECT vault_delete_org_secret($1, $2)`, orgB, "k").Scan(&b)
+	})
+	if err == nil || !errors.As(err, &pgErr) || pgErr.Code != "42501" {
+		t.Errorf("delete cross-org err = %v, want 42501", err)
+	}
+}
+
+// TestRLS_UsersIsolation — public.users is org-scoped via the
+// "shares at least one org with caller" policy. Alice in orgA cannot
+// see bob in orgB; both can see themselves; co-workers in the same
+// org can see each other (so display_name/avatar resolve for task
+// authors etc.).
+func TestRLS_UsersIsolation(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	orgA, alice, _ := seedOrgWithUser(t, h, "alice")
+	_, bob, _ := seedOrgWithUser(t, h, "bob") // separate org
+	// Co-worker: charlie joins alice's team.
+	charlie := seedUser(t, h, "charlie")
+	teamA := getOrgTeam(t, h, orgA)
+	mustExec(t, h.AdminDB,
+		`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'member')`, charlie, teamA)
+
+	err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
+		var ids []string
+		rows, err := tx.Query(`SELECT id FROM users ORDER BY display_name`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				return err
+			}
+			ids = append(ids, id)
+		}
+		// Alice should see herself + charlie (same org), but NOT bob.
+		seen := make(map[string]bool)
+		for _, id := range ids {
+			seen[id] = true
+		}
+		if !seen[alice] {
+			t.Errorf("alice can't see her own user row")
+		}
+		if !seen[charlie] {
+			t.Errorf("alice can't see charlie's user row (same org)")
+		}
+		if seen[bob] {
+			t.Errorf("alice CAN see bob's user row across orgs — RLS broken")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("alice query: %v", err)
+	}
+
+	// Alice can update her own display_name.
+	err = h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
+		_, err := tx.Exec(`UPDATE users SET display_name = $1 WHERE id = $2`, "alice-renamed", alice)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("alice self-update: %v", err)
+	}
+
+	// Alice CANNOT update bob's row.
+	err = h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
+		res, err := tx.Exec(`UPDATE users SET display_name = $1 WHERE id = $2`, "bob-pwned", bob)
+		if err != nil {
+			return err
+		}
+		rows, _ := res.RowsAffected()
+		if rows != 0 {
+			t.Errorf("alice's UPDATE on bob affected %d rows, want 0 (RLS WITH CHECK should reject)", rows)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("alice cross-org update: %v", err)
 	}
 }
 
