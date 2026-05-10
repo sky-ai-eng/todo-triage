@@ -190,7 +190,7 @@ GRANT EXECUTE ON FUNCTION public.vault_delete_org_secret TO tf_app;
 
 -- (d) ----------------------------------------------------------------
 -- Claim-reading helpers come first; user_has_org_access lives below
--- the tenancy tables (it references memberships + teams, which
+-- the tenancy tables (it references org_memberships, which
 -- LANGUAGE SQL parses at function-creation time).
 -- +goose StatementBegin
 CREATE OR REPLACE FUNCTION tf.current_user_id() RETURNS UUID
