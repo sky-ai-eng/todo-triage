@@ -5,10 +5,12 @@ import (
 )
 
 // SetForTest swaps the process mode for the duration of t and
-// restores the previous value via t.Cleanup. Safe to call from
-// parallel tests because the underlying currentMode access goes
-// through modeMu, but in practice tests that flip mode usually
-// serialize themselves via t.Run subtests.
+// restores the previous value via t.Cleanup. Access to currentMode
+// goes through modeMu, so this helper is data-race-free, but it is
+// not safe for overlapping parallel tests: it mutates shared global
+// state, so concurrent callers can still interfere logically. Tests
+// that call SetForTest must avoid running in parallel with each other
+// or otherwise serialize their use of the helper.
 //
 // Lives in a non-_test.go file so consumers' test packages can call
 // it (a _test.go file would only be visible to runmode_test). The
