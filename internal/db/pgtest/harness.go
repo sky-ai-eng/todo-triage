@@ -318,7 +318,10 @@ func (h *Harness) withUserCtx(ctx context.Context, userID, orgID string, fn func
 	}
 
 	claims := map[string]string{"sub": userID, "org_id": orgID}
-	payload, _ := json.Marshal(claims)
+	payload, err := json.Marshal(claims)
+	if err != nil {
+		return fmt.Errorf("marshal jwt claims: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `SELECT set_config('request.jwt.claims', $1, true)`, string(payload)); err != nil {
 		return fmt.Errorf("set jwt claims: %w", err)
 	}
