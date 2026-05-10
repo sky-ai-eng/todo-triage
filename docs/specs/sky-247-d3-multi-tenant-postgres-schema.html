@@ -381,7 +381,7 @@ footer {
     <li><strong>Roles:</strong> <code>tf_app</code> (NOLOGIN, NOINHERIT, BYPASSRLS=false) — the role the app's transactions execute under. The migration also <code>GRANT tf_app TO authenticator</code> (the image's pre-shipped LOGIN role) so the connection-as-authenticator + <code>SET LOCAL ROLE tf_app</code> pattern works. See §4 for the full ceremony.</li>
     <li><strong>Extensions:</strong> <code>supabase_vault</code>, <code>pgsodium</code>, <code>pgcrypto</code>, <code>pg_graphql</code>, <code>pgjwt</code>, <code>uuid-ossp</code> are <strong>already loaded</strong> by the supabase/postgres image. Our migration calls <code>CREATE EXTENSION IF NOT EXISTS supabase_vault</code> defensively but it's a no-op in practice.</li>
     <li><strong>Schemas:</strong> <code>tf</code> (RLS helper functions live here). <code>auth</code> + <code>vault</code> + <code>storage</code> + <code>graphql</code> + <code>realtime</code> + <code>extensions</code> are pre-created by the image — we don't touch them beyond FK references.</li>
-    <li><strong>Tenancy tables:</strong> <code>orgs</code>, <code>teams</code>, <code>memberships</code>, <code>users</code> (mirror of <code>auth.users</code>; FK to <code>auth.users(id)</code> resolves natively because the image ships the full GoTrue schema), <code>sessions</code>, <code>integrations</code>, <code>org_limits</code>, <code>project_knowledge</code>. <strong>Invites are out of scope for D3</strong> — the flow lives in GoTrue (<code>POST /invite</code> + <code>auth.users.confirmation_token</code> + <code>POST /verify</code>); our org-scoped sidecar (<code>org_invites</code>) is deferred to its own ticket since multi-mode launches without SMTP wired up.</li>
+    <li><strong>Tenancy tables:</strong> <code>orgs</code>, <code>teams</code>, <code>memberships</code>, <code>users</code> (mirror of <code>auth.users</code>; FK to <code>auth.users(id)</code> resolves natively because the image ships the GoTrue baseline schema), <code>sessions</code>, <code>project_knowledge</code>. <strong>Invites are out of scope for D3</strong> — the flow lives in GoTrue (<code>POST /invite</code> + <code>auth.users.confirmation_token</code> + <code>POST /verify</code>); our org-scoped sidecar (<code>org_invites</code>) is deferred to its own ticket since multi-mode launches without SMTP wired up. <strong><code>integrations</code> and <code>org_limits</code> also deferred</strong> — neither has a v1 consumer in D3's scope. They land alongside the first integration migration ticket (PAT → Vault wiring) and the per-org billing-limits ticket respectively.</li>
     <li><strong>Settings tables:</strong> <code>org_settings</code>, <code>team_settings</code>, <code>user_settings</code> (columnar, one row per scope-key) plus <code>jira_project_status_rules</code> for per-project Jira workflow vocabularies. See §8 for the column mapping.</li>
     <li><strong>Vault wrappers:</strong> three SECURITY INVOKER functions (<code>vault_put_org_secret</code>, <code>vault_get_org_secret</code>, <code>vault_delete_org_secret</code>) + revoked-from-PUBLIC + granted to <code>tf_app</code>.</li>
     <li><strong>RLS helpers:</strong> <code>tf.current_user_id()</code>, <code>tf.current_org_id()</code>, <code>tf.user_has_org_access(target_org)</code>.</li>
@@ -484,11 +484,15 @@ $$;
 <section class="block" id="tenancy">
   <div class="section-label">§5</div>
   <h2>Tenancy schema</h2>
-  <p class="lede">Identity, orgs, teams, memberships, sessions, integrations. Verbatim translation of the architecture doc §5 schema with light commentary on why each choice.</p>
+  <p class="lede">Identity, orgs, teams, memberships, sessions. Identity FK targets are the GoTrue baseline tables that the supabase/postgres image pre-creates on first boot of a fresh database.</p>
 
   <h3>What the image gives us free</h3>
   <div class="callout callout--good">
-    <strong>Verified against <code>supabase/postgres:15.1.0.147</code>:</strong> the image's init scripts pre-create the full GoTrue <code>auth</code> schema (<code>auth.users</code>, <code>auth.refresh_tokens</code>, <code>auth.audit_log_entries</code>, <code>auth.instances</code>, <code>auth.schema_migrations</code>) before any service connects. Our <code>users.id REFERENCES auth.users(id) ON DELETE CASCADE</code> resolves natively at goose.Up time. <strong>No stub needed.</strong> When GoTrue boots, it owns the schema going forward and our FKs continue to work because the image-installed schema matches what GoTrue expects.
+    <strong>Verified against <code>supabase/postgres:15.1.0.147</code> (docker probe 2026-05-10):</strong> the image's init scripts pre-create the GoTrue baseline <code>auth</code> schema (<code>auth.users</code>, <code>auth.refresh_tokens</code>, <code>auth.audit_log_entries</code>, <code>auth.instances</code>, <code>auth.schema_migrations</code>) when a new database is created via the <code>POSTGRES_DB</code> env var. Our <code>users.id REFERENCES auth.users(id) ON DELETE CASCADE</code> resolves natively at goose.Up time. <strong>No stub needed.</strong>
+  </div>
+
+  <div class="callout callout--warn">
+    <strong>What's NOT in the image:</strong> the modern GoTrue SSO/identity tables (<code>auth.sso_providers</code>, <code>auth.sso_domains</code>, <code>auth.saml_providers</code>, <code>auth.identities</code>, <code>auth.mfa_factors</code>) are <em>not</em> in <code>15.1.0.147</code> — they're created by GoTrue's own migrations when the auth service boots in D6. Implication: <code>orgs.sso_provider_id</code> ships as a bare <code>UUID</code> column without an FK constraint in D3; a follow-up migration adds the FK once D6 wires up GoTrue.
   </div>
 
   <h3>Schema sketch</h3>
@@ -516,7 +520,7 @@ $$;
   description      <span class="kw">TEXT</span>,
   billing_email    <span class="kw">TEXT</span>,  <span class="com">-- canonical invoice contact; decoupled from any member's email</span>
   owner_user_id    <span class="kw">UUID NOT NULL REFERENCES</span> users(id),  <span class="com">-- founder; transferable</span>
-  sso_provider_id  <span class="kw">UUID REFERENCES</span> auth.sso_providers(id) <span class="kw">ON DELETE SET NULL</span>,  <span class="com">-- SAML/OIDC, 1:1; NULL until configured</span>
+  sso_provider_id  <span class="kw">UUID</span>,  <span class="com">-- SAML/OIDC, 1:1; NULL until configured. FK added in follow-up after D6 (GoTrue) creates auth.sso_providers.</span>
   sso_enforced     <span class="kw">BOOLEAN NOT NULL DEFAULT FALSE</span>,  <span class="com">-- block password login when true; org_domains (HRD) lands in SSO feature ticket</span>
   created_at       <span class="kw">TIMESTAMPTZ NOT NULL DEFAULT</span> now(),
   updated_at       <span class="kw">TIMESTAMPTZ NOT NULL DEFAULT</span> now(),
@@ -566,11 +570,60 @@ $$;
 <span class="kw">CREATE INDEX</span> sessions_user_idx    <span class="kw">ON</span> sessions(user_id)    <span class="kw">WHERE</span> revoked_at <span class="kw">IS NULL</span>;
 <span class="kw">CREATE INDEX</span> sessions_expires_idx <span class="kw">ON</span> sessions(expires_at) <span class="kw">WHERE</span> revoked_at <span class="kw">IS NULL</span>;
 
-<span class="com">-- integrations + org_limits + project_knowledge — see arch doc §5 verbatim</span></pre>
+<span class="com">-- the durable curator-maintained artifact, org-shared with OCC versioning</span>
+<span class="kw">CREATE TABLE</span> project_knowledge (
+  id              <span class="kw">UUID PRIMARY KEY DEFAULT</span> gen_random_uuid(),
+  org_id          <span class="kw">UUID NOT NULL REFERENCES</span> orgs(id) <span class="kw">ON DELETE CASCADE</span>,
+  project_id      <span class="kw">UUID NOT NULL REFERENCES</span> projects(id) <span class="kw">ON DELETE CASCADE</span>,
+  key             <span class="kw">TEXT NOT NULL</span>,                              <span class="com">-- e.g. 'overview', 'conventions', 'agents.md'</span>
+  content         <span class="kw">TEXT NOT NULL DEFAULT</span> <span class="str">''</span>,
+  version         <span class="kw">INT NOT NULL DEFAULT</span> 1,                       <span class="com">-- OCC token; increments on every successful write</span>
+  last_updated_by <span class="kw">UUID REFERENCES</span> users(id) <span class="kw">ON DELETE SET NULL</span>,
+  last_updated_by_run <span class="kw">UUID</span>,                                  <span class="com">-- which curator run produced this revision (FK added when runs table exists)</span>
+  created_at      <span class="kw">TIMESTAMPTZ NOT NULL DEFAULT</span> now(),
+  updated_at      <span class="kw">TIMESTAMPTZ NOT NULL DEFAULT</span> now(),
+  <span class="kw">UNIQUE</span> (project_id, key)
+);
+<span class="kw">CREATE INDEX</span> project_knowledge_org_idx <span class="kw">ON</span> project_knowledge(org_id, project_id);
+
+<span class="com">-- OCC: compare-and-swap helper. Returns the new version on success;</span>
+<span class="com">-- raises 'concurrent update' (SQLSTATE 40001) when the expected_version</span>
+<span class="com">-- doesn't match — the caller retries by re-reading + re-applying.</span>
+<span class="kw">CREATE OR REPLACE FUNCTION</span> public.update_project_knowledge(
+  p_id               <span class="kw">UUID</span>,
+  p_expected_version <span class="kw">INT</span>,
+  p_content          <span class="kw">TEXT</span>,
+  p_updated_by       <span class="kw">UUID</span>,
+  p_updated_by_run   <span class="kw">UUID DEFAULT NULL</span>
+) <span class="kw">RETURNS INT</span>
+<span class="kw">LANGUAGE</span> plpgsql <span class="kw">SECURITY INVOKER</span>
+<span class="kw">AS</span> $$
+<span class="kw">DECLARE</span>
+  v_new_version <span class="kw">INT</span>;
+<span class="kw">BEGIN</span>
+  <span class="kw">UPDATE</span> project_knowledge
+     <span class="kw">SET</span> content = p_content,
+         version = version + 1,
+         last_updated_by = p_updated_by,
+         last_updated_by_run = p_updated_by_run,
+         updated_at = now()
+   <span class="kw">WHERE</span> id = p_id
+     <span class="kw">AND</span> version = p_expected_version
+  <span class="kw">RETURNING</span> version <span class="kw">INTO</span> v_new_version;
+
+  <span class="kw">IF</span> v_new_version <span class="kw">IS NULL THEN</span>
+    <span class="kw">RAISE EXCEPTION</span> <span class="str">'concurrent update of project_knowledge %'</span>, p_id
+      <span class="kw">USING ERRCODE</span> = <span class="str">'40001'</span>;
+  <span class="kw">END IF</span>;
+  <span class="kw">RETURN</span> v_new_version;
+<span class="kw">END</span>;
+$$;
+<span class="kw">REVOKE ALL ON FUNCTION</span> public.update_project_knowledge <span class="kw">FROM PUBLIC</span>;
+<span class="kw">GRANT EXECUTE ON FUNCTION</span> public.update_project_knowledge <span class="kw">TO</span> tf_app;</pre>
 
   <p><strong>Why <code>UUID</code> over <code>BIGSERIAL</code>:</strong> primary keys are emitted to Vault paths (<code>org/&lt;uuid&gt;/&lt;key&gt;</code>), JWT claims, and external integration metadata. UUIDs prevent ID-guessing attacks and make cross-system references unambiguous. Performance overhead vs sequential IDs is acceptable at the scale this targets.</p>
 
-  <p><strong>Why <code>JSONB</code> for <code>integrations.config</code>:</strong> shape varies per integration (<code>github_app</code>'s installation_id vs <code>jira_oauth</code>'s site URL); a JSONB column with key extraction at query time beats a sparse columnar layout, and pg's JSONB indexing handles selective lookups when needed.</p>
+  <p><strong>Why OCC on <code>project_knowledge</code>:</strong> two curator runs (one per user) can both decide to update the project's "overview" KB entry near-simultaneously. Last-write-wins via plain UPDATE silently discards the loser's edits. Compare-and-swap on a <code>version</code> column makes the conflict explicit — the loser's caller catches SQLSTATE 40001, re-reads, and decides whether to merge or abort. Implemented as a SQL function so the version check + content write happens in one statement, eliminating the read-then-write race that exists if the application does it in two round-trips.</p>
 </section>
 
 <!-- ===================================================== -->
@@ -679,7 +732,7 @@ $$ <span class="kw">LANGUAGE SQL STABLE</span>;</pre>
       <tr><td><code>entities</code> + <code>events</code></td><td>org-visible (no creator scope)</td><td>—</td></tr>
     </tbody>
   </table>
-  <p>The curator-chat scoping deserves an explicit callout: each user has their own ongoing conversation with the curator about a project (own <code>creator_user_id</code> on <code>curator_requests</code>; children denormalize <code>org_id</code> from the parent). Both Alice and Bob can teach the curator about the same project; their chats stay separate but the resulting writes to <code>project_knowledge</code> land in the shared, org-visible table with last-write-wins on conflicts. <code>project_knowledge.last_updated_by</code> retains the run id so the chronology is auditable. v2 can introduce shared/team-visible curator chats if usage shows people want them — same elevation pattern as memories.</p>
+  <p>The curator-chat scoping deserves an explicit callout: each user has their own ongoing conversation with the curator about a project (own <code>creator_user_id</code> on <code>curator_requests</code>; children denormalize <code>org_id</code> from the parent). Both Alice and Bob can teach the curator about the same project; their chats stay separate but the resulting writes to <code>project_knowledge</code> land in the shared, org-visible table — with <strong>OCC versioning</strong> rather than last-write-wins, so concurrent edits surface as 40001 conflicts the curator can re-resolve. <code>project_knowledge.last_updated_by</code> (FK → users) + <code>last_updated_by_run</code> (UUID, FK added with runs table) retain the chronology for audit. v2 can introduce shared/team-visible curator chats if usage shows people want them — same elevation pattern as memories.</p>
 
   <div class="callout callout--warn">
     <strong>Service-role caveat:</strong> The Postgres role TF connects as (<code>tf_app</code>) must NOT be a superuser and must NOT have <code>BYPASSRLS</code>. Both bypass row-level security. The migration role (used by goose) can be more privileged because it never serves user requests — but at minimum it needs CREATE on the relevant schemas, plus permission to CREATE EXTENSION.
@@ -875,7 +928,7 @@ $$ <span class="kw">LANGUAGE SQL STABLE</span>;</pre>
     </li>
     <li>
       <span class="step-title">Author the Postgres baseline</span>
-      <span class="step-body">Single goose migration <code>internal/db/migrations-postgres/202605100001_pg_baseline.sql</code>. Sections, in order: (a) <code>CREATE SCHEMA IF NOT EXISTS tf</code>; (b) idempotent <code>CREATE ROLE tf_app</code> via <code>DO $$ ... $$</code> + <code>GRANT tf_app TO authenticator</code> + schema/default-privilege grants per §4; (c) Vault wrappers + REVOKE/GRANT EXECUTE on tf_app per §6; (d) RLS helpers in <code>tf</code> schema per §7; (e) tenancy tables (orgs/teams/users/memberships/sessions/integrations/org_limits/project_knowledge); (f) settings tables (org/team/user) + jira_project_status_rules per §8; (g) all TF tables in multi shape with org_id/creator_user_id/visibility/team_id where applicable; (h) all indexes (org_id leading on org-scoped tables); (i) <code>ALTER TABLE … ENABLE ROW LEVEL SECURITY</code> + per-table RLS policies; (j) <code>INSERT</code> seed data into <code>events_catalog</code> and <code>system_prompt_versions</code>. Use <code>-- +goose Up</code> / <code>-- +goose Down</code> markers; Down is <code>SELECT 'down not supported';</code>. Use <code>-- +goose StatementBegin/End</code> blocks for the plpgsql function bodies.</span>
+      <span class="step-body">Single goose migration <code>internal/db/migrations-postgres/202605100001_pg_baseline.sql</code>. Sections, in order: (a) <code>CREATE SCHEMA IF NOT EXISTS tf</code>; (b) idempotent <code>CREATE ROLE tf_app</code> via <code>DO $$ ... $$</code> + <code>GRANT tf_app TO authenticator</code> + schema/default-privilege grants per §4; (c) Vault wrappers + REVOKE/GRANT EXECUTE on tf_app per §6; (d) RLS helpers in <code>tf</code> schema + explicit <code>GRANT EXECUTE</code> on each helper to <code>tf_app</code>; (e) tenancy tables (orgs/teams/users/memberships/sessions/project_knowledge); (f) <code>update_project_knowledge</code> OCC function + REVOKE/GRANT; (g) settings tables (org/team/user) + jira_project_status_rules per §8; (h) all TF tables in multi shape with org_id/creator_user_id/visibility/team_id where applicable; (i) <code>REVOKE INSERT, UPDATE, DELETE</code> on <code>events_catalog</code> + <code>system_prompt_versions</code> from <code>tf_app</code> (read-only ref tables); (j) all indexes (org_id leading on org-scoped tables); (k) <code>ALTER TABLE … ENABLE ROW LEVEL SECURITY</code> + per-table RLS policies; (l) <code>INSERT</code> seed data into <code>events_catalog</code> and <code>system_prompt_versions</code>. Use <code>-- +goose Up</code> / <code>-- +goose Down</code> markers; Down is <code>SELECT 'down not supported';</code>. Use <code>-- +goose StatementBegin/End</code> blocks around every multi-statement plpgsql body (3 Vault wrappers + 3 RLS helpers + <code>update_project_knowledge</code> + the <code>DO $$ … $$</code> role-creation block — 8 boundaries minimum). <code>integrations</code> + <code>org_limits</code> deferred to follow-up tickets — no D3 consumer.</span>
     </li>
     <li>
       <span class="step-title">Build the Postgres test harness</span>
@@ -956,7 +1009,19 @@ $$ <span class="kw">LANGUAGE SQL STABLE</span>;</pre>
       </tr>
       <tr>
         <td>Wait strategy?</td>
-        <td>Two-stage: <code>wait.ForLog("PostgreSQL init process complete")</code> + SQL probe for <code>auth.users</code> existence. The default <code>"database system is ready"</code> log fires before image-init (auth schema setup, role bootstrap) is done, so a naive wait races and produces flaky tests.</td>
+        <td>Two-stage: <code>wait.ForLog("PostgreSQL init process complete")</code> + SQL probe for <code>auth.users</code> existence (in the <code>POSTGRES_DB</code>-named DB, not the default <code>postgres</code> DB — image init only seeds the <code>auth</code> schema in the configured DB, verified by probe). The default <code>"database system is ready"</code> log fires before image-init is done, so a naive wait races.</td>
+      </tr>
+      <tr>
+        <td>Image probe — what's actually in <code>auth.*</code> vs assumed?</td>
+        <td>Confirmed 2026-05-10 via local <code>docker run supabase/postgres:15.1.0.147</code>: <code>auth.users</code>, <code>auth.refresh_tokens</code>, <code>auth.audit_log_entries</code>, <code>auth.instances</code>, <code>auth.schema_migrations</code> are present. <strong><code>auth.sso_providers</code> is NOT</strong> — modern GoTrue creates it via its own migrations. Implication: <code>orgs.sso_provider_id</code> ships as a bare UUID; follow-up migration adds the FK post-D6.</td>
+      </tr>
+      <tr>
+        <td>OCC on <code>project_knowledge</code>?</td>
+        <td>Yes — <code>version INT</code> column + <code>update_project_knowledge(id, expected_version, ...)</code> SQL function that does compare-and-swap and raises SQLSTATE 40001 on conflict. Naked UPDATEs by the curator would lose concurrent edits between Alice's and Bob's chats with last-write-wins; OCC surfaces the conflict so the caller can decide to merge or retry.</td>
+      </tr>
+      <tr>
+        <td>Defer <code>integrations</code> + <code>org_limits</code>?</td>
+        <td>Yes. Neither has a v1 consumer in D3's scope and the column shape isn't fully spec'd in either §5 or the arch doc. Both land in their own ticket — <code>integrations</code> with the PAT → Vault migration ticket, <code>org_limits</code> with per-org billing-limits.</td>
       </tr>
     </tbody>
   </table>
@@ -1009,7 +1074,8 @@ $$ <span class="kw">LANGUAGE SQL STABLE</span>;</pre>
     <li><span class="tag tag--green">PASS</span> <code>TestRLS_SettingsScoping</code> — user_settings readable only by owner; team_settings readable by team members; org_settings readable by org members.</li>
     <li><span class="tag tag--green">PASS</span> <code>TestVault_CrossOrgIsolation</code> — <code>vault_get_org_secret(orgA, 'github_pat')</code> from a session whose claims have <code>org_id = orgB</code> returns nothing.</li>
     <li><span class="tag tag--green">PASS</span> <code>TestVault_GrantsLockdown</code> — calling <code>vault_get_org_secret</code> as <code>authenticated</code> (a role <code>tf_app</code> wasn't granted to) errors with permission denial.</li>
-    <li><span class="tag tag--green">PASS</span> <code>TestSeedData</code> — <code>events_catalog</code> has the expected 31 event types from <code>domain.AllEventTypes()</code>; <code>system_prompt_versions</code> matches shipped prompts.</li>
+    <li><span class="tag tag--green">PASS</span> <code>TestProjectKnowledge_OCC</code> — two concurrent <code>update_project_knowledge</code> calls with the same expected_version: one succeeds and returns <code>version + 1</code>; the other raises SQLSTATE 40001. Run via AppDB with two open transactions.</li>
+    <li><span class="tag tag--green">PASS</span> <code>TestSeedData</code> — <code>events_catalog</code> has every event type from <code>domain.AllEventTypes()</code> (current count: 32 — assert against the slice length, not a hardcoded number, so drift surfaces at test time); <code>system_prompt_versions</code> matches shipped prompts.</li>
     <li><span class="tag tag--green">PASS</span> SQLite tests (entire existing suite) still green — D3 didn't touch the SQLite path.</li>
     <li><span class="tag">CODE</span> <code>internal/db/migrations-postgres/202605100001_pg_baseline.sql</code> contains the consolidated schema. <code>internal/db/pgtest/</code> harness exposes <code>AdminDB</code> + <code>AppDB</code> as separate fields.</li>
     <li><span class="tag">DOC</span> <code>CLAUDE.md</code> schema bullet extended; <code>migrations-postgres/README.md</code> updated; spec html attached to SKY-247.</li>
@@ -1025,6 +1091,9 @@ $$ <span class="kw">LANGUAGE SQL STABLE</span>;</pre>
     <li>Settings UI rework + per-project Jira rules UI — D9 / settings UI overhaul. D3 ships the schema; the UI rebuilt in a follow-up.</li>
     <li>SettingsResolver application layer (precedence + merge logic across user/team/org settings) — design exercise punted to a follow-up app-layer ticket once D2 stores land.</li>
     <li><code>org_invites</code> table — GoTrue owns the email + token + redemption flow (<code>POST /invite</code>, <code>auth.users.confirmation_token</code>, <code>POST /verify</code>). The org-scoped sidecar (<code>org_id</code>, <code>user_id</code>, <code>role</code>, <code>team_id?</code>, <code>invited_by</code>, <code>accepted_at</code>) is a thin add-on and lands in its own ticket alongside the SMTP wiring + invite UI.</li>
+    <li><code>integrations</code> table — no D3 consumer (D2's stores work against tenancy + settings + project_knowledge only); column shape isn't fully nailed down in §5 or the arch doc. Lands with the PAT → Vault wiring ticket so the schema is designed against a real consumer.</li>
+    <li><code>org_limits</code> table — no D3 consumer; lands with the per-org billing-limits ticket.</li>
+    <li>FK on <code>orgs.sso_provider_id → auth.sso_providers</code> — image doesn't pre-create the table. FK gets added in a follow-up after D6 (GoTrue boot) creates <code>auth.sso_providers</code>.</li>
   </ul>
 </section>
 
