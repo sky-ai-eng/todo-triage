@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 
@@ -925,37 +926,42 @@ func TestRLS_TeamVisibilityIsTeamScoped(t *testing.T) {
 // TestRLS_RevokedMembership — if a user's session still carries
 // org_id claims after the underlying membership is gone, RLS must
 // still gate them. Without `tf.user_has_org_access(org_id)` in the
-// USING clause, alice could read tasks she created in orgA even
-// after being kicked out of orgA. The check is on top of the
-// claims match (current_org_id), giving us two independent gates.
+// USING clause, the user could read rows they created in that org
+// even after being kicked out. Two independent gates: claims match
+// AND live membership.
+//
+// Uses a regular member (bob), not the org owner, so the test
+// doesn't hit the "must retain at least one owner" invariant.
 func TestRLS_RevokedMembership(t *testing.T) {
 	h := Shared(t)
 	h.Reset(t)
 
-	orgA, alice, _ := seedOrgWithUser(t, h, "alice")
-	entityA := seedEntity(t, h, orgA, "github", "octo/repo#1")
-	taskA := seedTask(t, h, orgA, alice, entityA, "github:pr:opened")
+	orgA, _, teamA := seedOrgWithUser(t, h, "alice")
+	bob := seedUser(t, h, "bob")
+	addOrgMember(t, h, bob, orgA, teamA, "member", "member")
 
-	// Sanity: alice can see her task pre-revocation.
-	err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
+	entityA := seedEntity(t, h, orgA, "github", "octo/repo#1")
+	taskB := seedTask(t, h, orgA, bob, entityA, "github:pr:opened")
+
+	// Sanity: bob can see his task pre-revocation.
+	err := h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
 		var id string
-		return tx.QueryRow(`SELECT id FROM tasks WHERE id = $1`, taskA).Scan(&id)
+		return tx.QueryRow(`SELECT id FROM tasks WHERE id = $1`, taskB).Scan(&id)
 	})
 	if err != nil {
-		t.Fatalf("alice pre-revocation: %v", err)
+		t.Fatalf("bob pre-revocation: %v", err)
 	}
 
-	// Revoke alice's membership at BOTH levels (admin path; tests as
-	// supabase_admin). Removing the team membership alone is no
-	// longer enough — user_has_org_access queries org_memberships in
-	// the two-axis model.
-	mustExec(t, h.AdminDB, `DELETE FROM org_memberships WHERE user_id = $1`, alice)
-	mustExec(t, h.AdminDB, `DELETE FROM memberships WHERE user_id = $1`, alice)
+	// Revoke bob's membership at BOTH levels. Removing the team
+	// membership alone is no longer enough — user_has_org_access
+	// queries org_memberships in the two-axis model.
+	mustExec(t, h.AdminDB, `DELETE FROM memberships WHERE user_id = $1`, bob)
+	mustExec(t, h.AdminDB, `DELETE FROM org_memberships WHERE user_id = $1`, bob)
 
-	// Alice's session still carries claims {sub: alice, org_id: orgA}
+	// Bob's session still carries claims {sub: bob, org_id: orgA}
 	// but org_memberships row is gone → tf.user_has_org_access(orgA) now
 	// returns false. Task SELECT must return 0 rows.
-	err = h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
+	err = h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
 		rows, err := tx.Query(`SELECT id FROM tasks`)
 		if err != nil {
 			return err
@@ -969,12 +975,12 @@ func TestRLS_RevokedMembership(t *testing.T) {
 			return err
 		}
 		if count != 0 {
-			t.Errorf("alice saw %d tasks after membership revoked, want 0", count)
+			t.Errorf("bob saw %d tasks after membership revoked, want 0", count)
 		}
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("alice post-revocation: %v", err)
+		t.Fatalf("bob post-revocation: %v", err)
 	}
 }
 
@@ -1496,6 +1502,273 @@ func TestGooseDBVersionLockdown(t *testing.T) {
 	}
 	if seqHas {
 		t.Errorf("tf_app has USAGE on goose_db_version_id_seq")
+	}
+}
+
+// TestOrgOwnership_LastOwnerProtected — the trigger refuses to leave
+// an org without any owner. Single-statement transfers (promote new
+// in same UPDATE that demotes old) work; deleting/demoting the last
+// owner does not.
+func TestOrgOwnership_LastOwnerProtected(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	orgA, alice, _ := seedOrgWithUser(t, h, "alice")
+
+	// Demoting the sole owner must fail.
+	_, err := h.AdminDB.Exec(
+		`UPDATE org_memberships SET role = 'member' WHERE user_id = $1 AND org_id = $2`,
+		alice, orgA,
+	)
+	if err == nil {
+		t.Errorf("demoting sole owner succeeded — invariant broken")
+	} else if !strings.Contains(err.Error(), "at least one owner") {
+		t.Errorf("expected owner-invariant error, got: %v", err)
+	}
+
+	// Deleting the sole owner must fail.
+	_, err = h.AdminDB.Exec(
+		`DELETE FROM org_memberships WHERE user_id = $1 AND org_id = $2`,
+		alice, orgA,
+	)
+	if err == nil {
+		t.Errorf("deleting sole owner succeeded — invariant broken")
+	}
+
+	// Add a second owner; THEN demoting alice works (transfer flow).
+	bob := seedUser(t, h, "bob")
+	mustExec(t, h.AdminDB,
+		`INSERT INTO org_memberships (user_id, org_id, role) VALUES ($1, $2, 'owner')`, bob, orgA)
+	if _, err := h.AdminDB.Exec(
+		`UPDATE org_memberships SET role = 'member' WHERE user_id = $1 AND org_id = $2`,
+		alice, orgA,
+	); err != nil {
+		t.Errorf("demoting after second owner added failed: %v", err)
+	}
+}
+
+// TestOrgOwnership_OnlyOwnerCanTransfer — orgs.owner_user_id can only
+// be changed by the current owner. Closes the gap where any
+// user_is_org_admin (which now includes role='admin', not just
+// 'owner') could rewrite ownership and take the org over.
+func TestOrgOwnership_OnlyOwnerCanTransfer(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	orgA, alice, teamA := seedOrgWithUser(t, h, "alice")
+	bob := seedUser(t, h, "bob")
+	// Bob is an org-level admin (not owner) and a team admin.
+	addOrgMember(t, h, bob, orgA, teamA, "admin", "admin")
+
+	// Bob tries to take over (set himself as owner_user_id). Trigger
+	// refuses — only the current owner can transfer.
+	err := h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
+		_, err := tx.Exec(`UPDATE orgs SET owner_user_id = $1 WHERE id = $2`, bob, orgA)
+		return err
+	})
+	if err == nil {
+		t.Fatalf("org admin (not owner) transferred ownership — privilege escalation")
+	}
+	if !strings.Contains(err.Error(), "current org owner") {
+		t.Errorf("expected only-owner-can-transfer error, got: %v", err)
+	}
+
+	// Alice (the actual owner) needs bob to already have 'owner'
+	// role in org_memberships before transferring. Without that,
+	// the trigger refuses.
+	err = h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
+		_, err := tx.Exec(`UPDATE orgs SET owner_user_id = $1 WHERE id = $2`, bob, orgA)
+		return err
+	})
+	if err == nil {
+		t.Errorf("transfer to non-owner-role user succeeded — invariant broken")
+	}
+
+	// Promote bob to org_memberships owner, then transfer works.
+	mustExec(t, h.AdminDB,
+		`UPDATE org_memberships SET role = 'owner' WHERE user_id = $1 AND org_id = $2`,
+		bob, orgA)
+	err = h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
+		_, err := tx.Exec(`UPDATE orgs SET owner_user_id = $1 WHERE id = $2`, bob, orgA)
+		return err
+	})
+	if err != nil {
+		t.Errorf("legitimate ownership transfer (alice→bob, both org_memberships=owner) failed: %v", err)
+	}
+}
+
+// TestVisibilityCheck_TeamRequiresTeamID — visibility='team' with a
+// NULL team_id is an invalid state. The CHECK constraint refuses.
+func TestVisibilityCheck_TeamRequiresTeamID(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	orgA, alice, _ := seedOrgWithUser(t, h, "alice")
+
+	_, err := h.AdminDB.Exec(`
+		INSERT INTO prompts (org_id, creator_user_id, visibility, name, body)
+		VALUES ($1, $2, 'team', 'orphan-team-prompt', '')
+	`, orgA, alice)
+	if err == nil {
+		t.Fatalf("prompts INSERT with visibility=team AND team_id=NULL succeeded — CHECK constraint missing")
+	}
+	if !strings.Contains(err.Error(), "team_visibility_requires_team") {
+		t.Errorf("expected CHECK constraint violation, got: %v", err)
+	}
+}
+
+// TestUpdatedAtAutoBump — every table with an updated_at column gets
+// the timestamp bumped on UPDATE without the app having to set it.
+func TestUpdatedAtAutoBump(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	orgA, _, _ := seedOrgWithUser(t, h, "alice")
+
+	var before time.Time
+	if err := h.AdminDB.QueryRow(
+		`SELECT updated_at FROM orgs WHERE id = $1`, orgA,
+	).Scan(&before); err != nil {
+		t.Fatalf("read initial updated_at: %v", err)
+	}
+
+	// Sleep a moment so the bump is observable in TIMESTAMPTZ resolution.
+	time.Sleep(10 * time.Millisecond)
+
+	if _, err := h.AdminDB.Exec(
+		`UPDATE orgs SET description = 'new desc' WHERE id = $1`, orgA,
+	); err != nil {
+		t.Fatalf("UPDATE orgs: %v", err)
+	}
+
+	var after time.Time
+	if err := h.AdminDB.QueryRow(
+		`SELECT updated_at FROM orgs WHERE id = $1`, orgA,
+	).Scan(&after); err != nil {
+		t.Fatalf("read post updated_at: %v", err)
+	}
+	if !after.After(before) {
+		t.Errorf("updated_at not bumped on UPDATE: before=%v after=%v", before, after)
+	}
+}
+
+// TestVault_NullOrgIdRejected — passing NULL p_org_id to a Vault
+// wrapper raises 42501. Without this guard, a session with NULL
+// current_org_id could call vault_get_org_secret(NULL, 'k') and
+// slip past the IS DISTINCT FROM check (NULL IS DISTINCT FROM NULL
+// is false in Postgres).
+func TestVault_NullOrgIdRejected(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	_, alice, _ := seedOrgWithUser(t, h, "alice")
+	orgA, _, _ := seedOrgWithUser(t, h, "alice2")
+	_ = alice
+	_ = orgA
+
+	_, userB, _ := seedOrgWithUser(t, h, "bob")
+
+	// User session with NULL org_id claim (e.g., post-signup, before
+	// joining any org). Call vault wrapper with NULL p_org_id.
+	ctx := context.Background()
+	tx, err := h.AppDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`SET LOCAL ROLE tf_app`); err != nil {
+		t.Fatalf("set role: %v", err)
+	}
+	if _, err := tx.Exec(
+		`SELECT set_config('request.jwt.claims', $1, true)`,
+		`{"sub":"`+userB+`","org_id":""}`,
+	); err != nil {
+		t.Fatalf("set claims: %v", err)
+	}
+	var s sql.NullString
+	err = tx.QueryRow(`SELECT vault_get_org_secret(NULL, 'k')`).Scan(&s)
+	if err == nil {
+		t.Fatalf("vault_get_org_secret(NULL, 'k') succeeded — null-org-id gate missing")
+	}
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "42501" {
+		t.Errorf("err = %v, want SQLSTATE 42501", err)
+	}
+}
+
+// TestRLS_PendingReviewsInheritParentVisibility — pending_reviews
+// with a non-null run_id must inherit the run's creator-scope. Bob
+// can't read alice's draft review content via pending_reviews even
+// though they share an org.
+func TestRLS_PendingReviewsInheritParentVisibility(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	orgA, alice, teamA := seedOrgWithUser(t, h, "alice")
+	bob := seedUser(t, h, "bob")
+	addOrgMember(t, h, bob, orgA, teamA, "member", "member")
+
+	// Alice creates a task + run + a pending review tied to that run.
+	entityA := seedEntity(t, h, orgA, "github", "octo/repo#1")
+	taskID := seedTask(t, h, orgA, alice, entityA, "github:pr:opened")
+	prompt := seedPrompt(t, h, orgA, alice, "p1")
+	var runID, reviewID string
+	if err := h.AdminDB.QueryRow(`
+		INSERT INTO runs (org_id, creator_user_id, task_id, prompt_id) VALUES ($1, $2, $3, $4) RETURNING id
+	`, orgA, alice, taskID, prompt).Scan(&runID); err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+	if err := h.AdminDB.QueryRow(`
+		INSERT INTO pending_reviews (org_id, pr_number, owner, repo, commit_sha, run_id, review_body)
+		VALUES ($1, 1, 'octo', 'repo', 'sha', $2, 'draft body') RETURNING id
+	`, orgA, runID).Scan(&reviewID); err != nil {
+		t.Fatalf("seed pending_review: %v", err)
+	}
+	mustExec(t, h.AdminDB, `
+		INSERT INTO pending_review_comments (org_id, review_id, path, line, body)
+		VALUES ($1, $2, 'main.go', 10, 'nit')
+	`, orgA, reviewID)
+
+	// Alice sees them.
+	err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
+		var n int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM pending_reviews`).Scan(&n); err != nil {
+			return err
+		}
+		if n != 1 {
+			t.Errorf("alice saw %d reviews, want 1", n)
+		}
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM pending_review_comments`).Scan(&n); err != nil {
+			return err
+		}
+		if n != 1 {
+			t.Errorf("alice saw %d review comments, want 1", n)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("alice query: %v", err)
+	}
+
+	// Bob, same org, NOT the run creator — must see ZERO.
+	err = h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
+		var n int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM pending_reviews`).Scan(&n); err != nil {
+			return err
+		}
+		if n != 0 {
+			t.Errorf("bob saw %d pending_reviews tied to alice's run, want 0 — review content leaked", n)
+		}
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM pending_review_comments`).Scan(&n); err != nil {
+			return err
+		}
+		if n != 0 {
+			t.Errorf("bob saw %d pending_review_comments, want 0", n)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("bob query: %v", err)
 	}
 }
 

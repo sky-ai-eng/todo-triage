@@ -87,7 +87,14 @@ BEGIN
   -- DEFINER + arbitrary p_org_id would let any tf_app caller read/write
   -- ANY org's secrets; gate on the JWT-claims org so the wrapper only
   -- ever touches the active session's tenant.
-  IF p_org_id IS DISTINCT FROM tf.current_org_id() THEN
+  -- NULL p_org_id or NULL current_org_id would slip past IS DISTINCT
+  -- FROM (both-NULL is "not distinct"). Refuse both explicitly so a
+  -- claims-less session can't sneak through.
+  IF p_org_id IS NULL OR tf.current_org_id() IS NULL THEN
+    RAISE EXCEPTION 'Vault access denied: missing org context (p_org_id or request.jwt.claims.org_id is NULL)'
+      USING ERRCODE = '42501';
+  END IF;
+  IF p_org_id <> tf.current_org_id() THEN
     RAISE EXCEPTION 'cross-org Vault access denied: p_org_id=% does not match request.jwt.claims.org_id', p_org_id
       USING ERRCODE = '42501';
   END IF;
@@ -113,7 +120,14 @@ DECLARE
   v_full_name TEXT := 'org/' || p_org_id::text || '/' || p_key;
   v_secret    TEXT;
 BEGIN
-  IF p_org_id IS DISTINCT FROM tf.current_org_id() THEN
+  -- NULL p_org_id or NULL current_org_id would slip past IS DISTINCT
+  -- FROM (both-NULL is "not distinct"). Refuse both explicitly so a
+  -- claims-less session can't sneak through.
+  IF p_org_id IS NULL OR tf.current_org_id() IS NULL THEN
+    RAISE EXCEPTION 'Vault access denied: missing org context (p_org_id or request.jwt.claims.org_id is NULL)'
+      USING ERRCODE = '42501';
+  END IF;
+  IF p_org_id <> tf.current_org_id() THEN
     RAISE EXCEPTION 'cross-org Vault access denied: p_org_id=% does not match request.jwt.claims.org_id', p_org_id
       USING ERRCODE = '42501';
   END IF;
@@ -137,7 +151,14 @@ DECLARE
   v_full_name TEXT := 'org/' || p_org_id::text || '/' || p_key;
   v_existing  UUID;
 BEGIN
-  IF p_org_id IS DISTINCT FROM tf.current_org_id() THEN
+  -- NULL p_org_id or NULL current_org_id would slip past IS DISTINCT
+  -- FROM (both-NULL is "not distinct"). Refuse both explicitly so a
+  -- claims-less session can't sneak through.
+  IF p_org_id IS NULL OR tf.current_org_id() IS NULL THEN
+    RAISE EXCEPTION 'Vault access denied: missing org context (p_org_id or request.jwt.claims.org_id is NULL)'
+      USING ERRCODE = '42501';
+  END IF;
+  IF p_org_id <> tf.current_org_id() THEN
     RAISE EXCEPTION 'cross-org Vault access denied: p_org_id=% does not match request.jwt.claims.org_id', p_org_id
       USING ERRCODE = '42501';
   END IF;
@@ -356,6 +377,79 @@ $$;
 REVOKE ALL ON FUNCTION tf.user_is_org_admin_via_team FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION tf.user_is_org_admin_via_team TO tf_app;
 
+-- set_updated_at — trigger helper that auto-bumps updated_at on any
+-- UPDATE. Attached to every table with an updated_at column at the
+-- end of this migration. Without this, app code has to remember to
+-- set updated_at on every UPDATE — easy to forget.
+-- +goose StatementBegin
+CREATE OR REPLACE FUNCTION tf.set_updated_at() RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  NEW.updated_at = now();
+  RETURN NEW;
+END;
+$$;
+-- +goose StatementEnd
+
+-- guard_org_owners — statement-level trigger function that runs after
+-- UPDATE/DELETE on org_memberships and refuses if any affected org
+-- would be left with zero 'owner'-role rows. Standard "ownership
+-- never goes orphan" invariant — the trigger fires once per
+-- statement so multi-row ownership transfers (promote new, demote
+-- old, all in one UPDATE) work fine as long as the post-state has
+-- at least one owner.
+-- +goose StatementBegin
+CREATE OR REPLACE FUNCTION tf.guard_org_owners() RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM affected ao
+    WHERE NOT EXISTS (
+      SELECT 1 FROM org_memberships
+       WHERE org_id = ao.org_id AND role = 'owner'
+    )
+  ) THEN
+    RAISE EXCEPTION 'each org must retain at least one owner role'
+      USING ERRCODE = '23514';
+  END IF;
+  RETURN NULL;
+END;
+$$;
+-- +goose StatementEnd
+
+-- guard_org_owner_transfer — BEFORE-trigger on orgs that intercepts
+-- changes to owner_user_id. Only the CURRENT owner can transfer
+-- ownership (otherwise any org admin could take over by self-update,
+-- which is privilege escalation). The new owner_user_id must already
+-- have a corresponding 'owner' row in org_memberships, so callers
+-- can't point ownership at a user who isn't actually an org owner.
+-- +goose StatementBegin
+CREATE OR REPLACE FUNCTION tf.guard_org_owner_transfer() RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF NEW.owner_user_id IS DISTINCT FROM OLD.owner_user_id THEN
+    IF OLD.owner_user_id IS DISTINCT FROM tf.current_user_id() THEN
+      RAISE EXCEPTION 'only the current org owner can transfer ownership'
+        USING ERRCODE = '42501';
+    END IF;
+    IF NOT EXISTS (
+      SELECT 1 FROM org_memberships
+       WHERE user_id = NEW.owner_user_id
+         AND org_id  = NEW.id
+         AND role    = 'owner'
+    ) THEN
+      RAISE EXCEPTION 'new owner_user_id must already have role=owner in org_memberships'
+        USING ERRCODE = '23514';
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+-- +goose StatementEnd
+
 -- AES-GCM ciphertext columns; key = TF_SESSION_KEY env var (D6 wires it).
 CREATE TABLE sessions (
   id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -450,6 +544,9 @@ CREATE TABLE prompts (
   creator_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   team_id         UUID REFERENCES teams(id) ON DELETE SET NULL,
   visibility      TEXT NOT NULL DEFAULT 'private' CHECK (visibility IN ('private','team','org')),
+  -- visibility='team' is meaningless without a team_id to point at;
+  -- enforce the implication so apps can't produce orphaned rows.
+  CONSTRAINT prompts_team_visibility_requires_team CHECK (visibility <> 'team' OR team_id IS NOT NULL),
   name            TEXT NOT NULL,
   body            TEXT NOT NULL,
   source          TEXT NOT NULL DEFAULT 'user',
@@ -475,6 +572,7 @@ CREATE TABLE projects (
   creator_user_id           UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   team_id                   UUID REFERENCES teams(id) ON DELETE SET NULL,
   visibility                TEXT NOT NULL DEFAULT 'private' CHECK (visibility IN ('private','team','org')),
+  CONSTRAINT projects_team_visibility_requires_team CHECK (visibility <> 'team' OR team_id IS NOT NULL),
   name                      TEXT NOT NULL,
   description               TEXT NOT NULL DEFAULT '',
   curator_session_id        TEXT,
@@ -561,6 +659,7 @@ CREATE TABLE task_rules (
   creator_user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   team_id              UUID REFERENCES teams(id) ON DELETE SET NULL,
   visibility           TEXT NOT NULL DEFAULT 'private' CHECK (visibility IN ('private','team','org')),
+  CONSTRAINT task_rules_team_visibility_requires_team CHECK (visibility <> 'team' OR team_id IS NOT NULL),
   event_type           TEXT NOT NULL REFERENCES events_catalog(id) ON DELETE RESTRICT,
   scope_predicate_json JSONB,
   enabled              BOOLEAN NOT NULL DEFAULT TRUE,
@@ -578,6 +677,7 @@ CREATE TABLE prompt_triggers (
   creator_user_id          UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   team_id                  UUID REFERENCES teams(id) ON DELETE SET NULL,
   visibility               TEXT NOT NULL DEFAULT 'private' CHECK (visibility IN ('private','team','org')),
+  CONSTRAINT prompt_triggers_team_visibility_requires_team CHECK (visibility <> 'team' OR team_id IS NOT NULL),
   prompt_id                UUID NOT NULL,
   trigger_type             TEXT NOT NULL DEFAULT 'event',
   event_type               TEXT NOT NULL REFERENCES events_catalog(id) ON DELETE RESTRICT,
@@ -597,6 +697,7 @@ CREATE TABLE tasks (
   creator_user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   team_id              UUID REFERENCES teams(id) ON DELETE SET NULL,
   visibility           TEXT NOT NULL DEFAULT 'private' CHECK (visibility IN ('private','team','org')),
+  CONSTRAINT tasks_team_visibility_requires_team CHECK (visibility <> 'team' OR team_id IS NOT NULL),
   entity_id            UUID NOT NULL,
   event_type           TEXT NOT NULL REFERENCES events_catalog(id) ON DELETE RESTRICT,
   dedup_key            TEXT NOT NULL DEFAULT '',
@@ -637,6 +738,9 @@ CREATE TABLE runs (
   creator_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   team_id         UUID REFERENCES teams(id) ON DELETE SET NULL,
   visibility      TEXT NOT NULL DEFAULT 'private' CHECK (visibility IN ('private','team','org')),
+  -- visibility='team' is meaningless without a team_id to point at;
+  -- enforce the implication so apps can't produce orphaned rows.
+  CONSTRAINT runs_team_visibility_requires_team CHECK (visibility <> 'team' OR team_id IS NOT NULL),
   task_id         UUID NOT NULL,
   prompt_id       UUID NOT NULL,
   trigger_id      UUID,
@@ -1394,10 +1498,23 @@ CREATE POLICY swipe_events_modify ON swipe_events FOR ALL
   USING (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id) AND creator_user_id = tf.current_user_id())
   WITH CHECK (org_id = tf.current_org_id() AND creator_user_id = tf.current_user_id()
               AND tf.user_has_org_access(org_id));
-CREATE POLICY pending_reviews_all          ON pending_reviews FOR ALL USING (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id))
-                                                                       WITH CHECK (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id));
-CREATE POLICY pending_review_comments_all  ON pending_review_comments FOR ALL USING (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id))
-                                                                               WITH CHECK (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id));
+-- pending_reviews: org-shared when run_id IS NULL (a review staged
+-- before any agent run was attached). When run_id IS NOT NULL the
+-- review is tied to a creator-scoped run; gate via runs RLS so
+-- non-creator org members can't read draft review content.
+CREATE POLICY pending_reviews_all ON pending_reviews FOR ALL
+  USING (
+    org_id = tf.current_org_id() AND tf.user_has_org_access(org_id)
+    AND (run_id IS NULL OR EXISTS (SELECT 1 FROM runs r WHERE r.id = pending_reviews.run_id))
+  )
+  WITH CHECK (
+    org_id = tf.current_org_id() AND tf.user_has_org_access(org_id)
+    AND (run_id IS NULL OR EXISTS (SELECT 1 FROM runs r WHERE r.id = pending_reviews.run_id))
+  );
+-- pending_review_comments inherits transitively via pending_reviews.
+CREATE POLICY pending_review_comments_all ON pending_review_comments FOR ALL
+  USING      (EXISTS (SELECT 1 FROM pending_reviews pr WHERE pr.id = pending_review_comments.review_id))
+  WITH CHECK (EXISTS (SELECT 1 FROM pending_reviews pr WHERE pr.id = pending_review_comments.review_id));
 
 -- Curator: per-user-per-project chat (creator-scoped).
 CREATE POLICY curator_requests_select ON curator_requests FOR SELECT
@@ -1419,7 +1536,40 @@ CREATE POLICY curator_pending_context_modify ON curator_pending_context FOR ALL
   WITH CHECK (org_id = tf.current_org_id() AND creator_user_id = tf.current_user_id()
               AND tf.user_has_org_access(org_id));
 
--- (l) ----------------------------------------------------------------
+-- Trigger attachments — done at end-of-migration so the trigger
+-- helper functions and all tables exist before we wire them up.
+
+-- (l.1) updated_at auto-bump for every table that has the column.
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON users                     FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON orgs                      FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON teams                     FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON org_settings              FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON team_settings             FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON user_settings             FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON jira_project_status_rules FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON prompts                   FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON projects                  FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON project_knowledge         FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON task_rules                FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON prompt_triggers           FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON repo_profiles             FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON preferences               FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
+
+-- (l.2) Org-ownership invariants.
+CREATE TRIGGER org_memberships_keep_owner_on_update
+  AFTER UPDATE ON org_memberships
+  REFERENCING OLD TABLE AS affected
+  FOR EACH STATEMENT EXECUTE FUNCTION tf.guard_org_owners();
+CREATE TRIGGER org_memberships_keep_owner_on_delete
+  AFTER DELETE ON org_memberships
+  REFERENCING OLD TABLE AS affected
+  FOR EACH STATEMENT EXECUTE FUNCTION tf.guard_org_owners();
+
+CREATE TRIGGER orgs_guard_owner_transfer
+  BEFORE UPDATE OF owner_user_id ON orgs
+  FOR EACH ROW EXECUTE FUNCTION tf.guard_org_owner_transfer();
+
+-- (l.3) ----------------------------------------------------------------
 -- Seed events_catalog. Mirrors domain.AllEventTypes() — hand-transcribed
 -- because plpgsql can't call Go. Drift surfaces via TestSeedData
 -- asserting events_catalog rowcount == len(domain.AllEventTypes()).
