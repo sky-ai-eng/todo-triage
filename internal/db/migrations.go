@@ -51,13 +51,12 @@ CREATE TABLE IF NOT EXISTS goose_db_version (
 // tracking via `goose_db_version` from here on out.
 //
 // Sequence:
-//  1. Detect dialect (sqlite3 today; the postgres tree is scaffolded
-//     for SKY-247 / D3 but not yet exercised).
-//  2. Run importLegacyVersionsIfNeeded — for any install whose
-//     pre-goose `schema_migrations` table contains rows, stamp the
-//     baseline as already applied so goose does not re-execute its
-//     CREATE TABLE statements against the live schema.
-//  3. Hand the routed embed.FS to goose and call goose.Up.
+//  1. Run importLegacyVersionsIfNeeded — for any sqlite3 install
+//     whose pre-goose `schema_migrations` table contains rows, stamp
+//     the baseline as already applied so goose does not re-execute
+//     its CREATE TABLE statements against the live schema. Postgres
+//     callers always early-return from this shim (no legacy state).
+//  2. Hand the routed embed.FS to goose and call goose.Up.
 //
 // Failures roll back at the per-migration boundary goose owns; the
 // next launch retries any unapplied migration. The baseline is
@@ -65,8 +64,7 @@ CREATE TABLE IF NOT EXISTS goose_db_version (
 // import shim no-ops on a borderline install — schema_migrations
 // missing or empty — the baseline runs cleanly against the existing
 // schema.
-func runMigrations(db *sql.DB) error {
-	dialect := detectDialect(db)
+func runMigrations(db *sql.DB, dialect string) error {
 	if err := importLegacyVersionsIfNeeded(db, dialect); err != nil {
 		return fmt.Errorf("legacy import: %w", err)
 	}
@@ -82,15 +80,6 @@ func runMigrations(db *sql.DB) error {
 		return fmt.Errorf("goose up: %w", err)
 	}
 	return nil
-}
-
-// detectDialect returns the goose dialect string for the connected
-// database. Today this is always sqlite3 — the Postgres path
-// (SKY-247 / D3) will plumb a real driver-name probe through here.
-// Centralizing the decision now keeps the call sites stable when that
-// happens.
-func detectDialect(_ *sql.DB) string {
-	return "sqlite3"
 }
 
 // migrationsFor returns the embedded migration tree for a goose
@@ -366,9 +355,9 @@ func tableExistsInMaster(db *sql.DB, table string) (bool, error) {
 // importLegacyVersionsIfNeeded first so an existing install (whose
 // goose_db_version was stamped lazily on its next server start)
 // reports correctly even when status is the first command invoked
-// after the goose cutover.
-func MigrationStatus(db *sql.DB, w io.Writer) error {
-	dialect := detectDialect(db)
+// after the goose cutover. Dialect is caller-provided (see Migrate
+// docstring for the rationale).
+func MigrationStatus(db *sql.DB, dialect string, w io.Writer) error {
 	if err := importLegacyVersionsIfNeeded(db, dialect); err != nil {
 		return fmt.Errorf("legacy import: %w", err)
 	}

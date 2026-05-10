@@ -50,7 +50,7 @@ func runUp() {
 		os.Exit(1)
 	}
 	defer database.Close()
-	if err := db.Migrate(database); err != nil {
+	if err := db.Migrate(database, "sqlite3"); err != nil {
 		fmt.Fprintf(os.Stderr, "migrate up: %v\n", err)
 		os.Exit(1)
 	}
@@ -64,7 +64,7 @@ func runStatus() {
 		os.Exit(1)
 	}
 	defer database.Close()
-	if err := db.MigrationStatus(database, os.Stdout); err != nil {
+	if err := db.MigrationStatus(database, "sqlite3", os.Stdout); err != nil {
 		fmt.Fprintf(os.Stderr, "migrate status: %v\n", err)
 		os.Exit(1)
 	}

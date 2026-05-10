@@ -381,7 +381,7 @@ func resolvedTakeoversDir(dataDir string) (string, error) {
 		return fallback, err
 	}
 	defer conn.Close()
-	if err := db.Migrate(conn); err != nil {
+	if err := db.Migrate(conn, "sqlite3"); err != nil {
 		return fallback, err
 	}
 	if err := config.Init(conn); err != nil {

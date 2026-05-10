@@ -51,7 +51,7 @@ func Handle(args []string) {
 	// Idempotent — no-op if the schema is already current. Covers the
 	// rare case of running `resume` against a freshly-created DB
 	// before the server has ever migrated it.
-	if err := db.Migrate(database); err != nil {
+	if err := db.Migrate(database, "sqlite3"); err != nil {
 		fail("migrate database: %v", err)
 	}
 

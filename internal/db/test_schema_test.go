@@ -25,7 +25,7 @@ func TestBootstrapSchemaForTest_MatchesMigrateAndSeed(t *testing.T) {
 	}
 
 	real := openMem(t)
-	if err := Migrate(real); err != nil {
+	if err := Migrate(real, "sqlite3"); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 	if err := SeedEventTypes(real); err != nil {

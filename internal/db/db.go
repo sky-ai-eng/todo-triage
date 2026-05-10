@@ -78,11 +78,15 @@ func OpenAt(dbPath string) (*sql.DB, error) {
 }
 
 // Migrate brings the schema to head by applying any pending forward
-// migrations from internal/db/migrations/*.sql. Idempotent — running
-// against an up-to-date DB is a no-op. Existing installs (DBs that
-// predate the migration runner) are stamped at the baseline on first
-// run; their schema is not re-executed. See migrations.go for the
-// runner and the existing-install upgrade path.
-func Migrate(db *sql.DB) error {
-	return runMigrations(db)
+// migrations from the embedded tree matching `dialect` (sqlite3 or
+// postgres). Idempotent. Existing SQLite installs that predate the
+// migration runner are stamped at the baseline on first run.
+//
+// The dialect is caller-provided rather than auto-detected: the caller
+// opened the connection and knows which driver it used, and threading
+// the value through avoids brittle driver-type reflection inside the
+// runner. SQLite callers pass "sqlite3"; Postgres callers pass
+// "postgres". See migrations.go for the runner.
+func Migrate(db *sql.DB, dialect string) error {
+	return runMigrations(db, dialect)
 }

@@ -39,7 +39,7 @@ func TestResolvedTakeoversDir_ConfigOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("db.Open(): %v", err)
 	}
-	if err := db.Migrate(conn); err != nil {
+	if err := db.Migrate(conn, "sqlite3"); err != nil {
 		conn.Close()
 		t.Fatalf("db.Migrate(): %v", err)
 	}
