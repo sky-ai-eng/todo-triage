@@ -162,9 +162,9 @@ var expectedLegacyVersions = []string{
 }
 
 // ErrPreRunnerInstall is returned by Migrate when the DB has
-// application tables but no version metadata at all. Surfaced
-// verbatim by main.go's log.Fatalf so the operator sees the
-// upgrade-path instructions.
+// application tables but no version metadata at all. Its
+// upgrade-path instructions are preserved when the error is
+// wrapped and ultimately logged by main.go.
 var ErrPreRunnerInstall = errors.New(
 	"this database appears to predate the schema migration runner; " +
 		"to upgrade safely, install and run triagefactory v1.10.1 " +
