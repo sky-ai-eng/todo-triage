@@ -1620,8 +1620,15 @@ func TestVisibilityCheck_TeamRequiresTeamID(t *testing.T) {
 	if err == nil {
 		t.Fatalf("prompts INSERT with visibility=team AND team_id=NULL succeeded — CHECK constraint missing")
 	}
-	if !strings.Contains(err.Error(), "team_visibility_requires_team") {
-		t.Errorf("expected CHECK constraint violation, got: %v", err)
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		t.Fatalf("expected PostgreSQL error, got: %T %v", err, err)
+	}
+	if pgErr.Code != "23514" {
+		t.Fatalf("expected SQLSTATE 23514 (check_violation), got %q: %v", pgErr.Code, err)
+	}
+	if pgErr.ConstraintName != "team_visibility_requires_team" {
+		t.Errorf("expected constraint team_visibility_requires_team, got %q", pgErr.ConstraintName)
 	}
 }
 
