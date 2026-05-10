@@ -123,7 +123,7 @@ func boot() {
 				port = port[:i]
 			}
 			return fmt.Sprintf("postgres://postgres:postgres@%s:%s/tf_test?sslmode=disable", host, port)
-		}).WithQuery("SELECT 1 FROM auth.users LIMIT 1").
+		}).WithQuery("SELECT 1 WHERE to_regclass('auth.users') IS NOT NULL").
 			WithStartupTimeout(3 * time.Minute).
 			WithPollInterval(1 * time.Second),
 	}
