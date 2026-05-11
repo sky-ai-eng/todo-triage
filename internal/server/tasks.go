@@ -123,6 +123,7 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
 	var req swipeRequest
+	limitBody(w, r)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
@@ -262,6 +263,7 @@ func (s *Server) handleSnooze(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
 	var req snoozeRequest
+	limitBody(w, r)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return

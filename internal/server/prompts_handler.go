@@ -55,6 +55,7 @@ type createPromptRequest struct {
 
 func (s *Server) handlePromptCreate(w http.ResponseWriter, r *http.Request) {
 	var req createPromptRequest
+	limitBody(w, r)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
@@ -90,6 +91,7 @@ func (s *Server) handlePromptPut(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
 	var req updatePromptRequest
+	limitBody(w, r)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return

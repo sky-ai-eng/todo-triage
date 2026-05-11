@@ -34,6 +34,7 @@ type Runner struct {
 	profileReady func() bool // returns true when repo profiles are available
 	trigger      chan struct{}
 	stop         chan struct{}
+	done         chan struct{} // closed when the run loop exits
 	mu           sync.Mutex
 	running      bool
 }
@@ -44,12 +45,16 @@ func NewRunner(database *sql.DB, callbacks RunnerCallbacks) *Runner {
 		callbacks: callbacks,
 		trigger:   make(chan struct{}, 1),
 		stop:      make(chan struct{}),
+		done:      make(chan struct{}),
 	}
 }
 
 // SetProfileGate sets the function used to check if repo profiles are ready.
-// If not set, scoring proceeds without gating.
+// If not set, scoring proceeds without gating. Must be called before Start()
+// or protected by the mutex for concurrent access.
 func (r *Runner) SetProfileGate(fn func() bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.profileReady = fn
 }
 
@@ -82,6 +87,7 @@ func (r *Runner) Start() {
 		cancel()
 	}()
 	go func() {
+		defer close(r.done)
 		for {
 			select {
 			case <-r.trigger:
@@ -93,8 +99,10 @@ func (r *Runner) Start() {
 	}()
 }
 
+// Stop signals the runner to stop and waits for the run loop to exit.
 func (r *Runner) Stop() {
 	close(r.stop)
+	<-r.done
 }
 
 func (r *Runner) run(ctx context.Context) {
@@ -114,7 +122,10 @@ func (r *Runner) run(ctx context.Context) {
 
 	// Wait for repo profiles before scoring — stale or missing profiles
 	// lead to incorrect repo matches that would need re-scoring anyway.
-	if r.profileReady != nil && !r.profileReady() {
+	r.mu.Lock()
+	gate := r.profileReady
+	r.mu.Unlock()
+	if gate != nil && !gate() {
 		log.Println("[ai] skipping scoring cycle: repo profiles not ready")
 		return
 	}

@@ -30,6 +30,7 @@ type Event struct {
 type Hub struct {
 	mu      sync.RWMutex
 	clients map[*client]struct{}
+	wg      sync.WaitGroup // tracks active writePump goroutines
 }
 
 type client struct {
@@ -68,7 +69,11 @@ func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[ws] client connected (%d total)", h.clientCount())
 
 	// Start write pump in background
-	go h.writePump(c)
+	h.wg.Add(1)
+	go func() {
+		defer h.wg.Done()
+		h.writePump(c)
+	}()
 
 	// Read pump (blocks until disconnect)
 	h.readPump(c)
@@ -145,6 +150,18 @@ func (h *Hub) writePump(c *client) {
 			}
 		}
 	}
+}
+
+// Shutdown closes all client connections and waits for write pumps to drain.
+func (h *Hub) Shutdown() {
+	h.mu.Lock()
+	for c := range h.clients {
+		close(c.closed)
+		_ = c.conn.Close(ws.StatusGoingAway, "server shutting down")
+		delete(h.clients, c)
+	}
+	h.mu.Unlock()
+	h.wg.Wait()
 }
 
 func (h *Hub) clientCount() int {

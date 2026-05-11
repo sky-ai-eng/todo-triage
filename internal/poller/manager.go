@@ -30,6 +30,7 @@ type Manager struct {
 	mu       sync.Mutex
 	ghStop   chan struct{}
 	jiraStop chan struct{}
+	wg       sync.WaitGroup // tracks running poll goroutines
 }
 
 func NewManager(database *sql.DB, bus *eventbus.Bus) *Manager {
@@ -101,8 +102,6 @@ func (m *Manager) Restart() {
 
 func (m *Manager) stopAll() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	if m.ghStop != nil {
 		close(m.ghStop)
 		m.ghStop = nil
@@ -113,6 +112,10 @@ func (m *Manager) stopAll() {
 		m.jiraStop = nil
 		log.Println("[jira] tracker stopped")
 	}
+	m.mu.Unlock()
+
+	// Wait for poll goroutines to finish their current cycle.
+	m.wg.Wait()
 }
 
 // startGitHub launches the GitHub tracking loop.
@@ -162,7 +165,10 @@ func (m *Manager) startGitHub(cfg config.Config, creds auth.Credentials) {
 		userTeams = nil
 	}
 
+	m.wg.Add(1)
 	go func() {
+		defer m.wg.Done()
+
 		// Initial poll
 		if _, err := m.tracker.RefreshGitHub(client, creds.GitHubUsername, userTeams, repos); err != nil {
 			log.Printf("[github] tracker error: %v", err)
@@ -206,7 +212,10 @@ func (m *Manager) startJira(cfg config.Config, creds auth.Credentials) {
 	m.jiraStop = stop
 	m.mu.Unlock()
 
+	m.wg.Add(1)
 	go func() {
+		defer m.wg.Done()
+
 		// Initial poll
 		if _, err := m.tracker.RefreshJira(client, creds.JiraURL, cfg.Jira.Projects, cfg.Jira.Pickup.Members, cfg.Jira.Done.Members, creds.JiraDisplayName); err != nil {
 			log.Printf("[jira] tracker error: %v", err)

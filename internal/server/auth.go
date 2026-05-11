@@ -33,6 +33,7 @@ type setupResponse struct {
 
 func (s *Server) handleAuthSetup(w http.ResponseWriter, r *http.Request) {
 	var req setupRequest
+	limitBody(w, r)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
