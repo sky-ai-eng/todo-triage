@@ -108,16 +108,17 @@ func (s *promptStore) SeedOrUpdate(ctx context.Context, orgID string, p domain.P
 	}
 
 	if !exists {
-		// creator_user_id is NOT NULL. SeedOrUpdate runs admin-pool
-		// (no JWT claim → tf.current_user_id() is NULL), so the
-		// COALESCE falls back to the org's founder. Same pattern as
-		// Create — "org owner authored this" is the natural reading
-		// for shipped system prompts seeded at deploy time.
+		// Shipped system prompts have no human author. The
+		// prompts_system_has_no_creator CHECK constraint pins
+		// (source='system' ↔ creator_user_id IS NULL), and the
+		// prompts_update RLS policy lets any org member modify
+		// the row via the (source='system' AND visibility='org')
+		// branch — the path the user takes when they tweak a
+		// shipped prompt (which then flips user_modified=true and
+		// is left alone by future re-seeds).
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO prompts (id, org_id, creator_user_id, name, body, source, usage_count, user_modified, created_at, updated_at)
-			VALUES ($1, $2,
-				COALESCE(tf.current_user_id(), (SELECT owner_user_id FROM orgs WHERE id = $2)),
-				$3, $4, $5, 0, FALSE, $6, $6)
+			INSERT INTO prompts (id, org_id, creator_user_id, name, body, source, visibility, usage_count, user_modified, created_at, updated_at)
+			VALUES ($1, $2, NULL, $3, $4, $5, 'org', 0, FALSE, $6, $6)
 		`, p.ID, orgID, p.Name, p.Body, p.Source, now); err != nil {
 			return fmt.Errorf("insert prompt: %w", err)
 		}

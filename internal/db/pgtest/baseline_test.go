@@ -1796,13 +1796,17 @@ func TestPrompts_SemanticIDsAccepted(t *testing.T) {
 
 	orgA, alice, _ := seedOrgWithUser(t, h, "alice")
 
-	// System prompt with a semantic ID.
+	// System prompt with a semantic ID. creator_user_id is NULL +
+	// visibility='org' per the prompts_system_has_no_creator CHECK
+	// constraint added in 202605110001 — shipped rows have no human
+	// author and are org-visible by default.
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO prompts (id, org_id, creator_user_id, source, name, body)
-		VALUES ('system-pr-review', $1, $2, 'system', 'PR Review', '...')
-	`, orgA, alice); err != nil {
+		INSERT INTO prompts (id, org_id, creator_user_id, source, visibility, name, body)
+		VALUES ('system-pr-review', $1, NULL, 'system', 'org', 'PR Review', '...')
+	`, orgA); err != nil {
 		t.Fatalf("system prompt INSERT with semantic id: %v", err)
 	}
+	_ = alice // user prompt INSERT below still uses alice as creator
 
 	// system_prompt_versions can reference it. org_id required since
 	// prompts are per-org and the version table mirrors that scoping.
@@ -1851,11 +1855,13 @@ func TestSystemPromptSeeding_DeployActorOnly(t *testing.T) {
 	orgA, alice, _ := seedOrgWithUser(t, h, "alice")
 
 	// Deploy actor (AdminDB) can INSERT both prompts and
-	// system_prompt_versions.
+	// system_prompt_versions. System rows ship with creator_user_id
+	// NULL + visibility='org' per the constraint added in
+	// 202605110001 — there's no human author for shipped content.
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO prompts (id, org_id, creator_user_id, source, name, body)
-		VALUES ('system-pr-review', $1, $2, 'system', 'PR Review', 'v1 body')
-	`, orgA, alice); err != nil {
+		INSERT INTO prompts (id, org_id, creator_user_id, source, visibility, name, body)
+		VALUES ('system-pr-review', $1, NULL, 'system', 'org', 'PR Review', 'v1 body')
+	`, orgA); err != nil {
 		t.Fatalf("AdminDB system prompt INSERT: %v", err)
 	}
 	if _, err := h.AdminDB.Exec(`

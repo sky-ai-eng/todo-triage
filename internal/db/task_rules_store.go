@@ -13,9 +13,13 @@ import (
 // impls translate this into their dialect's null-literal.
 //
 // ID is a human-readable slug ("system-rule-ci-check-failed"). SQLite
-// stores it verbatim (the column is TEXT). Postgres stores its UUID()
-// form because the column is UUID-typed; UUID() is deterministic, so
-// re-seeds across boots produce the same row identity.
+// stores it verbatim (the column is TEXT). Postgres stores its
+// UUIDFor(orgID) derivation because the column is UUID-typed AND the
+// PRIMARY KEY is global (not scoped by org_id). A slug-only UUID
+// would collide across orgs and ON CONFLICT DO NOTHING would silently
+// skip every org except the first to seed; tying the derivation to
+// orgID gives each tenant its own row identity for the same logical
+// rule.
 type ShippedTaskRule struct {
 	ID              string
 	EventType       string
@@ -27,15 +31,19 @@ type ShippedTaskRule struct {
 
 // shippedTaskRuleNamespace is a fixed UUID v4 used as the seed
 // namespace for UUID5 derivation. Hardcoded once so re-seeds across
-// every install land on the same UUID for a given slug. Generated
-// out-of-band; never regenerate without a migration plan.
+// every install land on the same UUID for a given (slug, orgID)
+// pair. Generated out-of-band; never regenerate without a migration
+// plan.
 var shippedTaskRuleNamespace = uuid.MustParse("a9b6f3c1-7e58-4d1f-8c02-1e6f8c4a9b3e")
 
-// UUID returns the deterministic UUID for this shipped rule's slug,
-// suitable for use as the row id in a UUID-typed column. Same slug
-// → same UUID across installs and across re-seeds.
-func (r ShippedTaskRule) UUID() string {
-	return uuid.NewSHA1(shippedTaskRuleNamespace, []byte(r.ID)).String()
+// UUIDFor returns the deterministic per-org UUID for this shipped
+// rule, suitable for use as the row id in a UUID-typed column. Same
+// (slug, orgID) → same UUID across installs and across re-seeds; two
+// different orgs get two different UUIDs for the same shipped slug,
+// which is what makes Seed work in a multi-tenant install given the
+// global PRIMARY KEY on task_rules.id.
+func (r ShippedTaskRule) UUIDFor(orgID string) string {
+	return uuid.NewSHA1(shippedTaskRuleNamespace, []byte(r.ID+"/"+orgID)).String()
 }
 
 // ShippedTaskRules is the v1 default rule set documented in
