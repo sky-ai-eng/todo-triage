@@ -111,6 +111,30 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 		}
 	})
 
+	t.Run("RecordSwipe_OnSnoozedTask_ClearsSnoozeUntil", func(t *testing.T) {
+		// The queue listing hides 'queued' rows whose snooze_until is
+		// in the future. A snoozed→claimed→requeue path that leaves
+		// snooze_until stamped would silently drop the task off the
+		// Board. RecordSwipe must clear snooze_until on every
+		// transition; only SnoozeTask sets it.
+		store, orgID, seedTask, readTask, _ := factory(t)
+		taskID := seedTask(t)
+		until := time.Now().Add(2 * time.Hour).UTC()
+		if err := store.SnoozeTask(context.Background(), orgID, taskID, until, 0); err != nil {
+			t.Fatalf("snooze: %v", err)
+		}
+		if _, err := store.RecordSwipe(context.Background(), orgID, taskID, "claim", 0); err != nil {
+			t.Fatalf("RecordSwipe: %v", err)
+		}
+		status, snoozeUntil := readTask(t, taskID)
+		if status != "claimed" {
+			t.Fatalf("status=%q want claimed", status)
+		}
+		if !snoozeUntil.IsZero() {
+			t.Fatalf("snooze_until=%v want zero after RecordSwipe transition (stale snooze hides queued tasks)", snoozeUntil)
+		}
+	})
+
 	t.Run("SnoozeTask_SetsSnoozeUntilAndStatus", func(t *testing.T) {
 		store, orgID, seedTask, readTask, readAudit := factory(t)
 		taskID := seedTask(t)

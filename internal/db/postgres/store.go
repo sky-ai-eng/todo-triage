@@ -83,16 +83,21 @@ func New(admin, app *sql.DB) db.Stores {
 // them. Tests construct *sql.DB via the pgtest harness, which
 // registers the pgx driver itself.
 
-// NewForTx wires a db.Stores bundle whose every field shares one
-// *sql.Tx — the same shape WithTx produces internally, exposed for
-// tests that need to drive store methods against a claims-set
-// transaction (most prominently SecretStore, where the vault
-// wrapper refuses calls without a matching JWT claim). Production
-// code reaches the same wiring via Store.WithTx; this helper is a
-// way for the conformance harness to skip the extra WithTx
-// callback layer when it already controls the tx.
-func NewForTx(tx *sql.Tx) db.Stores {
-	return db.Stores{
+// NewForTx returns a db.TxStores wired against one *sql.Tx — the
+// same shape WithTx produces internally for its closure body,
+// exposed so tests can drive store methods against a claims-set
+// transaction without going through a WithTx callback. The most
+// prominent caller is the SecretStore test, where the vault
+// wrapper refuses calls without a matching JWT claim.
+//
+// Returns db.TxStores (not db.Stores) deliberately: db.Stores
+// carries a TxRunner, and a Stores{Tx: nil} would panic on
+// stores.Tx.WithTx(...). TxStores has no Tx field, so misuse is
+// a compile error rather than a runtime crash. Production code
+// reaches the same wiring via Store.WithTx; this helper is the
+// test-side door into it.
+func NewForTx(tx *sql.Tx) db.TxStores {
+	return db.TxStores{
 		Scores:    newScoreStore(tx),
 		Prompts:   newTxPromptStore(tx),
 		Swipes:    newSwipeStore(tx),

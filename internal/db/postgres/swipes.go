@@ -50,7 +50,14 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 		if err := insertSwipeEvent(ctx, tx, orgID, taskID, action, &hesitationMs); err != nil {
 			return err
 		}
-		return updateTaskStatus(ctx, tx, orgID, taskID, newStatus, nil, false)
+		// clearSnooze=true: none of the target statuses (claimed,
+		// dismissed, delegated, done, or the queued fallback for
+		// unknown actions) are semantically compatible with a
+		// future snooze_until — and the queue listing filter hides
+		// any 'queued' row with a future snooze_until. Mirrors the
+		// SQLite impl; SnoozeTask is the only method that sets
+		// snooze_until, every other path clears it.
+		return updateTaskStatus(ctx, tx, orgID, taskID, newStatus, nil, true)
 	}); err != nil {
 		return "", err
 	}

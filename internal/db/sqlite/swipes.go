@@ -50,7 +50,19 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 		); err != nil {
 			return err
 		}
-		_, err := q.ExecContext(ctx, `UPDATE tasks SET status = ? WHERE id = ?`, newStatus, taskID)
+		// snooze_until is cleared on EVERY transition out of the
+		// pre-swipe state. None of the swipe target statuses (claimed,
+		// dismissed, delegated, done, or the queued fallback for
+		// unknown actions) are semantically compatible with a future
+		// snooze_until — and the queue listing filter hides any
+		// 'queued' row whose snooze_until is in the future, so a
+		// snoozed→claimed→requeued path would otherwise leave the
+		// task invisible. SnoozeTask is the only method that should
+		// set snooze_until; everything else clears it.
+		_, err := q.ExecContext(ctx,
+			`UPDATE tasks SET status = ?, snooze_until = NULL WHERE id = ?`,
+			newStatus, taskID,
+		)
 		return err
 	})
 	if err != nil {
