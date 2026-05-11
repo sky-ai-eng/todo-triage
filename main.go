@@ -306,6 +306,18 @@ func main() {
 	}
 	seedDefaultPrompts(database, stores.Prompts, stores.Triggers)
 
+	// Bootstrap the local-mode agent identity (SKY-260 D-Agent). One
+	// agents row + one team_agents row for the synthetic LocalDefaultOrg
+	// / LocalDefaultTeamID pair. Idempotent — re-runs across boots
+	// (including v1.10.1 → current upgrades) leave existing rows intact,
+	// preserving any user-disable on team_agents.enabled. Logged as a
+	// warning on failure rather than fatal because the rows aren't yet
+	// load-bearing for routing/spawner; D-Claims (SKY-261) will flip
+	// this to fatal once tasks.claimed_by_agent_id is wired.
+	if err := db.BootstrapLocalAgent(context.Background(), stores); err != nil {
+		log.Printf("[bootstrap] warning: local agent: %v", err)
+	}
+
 	// Auto-import Claude Code skill files as prompts. context.Background
 	// at startup — no request to inherit from, the import runs to
 	// completion or fails of its own accord.

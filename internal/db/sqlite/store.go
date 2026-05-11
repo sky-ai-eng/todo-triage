@@ -28,14 +28,16 @@ type Store struct {
 func New(conn *sql.DB) db.Stores {
 	s := &Store{conn: conn}
 	s.stores = db.Stores{
-		Scores:    newScoreStore(conn),
-		Prompts:   newPromptStore(conn, conn),
-		Swipes:    newSwipeStore(conn),
-		Dashboard: newDashboardStore(conn),
-		Secrets:   newSecretStore(),
-		TaskRules: newTaskRuleStore(conn),
-		Triggers:  newTriggerStore(conn),
-		Tx:        s,
+		Scores:     newScoreStore(conn),
+		Prompts:    newPromptStore(conn, conn),
+		Swipes:     newSwipeStore(conn),
+		Dashboard:  newDashboardStore(conn),
+		Secrets:    newSecretStore(),
+		TaskRules:  newTaskRuleStore(conn),
+		Triggers:   newTriggerStore(conn),
+		Agents:     newAgentStore(conn),
+		TeamAgents: newTeamAgentStore(conn),
+		Tx:         s,
 	}
 	return s.stores
 }
