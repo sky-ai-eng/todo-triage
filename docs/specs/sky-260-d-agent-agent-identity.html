@@ -727,18 +727,19 @@ SELECT 'down not supported';</span>
   <h3>Local install bootstrap</h3>
   <p>Runs from <code>main.go</code> after <code>db.Migrate</code> + alongside <code>seedDefaultPrompts</code>. New helper in <code>seed.go</code> (or a sibling file — recommend <code>bootstrap.go</code> since this isn't a "shipped row" seed, it's an install-time row insert).</p>
 
-<pre class="code"><span class="com">// internal/db/sqlite/bootstrap.go (or main package's bootstrap.go — call it)</span>
-<span class="kw">func</span> <span class="fn">BootstrapLocalAgent</span>(ctx context.Context, stores *db.Stores) error {
-  <span class="com">// Idempotent — Create returns the existing row's id on duplicate.
-  // Use a stable id so re-running the binary doesn't create new rows.</span>
+<pre class="code"><span class="com">// internal/db/bootstrap.go (package db, not the per-backend impls)
+// Idempotent — re-runs across boots leave existing rows intact.
+// Both backends use db.BootstrapAgentID(orgID) as the row id (a
+// deterministic UUIDv5 per orgID) — Agent.ID on the input is ignored
+// by both impls so cross-backend re-runs land on the same row.</span>
+<span class="kw">func</span> <span class="fn">BootstrapLocalAgent</span>(ctx context.Context, stores Stores) error {
   agentID, err := stores.Agents.<span class="fn">Create</span>(ctx, runmode.LocalDefaultOrg, domain.Agent{
-    ID:          <span class="str">"local-agent"</span>,                <span class="com">// SQLite TEXT key; Postgres uses gen_random_uuid()</span>
     DisplayName: <span class="str">"Triage Factory Bot"</span>,
   })
   <span class="kw">if</span> err != <span class="kw">nil</span> { <span class="kw">return</span> err }
 
-  <span class="com">// One team in local mode (synthetic 'default').</span>
-  <span class="kw">return</span> stores.TeamAgents.<span class="fn">AddForTeam</span>(ctx, runmode.LocalDefaultOrg, <span class="str">"default"</span>, agentID)
+  <span class="com">// One team in local mode (synthetic LocalDefaultTeamID = "default").</span>
+  <span class="kw">return</span> stores.TeamAgents.<span class="fn">AddForTeam</span>(ctx, runmode.LocalDefaultOrg, LocalDefaultTeamID, agentID)
 }
 </pre>
 
@@ -932,7 +933,7 @@ SELECT 'down not supported';</span>
       </tr>
       <tr>
         <td>Is <code>agents.id = 'local-agent'</code> too cute? Should we use a deterministic UUID instead?</td>
-        <td>Deterministic UUID derived from a fixed namespace + "local". Matches the <code>ShippedTaskRule.UUIDFor(orgID)</code> pattern. SQLite stores it as TEXT either way.</td>
+        <td><strong>Resolved (in implementation):</strong> deterministic UUID via <code>db.BootstrapAgentID(orgID)</code> on both backends. Agent.ID on the input is ignored — letting callers override creates a foot-gun where SQLite (no UNIQUE(org_id)) would write a row that GetForOrg's deterministic lookup couldn't reach.</td>
         <td>If a local install ever upgrades to multi (which the arch doc says they don't, but) or if local-mode data ends up in a Postgres dev env, a TEXT id like <code>"local-agent"</code> would clash with Postgres's UUID-typed PK. Stable UUID avoids the trap.</td>
       </tr>
       <tr>

@@ -12,10 +12,12 @@ import (
 
 // AgentStoreFactory is what a per-backend test file hands to
 // RunAgentStoreConformance. The factory returns the wired store +
-// the orgID to pass to every method. Postgres backend pre-seeds the
-// orgs row so agents.org_id FK satisfies; SQLite has no FK and just
-// returns runmode.LocalDefaultOrg.
-type AgentStoreFactory func(t *testing.T) (store db.AgentStore, orgID string)
+// the orgID to pass to every method + a patUserID that's safe to
+// write into agents.github_pat_user_id. Postgres backend pre-seeds
+// the orgs row + the owner users row (and returns the owner's UUID
+// as patUserID so the github_pat_user_id FK satisfies); SQLite has
+// no FK and returns any valid UUID string.
+type AgentStoreFactory func(t *testing.T) (store db.AgentStore, orgID, patUserID string)
 
 // RunAgentStoreConformance runs the shared assertion suite. What it
 // covers:
@@ -35,7 +37,7 @@ func RunAgentStoreConformance(t *testing.T, factory AgentStoreFactory) {
 	t.Helper()
 
 	t.Run("Create_FirstCallInsertsAndReturnsID", func(t *testing.T) {
-		store, orgID := factory(t)
+		store, orgID, _ := factory(t)
 		ctx := context.Background()
 		id, err := store.Create(ctx, orgID, domain.Agent{
 			DisplayName:  "Custom Bot Name",
@@ -66,7 +68,7 @@ func RunAgentStoreConformance(t *testing.T, factory AgentStoreFactory) {
 	})
 
 	t.Run("Create_DefaultsDisplayName", func(t *testing.T) {
-		store, orgID := factory(t)
+		store, orgID, _ := factory(t)
 		_, err := store.Create(context.Background(), orgID, domain.Agent{})
 		if err != nil {
 			t.Fatalf("Create: %v", err)
@@ -91,7 +93,7 @@ func RunAgentStoreConformance(t *testing.T, factory AgentStoreFactory) {
 		// Both backends now ignore a.ID and use the deterministic
 		// derivation; the returned id is the only id the row will
 		// ever have. This test pins that contract.
-		store, orgID := factory(t)
+		store, orgID, _ := factory(t)
 		ctx := context.Background()
 		id, err := store.Create(ctx, orgID, domain.Agent{
 			ID:          "00000000-1111-2222-3333-444444444444",
@@ -121,7 +123,7 @@ func RunAgentStoreConformance(t *testing.T, factory AgentStoreFactory) {
 		// boots; the second Create must NOT error and must NOT change
 		// the existing row's id (callers persist the id elsewhere —
 		// flipping it would invalidate audit traces).
-		store, orgID := factory(t)
+		store, orgID, _ := factory(t)
 		ctx := context.Background()
 		first, err := store.Create(ctx, orgID, domain.Agent{DisplayName: "Original"})
 		if err != nil {
@@ -146,7 +148,7 @@ func RunAgentStoreConformance(t *testing.T, factory AgentStoreFactory) {
 	})
 
 	t.Run("GetForOrg_ReturnsNilWhenAbsent", func(t *testing.T) {
-		store, orgID := factory(t)
+		store, orgID, _ := factory(t)
 		got, err := store.GetForOrg(context.Background(), orgID)
 		if err != nil {
 			t.Fatalf("GetForOrg: %v", err)
@@ -157,7 +159,7 @@ func RunAgentStoreConformance(t *testing.T, factory AgentStoreFactory) {
 	})
 
 	t.Run("Update_AppliesFields", func(t *testing.T) {
-		store, orgID := factory(t)
+		store, orgID, _ := factory(t)
 		ctx := context.Background()
 		id, err := store.Create(ctx, orgID, domain.Agent{DisplayName: "Initial"})
 		if err != nil {
@@ -196,7 +198,7 @@ func RunAgentStoreConformance(t *testing.T, factory AgentStoreFactory) {
 		// The conformance asserts the contract (no error returned) for
 		// both backends — SQLite's no-op behavior comes from "WHERE
 		// id = ?" matching zero rows.
-		store, orgID := factory(t)
+		store, orgID, _ := factory(t)
 		ctx := context.Background()
 		if _, err := store.Create(ctx, orgID, domain.Agent{DisplayName: "Real"}); err != nil {
 			t.Fatalf("Create: %v", err)
@@ -219,7 +221,7 @@ func RunAgentStoreConformance(t *testing.T, factory AgentStoreFactory) {
 		// because of the FK. We exercise the mutual-exclusion property
 		// by starting with an installation-only row and clearing it via
 		// the App-set call.
-		store, orgID := factory(t)
+		store, orgID, _ := factory(t)
 		ctx := context.Background()
 		id, err := store.Create(ctx, orgID, domain.Agent{
 			DisplayName:             "Test",
@@ -245,14 +247,78 @@ func RunAgentStoreConformance(t *testing.T, factory AgentStoreFactory) {
 	})
 
 	t.Run("SetGitHubAppInstallation_OnInvalidUUID_IsNoop", func(t *testing.T) {
-		store, orgID := factory(t)
+		store, orgID, _ := factory(t)
 		if err := store.SetGitHubAppInstallation(context.Background(), orgID, "not-a-uuid", "12345"); err != nil {
 			t.Errorf("SetGitHubAppInstallation invalid UUID: want nil, got %v", err)
 		}
 	})
 
-	t.Run("SetGitHubPATUser_OnInvalidUUID_IsNoop", func(t *testing.T) {
-		store, orgID := factory(t)
+	t.Run("SetGitHubPATUser_WritesAndClearsApp", func(t *testing.T) {
+		// Mirror of SetGitHubAppInstallation_WritesAndClearsPATUser
+		// for the other credential source. Start with App-installed,
+		// switch to PAT-borrow, verify both:
+		//   1. github_pat_user_id is now the new userID
+		//   2. github_app_installation_id is NULL — "exactly one
+		//      credential source" invariant holds in both directions.
+		store, orgID, patUserID := factory(t)
+		ctx := context.Background()
+		id, err := store.Create(ctx, orgID, domain.Agent{
+			DisplayName:             "Test",
+			GitHubAppInstallationID: "55555",
+		})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if err := store.SetGitHubPATUser(ctx, orgID, id, patUserID); err != nil {
+			t.Fatalf("SetGitHubPATUser: %v", err)
+		}
+		got, _ := store.GetForOrg(ctx, orgID)
+		if got == nil {
+			t.Fatal("row missing after SetGitHubPATUser")
+		}
+		if got.GitHubPATUserID != patUserID {
+			t.Errorf("PAT user_id=%q want %q", got.GitHubPATUserID, patUserID)
+		}
+		if got.GitHubAppInstallationID != "" {
+			t.Errorf("App installation_id not cleared on PAT-set; got=%q", got.GitHubAppInstallationID)
+		}
+	})
+
+	t.Run("SetGitHubPATUser_RejectsMalformedUserID", func(t *testing.T) {
+		// Regression: an earlier version of both impls passed
+		// userID through nullUUID() / nullString() unconditionally, so a
+		// caller passing a non-UUID non-empty value (e.g. "alice@x.com"
+		// from a typo) would silently NULL-out github_pat_user_id AND
+		// clear github_app_installation_id in the same statement,
+		// wiping the agent's credentials entirely. Both impls now
+		// refuse malformed input loudly. Empty stays the explicit-clear
+		// path because that's a legitimate state transition.
+		store, orgID, _ := factory(t)
+		ctx := context.Background()
+		id, err := store.Create(ctx, orgID, domain.Agent{
+			DisplayName:             "Test",
+			GitHubAppInstallationID: "77777",
+		})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		err = store.SetGitHubPATUser(ctx, orgID, id, "alice@example.com")
+		if err == nil {
+			t.Fatal("SetGitHubPATUser accepted malformed userID; would silently wipe both credential fields")
+		}
+		// And the original credentials must be untouched — refusal
+		// means no UPDATE ran.
+		got, _ := store.GetForOrg(ctx, orgID)
+		if got == nil {
+			t.Fatal("row missing after refused SetGitHubPATUser")
+		}
+		if got.GitHubAppInstallationID != "77777" {
+			t.Errorf("App installation_id corrupted by refused call: %q", got.GitHubAppInstallationID)
+		}
+	})
+
+	t.Run("SetGitHubPATUser_OnInvalidAgentUUID_IsNoop", func(t *testing.T) {
+		store, orgID, _ := factory(t)
 		if err := store.SetGitHubPATUser(context.Background(), orgID, "not-a-uuid", uuid.New().String()); err != nil {
 			t.Errorf("SetGitHubPATUser invalid agent UUID: want nil, got %v", err)
 		}

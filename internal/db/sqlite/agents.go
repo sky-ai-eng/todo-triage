@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -125,6 +127,16 @@ func (s *agentStore) SetGitHubPATUser(ctx context.Context, orgID, agentID, userI
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
+	// Match the Postgres impl's input contract: empty = intentional
+	// clear, valid UUID = intentional set, anything else is a caller
+	// bug. SQLite's github_pat_user_id is TEXT with no FK so a
+	// malformed write wouldn't error at the column layer, but the
+	// silent "wipe both credential fields" effect is just as bad as
+	// in Postgres. Reject loudly to keep the cross-backend shape
+	// uniform.
+	if userID != "" && !isValidUUIDLike(userID) {
+		return fmt.Errorf("sqlite agents: SetGitHubPATUser: userID %q is not empty and not a valid UUID", userID)
+	}
 	_, err := s.q.ExecContext(ctx, `
 		UPDATE agents
 		SET github_pat_user_id = ?,
@@ -133,6 +145,15 @@ func (s *agentStore) SetGitHubPATUser(ctx context.Context, orgID, agentID, userI
 		WHERE id = ?
 	`, nullString(userID), time.Now().UTC(), agentID)
 	return err
+}
+
+// isValidUUIDLike is a thin local mirror of postgres/uuid.go:isValidUUID.
+// Duplicated rather than reaching across packages because the SQLite
+// store has no other reason to import postgres-internal helpers; it's
+// four lines of code and the shape is unlikely to drift.
+func isValidUUIDLike(s string) bool {
+	_, err := uuid.Parse(s)
+	return err == nil
 }
 
 // nullString returns NULL when s is empty so the column scans back as

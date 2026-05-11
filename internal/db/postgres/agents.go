@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -162,6 +163,15 @@ func (s *agentStore) SetGitHubAppInstallation(ctx context.Context, orgID, agentI
 func (s *agentStore) SetGitHubPATUser(ctx context.Context, orgID, agentID, userID string) error {
 	if !isValidUUID(agentID) {
 		return nil
+	}
+	// "" = caller-intentional clear, valid UUID = caller-intentional set.
+	// Any other shape (e.g. "alice@example.com" passed by mistake) is a
+	// programmer bug we refuse loudly rather than silently treating as
+	// clear — silently clearing would wipe BOTH credential fields in the
+	// same statement and leave the agent with no auth source, an
+	// outcome no caller intended.
+	if userID != "" && !isValidUUID(userID) {
+		return fmt.Errorf("postgres agents: SetGitHubPATUser: userID %q is not empty and not a valid UUID", userID)
 	}
 	_, err := s.app.ExecContext(ctx, `
 		UPDATE agents

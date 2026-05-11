@@ -77,6 +77,14 @@ func (s *teamAgentStore) AddForTeam(ctx context.Context, orgID, teamID, agentID 
 		// bootstrap runs outside any user tx.
 		return errors.New("postgres team_agents: AddForTeam must not be called inside WithTx; call stores.TeamAgents.AddForTeam directly")
 	}
+	// Match the no-op-on-invalid-UUID convention the rest of this store
+	// uses (GetForTeam, SetEnabled, SetOverrides, Remove). Without this
+	// guard the bare ExecContext below would raise Postgres 22P02 on
+	// malformed input, which leaks the parse layer into callers and
+	// makes the API inconsistent with its peers in the same interface.
+	if !isValidUUID(teamID) || !isValidUUID(agentID) {
+		return nil
+	}
 	// ON CONFLICT preserves existing rows verbatim — re-runs of
 	// bootstrap don't flip Enabled back to TRUE if a team has
 	// already disabled the bot.

@@ -24,12 +24,17 @@ import (
 func TestAgentStore_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
 
-	dbtest.RunAgentStoreConformance(t, func(t *testing.T) (db.AgentStore, string) {
+	dbtest.RunAgentStoreConformance(t, func(t *testing.T) (db.AgentStore, string, string) {
 		t.Helper()
 		h.Reset(t)
 		orgID := seedPgOrgForAgents(t, h)
+		// Reuse the org owner's user id as the SetGitHubPATUser target.
+		// agents.github_pat_user_id FKs users(id); the seed already
+		// created this user, so the FK is satisfied without seeding
+		// another row.
+		ownerID := mustOwnerUserForOrg(t, h, orgID)
 		stores := pgstore.New(h.AdminDB, h.AdminDB)
-		return stores.Agents, orgID
+		return stores.Agents, orgID, ownerID
 	})
 }
 
