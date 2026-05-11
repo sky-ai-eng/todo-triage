@@ -13,8 +13,9 @@ import (
 )
 
 // Store holds the SQLite connection + the bundle of resource-store
-// implementations wired against it. Returned by New(); the bundle
-// (db.Stores) is what main.go hands to handlers.
+// implementations wired against it. New returns the assembled
+// db.Stores bundle for application startup wiring; handlers should
+// depend only on the specific store interfaces they need.
 type Store struct {
 	conn *sql.DB
 
