@@ -16,6 +16,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/config"
 	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
@@ -198,15 +199,42 @@ func main() {
 		}
 	}
 
-	database, err := db.Open()
-	if err != nil {
-		log.Fatalf("failed to open database: %v", err)
+	// Runmode dispatch (SKY-246 D2 wave 0): open the right backend
+	// for the mode and wire the per-resource store bundle against
+	// it. The dispatch wraps db.Open/db.Migrate so a misconfigured
+	// TF_MODE=multi fails fast — without this guard, the local
+	// SQLite file at ~/.triagefactory/triagefactory.db would be
+	// created and migrated before the multi branch could reject.
+	//
+	// Multi mode is unreachable end-to-end until the v1 multi-tenant
+	// epic (SKY-242) completes: every store needs to migrate to the
+	// per-resource interface, and D7 needs to wire the Postgres
+	// connection config. Until then, packages outside the converted
+	// stores still call db.X(*sql.DB, ...) helpers that emit SQLite
+	// SQL — pointed at Postgres they'd produce runtime errors. The
+	// fatal here makes the unreachable state explicit instead of
+	// surfacing later as a pile of confusing SQL failures.
+	var (
+		database *sql.DB
+		stores   db.Stores
+	)
+	switch runmode.Current() {
+	case runmode.ModeLocal:
+		var err error
+		database, err = db.Open()
+		if err != nil {
+			log.Fatalf("failed to open database: %v", err)
+		}
+		if err := db.Migrate(database, "sqlite3"); err != nil {
+			log.Fatalf("failed to migrate database: %v", err)
+		}
+		stores = sqlitestore.New(database)
+	case runmode.ModeMulti:
+		log.Fatalf("TF_MODE=multi: multi-tenant mode is not yet wired end-to-end; see SKY-242 (v1 multi-tenant epic). Unset TF_MODE to run in local mode.")
+	default:
+		log.Fatalf("unknown runmode: %v", runmode.Current())
 	}
 	defer database.Close()
-
-	if err := db.Migrate(database, "sqlite3"); err != nil {
-		log.Fatalf("failed to migrate database: %v", err)
-	}
 
 	// Wire the config package against the DB and run the one-shot
 	// import of any pre-DB ~/.triagefactory/config.yaml. Must happen
@@ -385,7 +413,7 @@ func main() {
 	// Actual initialization happens below after the spawner is created.
 	var eventRouter *routing.Router
 
-	scorer := ai.NewRunner(database, ai.RunnerCallbacks{
+	scorer := ai.NewRunner(database, stores.Scores, runmode.LocalDefaultOrg, ai.RunnerCallbacks{
 		OnScoringStarted: func(taskIDs []string) {
 			wsHub.Broadcast(websocket.Event{
 				Type: "scoring_started",
