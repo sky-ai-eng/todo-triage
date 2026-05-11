@@ -33,7 +33,7 @@ func (s *taskRuleStore) Seed(ctx context.Context, orgID string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
-	now := time.Now()
+	now := time.Now().UTC()
 	var inserted int64
 	for _, r := range db.ShippedTaskRules {
 		var pred any
