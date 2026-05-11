@@ -188,7 +188,7 @@ func upsertSystemPromptVersionPG(ctx context.Context, q queryer, orgID, promptID
 
 func (s *promptStore) List(ctx context.Context, orgID string) ([]domain.Prompt, error) {
 	rows, err := s.app.QueryContext(ctx, `
-		SELECT id, name, body, source, allowed_tools, usage_count, created_at, updated_at
+		SELECT id, name, body, source, allowed_tools, model, usage_count, created_at, updated_at
 		FROM prompts WHERE org_id = $1 AND hidden = FALSE ORDER BY updated_at DESC
 	`, orgID)
 	if err != nil {
@@ -199,7 +199,7 @@ func (s *promptStore) List(ctx context.Context, orgID string) ([]domain.Prompt, 
 	var prompts []domain.Prompt
 	for rows.Next() {
 		var p domain.Prompt
-		if err := rows.Scan(&p.ID, &p.Name, &p.Body, &p.Source, &p.AllowedTools, &p.UsageCount, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.Body, &p.Source, &p.AllowedTools, &p.Model, &p.UsageCount, &p.CreatedAt, &p.UpdatedAt); err != nil {
 			return nil, err
 		}
 		prompts = append(prompts, p)
@@ -210,9 +210,9 @@ func (s *promptStore) List(ctx context.Context, orgID string) ([]domain.Prompt, 
 func (s *promptStore) Get(ctx context.Context, orgID string, id string) (*domain.Prompt, error) {
 	var p domain.Prompt
 	err := s.app.QueryRowContext(ctx, `
-		SELECT id, name, body, source, allowed_tools, usage_count, created_at, updated_at
+		SELECT id, name, body, source, allowed_tools, model, usage_count, created_at, updated_at
 		FROM prompts WHERE org_id = $1 AND id = $2
-	`, orgID, id).Scan(&p.ID, &p.Name, &p.Body, &p.Source, &p.AllowedTools, &p.UsageCount, &p.CreatedAt, &p.UpdatedAt)
+	`, orgID, id).Scan(&p.ID, &p.Name, &p.Body, &p.Source, &p.AllowedTools, &p.Model, &p.UsageCount, &p.CreatedAt, &p.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -237,19 +237,19 @@ func (s *promptStore) Create(ctx context.Context, orgID string, p domain.Prompt)
 	// COALESCE keeps the audit-when-possible behavior; the fallback
 	// only fires when no real user is on the call.
 	_, err := s.app.ExecContext(ctx, `
-		INSERT INTO prompts (id, org_id, creator_user_id, name, body, source, allowed_tools, usage_count, created_at, updated_at)
+		INSERT INTO prompts (id, org_id, creator_user_id, name, body, source, allowed_tools, model, usage_count, created_at, updated_at)
 		VALUES ($1, $2,
 			COALESCE(tf.current_user_id(), (SELECT owner_user_id FROM orgs WHERE id = $2)),
-			$3, $4, $5, $6, 0, now(), now())
-	`, p.ID, orgID, p.Name, p.Body, p.Source, p.AllowedTools)
+			$3, $4, $5, $6, $7, 0, now(), now())
+	`, p.ID, orgID, p.Name, p.Body, p.Source, p.AllowedTools, p.Model)
 	return err
 }
 
-func (s *promptStore) Update(ctx context.Context, orgID string, id, name, body string) error {
+func (s *promptStore) Update(ctx context.Context, orgID string, id, name, body, model string) error {
 	_, err := s.app.ExecContext(ctx, `
-		UPDATE prompts SET name = $1, body = $2, user_modified = TRUE, updated_at = now()
-		WHERE org_id = $3 AND id = $4
-	`, name, body, orgID, id)
+		UPDATE prompts SET name = $1, body = $2, model = $3, user_modified = TRUE, updated_at = now()
+		WHERE org_id = $4 AND id = $5
+	`, name, body, model, orgID, id)
 	return err
 }
 

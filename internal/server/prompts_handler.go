@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -51,8 +52,31 @@ func (s *Server) handlePromptGet(w http.ResponseWriter, r *http.Request) {
 }
 
 type createPromptRequest struct {
-	Name string `json:"name"`
-	Body string `json:"body"`
+	Name  string `json:"name"`
+	Body  string `json:"body"`
+	Model string `json:"model"`
+}
+
+// allowedPromptModelOverrides is the set of non-empty values accepted
+// for prompts.model. "" is always allowed and means "inherit the
+// global default from settings.AI.Model at dispatch". Kept aligned
+// with the picker in frontend/src/pages/Settings.tsx.
+var allowedPromptModelOverrides = []string{"haiku", "sonnet", "opus"}
+
+func validPromptModel(m string) bool {
+	if m == "" {
+		return true
+	}
+	for _, v := range allowedPromptModelOverrides {
+		if m == v {
+			return true
+		}
+	}
+	return false
+}
+
+func invalidPromptModelError() string {
+	return `model must be "" or one of: ` + strings.Join(allowedPromptModelOverrides, ", ")
 }
 
 func (s *Server) handlePromptCreate(w http.ResponseWriter, r *http.Request) {
@@ -65,6 +89,10 @@ func (s *Server) handlePromptCreate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name and body are required"})
 		return
 	}
+	if !validPromptModel(req.Model) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": invalidPromptModelError()})
+		return
+	}
 
 	id := uuid.New().String()
 	prompt := domain.Prompt{
@@ -72,6 +100,7 @@ func (s *Server) handlePromptCreate(w http.ResponseWriter, r *http.Request) {
 		Name:   req.Name,
 		Body:   req.Body,
 		Source: "user",
+		Model:  req.Model,
 	}
 
 	if err := s.prompts.Create(r.Context(), runmode.LocalDefaultOrg, prompt); err != nil {
@@ -84,8 +113,9 @@ func (s *Server) handlePromptCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 type updatePromptRequest struct {
-	Name string `json:"name"`
-	Body string `json:"body"`
+	Name  string `json:"name"`
+	Body  string `json:"body"`
+	Model string `json:"model"`
 }
 
 func (s *Server) handlePromptPut(w http.ResponseWriter, r *http.Request) {
@@ -100,8 +130,12 @@ func (s *Server) handlePromptPut(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name and body are required"})
 		return
 	}
+	if !validPromptModel(req.Model) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": invalidPromptModelError()})
+		return
+	}
 
-	if err := s.prompts.Update(r.Context(), runmode.LocalDefaultOrg, id, req.Name, req.Body); err != nil {
+	if err := s.prompts.Update(r.Context(), runmode.LocalDefaultOrg, id, req.Name, req.Body, req.Model); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
