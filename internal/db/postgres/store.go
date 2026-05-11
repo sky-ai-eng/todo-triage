@@ -69,7 +69,13 @@ func New(admin, app *sql.DB) db.Stores {
 		// request.jwt.claims before calling (the wrapper enforces
 		// p_org_id == tf.current_org_id()).
 		Secrets: newSecretStore(app),
-		Tx:      s,
+		// TaskRules needs both pools: Seed writes shipped rows
+		// without JWT claims, but the task_rules_modify RLS policy
+		// gates inserts on creator_user_id = tf.current_user_id().
+		// The impl routes Seed to admin (BYPASSRLS) and every CRUD
+		// method to app — same pool-split pattern PromptStore uses.
+		TaskRules: newTaskRuleStore(app, admin),
+		Tx:        s,
 	}
 	return s.stores
 }
@@ -103,5 +109,6 @@ func NewForTx(tx *sql.Tx) db.TxStores {
 		Swipes:    newSwipeStore(tx),
 		Dashboard: newDashboardStore(tx),
 		Secrets:   newSecretStore(tx),
+		TaskRules: newTxTaskRuleStore(tx),
 	}
 }

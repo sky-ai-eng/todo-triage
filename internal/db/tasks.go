@@ -427,30 +427,3 @@ func scanFields(scanner interface{ Scan(...any) error }, t *domain.Task) error {
 func scanTaskFields(rows *sql.Rows, t *domain.Task) error {
 	return scanFields(rows, t)
 }
-
-// --- Enabled rules query (for routing) ------------------------------------
-
-// GetEnabledRulesForEvent returns all enabled task_rules for an event type.
-func GetEnabledRulesForEvent(db *sql.DB, eventType string) ([]domain.TaskRule, error) {
-	rows, err := db.Query(`
-		SELECT id, event_type, scope_predicate_json, enabled, name,
-		       default_priority, sort_order, source, created_at, updated_at
-		FROM task_rules
-		WHERE event_type = ? AND enabled = 1
-	`, eventType)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var rules []domain.TaskRule
-	for rows.Next() {
-		var r domain.TaskRule
-		if err := rows.Scan(&r.ID, &r.EventType, &r.ScopePredicateJSON, &r.Enabled, &r.Name,
-			&r.DefaultPriority, &r.SortOrder, &r.Source, &r.CreatedAt, &r.UpdatedAt); err != nil {
-			return nil, err
-		}
-		rules = append(rules, r)
-	}
-	return rules, rows.Err()
-}

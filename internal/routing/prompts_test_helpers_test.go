@@ -21,6 +21,17 @@ func testPromptStore(database *sql.DB) db.PromptStore {
 	return sqlitestore.New(database).Prompts
 }
 
+// testTaskRuleStore returns a SQLite-backed TaskRuleStore for routing
+// tests. Mirrors testPromptStore — the router takes a TaskRuleStore
+// argument now that GetEnabledRulesForEvent moved off raw db.* and
+// onto the store interface.
+func testTaskRuleStore(database *sql.DB) db.TaskRuleStore {
+	if database == nil {
+		return nil
+	}
+	return sqlitestore.New(database).TaskRules
+}
+
 // createTestPrompt is the replacement for the deleted db.CreatePrompt
 // free-function. Routes through the store so test fixtures and
 // production share the same insert SQL.

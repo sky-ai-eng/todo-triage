@@ -24,6 +24,7 @@ type Server struct {
 	prompts            db.PromptStore
 	swipes             db.SwipeStore
 	dashboard          db.DashboardStore
+	taskRules          db.TaskRuleStore
 	mux                *http.ServeMux
 	static             fs.FS
 	ws                 *websocket.Hub
@@ -75,12 +76,13 @@ func (s *Server) projectMutex(id string) *sync.Mutex {
 // argument list grows one store at a time as their callers migrate;
 // raw *sql.DB stays available for handlers that haven't been ported
 // to a store yet.
-func New(database *sql.DB, prompts db.PromptStore, swipes db.SwipeStore, dashboard db.DashboardStore) *Server {
+func New(database *sql.DB, prompts db.PromptStore, swipes db.SwipeStore, dashboard db.DashboardStore, taskRules db.TaskRuleStore) *Server {
 	s := &Server{
 		db:        database,
 		prompts:   prompts,
 		swipes:    swipes,
 		dashboard: dashboard,
+		taskRules: taskRules,
 		mux:       http.NewServeMux(),
 		ws:        websocket.NewHub(),
 	}

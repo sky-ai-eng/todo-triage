@@ -12,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	_ "modernc.org/sqlite"
 )
 
@@ -39,7 +40,7 @@ func newTestServer(t *testing.T) *Server {
 		t.Fatalf("config init: %v", err)
 	}
 	stores := sqlitestore.New(database)
-	return New(database, stores.Prompts, stores.Swipes, stores.Dashboard)
+	return New(database, stores.Prompts, stores.Swipes, stores.Dashboard, stores.TaskRules)
 }
 
 // doJSON performs a JSON request against the server's mux and returns the
@@ -302,7 +303,7 @@ func TestTaskRulePatch_PredicateInvalidField_Rejects(t *testing.T) {
 // request.
 func TestTaskRuleRoundTrip_GetThenPostUnchanged(t *testing.T) {
 	s := newTestServer(t)
-	if err := db.SeedTaskRules(s.db); err != nil {
+	if err := s.taskRules.Seed(t.Context(), runmode.LocalDefaultOrg); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 

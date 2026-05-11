@@ -33,6 +33,7 @@ func New(conn *sql.DB) db.Stores {
 		Swipes:    newSwipeStore(conn),
 		Dashboard: newDashboardStore(conn),
 		Secrets:   newSecretStore(),
+		TaskRules: newTaskRuleStore(conn),
 		Tx:        s,
 	}
 	return s.stores

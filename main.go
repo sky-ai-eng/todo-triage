@@ -265,7 +265,7 @@ func main() {
 		openBrowser(fmt.Sprintf("http://localhost%s", addr))
 	}
 
-	srv := server.New(database, stores.Prompts, stores.Swipes, stores.Dashboard)
+	srv := server.New(database, stores.Prompts, stores.Swipes, stores.Dashboard, stores.TaskRules)
 
 	distFS, err := frontendDist()
 	if err != nil {
@@ -301,7 +301,7 @@ func main() {
 	if err := db.SeedEventTypes(database); err != nil {
 		log.Fatalf("failed to seed event types: %v", err)
 	}
-	if err := db.SeedTaskRules(database); err != nil {
+	if err := stores.TaskRules.Seed(context.Background(), runmode.LocalDefaultOrg); err != nil {
 		log.Fatalf("failed to seed task rules: %v", err)
 	}
 	seedDefaultPrompts(database, stores.Prompts)
@@ -546,7 +546,7 @@ func main() {
 	// Event router — records events, creates/bumps tasks, auto-delegates on
 	// matching triggers, runs inline close checks. Also handles post-scoring
 	// re-derive via the scorer callback wired above.
-	eventRouter = routing.NewRouter(database, stores.Prompts, spawner, scorer, wsHub)
+	eventRouter = routing.NewRouter(database, stores.Prompts, stores.TaskRules, spawner, scorer, wsHub)
 	bus.Subscribe(eventbus.Subscriber{
 		Name:   "router",
 		Filter: []string{"github:", "jira:"},
