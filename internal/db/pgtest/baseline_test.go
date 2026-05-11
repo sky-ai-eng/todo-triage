@@ -2377,6 +2377,9 @@ func TestRLS_BaselineCrossOrgPin_MultiOrgUser(t *testing.T) {
 			}
 			teams[tid] = true
 		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
 		if !teams[teamA] {
 			return fmt.Errorf("teamA settings not visible in orgA context")
 		}
