@@ -61,7 +61,14 @@ func New(admin, app *sql.DB) db.Stores {
 		// system_prompt_versions (REVOKE'd from tf_app — admin only),
 		// every other method runs on the app pool. The impl picks
 		// per-method internally.
-		Prompts: newPromptStore(app, admin),
+		Prompts:   newPromptStore(app, admin),
+		Swipes:    newSwipeStore(app),
+		Dashboard: newDashboardStore(app),
+		// Secrets wraps the public.vault_* SECURITY DEFINER functions
+		// — GRANTed to tf_app only. Caller must have set
+		// request.jwt.claims before calling (the wrapper enforces
+		// p_org_id == tf.current_org_id()).
+		Secrets: newSecretStore(app),
 		Tx:      s,
 	}
 	return s.stores
@@ -75,3 +82,26 @@ func New(admin, app *sql.DB) db.Stores {
 // openers alongside the config + DSN plumbing that actually consumes
 // them. Tests construct *sql.DB via the pgtest harness, which
 // registers the pgx driver itself.
+
+// NewForTx returns a db.TxStores wired against one *sql.Tx — the
+// same shape WithTx produces internally for its closure body,
+// exposed so tests can drive store methods against a claims-set
+// transaction without going through a WithTx callback. The most
+// prominent caller is the SecretStore test, where the vault
+// wrapper refuses calls without a matching JWT claim.
+//
+// Returns db.TxStores (not db.Stores) deliberately: db.Stores
+// carries a TxRunner, and a Stores{Tx: nil} would panic on
+// stores.Tx.WithTx(...). TxStores has no Tx field, so misuse is
+// a compile error rather than a runtime crash. Production code
+// reaches the same wiring via Store.WithTx; this helper is the
+// test-side door into it.
+func NewForTx(tx *sql.Tx) db.TxStores {
+	return db.TxStores{
+		Scores:    newScoreStore(tx),
+		Prompts:   newTxPromptStore(tx),
+		Swipes:    newSwipeStore(tx),
+		Dashboard: newDashboardStore(tx),
+		Secrets:   newSecretStore(tx),
+	}
+}

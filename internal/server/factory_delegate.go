@@ -9,6 +9,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // factoryDelegateRequest is the body for POST /api/factory/delegate.
@@ -193,7 +194,7 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	// spawner's run-completion path unconditionally sets task.status
 	// to 'done' (spawner.go:829), so a missed queued→delegated
 	// transition still resolves correctly at the end.
-	if _, err := db.RecordSwipe(s.db, task.ID, "delegate", 0); err != nil {
+	if _, err := s.swipes.RecordSwipe(r.Context(), runmode.LocalDefaultOrg, task.ID, "delegate", 0); err != nil {
 		log.Printf("[factory] failed to record delegate swipe for task %s after run %s started: %v",
 			task.ID, runID, err)
 	}

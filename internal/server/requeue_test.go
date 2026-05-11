@@ -8,6 +8,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // pendingApprovalFixture installs the full FK chain for a task whose
@@ -378,7 +379,7 @@ func TestHandleRequeue_404OnMissingTask(t *testing.T) {
 func TestRequeueTask_OkFalseOnMissingID(t *testing.T) {
 	s := newTestServer(t)
 
-	ok, err := db.RequeueTask(s.db, "no-such-task")
+	ok, err := s.swipes.RequeueTask(t.Context(), runmode.LocalDefaultOrg, "no-such-task")
 	if err != nil {
 		t.Fatalf("RequeueTask: %v", err)
 	}

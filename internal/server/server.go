@@ -22,6 +22,8 @@ import (
 type Server struct {
 	db                 *sql.DB
 	prompts            db.PromptStore
+	swipes             db.SwipeStore
+	dashboard          db.DashboardStore
 	mux                *http.ServeMux
 	static             fs.FS
 	ws                 *websocket.Hub
@@ -69,16 +71,18 @@ func (s *Server) projectMutex(id string) *sync.Mutex {
 }
 
 // New creates a new server with the given database + the per-resource
-// stores migrated under SKY-246, and registers all routes. Today that's
-// just db.PromptStore; subsequent waves grow the argument list one
-// store at a time as their callers migrate. Raw *sql.DB stays
-// available for handlers that haven't been ported to a store yet.
-func New(database *sql.DB, prompts db.PromptStore) *Server {
+// stores migrated under SKY-246, and registers all routes. The
+// argument list grows one store at a time as their callers migrate;
+// raw *sql.DB stays available for handlers that haven't been ported
+// to a store yet.
+func New(database *sql.DB, prompts db.PromptStore, swipes db.SwipeStore, dashboard db.DashboardStore) *Server {
 	s := &Server{
-		db:      database,
-		prompts: prompts,
-		mux:     http.NewServeMux(),
-		ws:      websocket.NewHub(),
+		db:        database,
+		prompts:   prompts,
+		swipes:    swipes,
+		dashboard: dashboard,
+		mux:       http.NewServeMux(),
+		ws:        websocket.NewHub(),
 	}
 	s.routes()
 	return s

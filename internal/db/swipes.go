@@ -1,149 +1,50 @@
 package db
 
 import (
-	"database/sql"
+	"context"
 	"time"
 )
 
-// RecordSwipe inserts a swipe event and updates the task status accordingly.
-// Returns the new task status.
-func RecordSwipe(database *sql.DB, taskID, action string, hesitationMs int) (string, error) {
-	tx, err := database.Begin()
-	if err != nil {
-		return "", err
-	}
-	defer tx.Rollback()
+//go:generate go run github.com/vektra/mockery/v2 --name=SwipeStore --output=./mocks --case=underscore --with-expecter
 
-	// Insert swipe event
-	_, err = tx.Exec(
-		`INSERT INTO swipe_events (task_id, action, hesitation_ms) VALUES (?, ?, ?)`,
-		taskID, action, hesitationMs,
-	)
-	if err != nil {
-		return "", err
-	}
-
-	// Map action to task status
-	var newStatus string
-	switch action {
-	case "claim":
-		newStatus = "claimed"
-	case "dismiss":
-		newStatus = "dismissed"
-	case "snooze":
-		newStatus = "snoozed"
-	case "delegate":
-		newStatus = "delegated"
-	case "complete":
-		newStatus = "done"
-	default:
-		newStatus = "queued"
-	}
-
-	_, err = tx.Exec(`UPDATE tasks SET status = ? WHERE id = ?`, newStatus, taskID)
-	if err != nil {
-		return "", err
-	}
-
-	return newStatus, tx.Commit()
-}
-
-// SnoozeTask sets the snooze_until timestamp and updates status to snoozed.
-func SnoozeTask(database *sql.DB, taskID string, until time.Time, hesitationMs int) error {
-	tx, err := database.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	_, err = tx.Exec(
-		`INSERT INTO swipe_events (task_id, action, hesitation_ms) VALUES (?, 'snooze', ?)`,
-		taskID, hesitationMs,
-	)
-	if err != nil {
-		return err
-	}
-
-	_, err = tx.Exec(
-		`UPDATE tasks SET status = 'snoozed', snooze_until = ? WHERE id = ?`,
-		until, taskID,
-	)
-	if err != nil {
-		return err
-	}
-
-	return tx.Commit()
-}
-
-// RequeueTask flips a task back to the queue without recording a
-// swipe_events row. Used by state-driven requeue paths (Board's
-// drag-to-Queue, SKY-207's "Return to queue" button, anything else
-// that isn't a swipe-card UX undo). Mirrors UndoLastSwipe's status
-// reset half but skips the audit row — those events belong to the
-// swipe subsystem and would muddy the analytics if every drag-to-
-// queue gesture got logged as if the user had swiped.
+// SwipeStore owns the audit-log of user swipe decisions on tasks
+// (swipe_events) plus the task-status writes that follow each swipe.
+// Logically split from TaskStore because the swipe surface has a
+// distinct shape: it's append-only audit + a status transition, and
+// the only consumer is the Board's swipe-card handler. Keeping the
+// surface narrow means the handler imports a 4-method interface
+// instead of the full task lifecycle.
 //
-// Returns ok=false when no row matched the taskID. Without this
-// signal, the public /requeue endpoint would silently 200 on a
-// bogus id (the underlying UPDATE just affects 0 rows) — masking
-// frontend bugs and making races between GetTask and the UPDATE
-// indistinguishable from real successes. Mirrors the
-// MarkAgentRunCancelledIfActive / MarkAgentRunDiscarded ok-bool
-// pattern.
-//
-// Wrapped in a tx for symmetry with UndoLastSwipe + future-
-// proofing if more state needs clearing on requeue (snooze_until
-// is the only one today; if a future state needs reset, both
-// helpers should evolve together).
-func RequeueTask(database *sql.DB, taskID string) (bool, error) {
-	tx, err := database.Begin()
-	if err != nil {
-		return false, err
-	}
-	defer tx.Rollback()
+// Atomicity: every mutating method writes the swipe_events row AND
+// updates the corresponding task in a single transaction — a partial
+// state ("status updated but no audit row" or vice versa) would
+// break the Board's undo flow and the analytics views.
+type SwipeStore interface {
+	// RecordSwipe inserts a swipe_events row and transitions the
+	// task's status based on the action ("claim" → claimed,
+	// "dismiss" → dismissed, "delegate" → delegated, "complete" →
+	// done; unknown action defaults to queued so a misuse doesn't
+	// silently strand the task). Returns the new task status the
+	// handler echoes back in the JSON response.
+	RecordSwipe(ctx context.Context, orgID string, taskID, action string, hesitationMs int) (string, error)
 
-	res, err := tx.Exec(
-		`UPDATE tasks SET status = 'queued', snooze_until = NULL WHERE id = ?`,
-		taskID,
-	)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return false, err
-	}
-	if err := tx.Commit(); err != nil {
-		return false, err
-	}
-	return n > 0, nil
-}
+	// SnoozeTask is the snooze-specific swipe: writes a 'snooze'
+	// swipe_events row + sets tasks.snooze_until and
+	// tasks.status='snoozed'. Separate from RecordSwipe because the
+	// timestamp parameter has no other use and the action is fixed.
+	SnoozeTask(ctx context.Context, orgID string, taskID string, until time.Time, hesitationMs int) error
 
-// UndoLastSwipe reverts the most recent swipe on a task, setting it back to queued.
-func UndoLastSwipe(database *sql.DB, taskID string) error {
-	tx, err := database.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
+	// RequeueTask sends a task back to the queue WITHOUT recording a
+	// swipe_events row. Used by drag-to-Queue and the "Return to
+	// queue" button — gestures that aren't swipes, so the audit log
+	// stays a clean view of swipe-card decisions. Returns ok=false
+	// when no row matched (the public /requeue endpoint maps that
+	// to 404 instead of a silent 200 on a bogus id).
+	RequeueTask(ctx context.Context, orgID string, taskID string) (ok bool, err error)
 
-	// Record the undo event
-	_, err = tx.Exec(
-		`INSERT INTO swipe_events (task_id, action) VALUES (?, 'undo')`,
-		taskID,
-	)
-	if err != nil {
-		return err
-	}
-
-	// Reset task to queued
-	_, err = tx.Exec(
-		`UPDATE tasks SET status = 'queued', snooze_until = NULL WHERE id = ?`,
-		taskID,
-	)
-	if err != nil {
-		return err
-	}
-
-	return tx.Commit()
+	// UndoLastSwipe writes an 'undo' swipe_events row + flips the
+	// task back to 'queued' with snooze_until cleared. The Board's
+	// undo button maps to this; the audit row makes the undo itself
+	// visible in the swipe-history view.
+	UndoLastSwipe(ctx context.Context, orgID string, taskID string) error
 }

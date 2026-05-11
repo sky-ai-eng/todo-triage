@@ -14,6 +14,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // handleDashboardStats returns aggregated PR statistics from entity snapshots.
@@ -24,7 +25,7 @@ func (s *Server) handleDashboardStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stats, err := db.GetDashboardStats(s.db, creds.GitHubUsername, 30)
+	stats, err := s.dashboard.Stats(r.Context(), runmode.LocalDefaultOrg, creds.GitHubUsername, 30)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -41,7 +42,7 @@ func (s *Server) handleDashboardPRs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	prs, err := db.GetDashboardPRs(s.db, creds.GitHubUsername)
+	prs, err := s.dashboard.PRs(r.Context(), runmode.LocalDefaultOrg, creds.GitHubUsername)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
