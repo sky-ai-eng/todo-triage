@@ -113,6 +113,52 @@ func RunTriggerStoreConformance(t *testing.T, factory TriggerStoreFactory) {
 		}
 	})
 
+	t.Run("Get_ReturnsNilOnInvalidUUID", func(t *testing.T) {
+		// Non-UUID strings (e.g. a stale slug from before SKY-247's
+		// global PK migration, or a malformed URL param) should
+		// surface as not-found rather than as a Postgres parse
+		// error (22P02). SQLite's TEXT-keyed table naturally
+		// returns 0 rows; the Postgres impl validates the UUID
+		// shape up front to match.
+		store, orgID, _ := factory(t)
+		for _, garbage := range []string{
+			"not-a-uuid",
+			"system-trigger-ci-fix", // looks like the pre-UUID slug
+			"",
+			"42",
+			"00000000-0000-0000-0000-00000000000",   // one short
+			"00000000-0000-0000-0000-0000000000000", // one long
+		} {
+			got, err := store.Get(context.Background(), orgID, garbage)
+			if err != nil {
+				t.Errorf("Get(%q): want (nil, nil) got error: %v", garbage, err)
+			}
+			if got != nil {
+				t.Errorf("Get(%q): want nil, got %+v", garbage, got)
+			}
+		}
+	})
+
+	t.Run("Mutations_OnInvalidUUID_AreNoops", func(t *testing.T) {
+		// Update / SetEnabled / Delete on an invalid UUID return
+		// nil (no-op) rather than bubbling a 22P02 parse error.
+		// Production handlers Get-first to 404, so this just keeps
+		// the mutating path consistent with that pattern.
+		store, orgID, _ := factory(t)
+		ctx := context.Background()
+		if err := store.SetEnabled(ctx, orgID, "not-a-uuid", false); err != nil {
+			t.Errorf("SetEnabled on invalid UUID: want nil, got %v", err)
+		}
+		if err := store.Delete(ctx, orgID, "not-a-uuid"); err != nil {
+			t.Errorf("Delete on invalid UUID: want nil, got %v", err)
+		}
+		if err := store.Update(ctx, orgID, domain.PromptTrigger{
+			ID: "not-a-uuid", TriggerType: domain.TriggerTypeEvent,
+		}); err != nil {
+			t.Errorf("Update on invalid UUID: want nil, got %v", err)
+		}
+	})
+
 	t.Run("Create_AndRoundTrip", func(t *testing.T) {
 		store, orgID, seedPrompts := factory(t)
 		seedPrompts(t)

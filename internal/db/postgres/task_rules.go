@@ -163,6 +163,12 @@ func (s *taskRuleStore) List(ctx context.Context, orgID string) ([]domain.TaskRu
 }
 
 func (s *taskRuleStore) Get(ctx context.Context, orgID string, id string) (*domain.TaskRule, error) {
+	// task_rules.id is UUID-typed; non-UUID strings would error at
+	// the column type layer (22P02) before WHERE evaluates. Treat as
+	// not-found. See internal/db/postgres/uuid.go.
+	if !isValidUUID(id) {
+		return nil, nil
+	}
 	row := s.app.QueryRowContext(ctx, `
 		SELECT `+pgTaskRuleColumns+`
 		FROM task_rules
@@ -200,6 +206,10 @@ func (s *taskRuleStore) Create(ctx context.Context, orgID string, r domain.TaskR
 }
 
 func (s *taskRuleStore) Update(ctx context.Context, orgID string, r domain.TaskRule) error {
+	// Invalid UUID → no row to update; no-op matches SQLite semantics.
+	if !isValidUUID(r.ID) {
+		return nil
+	}
 	var pred any
 	if r.ScopePredicateJSON != nil {
 		pred = *r.ScopePredicateJSON
@@ -214,6 +224,9 @@ func (s *taskRuleStore) Update(ctx context.Context, orgID string, r domain.TaskR
 }
 
 func (s *taskRuleStore) SetEnabled(ctx context.Context, orgID string, id string, enabled bool) error {
+	if !isValidUUID(id) {
+		return nil
+	}
 	_, err := s.app.ExecContext(ctx, `
 		UPDATE task_rules SET enabled = $1, updated_at = now() WHERE org_id = $2 AND id = $3
 	`, enabled, orgID, id)
@@ -221,6 +234,9 @@ func (s *taskRuleStore) SetEnabled(ctx context.Context, orgID string, id string,
 }
 
 func (s *taskRuleStore) Delete(ctx context.Context, orgID string, id string) error {
+	if !isValidUUID(id) {
+		return nil
+	}
 	_, err := s.app.ExecContext(ctx, `DELETE FROM task_rules WHERE org_id = $1 AND id = $2`, orgID, id)
 	return err
 }
@@ -228,6 +244,13 @@ func (s *taskRuleStore) Delete(ctx context.Context, orgID string, id string) err
 func (s *taskRuleStore) Reorder(ctx context.Context, orgID string, ids []string) error {
 	return s.runInTx(ctx, func(tx *sql.Tx) error {
 		for i, id := range ids {
+			// Skip invalid UUIDs — same "missing id means no-op"
+			// semantic Update / SetEnabled / Delete apply. Reorder
+			// is the only multi-id mutating method; a single bad
+			// id shouldn't roll back the whole batch.
+			if !isValidUUID(id) {
+				continue
+			}
 			if _, err := tx.ExecContext(ctx, `
 				UPDATE task_rules SET sort_order = $1, updated_at = now() WHERE org_id = $2 AND id = $3
 			`, i, orgID, id); err != nil {

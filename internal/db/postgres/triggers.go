@@ -142,6 +142,13 @@ func (s *triggerStore) List(ctx context.Context, orgID string) ([]domain.PromptT
 }
 
 func (s *triggerStore) Get(ctx context.Context, orgID string, id string) (*domain.PromptTrigger, error) {
+	// prompt_triggers.id is UUID-typed; non-UUID strings would
+	// error at the column type layer (22P02) before WHERE evaluates.
+	// Treat as not-found to match the SQLite TEXT-keyed semantics.
+	// See internal/db/postgres/uuid.go.
+	if !isValidUUID(id) {
+		return nil, nil
+	}
 	row := s.app.QueryRowContext(ctx, `
 		SELECT `+pgTriggerColumns+`
 		FROM prompt_triggers
@@ -189,6 +196,12 @@ func (s *triggerStore) Create(ctx context.Context, orgID string, t domain.Prompt
 }
 
 func (s *triggerStore) Update(ctx context.Context, orgID string, t domain.PromptTrigger) error {
+	// Invalid UUID → row can't exist; no-op rather than surfacing
+	// a Postgres parse error. Production handlers Get-first to 404,
+	// so this just makes the mutating path consistent with that.
+	if !isValidUUID(t.ID) {
+		return nil
+	}
 	var pred any
 	if t.ScopePredicateJSON != nil {
 		pred = *t.ScopePredicateJSON
@@ -203,6 +216,9 @@ func (s *triggerStore) Update(ctx context.Context, orgID string, t domain.Prompt
 }
 
 func (s *triggerStore) SetEnabled(ctx context.Context, orgID string, id string, enabled bool) error {
+	if !isValidUUID(id) {
+		return nil
+	}
 	_, err := s.app.ExecContext(ctx, `
 		UPDATE prompt_triggers SET enabled = $1, updated_at = now() WHERE org_id = $2 AND id = $3
 	`, enabled, orgID, id)
@@ -210,6 +226,9 @@ func (s *triggerStore) SetEnabled(ctx context.Context, orgID string, id string, 
 }
 
 func (s *triggerStore) Delete(ctx context.Context, orgID string, id string) error {
+	if !isValidUUID(id) {
+		return nil
+	}
 	_, err := s.app.ExecContext(ctx, `DELETE FROM prompt_triggers WHERE org_id = $1 AND id = $2`, orgID, id)
 	return err
 }
