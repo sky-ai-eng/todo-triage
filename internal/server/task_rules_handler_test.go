@@ -10,6 +10,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/config"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	_ "modernc.org/sqlite"
 )
@@ -37,7 +38,8 @@ func newTestServer(t *testing.T) *Server {
 	if err := config.Init(database); err != nil {
 		t.Fatalf("config init: %v", err)
 	}
-	return New(database)
+	stores := sqlitestore.New(database)
+	return New(database, stores.Prompts)
 }
 
 // doJSON performs a JSON request against the server's mux and returns the

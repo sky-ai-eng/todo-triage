@@ -32,9 +32,7 @@ func TestActiveRunIDsForTask(t *testing.T) {
 		t.Fatalf("create task: %v", err)
 	}
 
-	if err := CreatePrompt(database, domain.Prompt{ID: "test-prompt", Name: "T", Body: "x", Source: "user"}); err != nil {
-		t.Fatalf("create prompt: %v", err)
-	}
+	createPromptForTest(t, database, domain.Prompt{ID: "test-prompt", Name: "T", Body: "x", Source: "user"})
 
 	// Seed runs in a mix of states. Non-terminal ones should appear in the
 	// returned list; terminal ones (including pending_approval, which is
@@ -136,10 +134,8 @@ func takeoverFixture(t *testing.T, database *sql.DB, runID, status, worktreePath
 	}
 	// Use FindOrCreate semantics for the prompt — multiple fixtures in
 	// one test would otherwise collide on the unique ID.
-	if existing, _ := GetPrompt(database, "test-prompt"); existing == nil {
-		if err := CreatePrompt(database, domain.Prompt{ID: "test-prompt", Name: "T", Body: "x", Source: "user"}); err != nil {
-			t.Fatalf("create prompt: %v", err)
-		}
+	if existing := getPromptForTest(t, database, "test-prompt"); existing == nil {
+		createPromptForTest(t, database, domain.Prompt{ID: "test-prompt", Name: "T", Body: "x", Source: "user"})
 	}
 	if err := CreateAgentRun(database, domain.AgentRun{
 		ID:           runID,

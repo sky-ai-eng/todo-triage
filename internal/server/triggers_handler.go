@@ -9,6 +9,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 func (s *Server) handleTriggersList(w http.ResponseWriter, r *http.Request) {
@@ -70,7 +71,7 @@ func (s *Server) handleTriggerCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate prompt exists
-	prompt, err := db.GetPrompt(s.db, req.PromptID)
+	prompt, err := s.prompts.Get(r.Context(), runmode.LocalDefaultOrg, req.PromptID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

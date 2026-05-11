@@ -1,89 +1,77 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"log"
 
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-func seedDefaultPrompts(database *sql.DB) {
-	// Default PR review prompt — manual only. The user picks when to
-	// review a PR; no automation makes sense for reviewing (including
-	// reviewing one's own draft — that's just running this prompt by hand).
-	err := db.SeedOrUpdateSystemPrompt(database, domain.Prompt{
-		ID:     "system-pr-review",
-		Name:   "PR Code Review",
-		Body:   ai.PRReviewPromptTemplate,
-		Source: "system",
-	})
-	if err != nil {
-		log.Printf("[seed] warning: failed to seed PR review prompt: %v", err)
+// seedDefaultPrompts seeds the shipped system prompts via PromptStore
+// per org. Local mode iterates a single synthetic org
+// (runmode.LocalDefaultOrg); multi mode will iterate stores.Orgs.ListAll
+// once Wave 4 lands OrgStore — same loop shape, different source. Until
+// then this is a one-element slice with a TODO so the shape is right.
+//
+// Calls into PromptStore.SeedOrUpdate which:
+//   - SQLite: writes to the single conn.
+//   - Postgres: routes the writes to the admin pool internally (the
+//     system_prompt_versions sidecar is REVOKE'd from tf_app per D3).
+//
+// Prompt-trigger seeding still uses db.SeedPromptTrigger because the
+// RuleStore migration lands in Wave 1's follow-up PRs.
+func seedDefaultPrompts(database *sql.DB, prompts db.PromptStore) {
+	ctx := context.Background()
+
+	// TODO(SKY-246 wave 4): when OrgStore lands, replace this hard-coded
+	// slice with stores.Orgs.ListAll(ctx). Until then multi mode is
+	// fatal at startup so the local-only slice is correct.
+	orgs := []string{runmode.LocalDefaultOrg}
+
+	shipped := []domain.Prompt{
+		// Default PR review prompt — manual only. The user picks when
+		// to review a PR; no automation makes sense for reviewing
+		// (including reviewing one's own draft — that's just running
+		// this prompt by hand).
+		{ID: "system-pr-review", Name: "PR Code Review", Body: ai.PRReviewPromptTemplate, Source: "system"},
+
+		// Merge conflict resolution prompt — auto-fired on merge
+		// conflicts on the user's own PRs via the matching trigger
+		// below.
+		{ID: "system-conflict-resolution", Name: "Merge Conflict Resolution", Body: ai.ConflictResolutionPromptTemplate, Source: "system"},
+
+		// CI fix prompt — auto-fired on CI failures via prompt_trigger.
+		{ID: "system-ci-fix", Name: "CI Fix", Body: ai.CIFixPromptTemplate, Source: "system"},
+
+		// Jira implementation prompt — auto-fired on issues assigned
+		// to the user via the matching trigger below.
+		{ID: "system-jira-implement", Name: "Jira Issue Implementation", Body: ai.JiraImplementPromptTemplate, Source: "system"},
+
+		// Fix review feedback — fires on reviews landed on the user's
+		// PRs. Same action regardless of whether the reviewer is the
+		// user (self-review loop) or someone else (normal code
+		// review): read the review, fix what's right, push back on
+		// what isn't, push to branch.
+		{ID: "system-fix-review-feedback", Name: "Fix Review Feedback", Body: ai.FixReviewFeedbackPromptTemplate, Source: "system"},
+
+		// Default Curator spec-authorship skill (SKY-221). The Curator
+		// materializes whichever prompt a project points at as a
+		// literal Claude Code skill on each dispatch; new projects
+		// start pointing at this one. Users override per-project via
+		// the Projects page.
+		{ID: domain.SystemTicketSpecPromptID, Name: "Curator: Ticket as a Spec", Body: ai.TicketSpecPromptTemplate, Source: "system"},
 	}
 
-	// Merge conflict resolution prompt — auto-fired on merge conflicts on
-	// the user's own PRs via the matching trigger below.
-	err = db.SeedOrUpdateSystemPrompt(database, domain.Prompt{
-		ID:     "system-conflict-resolution",
-		Name:   "Merge Conflict Resolution",
-		Body:   ai.ConflictResolutionPromptTemplate,
-		Source: "system",
-	})
-	if err != nil {
-		log.Printf("[seed] warning: failed to seed conflict resolution prompt: %v", err)
-	}
-
-	// CI fix prompt — auto-fired on CI failures via prompt_trigger.
-	err = db.SeedOrUpdateSystemPrompt(database, domain.Prompt{
-		ID:     "system-ci-fix",
-		Name:   "CI Fix",
-		Body:   ai.CIFixPromptTemplate,
-		Source: "system",
-	})
-	if err != nil {
-		log.Printf("[seed] warning: failed to seed CI fix prompt: %v", err)
-	}
-
-	// Jira implementation prompt — auto-fired on issues assigned to the
-	// user via the matching trigger below.
-	err = db.SeedOrUpdateSystemPrompt(database, domain.Prompt{
-		ID:     "system-jira-implement",
-		Name:   "Jira Issue Implementation",
-		Body:   ai.JiraImplementPromptTemplate,
-		Source: "system",
-	})
-	if err != nil {
-		log.Printf("[seed] warning: failed to seed Jira implement prompt: %v", err)
-	}
-
-	// Fix review feedback — fires on reviews landed on the user's PRs.
-	// Same action regardless of whether the reviewer is the user
-	// (self-review loop) or someone else (normal code review): read the
-	// review, fix what's right, push back on what isn't, push to branch.
-	err = db.SeedOrUpdateSystemPrompt(database, domain.Prompt{
-		ID:     "system-fix-review-feedback",
-		Name:   "Fix Review Feedback",
-		Body:   ai.FixReviewFeedbackPromptTemplate,
-		Source: "system",
-	})
-	if err != nil {
-		log.Printf("[seed] warning: failed to seed fix-review-feedback prompt: %v", err)
-	}
-
-	// Default Curator spec-authorship skill (SKY-221). The Curator
-	// materializes whichever prompt a project points at as a literal
-	// Claude Code skill on each dispatch; new projects start pointing
-	// at this one. Users override per-project via the Projects page.
-	err = db.SeedOrUpdateSystemPrompt(database, domain.Prompt{
-		ID:     domain.SystemTicketSpecPromptID,
-		Name:   "Curator: Ticket as a Spec",
-		Body:   ai.TicketSpecPromptTemplate,
-		Source: "system",
-	})
-	if err != nil {
-		log.Printf("[seed] warning: failed to seed ticket-spec prompt: %v", err)
+	for _, orgID := range orgs {
+		for _, p := range shipped {
+			if err := prompts.SeedOrUpdate(ctx, orgID, p); err != nil {
+				log.Printf("[seed] warning: failed to seed %s in org %s: %v", p.ID, orgID, err)
+			}
+		}
 	}
 
 	// --- Default triggers --------------------------------------------------

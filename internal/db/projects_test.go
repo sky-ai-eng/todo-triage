@@ -283,11 +283,9 @@ func TestListProjects_TrackerColumnsRoundtrip(t *testing.T) {
 func TestProject_SpecAuthorshipPromptID_Roundtrip(t *testing.T) {
 	database := newTestDB(t)
 
-	if err := SeedPrompt(database, domain.Prompt{
+	createPromptForTest(t, database, domain.Prompt{
 		ID: "test-spec-prompt", Name: "Test Spec", Body: "x", Source: "test",
-	}); err != nil {
-		t.Fatalf("seed prompt: %v", err)
-	}
+	})
 
 	id, err := CreateProject(database, domain.Project{
 		Name:                   "p",
@@ -316,9 +314,7 @@ func TestProject_SpecAuthorshipPromptID_Roundtrip(t *testing.T) {
 	if err := UpdateProject(database, *cleared); err != nil {
 		t.Fatalf("re-set: %v", err)
 	}
-	if err := DeletePrompt(database, "test-spec-prompt"); err != nil {
-		t.Fatalf("delete prompt: %v", err)
-	}
+	deletePromptForTest(t, database, "test-spec-prompt")
 	after, _ := GetProject(database, id)
 	if after.SpecAuthorshipPromptID != "" {
 		t.Errorf("after FK cascade: got %q, want empty (ON DELETE SET NULL)", after.SpecAuthorshipPromptID)

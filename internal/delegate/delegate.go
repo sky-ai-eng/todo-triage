@@ -17,6 +17,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
@@ -68,7 +69,7 @@ func (s *Spawner) Delegate(task domain.Task, explicitPromptID string, triggerTyp
 
 	extraTools := s.collectExtraTools(resolved.AllowedTools)
 
-	if err := db.IncrementPromptUsage(s.database, promptID); err != nil {
+	if err := s.prompts.IncrementUsage(context.Background(), runmode.LocalDefaultOrg, promptID); err != nil {
 		log.Printf("[delegate] warning: failed to increment usage for prompt %s: %v", promptID, err)
 	}
 

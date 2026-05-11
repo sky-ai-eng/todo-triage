@@ -7,6 +7,6 @@ import (
 )
 
 func (s *Server) handleSkillsImport(w http.ResponseWriter, r *http.Request) {
-	result := skills.ImportAll(s.db)
+	result := skills.ImportAll(r.Context(), s.db, s.prompts)
 	writeJSON(w, http.StatusOK, result)
 }

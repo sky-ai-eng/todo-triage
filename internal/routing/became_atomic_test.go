@@ -68,7 +68,7 @@ func TestHandleEvent_BecameAtomic_ExistingTask_NoDuplicate(t *testing.T) {
 	atomicJSON, _ := json.Marshal(atomicMeta)
 
 	ws := websocket.NewHub()
-	router := NewRouter(database, nil, noopScorer{}, ws)
+	router := NewRouter(database, testPromptStore(database), nil, noopScorer{}, ws)
 
 	router.HandleEvent(domain.Event{
 		EventType:    domain.EventJiraIssueBecameAtomic,
@@ -118,7 +118,7 @@ func TestHandleEvent_BecameAtomic_NoExistingTask_CreatesTask(t *testing.T) {
 	metaJSON, _ := json.Marshal(meta)
 
 	ws := websocket.NewHub()
-	router := NewRouter(database, nil, noopScorer{}, ws)
+	router := NewRouter(database, testPromptStore(database), nil, noopScorer{}, ws)
 
 	router.HandleEvent(domain.Event{
 		EventType:    domain.EventJiraIssueBecameAtomic,

@@ -13,7 +13,9 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 	_ "modernc.org/sqlite"
 )
@@ -85,7 +87,7 @@ func seedJiraRun(t *testing.T, database *db.DB, runID, issueKey string) {
 	if err != nil {
 		t.Fatalf("task: %v", err)
 	}
-	if err := db.CreatePrompt(database.Conn, domain.Prompt{ID: "p-" + runID, Name: "T", Body: "x", Source: "user"}); err != nil {
+	if err := sqlitestore.New(database.Conn).Prompts.Create(t.Context(), runmode.LocalDefaultOrg, domain.Prompt{ID: "p-" + runID, Name: "T", Body: "x", Source: "user"}); err != nil {
 		t.Fatalf("prompt: %v", err)
 	}
 	if err := db.CreateAgentRun(database.Conn, domain.AgentRun{
@@ -114,7 +116,7 @@ func seedGitHubRun(t *testing.T, database *db.DB, runID string) {
 	if err != nil {
 		t.Fatalf("task: %v", err)
 	}
-	if err := db.CreatePrompt(database.Conn, domain.Prompt{ID: "p-" + runID, Name: "T", Body: "x", Source: "user"}); err != nil {
+	if err := sqlitestore.New(database.Conn).Prompts.Create(t.Context(), runmode.LocalDefaultOrg, domain.Prompt{ID: "p-" + runID, Name: "T", Body: "x", Source: "user"}); err != nil {
 		t.Fatalf("prompt: %v", err)
 	}
 	if err := db.CreateAgentRun(database.Conn, domain.AgentRun{

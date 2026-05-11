@@ -53,11 +53,9 @@ func setupDrainScenario(t *testing.T, database *sql.DB) (entityID, taskID, trigg
 	}
 	entityID = entity.ID
 
-	if err := db.CreatePrompt(database, domain.Prompt{
+	createTestPrompt(t, database, domain.Prompt{
 		ID: "p-drain", Name: "P", Body: "x", Source: "user",
-	}); err != nil {
-		t.Fatalf("create prompt: %v", err)
-	}
+	})
 
 	eventID, err = db.RecordEvent(database, domain.Event{
 		EventType:    domain.EventGitHubPRCICheckFailed,
@@ -107,7 +105,7 @@ func TestDrainEntity_ClosedTask(t *testing.T) {
 		t.Fatalf("close task: %v", err)
 	}
 
-	router := NewRouter(database, nil, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), nil, noopScorer{}, websocket.NewHub())
 	router.DrainEntity(entityID)
 
 	rows, err := db.ListPendingFiringsForEntity(database, entityID)
@@ -140,7 +138,7 @@ func TestDrainEntity_DisabledTrigger(t *testing.T) {
 		t.Fatalf("disable trigger: %v", err)
 	}
 
-	router := NewRouter(database, nil, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), nil, noopScorer{}, websocket.NewHub())
 	router.DrainEntity(entityID)
 
 	rows, err := db.ListPendingFiringsForEntity(database, entityID)
@@ -180,9 +178,7 @@ func TestDrainEntity_MultipleStaleFirings(t *testing.T) {
 		taskIDs = append(taskIDs, task.ID)
 
 		promptID := []string{"p-1", "p-2", "p-3"}[i]
-		if err := db.CreatePrompt(database, domain.Prompt{ID: promptID, Name: promptID, Body: "x", Source: "user"}); err != nil {
-			t.Fatalf("create prompt %s: %v", promptID, err)
-		}
+		createTestPrompt(t, database, domain.Prompt{ID: promptID, Name: promptID, Body: "x", Source: "user"})
 		trigID := []string{"tr-1", "tr-2", "tr-3"}[i]
 		if err := db.SavePromptTrigger(database, domain.PromptTrigger{
 			ID: trigID, PromptID: promptID, TriggerType: domain.TriggerTypeEvent,
@@ -204,7 +200,7 @@ func TestDrainEntity_MultipleStaleFirings(t *testing.T) {
 		}
 	}
 
-	router := NewRouter(database, nil, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), nil, noopScorer{}, websocket.NewHub())
 	router.DrainEntity(entityID)
 
 	rows, err := db.ListPendingFiringsForEntity(database, entityID)
@@ -231,7 +227,7 @@ func TestDrainEntity_EmptyQueue(t *testing.T) {
 	database := newTestDB(t)
 	entityID, _, _, _ := setupDrainScenario(t, database)
 
-	router := NewRouter(database, nil, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), nil, noopScorer{}, websocket.NewHub())
 	router.DrainEntity(entityID) // must not panic or error visibly
 
 	rows, err := db.ListPendingFiringsForEntity(database, entityID)
@@ -265,7 +261,7 @@ func TestDrainEntity_ConcurrentDrainsDoNotDoubleFire(t *testing.T) {
 	}
 
 	stub := &stubDelegator{db: database}
-	router := NewRouter(database, stub, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), stub, noopScorer{}, websocket.NewHub())
 
 	const drainers = 5
 	var wg sync.WaitGroup
@@ -318,7 +314,7 @@ func TestRunDrainSweeper_PicksUpStuckFiring(t *testing.T) {
 	}
 
 	stub := &stubDelegator{db: database}
-	router := NewRouter(database, stub, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), stub, noopScorer{}, websocket.NewHub())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -366,7 +362,7 @@ func TestRunDrainSweeper_NoOpWhenIdle(t *testing.T) {
 	_ = entityID
 
 	stub := &stubDelegator{db: database}
-	router := NewRouter(database, stub, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), stub, noopScorer{}, websocket.NewHub())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

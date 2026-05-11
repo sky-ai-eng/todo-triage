@@ -5,8 +5,10 @@ import (
 	"net/http"
 
 	"github.com/google/uuid"
+
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 func (s *Server) handleEventTypes(w http.ResponseWriter, r *http.Request) {
@@ -22,7 +24,7 @@ func (s *Server) handleEventTypes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePromptsList(w http.ResponseWriter, r *http.Request) {
-	prompts, err := db.ListPrompts(s.db)
+	prompts, err := s.prompts.List(r.Context(), runmode.LocalDefaultOrg)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -35,7 +37,7 @@ func (s *Server) handlePromptsList(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handlePromptGet(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	prompt, err := db.GetPrompt(s.db, id)
+	prompt, err := s.prompts.Get(r.Context(), runmode.LocalDefaultOrg, id)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -72,12 +74,12 @@ func (s *Server) handlePromptCreate(w http.ResponseWriter, r *http.Request) {
 		Source: "user",
 	}
 
-	if err := db.CreatePrompt(s.db, prompt); err != nil {
+	if err := s.prompts.Create(r.Context(), runmode.LocalDefaultOrg, prompt); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 
-	created, _ := db.GetPrompt(s.db, id)
+	created, _ := s.prompts.Get(r.Context(), runmode.LocalDefaultOrg, id)
 	writeJSON(w, http.StatusCreated, created)
 }
 
@@ -99,19 +101,19 @@ func (s *Server) handlePromptPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := db.UpdatePrompt(s.db, id, req.Name, req.Body); err != nil {
+	if err := s.prompts.Update(r.Context(), runmode.LocalDefaultOrg, id, req.Name, req.Body); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 
-	updated, _ := db.GetPrompt(s.db, id)
+	updated, _ := s.prompts.Get(r.Context(), runmode.LocalDefaultOrg, id)
 	writeJSON(w, http.StatusOK, updated)
 }
 
 func (s *Server) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
-	prompt, err := db.GetPrompt(s.db, id)
+	prompt, err := s.prompts.Get(r.Context(), runmode.LocalDefaultOrg, id)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -136,7 +138,7 @@ func (s *Server) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
 
 	// System and imported prompts are soft-deleted (hidden), user prompts are hard-deleted
 	if prompt.Source == "system" || prompt.Source == "imported" {
-		if err := db.HidePrompt(s.db, id); err != nil {
+		if err := s.prompts.Hide(r.Context(), runmode.LocalDefaultOrg, id); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
@@ -144,7 +146,7 @@ func (s *Server) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := db.DeletePrompt(s.db, id); err != nil {
+	if err := s.prompts.Delete(r.Context(), runmode.LocalDefaultOrg, id); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -153,7 +155,7 @@ func (s *Server) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handlePromptStats(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	stats, err := db.GetPromptStats(s.db, id)
+	stats, err := s.prompts.Stats(r.Context(), runmode.LocalDefaultOrg, id)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

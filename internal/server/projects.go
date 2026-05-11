@@ -24,6 +24,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/projectbundle"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
@@ -107,7 +108,7 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 	// — tests that don't seed prompts get NULL on insert and the curator
 	// runtime falls back to the same default at dispatch time anyway.
 	specPromptID := ""
-	def, defErr := db.GetPrompt(s.db, domain.SystemTicketSpecPromptID)
+	def, defErr := s.prompts.Get(r.Context(), runmode.LocalDefaultOrg, domain.SystemTicketSpecPromptID)
 	if defErr != nil {
 		log.Printf("handleProjectCreate: failed to load default spec-authorship prompt %q: %v", domain.SystemTicketSpecPromptID, defErr)
 	} else if def != nil {
@@ -428,7 +429,7 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 		// up front keeps the contract crisp.
 		trimmed := strings.TrimSpace(*req.SpecAuthorshipPromptID)
 		if trimmed != "" {
-			prompt, err := db.GetPrompt(s.db, trimmed)
+			prompt, err := s.prompts.Get(r.Context(), runmode.LocalDefaultOrg, trimmed)
 			if err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "load prompt: " + err.Error()})
 				return

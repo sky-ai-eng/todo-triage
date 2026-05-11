@@ -79,9 +79,7 @@ func TestMaterializePriorMemories_WritesPriors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("task: %v", err)
 	}
-	if err := db.CreatePrompt(database, domain.Prompt{ID: "p1", Name: "T", Body: "x", Source: "user"}); err != nil {
-		t.Fatalf("prompt: %v", err)
-	}
+	ensureTestPrompt(t, database, domain.Prompt{ID: "p1", Name: "T", Body: "x", Source: "user"})
 	if err := db.CreateAgentRun(database, domain.AgentRun{
 		ID: "prior-run", TaskID: task.ID, PromptID: "p1", Status: "completed", Model: "m",
 	}); err != nil {

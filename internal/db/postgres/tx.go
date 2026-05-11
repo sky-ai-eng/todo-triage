@@ -44,7 +44,8 @@ func (s *Store) WithTx(ctx context.Context, orgID, userID string, fn func(db.TxS
 	}
 
 	txStores := db.TxStores{
-		Scores: newScoreStore(tx),
+		Scores:  newScoreStore(tx),
+		Prompts: newTxPromptStore(tx),
 	}
 	if err := fn(txStores); err != nil {
 		return err

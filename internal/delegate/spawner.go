@@ -13,6 +13,7 @@ import (
 	"log"
 	"sync"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
@@ -40,6 +41,7 @@ type QueueDrainer interface {
 // Spawner manages delegated agent runs.
 type Spawner struct {
 	database *sql.DB
+	prompts  db.PromptStore
 	wsHub    *websocket.Hub
 
 	mu                    sync.Mutex
@@ -54,9 +56,10 @@ type Spawner struct {
 	agentToolsCache string
 }
 
-func NewSpawner(database *sql.DB, ghClient *ghclient.Client, wsHub *websocket.Hub, model string) *Spawner {
+func NewSpawner(database *sql.DB, prompts db.PromptStore, ghClient *ghclient.Client, wsHub *websocket.Hub, model string) *Spawner {
 	return &Spawner{
 		database:  database,
+		prompts:   prompts,
 		ghClient:  ghClient,
 		wsHub:     wsHub,
 		model:     model,

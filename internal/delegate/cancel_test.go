@@ -49,7 +49,7 @@ func TestCancel_AwaitingInputAutoRun_DrainsQueue(t *testing.T) {
 		t.Fatalf("park run: %v", err)
 	}
 
-	s := NewSpawner(database, nil, nil, "claude-sonnet-4-6")
+	s := NewSpawner(database, testPromptStore(database), nil, nil, "claude-sonnet-4-6")
 	drainer := newFakeDrainer()
 	s.SetQueueDrainer(drainer)
 
@@ -87,7 +87,7 @@ func TestCancel_AwaitingInputManualRun_NoDrain(t *testing.T) {
 		t.Fatalf("park run: %v", err)
 	}
 
-	s := NewSpawner(database, nil, nil, "claude-sonnet-4-6")
+	s := NewSpawner(database, testPromptStore(database), nil, nil, "claude-sonnet-4-6")
 	drainer := newFakeDrainer()
 	s.SetQueueDrainer(drainer)
 
@@ -117,7 +117,7 @@ func TestCancel_AlreadyTerminal_NoDrain(t *testing.T) {
 		t.Fatalf("complete run: %v", err)
 	}
 
-	s := NewSpawner(database, nil, nil, "claude-sonnet-4-6")
+	s := NewSpawner(database, testPromptStore(database), nil, nil, "claude-sonnet-4-6")
 	drainer := newFakeDrainer()
 	s.SetQueueDrainer(drainer)
 
