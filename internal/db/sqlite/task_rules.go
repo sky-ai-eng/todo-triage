@@ -100,7 +100,7 @@ func (s *taskRuleStore) Create(ctx context.Context, orgID string, r domain.TaskR
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
-	now := time.Now()
+	now := time.Now().UTC()
 	_, err := s.q.ExecContext(ctx, `
 		INSERT INTO task_rules (id, event_type, scope_predicate_json, enabled, name,
 		                        default_priority, sort_order, source, created_at, updated_at)
@@ -120,7 +120,7 @@ func (s *taskRuleStore) Update(ctx context.Context, orgID string, r domain.TaskR
 		    default_priority = ?, sort_order = ?, updated_at = ?
 		WHERE id = ?
 	`, r.ScopePredicateJSON, r.Enabled, r.Name,
-		r.DefaultPriority, r.SortOrder, time.Now(), r.ID)
+		r.DefaultPriority, r.SortOrder, time.Now().UTC(), r.ID)
 	return err
 }
 
@@ -130,7 +130,7 @@ func (s *taskRuleStore) SetEnabled(ctx context.Context, orgID string, id string,
 	}
 	_, err := s.q.ExecContext(ctx, `
 		UPDATE task_rules SET enabled = ?, updated_at = ? WHERE id = ?
-	`, enabled, time.Now(), id)
+	`, enabled, time.Now().UTC(), id)
 	return err
 }
 
@@ -147,7 +147,7 @@ func (s *taskRuleStore) Reorder(ctx context.Context, orgID string, ids []string)
 		return err
 	}
 	return inTx(ctx, s.q, func(q queryer) error {
-		now := time.Now()
+		now := time.Now().UTC()
 		for i, id := range ids {
 			if _, err := q.ExecContext(ctx,
 				`UPDATE task_rules SET sort_order = ?, updated_at = ? WHERE id = ?`,
