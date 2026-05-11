@@ -2307,6 +2307,9 @@ func TestRLS_BaselineCrossOrgPin_MultiOrgUser(t *testing.T) {
 			}
 			ids[id] = true
 		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
 		if !ids[charlieID] {
 			return fmt.Errorf("charlie not in own user list")
 		}
