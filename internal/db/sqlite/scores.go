@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -50,29 +51,45 @@ func (s *scoreStore) UpdateTaskScores(ctx context.Context, orgID string, updates
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
-	// All-or-nothing across the batch: a mid-loop failure must roll
-	// back any rows that already flipped to 'scored'. inTx reuses the
-	// caller's *sql.Tx if we're already inside one (so this remains
-	// composable with Stores.Tx.WithTx), or opens a fresh tx when
-	// called against a *sql.DB.
-	return inTx(ctx, s.q, func(q queryer) error {
-		stmt, err := prepareContext(ctx, q, `
-			UPDATE tasks
-			SET priority_score = ?, autonomy_suitability = ?, ai_summary = ?,
-			    priority_reasoning = ?, scoring_status = 'scored'
-			WHERE id = ?
-		`)
-		if err != nil {
-			return err
-		}
-		defer stmt.Close()
-		for _, u := range updates {
-			if _, err := stmt.ExecContext(ctx, u.PriorityScore, u.AutonomySuitability, u.Summary, u.PriorityReasoning, u.ID); err != nil {
-				return err
-			}
-		}
+	if len(updates) == 0 {
 		return nil
-	})
+	}
+	// Single UPDATE ... FROM (VALUES ...) so the whole batch lands in
+	// one statement instead of N. Atomic by construction (single
+	// statement = single implicit tx), so no tx wrapper needed.
+	//
+	// SQLite supports UPDATE-FROM (>= 3.33) and VALUES as a table
+	// source, but does NOT support column aliasing on a VALUES source
+	// directly ("(VALUES ...) AS v(col1, col2)" — that form is a
+	// Postgres extension). We wrap the VALUES in a SELECT that renames
+	// the default column1/column2/... aliases into the columns the
+	// UPDATE references. Verified at runtime on modernc.org/sqlite
+	// 3.53.x.
+	rowExprs := make([]string, 0, len(updates))
+	args := make([]any, 0, len(updates)*5)
+	for _, u := range updates {
+		rowExprs = append(rowExprs, "(?, ?, ?, ?, ?)")
+		args = append(args, u.ID, u.PriorityScore, u.AutonomySuitability, u.Summary, u.PriorityReasoning)
+	}
+	query := `
+		UPDATE tasks
+		SET priority_score = v.priority_score,
+		    autonomy_suitability = v.autonomy_suitability,
+		    ai_summary = v.ai_summary,
+		    priority_reasoning = v.priority_reasoning,
+		    scoring_status = 'scored'
+		FROM (
+			SELECT column1 AS id,
+			       column2 AS priority_score,
+			       column3 AS autonomy_suitability,
+			       column4 AS ai_summary,
+			       column5 AS priority_reasoning
+			FROM (VALUES ` + strings.Join(rowExprs, ", ") + `)
+		) AS v
+		WHERE tasks.id = v.id
+	`
+	_, err := s.q.ExecContext(ctx, query, args...)
+	return err
 }
 
 func (s *scoreStore) UnscoredTasks(ctx context.Context, orgID string) ([]domain.Task, error) {
@@ -111,47 +128,6 @@ func assertLocalOrg(orgID string) error {
 		return fmt.Errorf("sqlite store: orgID must be %q in local mode, got %q", runmode.LocalDefaultOrg, orgID)
 	}
 	return nil
-}
-
-// prepareContext smooths over the fact that *sql.DB and *sql.Tx both
-// expose PrepareContext but Go's stdlib doesn't give us a common
-// interface for it. We type-switch on the queryer; both branches are
-// exhaustive for the concrete types we ever construct.
-func prepareContext(ctx context.Context, q queryer, query string) (*sql.Stmt, error) {
-	switch v := q.(type) {
-	case *sql.DB:
-		return v.PrepareContext(ctx, query)
-	case *sql.Tx:
-		return v.PrepareContext(ctx, query)
-	default:
-		return nil, fmt.Errorf("sqlite store: unexpected queryer type %T", q)
-	}
-}
-
-// inTx runs fn against a queryer that's guaranteed to be a transaction:
-//   - if q is already a *sql.Tx (caller composed us inside Stores.Tx.WithTx),
-//     fn runs against that tx directly so the outer commit/rollback wins.
-//   - if q is a *sql.DB, inTx opens a fresh tx, runs fn against it, and
-//     commits or rolls back based on fn's return. This is the path that
-//     gives store methods documented as "atomic across the batch" their
-//     atomicity even when called outside an explicit WithTx.
-func inTx(ctx context.Context, q queryer, fn func(queryer) error) error {
-	switch v := q.(type) {
-	case *sql.Tx:
-		return fn(v)
-	case *sql.DB:
-		tx, err := v.BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = tx.Rollback() }()
-		if err := fn(tx); err != nil {
-			return err
-		}
-		return tx.Commit()
-	default:
-		return fmt.Errorf("sqlite store: unexpected queryer type %T", q)
-	}
 }
 
 // --- scan helpers --------------------------------------------------

@@ -3,6 +3,8 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"fmt"
+	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -46,24 +48,42 @@ func (s *scoreStore) ResetScoringToPending(ctx context.Context, orgID string, ta
 }
 
 func (s *scoreStore) UpdateTaskScores(ctx context.Context, orgID string, updates []domain.TaskScoreUpdate) error {
-	// All-or-nothing across the batch: a mid-loop failure must roll
-	// back any rows that already flipped to 'scored'. inTx reuses the
-	// caller's *sql.Tx if we're already inside one (so this remains
-	// composable with Stores.Tx.WithTx), or opens a fresh tx when
-	// called against a *sql.DB.
-	return inTx(ctx, s.q, func(q queryer) error {
-		for _, u := range updates {
-			if _, err := q.ExecContext(ctx, `
-				UPDATE tasks
-				SET priority_score = $1, autonomy_suitability = $2, ai_summary = $3,
-				    priority_reasoning = $4, scoring_status = 'scored'
-				WHERE id = $5 AND org_id = $6
-			`, u.PriorityScore, u.AutonomySuitability, u.Summary, u.PriorityReasoning, u.ID, orgID); err != nil {
-				return err
-			}
-		}
+	if len(updates) == 0 {
 		return nil
-	})
+	}
+	// Single UPDATE ... FROM (VALUES ...) so the whole batch lands in
+	// one round-trip. Atomic by construction (single statement =
+	// implicit tx in Postgres), so no inTx wrapper needed. Avoids the
+	// N-round-trip-per-cycle bottleneck the per-row loop had.
+	//
+	// Placeholders are emitted with explicit ::uuid/::real/::text casts
+	// because the VALUES literal's types are inferred from the first
+	// row, and a NULL or empty string there would make later rows fail
+	// to coerce. Explicit casts pin every column's type at parse time.
+	var (
+		rowExprs []string
+		args     = []any{orgID}
+		n        = 2 // $1 is orgID
+	)
+	for _, u := range updates {
+		rowExprs = append(rowExprs, fmt.Sprintf(
+			"($%d::uuid, $%d::real, $%d::real, $%d::text, $%d::text)",
+			n, n+1, n+2, n+3, n+4))
+		args = append(args, u.ID, u.PriorityScore, u.AutonomySuitability, u.Summary, u.PriorityReasoning)
+		n += 5
+	}
+	query := fmt.Sprintf(`
+		UPDATE tasks t
+		SET priority_score = v.priority_score,
+		    autonomy_suitability = v.autonomy_suitability,
+		    ai_summary = v.ai_summary,
+		    priority_reasoning = v.priority_reasoning,
+		    scoring_status = 'scored'
+		FROM (VALUES %s) AS v(id, priority_score, autonomy_suitability, ai_summary, priority_reasoning)
+		WHERE t.id = v.id AND t.org_id = $1
+	`, strings.Join(rowExprs, ", "))
+	_, err := s.q.ExecContext(ctx, query, args...)
+	return err
 }
 
 func (s *scoreStore) UnscoredTasks(ctx context.Context, orgID string) ([]domain.Task, error) {
