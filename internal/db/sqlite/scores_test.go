@@ -1,6 +1,7 @@
 package sqlite_test
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -86,4 +88,51 @@ func seedSQLiteTasks(t *testing.T, conn *sql.DB, n int) []string {
 		ids = append(ids, taskID)
 	}
 	return ids
+}
+
+// TestScoreStore_SQLite_UpdateTaskScores_ChunksLargeBatch exercises
+// the chunking path in UpdateTaskScores. The chunk size is 150
+// updates × 5 placeholders = 750 placeholders per statement; this
+// test passes 175 updates so chunking has to happen (>150 forces
+// at least two chunks) and the all-or-nothing tx around them must
+// hold so every row ends up scored.
+func TestScoreStore_SQLite_UpdateTaskScores_ChunksLargeBatch(t *testing.T) {
+	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	if err != nil {
+		t.Fatalf("open in-memory db: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	conn.SetMaxOpenConns(1)
+	conn.SetMaxIdleConns(1)
+	if err := db.BootstrapSchemaForTest(conn); err != nil {
+		t.Fatalf("bootstrap schema: %v", err)
+	}
+
+	const n = 175
+	ids := seedSQLiteTasks(t, conn, n)
+	updates := make([]domain.TaskScoreUpdate, len(ids))
+	for i, id := range ids {
+		updates[i] = domain.TaskScoreUpdate{
+			ID:                  id,
+			PriorityScore:       float64(i%10) * 0.1,
+			AutonomySuitability: float64(i%5) * 0.2,
+			Summary:             fmt.Sprintf("summary-%d", i),
+			PriorityReasoning:   fmt.Sprintf("reason-%d", i),
+		}
+	}
+
+	stores := sqlitestore.New(conn)
+	if err := stores.Scores.UpdateTaskScores(context.Background(), runmode.LocalDefaultOrg, updates); err != nil {
+		t.Fatalf("UpdateTaskScores: %v", err)
+	}
+
+	// Every row should be 'scored' now — if a chunk silently dropped,
+	// some rows would still be 'pending' or 'in_progress'.
+	var scored int
+	if err := conn.QueryRow(`SELECT COUNT(*) FROM tasks WHERE scoring_status = 'scored'`).Scan(&scored); err != nil {
+		t.Fatalf("count scored: %v", err)
+	}
+	if scored != n {
+		t.Fatalf("scored count: got %d, want %d", scored, n)
+	}
 }

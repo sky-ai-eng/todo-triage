@@ -47,6 +47,14 @@ func (s *scoreStore) ResetScoringToPending(ctx context.Context, orgID string, ta
 	return nil
 }
 
+// updateTaskScoresChunkSize is the max rows-per-statement for the
+// batched UPDATE. SQLite's bound-parameter cap is driver-dependent
+// (modernc.org/sqlite ships with the modern 32766 default; some
+// builds historically defaulted to 999). 150 rows × 5 placeholders
+// = 750 placeholders, comfortably under any plausible limit and
+// leaves margin if the UPDATE row shape grows.
+const updateTaskScoresChunkSize = 150
+
 func (s *scoreStore) UpdateTaskScores(ctx context.Context, orgID string, updates []domain.TaskScoreUpdate) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
@@ -54,20 +62,38 @@ func (s *scoreStore) UpdateTaskScores(ctx context.Context, orgID string, updates
 	if len(updates) == 0 {
 		return nil
 	}
-	// Single UPDATE ... FROM (VALUES ...) so the whole batch lands in
-	// one statement instead of N. Atomic by construction (single
-	// statement = single implicit tx), so no tx wrapper needed.
+	// Single UPDATE ... FROM (VALUES ...) per chunk, all chunks inside
+	// one tx for all-or-nothing semantics across the batch. Atomicity
+	// matters because a mid-stream failure must NOT leave the cycle's
+	// tasks half-marked 'scored' (the scorer's reset path keys off
+	// scoring_status, and partial state confuses it). inTx reuses the
+	// caller's *sql.Tx if we're already inside one (Stores.Tx.WithTx),
+	// or opens a fresh tx otherwise.
 	//
-	// SQLite supports UPDATE-FROM (>= 3.33) and VALUES as a table
-	// source, but does NOT support column aliasing on a VALUES source
-	// directly ("(VALUES ...) AS v(col1, col2)" — that form is a
-	// Postgres extension). We wrap the VALUES in a SELECT that renames
-	// the default column1/column2/... aliases into the columns the
-	// UPDATE references. Verified at runtime on modernc.org/sqlite
-	// 3.53.x.
-	rowExprs := make([]string, 0, len(updates))
-	args := make([]any, 0, len(updates)*5)
-	for _, u := range updates {
+	// Dialect note: SQLite supports UPDATE-FROM (>= 3.33) and VALUES as
+	// a table source, but does NOT accept column aliasing directly on a
+	// VALUES source ("(VALUES ...) AS v(col1, col2)" — that form is a
+	// Postgres extension). The VALUES is wrapped in a SELECT that
+	// renames the default column1/column2/... aliases into the columns
+	// the UPDATE references.
+	return inTx(ctx, s.q, func(q queryer) error {
+		for start := 0; start < len(updates); start += updateTaskScoresChunkSize {
+			end := start + updateTaskScoresChunkSize
+			if end > len(updates) {
+				end = len(updates)
+			}
+			if err := applyScoresChunk(ctx, q, updates[start:end]); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func applyScoresChunk(ctx context.Context, q queryer, chunk []domain.TaskScoreUpdate) error {
+	rowExprs := make([]string, 0, len(chunk))
+	args := make([]any, 0, len(chunk)*5)
+	for _, u := range chunk {
 		rowExprs = append(rowExprs, "(?, ?, ?, ?, ?)")
 		args = append(args, u.ID, u.PriorityScore, u.AutonomySuitability, u.Summary, u.PriorityReasoning)
 	}
@@ -88,7 +114,7 @@ func (s *scoreStore) UpdateTaskScores(ctx context.Context, orgID string, updates
 		) AS v
 		WHERE tasks.id = v.id
 	`
-	_, err := s.q.ExecContext(ctx, query, args...)
+	_, err := q.ExecContext(ctx, query, args...)
 	return err
 }
 
