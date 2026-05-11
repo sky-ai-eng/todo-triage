@@ -187,18 +187,6 @@ func FindActiveTasksByEntity(db *sql.DB, entityID string) ([]domain.Task, error)
 	`, entityID)
 }
 
-// PendingTaskRef is the minimal projection of a task used by snapshot
-// surfaces that only need to know "this entity has an active task at
-// this event_type, with this dedup_key" — no priority, no run linkage,
-// no entity-side metadata. Read-path equivalent of factoryEntityJSON's
-// pendingTaskRef on the wire.
-type PendingTaskRef struct {
-	ID        string
-	EntityID  string
-	EventType string
-	DedupKey  string
-}
-
 // ListActiveTaskRefsForEntities returns minimal active-task refs (id,
 // entity_id, event_type, dedup_key) for any entity in entityIDs. Used
 // by the factory snapshot to attach pending_tasks per entity in a
@@ -207,12 +195,12 @@ type PendingTaskRef struct {
 //
 // Chunks on SQLite's variable limit (500) the same way
 // ListRecentEventsByEntity does.
-func ListActiveTaskRefsForEntities(database *sql.DB, entityIDs []string) ([]PendingTaskRef, error) {
+func ListActiveTaskRefsForEntities(database *sql.DB, entityIDs []string) ([]domain.PendingTaskRef, error) {
 	if len(entityIDs) == 0 {
 		return nil, nil
 	}
 	const chunkSize = 500
-	out := make([]PendingTaskRef, 0, len(entityIDs))
+	out := make([]domain.PendingTaskRef, 0, len(entityIDs))
 	for start := 0; start < len(entityIDs); start += chunkSize {
 		end := start + chunkSize
 		if end > len(entityIDs) {
@@ -236,7 +224,7 @@ func ListActiveTaskRefsForEntities(database *sql.DB, entityIDs []string) ([]Pend
 			return nil, err
 		}
 		for rows.Next() {
-			var ref PendingTaskRef
+			var ref domain.PendingTaskRef
 			if err := rows.Scan(&ref.ID, &ref.EntityID, &ref.EventType, &ref.DedupKey); err != nil {
 				rows.Close()
 				return nil, err

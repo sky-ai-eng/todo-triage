@@ -263,11 +263,11 @@ func (s *promptStore) IncrementUsage(ctx context.Context, orgID string, id strin
 // is a future patch, not a port. Stats lives on PromptStore (vs
 // RunStore) because the queries key on prompt_id and the prompts
 // handler is the only consumer.
-func (s *promptStore) Stats(ctx context.Context, orgID string, promptID string) (*db.PromptStats, error) {
+func (s *promptStore) Stats(ctx context.Context, orgID string, promptID string) (*domain.PromptStats, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
-	stats := &db.PromptStats{}
+	stats := &domain.PromptStats{}
 
 	// Totals — aggregate, always returns exactly one row. COALESCE on
 	// the SUM(CASE…) columns because SUM over zero rows is NULL in
@@ -344,7 +344,7 @@ func (s *promptStore) Stats(ctx context.Context, orgID string, promptID string) 
 
 	for i := 29; i >= 0; i-- {
 		d := time.Now().AddDate(0, 0, -i).Format("2006-01-02")
-		stats.RunsPerDay = append(stats.RunsPerDay, db.DayCount{Date: d, Count: dayMap[d]})
+		stats.RunsPerDay = append(stats.RunsPerDay, domain.DayCount{Date: d, Count: dayMap[d]})
 	}
 	return stats, nil
 }

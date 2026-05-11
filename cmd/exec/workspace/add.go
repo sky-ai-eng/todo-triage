@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
@@ -207,7 +208,7 @@ func materializeWorkspace(database *db.DB, runID, ownerRepoArg string, deps addD
 
 	// Reserve. Two concurrent processes that both reach this point
 	// race at the PK; the loser short-circuits before touching git.
-	inserted, winningPath, err := db.InsertRunWorktree(database.Conn, db.RunWorktree{
+	inserted, winningPath, err := db.InsertRunWorktree(database.Conn, domain.RunWorktree{
 		RunID:         runID,
 		RepoID:        repoID,
 		Path:          wtPath,

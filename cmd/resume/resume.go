@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // Handle dispatches the resume subcommand.
@@ -102,7 +103,7 @@ func Handle(args []string) {
 // orphan triagefactory pid sitting around. Path lookup uses
 // exec.LookPath so we surface a clear "claude not found" error
 // instead of cryptic exec failures if Claude Code isn't on PATH.
-func execClaudeResume(r db.TakenOverRun) {
+func execClaudeResume(r domain.TakenOverRun) {
 	if _, err := os.Stat(r.WorktreePath); err != nil {
 		fail("takeover dir at %s is gone: %v", r.WorktreePath, err)
 	}
@@ -122,7 +123,7 @@ func execClaudeResume(r db.TakenOverRun) {
 // pickRun renders a numbered list of taken-over runs and reads the
 // user's choice from stdin. Loops on invalid input rather than
 // exiting — typing a non-number on first try shouldn't lose the list.
-func pickRun(runs []db.TakenOverRun) db.TakenOverRun {
+func pickRun(runs []domain.TakenOverRun) domain.TakenOverRun {
 	fmt.Fprintln(os.Stderr, "Multiple taken-over runs available:")
 	fmt.Fprintln(os.Stderr)
 	renderRuns(runs)
@@ -151,7 +152,7 @@ func pickRun(runs []db.TakenOverRun) db.TakenOverRun {
 // stderr (so it doesn't pollute stdout if a future caller pipes
 // resume's output anywhere). Format: "  N. <short-id>  <source-id>
 // <task-title> (Xm ago)".
-func renderRuns(runs []db.TakenOverRun) {
+func renderRuns(runs []domain.TakenOverRun) {
 	now := time.Now()
 	for i, r := range runs {
 		short := r.RunID

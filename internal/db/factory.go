@@ -128,21 +128,11 @@ func TaskCountsByEventTypeSince(database *sql.DB, since time.Time) (map[string]i
 	return out, rows.Err()
 }
 
-// FactoryActiveRun is a run + its task + enough entity context to render an
-// overlay row and decide ownership tint. Returned by ListFactoryActiveRuns
-// so the handler doesn't have to do N+1 follow-up queries.
-type FactoryActiveRun struct {
-	Run            domain.AgentRun
-	Task           domain.Task
-	EntityAuthor   string // PR author login (github) or assignee (jira); "" if unknown
-	EntityEventTyp string // task.event_type; pre-copied for keyed lookup
-}
-
 // ListFactoryActiveRuns returns every run currently in-flight (status in
 // factoryActiveRunStatuses) joined with its task and entity. Ordered by
 // started_at so the overlay can render most-recent-first without client-side
 // sorting.
-func ListFactoryActiveRuns(database *sql.DB) ([]FactoryActiveRun, error) {
+func ListFactoryActiveRuns(database *sql.DB) ([]domain.FactoryActiveRun, error) {
 	placeholders := "?"
 	args := make([]any, 0, len(factoryActiveRunStatuses))
 	args = append(args, factoryActiveRunStatuses[0])
@@ -188,7 +178,7 @@ func ListFactoryActiveRuns(database *sql.DB) ([]FactoryActiveRun, error) {
 	}
 	defer rows.Close()
 
-	var out []FactoryActiveRun
+	var out []domain.FactoryActiveRun
 	for rows.Next() {
 		var r domain.AgentRun
 		var t domain.Task
@@ -229,38 +219,9 @@ func ListFactoryActiveRuns(database *sql.DB) ([]FactoryActiveRun, error) {
 			v := int(numTurns.Int64)
 			r.NumTurns = &v
 		}
-		out = append(out, FactoryActiveRun{Run: r, Task: t, EntityEventTyp: t.EventType})
+		out = append(out, domain.FactoryActiveRun{Run: r, Task: t, EntityEventTyp: t.EventType})
 	}
 	return out, rows.Err()
-}
-
-// FactoryEntityRow is an active entity plus the event_type of its most
-// recent event. LatestEventType is "" if the entity has no recorded events
-// (fresh discovery before any diff has fired). LatestEventAt is nil under
-// the same condition.
-type FactoryEntityRow struct {
-	Entity          domain.Entity
-	LatestEventType string
-	LatestEventAt   *time.Time
-}
-
-// FactoryRecentEvent is a single entry in an entity's recent event history.
-// Ordered chronologically ascending by caller (ListRecentEventsByEntity).
-//
-// Two timestamps because we need both for the factory animation:
-//   - CreatedAt is the "event time" used for chain ordering: occurred_at
-//     when the upstream system reported it, falling back to detection
-//     time. So two events from one poll order by their upstream times,
-//     not their insert order.
-//   - DetectedAt is purely the row's insert time (events.created_at).
-//     Used for clustering events into "this poll's burst" — events from
-//     a single poll cycle insert within milliseconds, so a small gap
-//     test on this field cleanly separates one poll's chain from another.
-//     Independent of upstream timestamps, which can be arbitrarily lagged.
-type FactoryRecentEvent struct {
-	EventType  string
-	CreatedAt  time.Time
-	DetectedAt time.Time
 }
 
 // ListRecentEventsByEntity returns the last `perEntity` events per
@@ -275,8 +236,8 @@ type FactoryRecentEvent struct {
 // Chunks on len(ids) > SQLite's variable limit the same way the scorer's
 // description loader does — factoryEntityLimit is 100 today so we never
 // hit it, but the guard is cheap.
-func ListRecentEventsByEntity(database *sql.DB, ids []string, perEntity int) (map[string][]FactoryRecentEvent, error) {
-	out := map[string][]FactoryRecentEvent{}
+func ListRecentEventsByEntity(database *sql.DB, ids []string, perEntity int) (map[string][]domain.FactoryRecentEvent, error) {
+	out := map[string][]domain.FactoryRecentEvent{}
 	if len(ids) == 0 || perEntity <= 0 {
 		return out, nil
 	}
@@ -349,7 +310,7 @@ func ListRecentEventsByEntity(database *sql.DB, ids []string, perEntity int) (ma
 				rows.Close()
 				return nil, err
 			}
-			out[entityID] = append(out[entityID], FactoryRecentEvent{
+			out[entityID] = append(out[entityID], domain.FactoryRecentEvent{
 				EventType:  eventType,
 				CreatedAt:  eventAt,
 				DetectedAt: detectedAt,
@@ -452,7 +413,7 @@ const factoryEntitySelectColumns = `
 // (partial, defined in db.go) and is bounded by both the time window
 // and the small grace limit, so the lookup is near-free even on
 // large entity tables.
-func ListFactoryEntities(database *sql.DB, limit int) ([]FactoryEntityRow, error) {
+func ListFactoryEntities(database *sql.DB, limit int) ([]domain.FactoryEntityRow, error) {
 	active, err := queryFactoryEntities(database, `
 		SELECT `+factoryEntitySelectColumns+`
 		FROM entities e
@@ -482,16 +443,16 @@ func ListFactoryEntities(database *sql.DB, limit int) ([]FactoryEntityRow, error
 	return append(active, closed...), nil
 }
 
-func queryFactoryEntities(database *sql.DB, query string, args ...any) ([]FactoryEntityRow, error) {
+func queryFactoryEntities(database *sql.DB, query string, args ...any) ([]domain.FactoryEntityRow, error) {
 	rows, err := database.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var out []FactoryEntityRow
+	var out []domain.FactoryEntityRow
 	for rows.Next() {
-		var row FactoryEntityRow
+		var row domain.FactoryEntityRow
 		var latestType sql.NullString
 		var latestAt sql.NullTime
 		if err := rows.Scan(

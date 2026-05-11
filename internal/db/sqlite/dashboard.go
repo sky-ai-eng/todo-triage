@@ -26,7 +26,7 @@ func newDashboardStore(q queryer) db.DashboardStore { return &dashboardStore{q: 
 
 var _ db.DashboardStore = (*dashboardStore)(nil)
 
-func (s *dashboardStore) Stats(ctx context.Context, orgID, username string, sinceDays int) (*db.DashboardStats, error) {
+func (s *dashboardStore) Stats(ctx context.Context, orgID, username string, sinceDays int) (*domain.DashboardStats, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
@@ -41,7 +41,7 @@ func (s *dashboardStore) Stats(ctx context.Context, orgID, username string, sinc
 	}
 	defer rows.Close()
 
-	stats := &db.DashboardStats{}
+	stats := &domain.DashboardStats{}
 	mergedByDay := make(map[string]int)
 
 	for rows.Next() {
@@ -97,7 +97,7 @@ func (s *dashboardStore) Stats(ctx context.Context, orgID, username string, sinc
 	return stats, nil
 }
 
-func (s *dashboardStore) PRs(ctx context.Context, orgID, username string) ([]db.PRSummaryRow, error) {
+func (s *dashboardStore) PRs(ctx context.Context, orgID, username string) ([]domain.PRSummaryRow, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
@@ -111,7 +111,7 @@ func (s *dashboardStore) PRs(ctx context.Context, orgID, username string) ([]db.
 	}
 	defer rows.Close()
 
-	var prs []db.PRSummaryRow
+	var prs []domain.PRSummaryRow
 	for rows.Next() {
 		var snapJSON string
 		if err := rows.Scan(&snapJSON); err != nil {
@@ -129,7 +129,7 @@ func (s *dashboardStore) PRs(ctx context.Context, orgID, username string) ([]db.
 		if snap.Merged {
 			state = "merged"
 		}
-		prs = append(prs, db.PRSummaryRow{
+		prs = append(prs, domain.PRSummaryRow{
 			Number:    snap.Number,
 			Title:     snap.Title,
 			Repo:      snap.Repo,
@@ -165,12 +165,12 @@ func dashboardStateToLower(s string) string {
 // continuous `days`-bucket slice ending today, filling zeros for
 // quiet days. Frontend renders 14 fixed buckets so the sparkline
 // stays the same width regardless of activity.
-func buildDashboardTimeline(buckets map[string]int, days int) []db.DashboardPoint {
-	points := make([]db.DashboardPoint, 0, days)
+func buildDashboardTimeline(buckets map[string]int, days int) []domain.DashboardPoint {
+	points := make([]domain.DashboardPoint, 0, days)
 	now := time.Now()
 	for i := days - 1; i >= 0; i-- {
 		key := now.AddDate(0, 0, -i).Format("2006-01-02")
-		points = append(points, db.DashboardPoint{Date: key, Count: buckets[key]})
+		points = append(points, domain.DashboardPoint{Date: key, Count: buckets[key]})
 	}
 	return points
 }

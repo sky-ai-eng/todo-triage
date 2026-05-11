@@ -419,7 +419,7 @@ func TestMaterializeWorkspace_RaceLossAtReservation(t *testing.T) {
 	// the winning row directly, with a distinguishable path so we can
 	// confirm the loser returns IT and not its own pre-computed path.
 	winnerPath := "/tmp/somewhere-else/winner"
-	if _, _, err := db.InsertRunWorktree(database.Conn, db.RunWorktree{
+	if _, _, err := db.InsertRunWorktree(database.Conn, domain.RunWorktree{
 		RunID: "r1", RepoID: "sky/core",
 		Path: winnerPath, FeatureBranch: "feature/SKY-1",
 	}); err != nil {
@@ -459,7 +459,7 @@ func TestMaterializeWorkspace_TrustsReservationEvenWhenDirMissing(t *testing.T) 
 	seedRepoProfile(t, database, "sky", "core", "https://x", "main")
 
 	winnerPath := expectedPath("r1", "sky", "core")
-	if _, _, err := db.InsertRunWorktree(database.Conn, db.RunWorktree{
+	if _, _, err := db.InsertRunWorktree(database.Conn, domain.RunWorktree{
 		RunID: "r1", RepoID: "sky/core",
 		Path: winnerPath, FeatureBranch: "feature/SKY-1",
 	}); err != nil {
@@ -500,7 +500,7 @@ func TestMaterializeWorkspace_LiveDirShortCircuitsAgeCheck(t *testing.T) {
 	seedRepoProfile(t, database, "sky", "core", "https://x", "main")
 	wantPath := expectedPath("r1", "sky", "core")
 
-	if _, _, err := db.InsertRunWorktree(database.Conn, db.RunWorktree{
+	if _, _, err := db.InsertRunWorktree(database.Conn, domain.RunWorktree{
 		RunID: "r1", RepoID: "sky/core",
 		Path: wantPath, FeatureBranch: "feature/SKY-1",
 	}); err != nil {
@@ -540,7 +540,7 @@ func TestMaterializeWorkspace_StaleReservationReclaimed(t *testing.T) {
 
 	// Seed the stale row (path won't exist on disk; default stub
 	// statPath returns ErrNotExist for everything not in liveDirs).
-	if _, _, err := db.InsertRunWorktree(database.Conn, db.RunWorktree{
+	if _, _, err := db.InsertRunWorktree(database.Conn, domain.RunWorktree{
 		RunID: "r1", RepoID: "sky/core",
 		Path: wantPath, FeatureBranch: "feature/SKY-1",
 	}); err != nil {
@@ -577,7 +577,7 @@ func TestMaterializeWorkspace_FreshRowMissingDirIsInFlight(t *testing.T) {
 	seedRepoProfile(t, database, "sky", "core", "https://x", "main")
 	wantPath := expectedPath("r1", "sky", "core")
 
-	if _, _, err := db.InsertRunWorktree(database.Conn, db.RunWorktree{
+	if _, _, err := db.InsertRunWorktree(database.Conn, domain.RunWorktree{
 		RunID: "r1", RepoID: "sky/core",
 		Path: wantPath, FeatureBranch: "feature/SKY-1",
 	}); err != nil {
