@@ -6,16 +6,16 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // GET /api/task-rules
 //
 // Returns all task rules (system + user) ordered by sort_order then name.
 func (s *Server) handleTaskRulesList(w http.ResponseWriter, r *http.Request) {
-	rules, err := db.ListTaskRules(s.db)
+	rules, err := s.taskRules.List(r.Context(), runmode.LocalDefaultOrg)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -95,13 +95,13 @@ func (s *Server) handleTaskRuleCreate(w http.ResponseWriter, r *http.Request) {
 		rule.ScopePredicateJSON = &canonical
 	}
 
-	if err := db.CreateTaskRule(s.db, rule); err != nil {
+	if err := s.taskRules.Create(r.Context(), runmode.LocalDefaultOrg, rule); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 
 	// Re-read so the response reflects server-set timestamps.
-	fresh, err := db.GetTaskRule(s.db, rule.ID)
+	fresh, err := s.taskRules.Get(r.Context(), runmode.LocalDefaultOrg, rule.ID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "created but failed to re-read: " + err.Error()})
 		return
@@ -137,7 +137,7 @@ func (s *Server) handleTaskRuleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	existing, err := db.GetTaskRule(s.db, id)
+	existing, err := s.taskRules.Get(r.Context(), runmode.LocalDefaultOrg, id)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -201,12 +201,12 @@ func (s *Server) handleTaskRuleUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := db.UpdateTaskRule(s.db, updated); err != nil {
+	if err := s.taskRules.Update(r.Context(), runmode.LocalDefaultOrg, updated); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 
-	fresh, err := db.GetTaskRule(s.db, id)
+	fresh, err := s.taskRules.Get(r.Context(), runmode.LocalDefaultOrg, id)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "updated but failed to re-read: " + err.Error()})
 		return
@@ -221,14 +221,14 @@ func (s *Server) handleTaskRuleUpdate(w http.ResponseWriter, r *http.Request) {
 // DELETE /api/task-rules/{id}
 //
 // Hard-deletes user rules; disables system rules in place. System rules are
-// soft-disabled because SeedTaskRules runs on every boot with INSERT OR
-// IGNORE — a hard-delete would be resurrected as enabled on the next boot.
-// Returns 200 with {status: "deleted"|"disabled"} so the frontend can show
-// the right confirmation.
+// soft-disabled because TaskRuleStore.Seed runs on every boot with
+// INSERT-OR-IGNORE semantics — a hard-delete would be resurrected as enabled
+// on the next boot. Returns 200 with {status: "deleted"|"disabled"} so the
+// frontend can show the right confirmation.
 func (s *Server) handleTaskRuleDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
-	existing, err := db.GetTaskRule(s.db, id)
+	existing, err := s.taskRules.Get(r.Context(), runmode.LocalDefaultOrg, id)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -240,7 +240,7 @@ func (s *Server) handleTaskRuleDelete(w http.ResponseWriter, r *http.Request) {
 
 	if existing.Source == "system" {
 		// Soft-disable instead of delete.
-		if err := db.SetTaskRuleEnabled(s.db, id, false); err != nil {
+		if err := s.taskRules.SetEnabled(r.Context(), runmode.LocalDefaultOrg, id, false); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
@@ -251,7 +251,7 @@ func (s *Server) handleTaskRuleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := db.DeleteTaskRule(s.db, id); err != nil {
+	if err := s.taskRules.Delete(r.Context(), runmode.LocalDefaultOrg, id); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -272,7 +272,7 @@ func (s *Server) handleTaskRuleReorder(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "empty ID list"})
 		return
 	}
-	if err := db.ReorderTaskRules(s.db, ids); err != nil {
+	if err := s.taskRules.Reorder(r.Context(), runmode.LocalDefaultOrg, ids); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}

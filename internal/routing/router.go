@@ -46,11 +46,12 @@ type Delegator interface {
 //     auto run or earlier queued firings (SKY-189).
 //  8. Runs inline close checks for the event type
 type Router struct {
-	db      *sql.DB
-	prompts dbpkg.PromptStore
-	spawner Delegator
-	scorer  Scorer
-	ws      *websocket.Hub
+	db        *sql.DB
+	prompts   dbpkg.PromptStore
+	taskRules dbpkg.TaskRuleStore
+	spawner   Delegator
+	scorer    Scorer
+	ws        *websocket.Hub
 
 	// drainLocks serializes DrainEntity calls per entity. Without this,
 	// the non-mutating PopPendingFiringForEntity creates a window between
@@ -69,10 +70,11 @@ type Router struct {
 }
 
 // NewRouter creates a Router.
-func NewRouter(db *sql.DB, prompts dbpkg.PromptStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
+func NewRouter(db *sql.DB, prompts dbpkg.PromptStore, taskRules dbpkg.TaskRuleStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
 	return &Router{
 		db:         db,
 		prompts:    prompts,
+		taskRules:  taskRules,
 		spawner:    spawner,
 		scorer:     scorer,
 		ws:         ws,
@@ -167,7 +169,7 @@ func (r *Router) HandleEvent(evt domain.Event) {
 	}
 
 	// Step 5: Match task_rules for this event type.
-	rules, err := dbpkg.GetEnabledRulesForEvent(r.db, evt.EventType)
+	rules, err := r.taskRules.GetEnabledForEvent(context.Background(), runmode.LocalDefaultOrg, evt.EventType)
 	if err != nil {
 		log.Printf("[router] failed to query rules for %s: %v", evt.EventType, err)
 	}

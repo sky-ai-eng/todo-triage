@@ -110,7 +110,7 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	// the events package contract.
 	defaultPriority := 0.5
 	schema, schemaOK := events.Get(req.EventType)
-	rules, err := db.GetEnabledRulesForEvent(s.db, req.EventType)
+	rules, err := s.taskRules.GetEnabledForEvent(r.Context(), runmode.LocalDefaultOrg, req.EventType)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // seedPrompt creates a user prompt so triggers have something to reference.
@@ -168,7 +168,7 @@ func TestTriggerUpdate_AutonomySuitabilityOutOfRange(t *testing.T) {
 // a full POST → GET → PUT → GET cycle without drift.
 func TestTriggerRoundTrip_AutonomySuitability(t *testing.T) {
 	s := newTestServer(t)
-	if err := db.SeedTaskRules(s.db); err != nil {
+	if err := s.taskRules.Seed(t.Context(), runmode.LocalDefaultOrg); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	promptID := seedPrompt(t, s)

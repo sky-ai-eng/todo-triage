@@ -37,6 +37,12 @@ type Stores struct {
 	// credentials live in the OS keychain, not the DB).
 	Secrets SecretStore
 
+	// TaskRules owns the declarative task_rules table — what
+	// event-shaped situations should produce a Board card. The
+	// router reads via GetEnabledForEvent on every routed event;
+	// handlers do full CRUD.
+	TaskRules TaskRuleStore
+
 	// Tx is the transaction runner — handlers that need atomic
 	// multi-store writes call Tx.WithTx and receive a TxStores with
 	// every field tx-bound. Postgres impl also sets the JWT claims
@@ -55,6 +61,7 @@ type TxStores struct {
 	Swipes    SwipeStore
 	Dashboard DashboardStore
 	Secrets   SecretStore
+	TaskRules TaskRuleStore
 }
 
 // TxRunner runs fn inside a single database transaction. Postgres

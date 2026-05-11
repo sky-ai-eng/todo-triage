@@ -130,7 +130,7 @@ func TestReDeriveAfterScoring_AboveThreshold_Delegates(t *testing.T) {
 	// gate-check path runs (suitability >= threshold, predicate matched)
 	// without panicking. The log output confirms the trigger fired.
 	ws := websocket.NewHub()
-	router := NewRouter(database, testPromptStore(database), nil, noopScorer{}, ws)
+	router := NewRouter(database, testPromptStore(database), testTaskRuleStore(database), nil, noopScorer{}, ws)
 
 	router.ReDeriveAfterScoring([]string{taskID})
 
@@ -162,7 +162,7 @@ func TestReDeriveAfterScoring_BelowThreshold_Skips(t *testing.T) {
 	}
 
 	ws := websocket.NewHub()
-	router := NewRouter(database, testPromptStore(database), nil, noopScorer{}, ws)
+	router := NewRouter(database, testPromptStore(database), testTaskRuleStore(database), nil, noopScorer{}, ws)
 	router.ReDeriveAfterScoring([]string{taskID})
 
 	// Task should remain queued — trigger was skipped
@@ -196,7 +196,7 @@ func TestReDeriveAfterScoring_AlreadyDelegated_Skips(t *testing.T) {
 	}
 
 	ws := websocket.NewHub()
-	router := NewRouter(database, testPromptStore(database), nil, noopScorer{}, ws)
+	router := NewRouter(database, testPromptStore(database), testTaskRuleStore(database), nil, noopScorer{}, ws)
 	router.ReDeriveAfterScoring([]string{taskID})
 
 	// Should still be delegated — re-derive skipped it
@@ -238,7 +238,7 @@ func TestReDeriveAfterScoring_ZeroThresholdTrigger_SkippedByReDerive(t *testing.
 	}})
 
 	ws := websocket.NewHub()
-	router := NewRouter(database, testPromptStore(database), nil, noopScorer{}, ws)
+	router := NewRouter(database, testPromptStore(database), testTaskRuleStore(database), nil, noopScorer{}, ws)
 	router.ReDeriveAfterScoring([]string{task.ID})
 
 	// Task should remain queued — zero-threshold trigger is skipped in re-derive
@@ -283,7 +283,7 @@ func TestReDeriveAfterScoring_PredicateMismatch_Skips(t *testing.T) {
 	}})
 
 	ws := websocket.NewHub()
-	router := NewRouter(database, testPromptStore(database), nil, noopScorer{}, ws)
+	router := NewRouter(database, testPromptStore(database), testTaskRuleStore(database), nil, noopScorer{}, ws)
 	router.ReDeriveAfterScoring([]string{task.ID})
 
 	// Task should stay queued — predicate doesn't match

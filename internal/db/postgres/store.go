@@ -68,8 +68,9 @@ func New(admin, app *sql.DB) db.Stores {
 		// — GRANTed to tf_app only. Caller must have set
 		// request.jwt.claims before calling (the wrapper enforces
 		// p_org_id == tf.current_org_id()).
-		Secrets: newSecretStore(app),
-		Tx:      s,
+		Secrets:   newSecretStore(app),
+		TaskRules: newTaskRuleStore(app),
+		Tx:        s,
 	}
 	return s.stores
 }
@@ -103,5 +104,6 @@ func NewForTx(tx *sql.Tx) db.TxStores {
 		Swipes:    newSwipeStore(tx),
 		Dashboard: newDashboardStore(tx),
 		Secrets:   newSecretStore(tx),
+		TaskRules: newTaskRuleStore(tx),
 	}
 }

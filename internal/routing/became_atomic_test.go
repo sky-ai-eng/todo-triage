@@ -8,6 +8,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -19,7 +20,7 @@ import (
 
 func TestHandleEvent_BecameAtomic_ExistingTask_NoDuplicate(t *testing.T) {
 	database := newTestDB(t)
-	if err := db.SeedTaskRules(database); err != nil {
+	if err := testTaskRuleStore(database).Seed(t.Context(), runmode.LocalDefaultOrg); err != nil {
 		t.Fatalf("seed task rules: %v", err)
 	}
 
@@ -68,7 +69,7 @@ func TestHandleEvent_BecameAtomic_ExistingTask_NoDuplicate(t *testing.T) {
 	atomicJSON, _ := json.Marshal(atomicMeta)
 
 	ws := websocket.NewHub()
-	router := NewRouter(database, testPromptStore(database), nil, noopScorer{}, ws)
+	router := NewRouter(database, testPromptStore(database), testTaskRuleStore(database), nil, noopScorer{}, ws)
 
 	router.HandleEvent(domain.Event{
 		EventType:    domain.EventJiraIssueBecameAtomic,
@@ -99,7 +100,7 @@ func TestHandleEvent_BecameAtomic_NoExistingTask_CreatesTask(t *testing.T) {
 	// the duplicate case — it doesn't break the normal belated-discovery
 	// flow.
 	database := newTestDB(t)
-	if err := db.SeedTaskRules(database); err != nil {
+	if err := testTaskRuleStore(database).Seed(t.Context(), runmode.LocalDefaultOrg); err != nil {
 		t.Fatalf("seed task rules: %v", err)
 	}
 
@@ -118,7 +119,7 @@ func TestHandleEvent_BecameAtomic_NoExistingTask_CreatesTask(t *testing.T) {
 	metaJSON, _ := json.Marshal(meta)
 
 	ws := websocket.NewHub()
-	router := NewRouter(database, testPromptStore(database), nil, noopScorer{}, ws)
+	router := NewRouter(database, testPromptStore(database), testTaskRuleStore(database), nil, noopScorer{}, ws)
 
 	router.HandleEvent(domain.Event{
 		EventType:    domain.EventJiraIssueBecameAtomic,
