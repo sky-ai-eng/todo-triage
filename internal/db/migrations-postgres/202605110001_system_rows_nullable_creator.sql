@@ -79,22 +79,28 @@ CREATE POLICY task_rules_insert ON task_rules FOR INSERT
               AND tf.user_has_org_access(org_id)
               AND creator_user_id = tf.current_user_id());
 
--- UPDATE: own user-source row OR any system+org-visible row.
--- The system branch lets any org member disable a shipped default
--- (the current product behavior that the old policy was structurally
--- denying to non-owners). The CHECK constraint above pins
--- creator_user_id NULL ↔ source='system', so this clause can't be
--- abused to mutate a user row into a system row (the CHECK would
--- reject the resulting state).
+-- UPDATE: own user-source row OR any org-visible row IF caller is
+-- an org admin. The org-visible branch covers both TF-shipped system
+-- rows (source='system', creator_user_id NULL) and admin-authored
+-- org defaults (source='user', creator_user_id=admin, visibility='org').
+-- Non-admin org members CANNOT mutate org-visible rows — that would
+-- let any member disable a shipped default for everyone, which is
+-- the wrong granularity for an org-wide toggle. Per-user "hide this
+-- from my Board" lives in a sidecar (forthcoming) and doesn't
+-- touch this row.
+--
+-- The CHECK constraint above pins creator_user_id NULL ↔ source='system',
+-- so this clause can't be abused to mutate a user row into a system
+-- row (the CHECK would reject the resulting state).
 CREATE POLICY task_rules_update ON task_rules FOR UPDATE
   USING (org_id = tf.current_org_id()
-         AND tf.user_has_org_access(org_id)
-         AND (creator_user_id = tf.current_user_id()
-              OR (source = 'system' AND visibility = 'org')))
+         AND ((creator_user_id = tf.current_user_id()
+               AND tf.user_has_org_access(org_id))
+              OR (visibility = 'org' AND tf.user_is_org_admin(org_id))))
   WITH CHECK (org_id = tf.current_org_id()
-              AND tf.user_has_org_access(org_id)
-              AND (creator_user_id = tf.current_user_id()
-                   OR (source = 'system' AND visibility = 'org')));
+              AND ((creator_user_id = tf.current_user_id()
+                    AND tf.user_has_org_access(org_id))
+                   OR (visibility = 'org' AND tf.user_is_org_admin(org_id))));
 
 -- DELETE: own user-source row only. Handlers route system-row
 -- deletes to SetEnabled(false) — making the structural denial here
@@ -112,15 +118,18 @@ CREATE POLICY prompts_insert ON prompts FOR INSERT
               AND tf.user_has_org_access(org_id)
               AND creator_user_id = tf.current_user_id());
 
+-- Same admin-only gate on org-visible prompts: shipped system
+-- prompts and admin-authored org-shared prompts are managed by
+-- admins; non-admins can edit only their own rows.
 CREATE POLICY prompts_update ON prompts FOR UPDATE
   USING (org_id = tf.current_org_id()
-         AND tf.user_has_org_access(org_id)
-         AND (creator_user_id = tf.current_user_id()
-              OR (source = 'system' AND visibility = 'org')))
+         AND ((creator_user_id = tf.current_user_id()
+               AND tf.user_has_org_access(org_id))
+              OR (visibility = 'org' AND tf.user_is_org_admin(org_id))))
   WITH CHECK (org_id = tf.current_org_id()
-              AND tf.user_has_org_access(org_id)
-              AND (creator_user_id = tf.current_user_id()
-                   OR (source = 'system' AND visibility = 'org')));
+              AND ((creator_user_id = tf.current_user_id()
+                    AND tf.user_has_org_access(org_id))
+                   OR (visibility = 'org' AND tf.user_is_org_admin(org_id))));
 
 CREATE POLICY prompts_delete ON prompts FOR DELETE
   USING (org_id = tf.current_org_id()

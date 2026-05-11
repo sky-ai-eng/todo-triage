@@ -170,45 +170,28 @@ func TestTaskRuleStore_Postgres_SeededRowsHaveSystemShape(t *testing.T) {
 	}
 }
 
-// TestTaskRuleStore_Postgres_UserCanUpdateSystemRow pins the policy
-// fix from migration 202605110001: any org member (not just the
-// org owner who happened to be the COALESCE-fallback creator under
-// the old shape) can disable a shipped rule. The old task_rules_modify
-// FOR ALL required creator_user_id = tf.current_user_id() on UPDATE,
-// structurally locking every non-owner out. The new
-// task_rules_update policy adds a (source='system' AND visibility='org')
-// branch — this test exercises it via h.WithUser (claims-set tf_app
-// tx) so the policy actually runs.
-func TestTaskRuleStore_Postgres_UserCanUpdateSystemRow(t *testing.T) {
+// TestTaskRuleStore_Postgres_AdminCanUpdateSystemRow pins the
+// admin-only gate on org-visible row writes from migration
+// 202605110001. Disabling a TF-shipped default is an org-wide
+// decision: an admin makes it and every org member observes it.
+// The policy refuses non-admin writers and accepts admins.
+func TestTaskRuleStore_Postgres_AdminCanUpdateSystemRow(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 
-	// Seed an org with an owner (alice from seedPgOrgForTaskRules) plus
-	// a regular member (bob). The non-owner is the load-bearing actor
-	// — the old policy would have refused his UPDATE on the system rule.
+	// Owner (alice from seedPgOrgForTaskRules), an explicit admin
+	// (carol), and a plain member (bob). Three distinct identities
+	// so we can prove the policy gates on role, not on identity-as-
+	// owner-of-org.
 	orgID := seedPgOrgForTaskRules(t, h)
-	bobID := uuid.New().String()
-	h.SeedAuthUser(t, bobID, fmt.Sprintf("bob-%s@test.local", bobID[:8]))
-	if _, err := h.AdminDB.Exec(
-		`INSERT INTO users (id, display_name) VALUES ($1, $2)`,
-		bobID, "Bob the Non-Owner",
-	); err != nil {
-		t.Fatalf("seed bob: %v", err)
-	}
-	if _, err := h.AdminDB.Exec(
-		`INSERT INTO org_memberships (org_id, user_id, role) VALUES ($1, $2, 'member')`,
-		orgID, bobID,
-	); err != nil {
-		t.Fatalf("seed bob membership: %v", err)
-	}
+	bobID := seedPgMember(t, h, orgID, "bob", "member")
+	carolID := seedPgMember(t, h, orgID, "carol", "admin")
 
-	// Seed on admin (claims-less) — production boot path.
 	adminStores := pgstore.New(h.AdminDB, h.AdminDB)
 	if err := adminStores.TaskRules.Seed(context.Background(), orgID); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
-	// Find one shipped rule's id by event_type.
 	var ruleID string
 	if err := h.AdminDB.QueryRow(`
 		SELECT id FROM task_rules
@@ -217,9 +200,9 @@ func TestTaskRuleStore_Postgres_UserCanUpdateSystemRow(t *testing.T) {
 		t.Fatalf("find shipped CI rule: %v", err)
 	}
 
-	// Drive the UPDATE as bob (a non-owner org member) on the
-	// RLS-active app pool. The task_rules_update policy must let this
-	// through despite bob != creator_user_id (which is NULL).
+	// Non-admin (bob) must be refused. The policy filters the row
+	// out of the UPDATE's USING set, so the UPDATE returns 0 rows
+	// rather than an error — assert rows-affected.
 	err := h.WithUser(t, bobID, orgID, func(tx *sql.Tx) error {
 		res, err := tx.Exec(
 			`UPDATE task_rules SET enabled = FALSE, updated_at = now()
@@ -233,26 +216,77 @@ func TestTaskRuleStore_Postgres_UserCanUpdateSystemRow(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if n != 1 {
-			return fmt.Errorf("UPDATE matched %d rows; want 1 (policy silently filtered the row)", n)
+		if n != 0 {
+			return fmt.Errorf("non-admin UPDATE matched %d rows; policy should filter org-visible rows away from non-admins", n)
 		}
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("non-owner UPDATE on system row: %v (policy regression — old shape required creator=current_user)", err)
+		t.Fatalf("non-admin UPDATE assertion: %v", err)
 	}
-
-	// Confirm the disable actually landed (read on admin to see
-	// post-commit state).
+	// Sanity: rule still enabled after bob's failed UPDATE.
 	var enabled bool
 	if err := h.AdminDB.QueryRow(
 		`SELECT enabled FROM task_rules WHERE id = $1`, ruleID,
 	).Scan(&enabled); err != nil {
-		t.Fatalf("re-read: %v", err)
+		t.Fatalf("re-read post-bob: %v", err)
+	}
+	if !enabled {
+		t.Fatal("rule disabled after non-admin UPDATE; policy didn't gate")
+	}
+
+	// Admin (carol) must succeed.
+	err = h.WithUser(t, carolID, orgID, func(tx *sql.Tx) error {
+		res, err := tx.Exec(
+			`UPDATE task_rules SET enabled = FALSE, updated_at = now()
+			  WHERE org_id = $1 AND id = $2`,
+			orgID, ruleID,
+		)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n != 1 {
+			return fmt.Errorf("admin UPDATE matched %d rows; want 1", n)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("admin UPDATE on system row: %v", err)
+	}
+	if err := h.AdminDB.QueryRow(
+		`SELECT enabled FROM task_rules WHERE id = $1`, ruleID,
+	).Scan(&enabled); err != nil {
+		t.Fatalf("re-read post-carol: %v", err)
 	}
 	if enabled {
-		t.Errorf("rule still enabled after bob's UPDATE — silent no-op?")
+		t.Errorf("rule still enabled after admin's UPDATE — silent no-op?")
 	}
+}
+
+// seedPgMember adds one user with the given role to the given org.
+// Returns the user id. Used by the policy tests that need to
+// distinguish admin from member identities.
+func seedPgMember(t *testing.T, h *pgtest.Harness, orgID, label, role string) string {
+	t.Helper()
+	userID := uuid.New().String()
+	h.SeedAuthUser(t, userID, fmt.Sprintf("%s-%s@test.local", label, userID[:8]))
+	if _, err := h.AdminDB.Exec(
+		`INSERT INTO users (id, display_name) VALUES ($1, $2)`,
+		userID, label,
+	); err != nil {
+		t.Fatalf("seed user %s: %v", label, err)
+	}
+	if _, err := h.AdminDB.Exec(
+		`INSERT INTO org_memberships (org_id, user_id, role) VALUES ($1, $2, $3)`,
+		orgID, userID, role,
+	); err != nil {
+		t.Fatalf("seed %s membership: %v", label, err)
+	}
+	return userID
 }
 
 // TestTaskRuleStore_Postgres_UserCannotForgeSystemRow pins the other
