@@ -51,22 +51,24 @@ CREATE TABLE IF NOT EXISTS goose_db_version (
 // tracking via `goose_db_version` from here on out.
 //
 // Sequence:
-//  1. Detect dialect (sqlite3 today; the postgres tree is scaffolded
-//     for SKY-247 / D6 but not yet exercised).
-//  2. Run importLegacyVersionsIfNeeded — for any install whose
-//     pre-goose `schema_migrations` table contains rows, stamp the
-//     baseline as already applied so goose does not re-execute its
-//     CREATE TABLE statements against the live schema.
-//  3. Hand the routed embed.FS to goose and call goose.Up.
+//  1. Run importLegacyVersionsIfNeeded — for any sqlite3 install
+//     whose pre-goose `schema_migrations` table contains rows, stamp
+//     the baseline as already applied so goose does not re-execute
+//     its CREATE TABLE statements against the live schema. Postgres
+//     callers always early-return from this shim (no legacy state).
+//  2. Hand the routed embed.FS to goose and call goose.Up.
 //
 // Failures roll back at the per-migration boundary goose owns; the
-// next launch retries any unapplied migration. The baseline is
-// idempotent (every CREATE uses IF NOT EXISTS) so even if the legacy
-// import shim no-ops on a borderline install — schema_migrations
-// missing or empty — the baseline runs cleanly against the existing
-// schema.
-func runMigrations(db *sql.DB) error {
-	dialect := detectDialect(db)
+// next launch retries any unapplied migration. The SQLite baseline
+// is idempotent via `CREATE TABLE IF NOT EXISTS` on every statement,
+// so even a borderline-detected install (legacy `schema_migrations`
+// table missing or empty) runs cleanly against an already-populated
+// schema. The Postgres baseline does NOT use IF NOT EXISTS — fresh
+// installs are the only supported shape there, and goose's
+// `goose_db_version` tracker prevents re-runs after first success;
+// running the Postgres baseline against a non-fresh DB would error
+// on the first CREATE.
+func runMigrations(db *sql.DB, dialect string) error {
 	if err := importLegacyVersionsIfNeeded(db, dialect); err != nil {
 		return fmt.Errorf("legacy import: %w", err)
 	}
@@ -84,21 +86,12 @@ func runMigrations(db *sql.DB) error {
 	return nil
 }
 
-// detectDialect returns the goose dialect string for the connected
-// database. Today this is always sqlite3 — the Postgres path
-// (SKY-247 / D6) will plumb a real driver-name probe through here.
-// Centralizing the decision now keeps the call sites stable when that
-// happens.
-func detectDialect(_ *sql.DB) string {
-	return "sqlite3"
-}
-
 // migrationsFor returns the embedded migration tree for a goose
 // dialect. The trees are kept side-by-side so the parser only ever
 // sees DDL it can interpret — no runtime if/else inside a single
 // migration file deciding whether to emit BYTEA or BLOB. Pure-SQLite
 // builds (the only supported runtime today) never read the postgres
-// tree; once D6 lands the postgres path becomes a real consumer.
+// tree; once D3 lands the postgres path becomes a real consumer.
 func migrationsFor(dialect string) (fs.FS, string, error) {
 	switch dialect {
 	case "sqlite3":
@@ -279,7 +272,7 @@ func legacyMigrationsComplete(db *sql.DB) (bool, error) {
 // place as an audit trail / rollback safety net.
 func importLegacyVersionsIfNeeded(db *sql.DB, dialect string) error {
 	if dialect != "sqlite3" {
-		// Postgres path lands with D6; fresh installs there will
+		// Postgres path lands with D3; fresh installs there will
 		// have no legacy table to import from.
 		return nil
 	}
@@ -366,9 +359,9 @@ func tableExistsInMaster(db *sql.DB, table string) (bool, error) {
 // importLegacyVersionsIfNeeded first so an existing install (whose
 // goose_db_version was stamped lazily on its next server start)
 // reports correctly even when status is the first command invoked
-// after the goose cutover.
-func MigrationStatus(db *sql.DB, w io.Writer) error {
-	dialect := detectDialect(db)
+// after the goose cutover. Dialect is caller-provided (see Migrate
+// docstring for the rationale).
+func MigrationStatus(db *sql.DB, dialect string, w io.Writer) error {
 	if err := importLegacyVersionsIfNeeded(db, dialect); err != nil {
 		return fmt.Errorf("legacy import: %w", err)
 	}

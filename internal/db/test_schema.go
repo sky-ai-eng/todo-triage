@@ -53,7 +53,7 @@ func buildSchemaBundle() (string, error) {
 	template.SetMaxOpenConns(1)
 	template.SetMaxIdleConns(1)
 
-	if err := Migrate(template); err != nil {
+	if err := Migrate(template, "sqlite3"); err != nil {
 		return "", fmt.Errorf("migrate template: %w", err)
 	}
 	if err := SeedEventTypes(template); err != nil {

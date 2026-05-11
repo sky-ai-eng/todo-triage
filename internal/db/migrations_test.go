@@ -29,7 +29,7 @@ func openMigrationsTestDB(t *testing.T) *sql.DB {
 // baseline as applied.
 func TestMigrate_FreshInstall(t *testing.T) {
 	database := openMigrationsTestDB(t)
-	if err := Migrate(database); err != nil {
+	if err := Migrate(database, "sqlite3"); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 
@@ -54,10 +54,10 @@ func TestMigrate_FreshInstall(t *testing.T) {
 // Two Migrate calls in a row leave the post-state unchanged.
 func TestMigrate_Idempotent(t *testing.T) {
 	database := openMigrationsTestDB(t)
-	if err := Migrate(database); err != nil {
+	if err := Migrate(database, "sqlite3"); err != nil {
 		t.Fatalf("first Migrate: %v", err)
 	}
-	if err := Migrate(database); err != nil {
+	if err := Migrate(database, "sqlite3"); err != nil {
 		t.Fatalf("second Migrate: %v", err)
 	}
 
@@ -113,7 +113,7 @@ func TestMigrate_StampsBaselineOnExistingInstall(t *testing.T) {
 	database := openMigrationsTestDB(t)
 	seedFullLegacyState(t, database)
 
-	if err := Migrate(database); err != nil {
+	if err := Migrate(database, "sqlite3"); err != nil {
 		t.Fatalf("Migrate on simulated upgrade: %v", err)
 	}
 
@@ -178,7 +178,7 @@ func TestMigrate_PartialLegacyInstallErrors(t *testing.T) {
 		}
 	}
 
-	err := Migrate(database)
+	err := Migrate(database, "sqlite3")
 	if err == nil {
 		t.Fatalf("Migrate against partial-legacy DB should have errored")
 	}
@@ -212,7 +212,7 @@ func TestMigrate_EmptyLegacyTableRunsBaseline(t *testing.T) {
 		t.Fatalf("seed empty schema_migrations: %v", err)
 	}
 
-	if err := Migrate(database); err != nil {
+	if err := Migrate(database, "sqlite3"); err != nil {
 		t.Fatalf("Migrate with empty legacy table: %v", err)
 	}
 
@@ -243,7 +243,7 @@ func TestMigrate_PreRunnerInstallErrors(t *testing.T) {
 		t.Fatalf("seed pre-runner state: %v", err)
 	}
 
-	err := Migrate(database)
+	err := Migrate(database, "sqlite3")
 	if err == nil {
 		t.Fatalf("Migrate against pre-runner DB should have errored")
 	}

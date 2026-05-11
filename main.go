@@ -204,7 +204,7 @@ func main() {
 	}
 	defer database.Close()
 
-	if err := db.Migrate(database); err != nil {
+	if err := db.Migrate(database, "sqlite3"); err != nil {
 		log.Fatalf("failed to migrate database: %v", err)
 	}
 

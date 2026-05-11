@@ -37,7 +37,7 @@ func Handle(args []string) {
 		os.Exit(1)
 	}
 	defer conn.Close()
-	if err := db.Migrate(conn); err != nil {
+	if err := db.Migrate(conn, "sqlite3"); err != nil {
 		fmt.Fprintf(os.Stderr, "error running migrations: %v\n", err)
 		os.Exit(1)
 	}

@@ -514,12 +514,12 @@ footer {
 ├── migrations.go                  <span class="com">// goose wrapper + stamp shim</span>
 ├── migrations-sqlite/             <span class="com">// replaces migrations/</span>
 │   └── 202605090001_baseline.sql  <span class="com">// consolidated post-state of the prior 18 migrations</span>
-└── migrations-postgres/           <span class="com">// scaffolded; SKY-247 (D6) fills it</span>
+└── migrations-postgres/           <span class="com">// scaffolded; SKY-247 (D3) fills it</span>
     └── README.md</pre>
 
   <p><strong>Why split, not single dir with conditional execution:</strong> a SQL file with <code>BYTEA</code> won't parse in SQLite even if guarded by <code>WHERE dialect = 'postgres'</code> — SQLite's parser fails before the runtime check. Two trees keep each dialect's files independently parseable and tooling-friendly (you can <code>sqlite3 < file.sql</code> any sqlite migration to sanity-check).</p>
 
-  <p><strong>The empty <code>migrations-postgres/</code> directory ships in this PR</strong> with a README pointing at SKY-247, so D6 has a clear destination and the dialect-routing code is reviewable in isolation.</p>
+  <p><strong>The empty <code>migrations-postgres/</code> directory ships in this PR</strong> with a README pointing at SKY-247, so D3 has a clear destination and the dialect-routing code is reviewable in isolation.</p>
 
   <p><strong>The legacy <code>internal/db/migrations/</code> directory is deleted.</strong> Git history preserves the granular per-migration files; the live tree's source of truth is the consolidated baseline.</p>
 
@@ -563,10 +563,9 @@ footer {
 <span class="com">//go:embed migrations-postgres</span>
 <span class="kw">var</span> migrationsPostgresFS embed.FS  <span class="com">// directory embed — README only for now</span>
 
-<span class="com">// Migrate brings the schema to head via goose. Dialect is sqlite3 today;</span>
-<span class="com">// the postgres path is scaffolded but not yet exercised (SKY-247 / D6).</span>
-<span class="kw">func</span> <span class="fn">runMigrations</span>(db *sql.DB) <span class="kw">error</span> {
-  dialect := <span class="fn">detectDialect</span>(db)
+<span class="com">// Migrate brings the schema to head via goose. The dialect is</span>
+<span class="com">// caller-provided rather than auto-detected; see the post-D3 note below.</span>
+<span class="kw">func</span> <span class="fn">runMigrations</span>(db *sql.DB, dialect string) <span class="kw">error</span> {
   <span class="kw">if</span> err := <span class="fn">importLegacyVersionsIfNeeded</span>(db, dialect); err != <span class="kw">nil</span> {
     <span class="kw">return</span> fmt.Errorf(<span class="str">"legacy import: %w"</span>, err)
   }
@@ -578,7 +577,7 @@ footer {
 }</pre>
 
   <h3>Dialect detection</h3>
-  <p>This PR hardcodes <code>detectDialect</code> to return <code>"sqlite3"</code>. The pgx-based driver-name probe lands in SKY-247 (D6) alongside the first real Postgres consumer; centralizing the decision behind a function now keeps the call sites stable when that switch happens. Treat <code>detectDialect</code> as the seam, not a finished implementation.</p>
+  <p><strong>D1 shipped a placeholder <code>detectDialect</code> returning <code>"sqlite3"</code></strong>; SKY-247 (D3) removed that function entirely and changed the exported entrypoint to <code>db.Migrate(db, dialect string) error</code>. Driver-name reflection on <code>*sql.DB</code> is brittle — there's no portable way to map <code>driver.Driver</code> back to the goose dialect string without importing the driver package — so the caller (which opened the connection and knows what driver it used) passes the dialect verbatim. All call sites in <code>main.go</code> + <code>cmd/*</code> pass <code>"sqlite3"</code>; the pgtest harness passes <code>"postgres"</code>.</p>
 
   <h3>Baseline body shape</h3>
   <p>Plain semicolon-delimited DDL with goose's <code>-- +goose Up</code> opener and a <code>-- +goose Down</code> block holding <code>SELECT 'down not supported';</code>. No <code>StatementBegin/End</code> blocks needed — the baseline is just <code>CREATE TABLE</code> and <code>CREATE INDEX</code> statements; goose's default parser handles them. (StatementBegin/End is for migrations whose statements contain semicolons inside, like triggers.)</p>
@@ -614,7 +613,7 @@ footer {
 <section class="block" id="postgres">
   <div class="section-label">§8</div>
   <h2>Postgres readiness</h2>
-  <p class="lede">D1 doesn't add Postgres support to TF (D6 does). But the goose wrapper has to <em>handle</em> Postgres correctly so D6 can drop in without rewiring the routing layer.</p>
+  <p class="lede">D1 doesn't add Postgres support to TF (D3 does). But the goose wrapper has to <em>handle</em> Postgres correctly so D3 can drop in without rewiring the routing layer.</p>
 
   <h3>What this PR does</h3>
   <ul class="tight">
@@ -625,10 +624,10 @@ footer {
 
   <h3>What this PR does <em>not</em> do</h3>
   <ul class="tight">
-    <li>No pgx driver detection or Postgres CI — both land alongside the first real Postgres consumer in D6</li>
-    <li>No actual Postgres schema yet (D6)</li>
+    <li>No pgx driver detection or Postgres CI — both land alongside the first real Postgres consumer in D3</li>
+    <li>No actual Postgres schema yet (D3)</li>
     <li>No <code>TF_MODE=multi</code> branch in <code>db.Open()</code> — that's D4 / SKY-248</li>
-    <li>No connection string parsing for Postgres URLs (D6)</li>
+    <li>No connection string parsing for Postgres URLs (D3)</li>
   </ul>
 
   <p>The CI hook is the load-bearing bit: once D3 starts adding files, CI immediately verifies they at least parse + apply against a real Postgres without anyone having to wire it up.</p>
@@ -662,7 +661,7 @@ footer {
     </li>
     <li>
       <span class="step-title">Scaffold <code>migrations-postgres/</code></span>
-      <span class="step-body">Empty directory with a non-hidden README (so the <code>//go:embed migrations-postgres</code> directive doesn't fail at build time). README points at SKY-247 (D6) for what will fill it.</span>
+      <span class="step-body">Empty directory with a non-hidden README (so the <code>//go:embed migrations-postgres</code> directive doesn't fail at build time). README points at SKY-247 (D3) for what will fill it.</span>
     </li>
     <li>
       <span class="step-title">Wire CLI subcommands</span>
@@ -709,7 +708,7 @@ footer {
       </tr>
       <tr>
         <td>Future Postgres migrations land but the dialect router is wired wrong</td>
-        <td>Router lives in one place (<code>migrationsFor</code>); D6's first Postgres migration exercises it end-to-end before any production user reaches it.</td>
+        <td>Router lives in one place (<code>migrationsFor</code>); D3's first Postgres migration exercises it end-to-end before any production user reaches it.</td>
         <td>—</td>
       </tr>
     </tbody>
@@ -738,11 +737,11 @@ footer {
 
   <h3>Out of scope (do NOT do here)</h3>
   <ul class="tight">
-    <li>Adding any actual schema (orgs, sessions, etc.) — that's D6 / SKY-247</li>
+    <li>Adding any actual schema (orgs, sessions, etc.) — that's D3 / SKY-247</li>
     <li>Changing the connection-string handling — that's D4 / SKY-248</li>
-    <li>Postgres CI — pgx isn't even imported yet; spin that up alongside the first real Postgres migration in D6</li>
+    <li>Postgres CI — pgx isn't even imported yet; spin that up alongside the first real Postgres migration in D3</li>
     <li>Cleaning up the legacy <code>schema_migrations</code> table — left forever as audit trail (decision recorded in §4)</li>
-    <li>Adding goose's tx-locking annotations (<code>-- +goose NO TRANSACTION</code>) — none of our existing DDL needs it; revisit when D6 introduces a migration that legitimately can't be transactional (e.g. <code>CREATE INDEX CONCURRENTLY</code>)</li>
+    <li>Adding goose's tx-locking annotations (<code>-- +goose NO TRANSACTION</code>) — none of our existing DDL needs it; revisit when D3 introduces a migration that legitimately can't be transactional (e.g. <code>CREATE INDEX CONCURRENTLY</code>)</li>
   </ul>
 </section>
 
