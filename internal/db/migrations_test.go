@@ -123,6 +123,58 @@ func seedFullLegacyState(t *testing.T, database *sql.DB) {
 			user_modified INTEGER NOT NULL DEFAULT 0,
 			allowed_tools TEXT NOT NULL DEFAULT ''
 		);
+		-- Every other table SKY-269's 202605120003_local_tenancy.sql
+		-- ALTERs. Minimal column set — just (id) — because the test
+		-- migration adds org_id / team_id / creator_user_id via ALTER
+		-- TABLE ADD COLUMN, which doesn't care about the existing
+		-- column shape. The agents + team_agents tables need full
+		-- shape because 202605120003 does a rebuild (INSERT...SELECT
+		-- against every column).
+		CREATE TABLE projects (id TEXT PRIMARY KEY);
+		CREATE TABLE entity_links (id INTEGER PRIMARY KEY);
+		CREATE TABLE events (id TEXT PRIMARY KEY);
+		CREATE TABLE task_rules (id TEXT PRIMARY KEY);
+		CREATE TABLE tasks (id TEXT PRIMARY KEY);
+		CREATE TABLE task_events (id INTEGER PRIMARY KEY);
+		CREATE TABLE runs (id TEXT PRIMARY KEY);
+		CREATE TABLE run_artifacts (id INTEGER PRIMARY KEY);
+		CREATE TABLE run_messages (id INTEGER PRIMARY KEY);
+		CREATE TABLE run_memory (id INTEGER PRIMARY KEY);
+		CREATE TABLE pending_firings (id INTEGER PRIMARY KEY);
+		CREATE TABLE run_worktrees (id INTEGER PRIMARY KEY);
+		CREATE TABLE pending_prs (id INTEGER PRIMARY KEY);
+		CREATE TABLE swipe_events (id INTEGER PRIMARY KEY);
+		CREATE TABLE repo_profiles (id INTEGER PRIMARY KEY);
+		CREATE TABLE poller_state (id TEXT PRIMARY KEY);
+		CREATE TABLE pending_reviews (id INTEGER PRIMARY KEY);
+		CREATE TABLE pending_review_comments (id INTEGER PRIMARY KEY);
+		CREATE TABLE curator_requests (id INTEGER PRIMARY KEY);
+		CREATE TABLE curator_messages (id INTEGER PRIMARY KEY);
+		CREATE TABLE curator_pending_context (id INTEGER PRIMARY KEY);
+		-- agents + team_agents shipped in 202605120001_agents.sql with
+		-- the full column shape below; 202605120003 rebuilds them so
+		-- the fixture must mirror the post-202605120001 columns for
+		-- the INSERT...SELECT to find them.
+		CREATE TABLE agents (
+			id TEXT PRIMARY KEY,
+			display_name TEXT NOT NULL DEFAULT 'Triage Factory Bot',
+			default_model TEXT,
+			default_autonomy_suitability REAL,
+			github_app_installation_id TEXT,
+			github_pat_user_id TEXT,
+			jira_service_account_id TEXT,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);
+		CREATE TABLE team_agents (
+			team_id TEXT NOT NULL,
+			agent_id TEXT NOT NULL,
+			enabled INTEGER NOT NULL DEFAULT 1,
+			per_team_model TEXT,
+			per_team_autonomy_suitability REAL,
+			added_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (team_id, agent_id)
+		);
 	`); err != nil {
 		t.Fatalf("seed schema + data: %v", err)
 	}

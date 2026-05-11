@@ -8,26 +8,22 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// agentStore is the SQLite impl of db.AgentStore.
+// agentStore is the SQLite impl of db.AgentStore. Post-SKY-269 the
+// SQLite schema carries org_id with an FK to orgs(id), so every method
+// filters by org_id structurally instead of by the BootstrapAgentID-
+// derived row id. That matches the Postgres impl shape and removes
+// the convention burden of assertLocalOrg-at-every-method-entry.
 //
-//   - assertLocalOrg at every method entry (one synthetic org locally),
-//   - ctx propagation on every Exec/Query,
-//   - UTC timestamps everywhere,
-//   - INSERT OR IGNORE for Create with a deterministic id from
-//     db.BootstrapAgentID(orgID) — local mode has no UNIQUE(org_id)
-//     constraint (no org_id column), so idempotency is provided by the
-//     stable id alone.
-//
-// Credential columns (github_app_installation_id, github_pat_user_id)
-// stay NULL in local mode by design: the keychain is the source of
-// truth for the user's PAT, and the agents row is metadata. The
-// SetGitHubAppInstallation / SetGitHubPATUser methods still work — a
-// caller can populate them — but the default install path leaves both
-// empty.
+// The runtime assertLocalOrg call survives at startup as a defense-
+// in-depth check (the sentinel rows must exist + match the runmode
+// constants); per-method entries don't need it because the org_id
+// column physically constrains writes/reads to the one synthetic org.
 type agentStore struct{ q queryer }
 
 func newAgentStore(q queryer) db.AgentStore { return &agentStore{q: q} }
@@ -39,13 +35,11 @@ const sqliteAgentColumns = `id, display_name, default_model, default_autonomy_su
        created_at, updated_at`
 
 func (s *agentStore) GetForOrg(ctx context.Context, orgID string) (*domain.Agent, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
-	}
-	// Local mode has at most one agents row; the deterministic id lets
-	// us look it up directly without a (nonexistent) org_id column.
-	row := s.q.QueryRowContext(ctx, `SELECT `+sqliteAgentColumns+` FROM agents WHERE id = ?`,
-		db.BootstrapAgentID(orgID))
+	row := s.q.QueryRowContext(ctx, `
+		SELECT `+sqliteAgentColumns+`
+		FROM agents
+		WHERE org_id = ?
+	`, orgID)
 	a, err := scanAgentRow(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -57,41 +51,50 @@ func (s *agentStore) GetForOrg(ctx context.Context, orgID string) (*domain.Agent
 }
 
 func (s *agentStore) Create(ctx context.Context, orgID string, a domain.Agent) (string, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return "", err
-	}
 	now := time.Now().UTC()
 	// The row id is implementation-defined — always db.BootstrapAgentID(orgID).
-	// Caller-supplied a.ID is ignored. Allowing override would create a
-	// foot-gun: SQLite has no UNIQUE(org_id) column to enforce "one row
-	// per org" structurally, so a custom-id row would coexist with a
-	// later default-id Create and GetForOrg (which only reads by the
-	// derived id) would return the wrong one. Postgres has the same
-	// contract for symmetry.
+	// Caller-supplied a.ID is ignored; see agents_store.go for the rationale.
 	id := db.BootstrapAgentID(orgID)
 	displayName := a.DisplayName
 	if displayName == "" {
 		displayName = "Triage Factory Bot"
 	}
+	// In local mode the agent borrows the lone user's PAT (post-SKY-269
+	// the users sentinel row exists, so the FK is satisfied). Caller
+	// can override via SetGitHubPATUser later; the default-on-insert
+	// shape just keeps "the local bot has the local user's identity"
+	// true from the moment the row appears.
+	patUser := a.GitHubPATUserID
+	if patUser == "" && orgID == runmode.LocalDefaultOrgID {
+		patUser = runmode.LocalDefaultUserID
+	}
+	// INSERT OR IGNORE handles the idempotency case where the row
+	// already exists (UNIQUE(org_id) enforces "one per org"); the
+	// follow-up SELECT returns the established id either way.
 	_, err := s.q.ExecContext(ctx, `
 		INSERT OR IGNORE INTO agents
-			(id, display_name, default_model, default_autonomy_suitability,
+			(id, org_id, display_name, default_model, default_autonomy_suitability,
 			 github_app_installation_id, github_pat_user_id, jira_service_account_id,
 			 created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, id, displayName, nullString(a.DefaultModel), a.DefaultAutonomySuitability,
-		nullString(a.GitHubAppInstallationID), nullString(a.GitHubPATUserID), nullString(a.JiraServiceAccountID),
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, id, orgID, displayName, nullString(a.DefaultModel), a.DefaultAutonomySuitability,
+		nullString(a.GitHubAppInstallationID), nullString(patUser), nullString(a.JiraServiceAccountID),
 		now, now)
 	if err != nil {
 		return "", err
 	}
-	return id, nil
+	// Look up the established id — handles both fresh-insert and
+	// existing-row paths uniformly.
+	var existing string
+	if err := s.q.QueryRowContext(ctx,
+		`SELECT id FROM agents WHERE org_id = ?`, orgID,
+	).Scan(&existing); err != nil {
+		return "", err
+	}
+	return existing, nil
 }
 
 func (s *agentStore) Update(ctx context.Context, orgID string, a domain.Agent) error {
-	if err := assertLocalOrg(orgID); err != nil {
-		return err
-	}
 	_, err := s.q.ExecContext(ctx, `
 		UPDATE agents
 		SET display_name = ?,
@@ -99,16 +102,13 @@ func (s *agentStore) Update(ctx context.Context, orgID string, a domain.Agent) e
 		    default_autonomy_suitability = ?,
 		    jira_service_account_id = ?,
 		    updated_at = ?
-		WHERE id = ?
+		WHERE org_id = ? AND id = ?
 	`, a.DisplayName, nullString(a.DefaultModel), a.DefaultAutonomySuitability,
-		nullString(a.JiraServiceAccountID), time.Now().UTC(), a.ID)
+		nullString(a.JiraServiceAccountID), time.Now().UTC(), orgID, a.ID)
 	return err
 }
 
 func (s *agentStore) SetGitHubAppInstallation(ctx context.Context, orgID, agentID, installationID string) error {
-	if err := assertLocalOrg(orgID); err != nil {
-		return err
-	}
 	// Clear the PAT-borrow FK in the same statement so the "at most
 	// one credential source" invariant holds. Empty installationID is
 	// allowed (caller wiring an org out of App-mode back to PAT-borrow
@@ -118,22 +118,18 @@ func (s *agentStore) SetGitHubAppInstallation(ctx context.Context, orgID, agentI
 		SET github_app_installation_id = ?,
 		    github_pat_user_id = NULL,
 		    updated_at = ?
-		WHERE id = ?
-	`, nullString(installationID), time.Now().UTC(), agentID)
+		WHERE org_id = ? AND id = ?
+	`, nullString(installationID), time.Now().UTC(), orgID, agentID)
 	return err
 }
 
 func (s *agentStore) SetGitHubPATUser(ctx context.Context, orgID, agentID, userID string) error {
-	if err := assertLocalOrg(orgID); err != nil {
-		return err
-	}
 	// Match the Postgres impl's input contract: empty = intentional
 	// clear, valid UUID = intentional set, anything else is a caller
-	// bug. SQLite's github_pat_user_id is TEXT with no FK so a
-	// malformed write wouldn't error at the column layer, but the
-	// silent "wipe both credential fields" effect is just as bad as
-	// in Postgres. Reject loudly to keep the cross-backend shape
-	// uniform.
+	// bug. SQLite's github_pat_user_id has an FK to users(id) post-269
+	// so a non-UUID would also fail at the column layer, but
+	// rejecting up front keeps the error shape friendly + matches
+	// Postgres exactly.
 	if userID != "" && !isValidUUIDLike(userID) {
 		return fmt.Errorf("sqlite agents: SetGitHubPATUser: userID %q is not empty and not a valid UUID", userID)
 	}
@@ -142,8 +138,8 @@ func (s *agentStore) SetGitHubPATUser(ctx context.Context, orgID, agentID, userI
 		SET github_pat_user_id = ?,
 		    github_app_installation_id = NULL,
 		    updated_at = ?
-		WHERE id = ?
-	`, nullString(userID), time.Now().UTC(), agentID)
+		WHERE org_id = ? AND id = ?
+	`, nullString(userID), time.Now().UTC(), orgID, agentID)
 	return err
 }
 

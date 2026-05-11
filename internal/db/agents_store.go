@@ -6,6 +6,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 //go:generate go run github.com/vektra/mockery/v2 --name=AgentStore --output=./mocks --case=underscore --with-expecter
@@ -94,14 +95,24 @@ type AgentStore interface {
 var bootstrapAgentNamespace = uuid.MustParse("e1f7c4a3-9d62-4f1b-b8a5-6c3d2e9f1a7b")
 
 // BootstrapAgentID returns the deterministic UUID for the org's bot
-// row. Same orgID → same UUID across installs, restarts, and re-runs.
-// Used by both backends so:
+// row. Two regimes:
 //
-//   - SQLite INSERT OR IGNORE on (id) gives natural idempotency
-//     without needing an org_id column or surrogate UNIQUE constraint.
-//   - Postgres INSERT ... ON CONFLICT (org_id) DO NOTHING is also
-//     idempotent on its own; using the derived id keeps the inserted
-//     row's id predictable for tests + audit traces.
+//   - Local mode (orgID == runmode.LocalDefaultOrgID): returns the
+//     sentinel runmode.LocalDefaultAgentID directly. The SQLite
+//     migration (202605120003_local_tenancy.sql) backfills the
+//     pre-existing agents row to this id at upgrade time, so both
+//     fresh installs and upgrades resolve to the same value here.
+//   - Multi mode (any other orgID): UUIDv5 derivation from the
+//     namespace + orgID. Same orgID → same UUID across installs.
+//
+// Two regimes rather than one because local mode's orgID is a
+// sentinel UUID and applying UUIDv5 to it would produce a derived
+// value that has no recognizable shape in logs. Using the
+// LocalDefaultAgentID sentinel keeps every local-mode agent row's id
+// readable as "the local bot" at a glance.
 func BootstrapAgentID(orgID string) string {
+	if orgID == runmode.LocalDefaultOrgID {
+		return runmode.LocalDefaultAgentID
+	}
 	return uuid.NewSHA1(bootstrapAgentNamespace, []byte(orgID)).String()
 }

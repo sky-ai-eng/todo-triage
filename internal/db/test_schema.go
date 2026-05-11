@@ -87,16 +87,27 @@ func buildSchemaBundle() (string, error) {
 		return "", err
 	}
 
-	// Seed rows: goose_db_version so a follow-up Migrate sees head
-	// (post-SKY-245 the runner is goose-managed; the legacy
-	// schema_migrations table is no longer created on fresh installs);
-	// events_catalog because it's the FK target for task_rules.event_type
-	// and prompt_triggers.event_type and many tests insert against it.
-	if err := dumpTableInserts(template, "goose_db_version", &b); err != nil {
-		return "", err
-	}
-	if err := dumpTableInserts(template, "events_catalog", &b); err != nil {
-		return "", err
+	// Seed rows preserved across the bundle:
+	//   - goose_db_version  — a follow-up Migrate sees head (post-SKY-245
+	//     the runner is goose-managed; the legacy schema_migrations
+	//     table is no longer created on fresh installs).
+	//   - events_catalog    — FK target for task_rules.event_type and
+	//     prompt_triggers.event_type; many tests INSERT against it.
+	//   - tenancy sentinels — the SKY-269 migration inserts five rows
+	//     into orgs/teams/users/org_memberships/memberships that every
+	//     resource table now FKs into. The agents + team_agents tables
+	//     are rebuilt as part of the same migration and carry one row
+	//     pinning the local bot identity. Without these rows in the
+	//     bundle, post-269 tests can't INSERT into any FK-bearing
+	//     resource table because the FK target would be missing.
+	for _, table := range []string{
+		"goose_db_version", "events_catalog",
+		"orgs", "teams", "users", "org_memberships", "memberships",
+		"agents", "team_agents",
+	} {
+		if err := dumpTableInserts(template, table, &b); err != nil {
+			return "", err
+		}
 	}
 
 	return b.String(), nil

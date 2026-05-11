@@ -127,6 +127,65 @@ func TestBootstrapTeamAgent_ErrorsWhenOrgHasNoAgent(t *testing.T) {
 	}
 }
 
+// TestBootstrapLocalTenancy_ConstantsMatchRows is the anti-drift gate
+// for SKY-269. The runmode.LocalDefault*ID constants and the SQL
+// literals in 202605120003_local_tenancy.sql's INSERT statements MUST
+// stay byte-identical — if either side drifts, FKs from resource
+// tables resolve correctly at insert time (because the migration
+// backfills the column DEFAULT to the SQL literal) but the store
+// impls' WHERE org_id = runmode.LocalDefaultOrgID lookups return zero
+// rows. That's a silent runtime failure mode the test catches loudly.
+//
+// Postgres doesn't need an equivalent because its migration uses no
+// hardcoded sentinels — every UUID is gen_random_uuid() at insert.
+func TestBootstrapLocalTenancy_ConstantsMatchRows(t *testing.T) {
+	conn := openInMemorySQLite(t)
+
+	for _, c := range []struct {
+		name   string
+		table  string
+		column string
+		want   string
+	}{
+		{"org", "orgs", "id", runmode.LocalDefaultOrgID},
+		{"team", "teams", "id", runmode.LocalDefaultTeamID},
+		{"user", "users", "id", runmode.LocalDefaultUserID},
+	} {
+		var got string
+		if err := conn.QueryRow(
+			`SELECT ` + c.column + ` FROM ` + c.table + ` LIMIT 1`,
+		).Scan(&got); err != nil {
+			t.Fatalf("read %s.%s: %v", c.table, c.column, err)
+		}
+		if got != c.want {
+			t.Errorf("%s sentinel drift: migration inserted %q, runmode.LocalDefault%sID = %q",
+				c.name, got, c.name, c.want)
+		}
+	}
+
+	// memberships + org_memberships rows reference all three above —
+	// a row mismatch here means one of the constants drifted too.
+	var n int
+	if err := conn.QueryRow(`
+		SELECT COUNT(*) FROM org_memberships
+		WHERE user_id = ? AND org_id = ?
+	`, runmode.LocalDefaultUserID, runmode.LocalDefaultOrgID).Scan(&n); err != nil {
+		t.Fatalf("count org_memberships: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("org_memberships sentinel row count = %d, want 1 (FK target for every resource table)", n)
+	}
+	if err := conn.QueryRow(`
+		SELECT COUNT(*) FROM memberships
+		WHERE user_id = ? AND team_id = ?
+	`, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID).Scan(&n); err != nil {
+		t.Fatalf("count memberships: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("memberships sentinel row count = %d, want 1", n)
+	}
+}
+
 // openInMemorySQLite gives the bootstrap tests their own SQLite
 // fixture (the *_test.go files in package db can't import internal
 // helpers from package sqlite_test).

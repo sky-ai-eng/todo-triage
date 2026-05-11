@@ -46,13 +46,34 @@ const (
 	ModeMulti Mode = "multi"
 )
 
-// LocalDefaultOrg is the synthetic org id local-mode callers pass at
-// every D2 store call + D4b path resolver. The store layer's SQLite
-// impls assert it equals this constant; the path layer (D4b) strips
-// it from resolved paths so existing local installs see no on-disk
-// change. Callers should reference the constant rather than the
-// literal string so a future rename stays grep-able.
-const LocalDefaultOrg = "default"
+// Local-mode sentinel identity values. Three constants — one each for
+// org, team, user — used as the canonical local-mode identity at every
+// API entry point. Pre-SKY-269 these were synthetic runtime constants
+// with no DB row backing them; post-SKY-269 the SQLite migration
+// inserts one row per sentinel into orgs/teams/users so FKs from
+// every resource table have a real target. The byte values here MUST
+// match the migration's INSERTs verbatim — TestBootstrapLocalTenancy_
+// ConstantsMatchRows asserts the equivalence so any drift fails CI
+// rather than producing silently-broken FKs at runtime.
+//
+// The nil-shape UUIDs (00000000-...000N) are deliberately chosen for
+// log visibility — a row id starting with thirty zeros is instantly
+// recognizable as "the local-mode sentinel" rather than as a random
+// tenant. gen_random_uuid() never produces these.
+const (
+	LocalDefaultOrgID   = "00000000-0000-0000-0000-000000000001"
+	LocalDefaultTeamID  = "00000000-0000-0000-0000-000000000010"
+	LocalDefaultUserID  = "00000000-0000-0000-0000-000000000100"
+	LocalDefaultAgentID = "00000000-0000-0000-0000-000000001000"
+)
+
+// LocalDefaultOrg is the pre-SKY-269 spelling — kept as an alias of
+// LocalDefaultOrgID so call sites that already reference the old name
+// keep compiling. New code should reference LocalDefaultOrgID directly.
+// Slated for removal once the in-tree sweep completes; see the
+// project memory entry under team-agent-reframe / D-LocalParity for
+// status.
+const LocalDefaultOrg = LocalDefaultOrgID
 
 // currentMode + initialized + modeMu form the package's mutable state.
 // Reads through Current() take an RLock — cheap, contention-free for

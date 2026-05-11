@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 //go:generate go run github.com/vektra/mockery/v2 --name=TeamAgentStore --output=./mocks --case=underscore --with-expecter
@@ -72,10 +73,9 @@ type TeamAgentStore interface {
 	ListForOrg(ctx context.Context, orgID, agentID string) ([]domain.TeamAgent, error)
 }
 
-// LocalDefaultTeamID is the synthetic team id used in local mode where
-// there's no real teams table. Mirrors runmode.LocalDefaultOrg's role
-// for orgID: a fixed string that every team-scoped store call passes
-// through in local mode so the SQLite impl's team_id column has a
-// stable, recognizable value. Multi mode uses real UUIDs from the
-// teams table and never sees this constant.
-const LocalDefaultTeamID = "default"
+// LocalDefaultTeamID is the synthetic team id used in local mode.
+// Post-SKY-269 it equals runmode.LocalDefaultTeamID — the sentinel
+// UUID that the SQLite migration inserts as the one row of the
+// teams table. Kept as an alias here for the migration period; new
+// code should reference runmode.LocalDefaultTeamID directly.
+const LocalDefaultTeamID = runmode.LocalDefaultTeamID
