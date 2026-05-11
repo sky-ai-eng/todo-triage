@@ -1804,11 +1804,12 @@ func TestPrompts_SemanticIDsAccepted(t *testing.T) {
 		t.Fatalf("system prompt INSERT with semantic id: %v", err)
 	}
 
-	// system_prompt_versions can reference it.
+	// system_prompt_versions can reference it. org_id required since
+	// prompts are per-org and the version table mirrors that scoping.
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO system_prompt_versions (prompt_id, content_hash)
-		VALUES ('system-pr-review', 'sha256:abc')
-	`); err != nil {
+		INSERT INTO system_prompt_versions (org_id, prompt_id, content_hash)
+		VALUES ($1, 'system-pr-review', 'sha256:abc')
+	`, orgA); err != nil {
 		t.Fatalf("system_prompt_versions INSERT: %v", err)
 	}
 
@@ -1858,9 +1859,9 @@ func TestSystemPromptSeeding_DeployActorOnly(t *testing.T) {
 		t.Fatalf("AdminDB system prompt INSERT: %v", err)
 	}
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO system_prompt_versions (prompt_id, content_hash)
-		VALUES ('system-pr-review', 'sha256:abc')
-	`); err != nil {
+		INSERT INTO system_prompt_versions (org_id, prompt_id, content_hash)
+		VALUES ($1, 'system-pr-review', 'sha256:abc')
+	`, orgA); err != nil {
 		t.Fatalf("AdminDB system_prompt_versions INSERT: %v", err)
 	}
 
@@ -1868,10 +1869,10 @@ func TestSystemPromptSeeding_DeployActorOnly(t *testing.T) {
 	// (alice + orgA), system_prompt_versions writes are REVOKE'd.
 	err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
 		_, err := tx.Exec(`
-			INSERT INTO system_prompt_versions (prompt_id, content_hash)
-			VALUES ('system-pr-review', 'sha256:xyz')
-			ON CONFLICT (prompt_id) DO UPDATE SET content_hash = excluded.content_hash
-		`)
+			INSERT INTO system_prompt_versions (org_id, prompt_id, content_hash)
+			VALUES ($1, 'system-pr-review', 'sha256:xyz')
+			ON CONFLICT (org_id, prompt_id) DO UPDATE SET content_hash = excluded.content_hash
+		`, orgA)
 		return err
 	})
 	if err == nil {
@@ -1882,7 +1883,7 @@ func TestSystemPromptSeeding_DeployActorOnly(t *testing.T) {
 	// Same for UPDATE.
 	err = h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
 		_, err := tx.Exec(
-			`UPDATE system_prompt_versions SET content_hash = 'forged' WHERE prompt_id = 'system-pr-review'`,
+			`UPDATE system_prompt_versions SET content_hash = 'forged' WHERE org_id = $1 AND prompt_id = 'system-pr-review'`, orgA,
 		)
 		return err
 	})

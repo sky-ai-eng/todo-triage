@@ -398,7 +398,7 @@ footer {
     <li><strong>Child-table policies inherit parent visibility</strong>: tables denormalized from creator-scoped parents (<code>task_events</code>, <code>run_artifacts</code>, <code>run_messages</code>, <code>run_memory</code>, <code>run_worktrees</code>, <code>pending_prs</code>, <code>pending_firings</code>, <code>pending_reviews</code>, <code>pending_review_comments</code>) gate via <code>EXISTS (SELECT 1 FROM parent WHERE parent.id = child.parent_id)</code> rather than <code>org_id</code> alone, so a non-creator org member can't side-channel into another user's task/run/review metadata.</li>
     <li><strong>Ownership invariants</strong>: a trigger (<code>tf.guard_org_owners</code>) refuses any UPDATE/DELETE on <code>org_memberships</code> that would leave an org with zero <code>role='owner'</code> rows; <code>orgs.owner_user_id</code> is gated by a BEFORE-trigger (<code>tf.guard_org_owner_transfer</code>) that only the current owner can change AND only to a user who already has <code>role='owner'</code> in <code>org_memberships</code>. Together: org admins can rename but not take over.</li>
     <li><strong>Hygiene constraints</strong>: <code>CHECK (visibility &lt;&gt; 'team' OR team_id IS NOT NULL)</code> on every table with the team/visibility pair (prompts, projects, task_rules, prompt_triggers, tasks, runs); <code>updated_at</code> auto-bumped on every UPDATE via a single <code>tf.set_updated_at</code> trigger fanned across every table that has the column; Vault wrappers explicitly raise on NULL <code>p_org_id</code> or NULL <code>current_org_id</code> (otherwise <code>IS DISTINCT FROM</code> would let both-NULL slip past the cross-org gate).</li>
-    <li><strong>Reference data baked in:</strong> <code>events_catalog</code> seeded via <code>INSERT</code>s in the migration itself (mirrors supabase convention; avoids requiring app-layer seeding privileges on a table tf_app has no INSERT grant on). Same treatment for <code>system_prompt_versions</code> if shipping with system prompts pre-loaded.</li>
+    <li><strong>Reference data:</strong> <code>events_catalog</code> seeded via <code>INSERT</code>s in the migration itself (truly global, one row set across all tenants). <code>system_prompt_versions</code> is <em>not</em> migration-seeded — it's per-org and populated by the deploy-time seeder running on the migration connection (see §10 step 3 + the D2 carry-over note in SKY-246's spec). System prompts themselves (<code>prompts</code> rows with <code>source='system'</code>) follow the same per-org pattern.</li>
   </ul>
 
   <p><strong>D4a is merged but D3 doesn't import it.</strong> <code>internal/runmode</code> is the deployment-posture flag; D3 is pure SQL DDL with no Go integration. D4b will be the first runmode consumer (paths package). Leaving the runmode reference here only as forward-context.</p>
@@ -836,8 +836,12 @@ $$ <span class="kw">LANGUAGE SQL STABLE</span>;</pre>
         <td><code>org_id UUID NOT NULL</code> denormalized from the parent (<code>runs</code> / <code>pending_reviews</code> / <code>curator_requests</code>) for RLS-policy efficiency — avoids policies that have to JOIN to figure out access. <code>curator_messages</code> + <code>curator_pending_context</code> additionally inherit <code>creator_user_id</code> from <code>curator_requests</code> via FK; RLS gates against the joined value.</td>
       </tr>
       <tr>
-        <td><code>events_catalog</code>, <code>system_prompt_versions</code></td>
-        <td>Global reference tables — no <code>org_id</code>. Read-only for <code>tf_app</code>; written only by the migration itself (<code>INSERT</code>s baked into the goose baseline, not by application code). RLS not enabled. <code>tf_app</code>'s grants are <code>SELECT</code> only — INSERT/UPDATE/DELETE are revoked at migration time.</td>
+        <td><code>events_catalog</code></td>
+        <td>Truly global reference table — no <code>org_id</code>, RLS not enabled. Read-only for <code>tf_app</code>; written only by the migration itself (<code>INSERT</code>s baked into the goose baseline). The 31 event types are universal across all tenants.</td>
+      </tr>
+      <tr>
+        <td><code>system_prompt_versions</code></td>
+        <td>Per-org because <code>prompts</code> is per-org (composite PK <code>(org_id, id)</code>): each tenant gets its own copy of system prompts and tracks its own version hashes. RLS enabled (SELECT gated on org_id); INSERT/UPDATE/DELETE REVOKEd from <code>tf_app</code> entirely — seeding is a deploy-time operation that runs on the migration connection, not at request time. See the seeding callout near §10 step 3.</td>
       </tr>
       <tr>
         <td><code>settings</code></td>

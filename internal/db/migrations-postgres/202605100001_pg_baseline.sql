@@ -544,11 +544,21 @@ CREATE TABLE events_catalog (
 -- semantic stable IDs (e.g. 'system-pr-review' in seed.go) that the
 -- application references by name. User-generated prompts get
 -- gen_random_uuid()::text as their default. The full row set lives
--- in one table regardless of which side generated the ID. ID-
--- guessing defense isn't load-bearing here — RLS + visibility
--- already gates reads.
+-- in one table regardless of which side generated the ID.
+--
+-- Primary key is COMPOSITE (org_id, id), not id alone — system
+-- prompts are seeded per-org (each tenant gets its own
+-- 'system-pr-review' row with potentially independently-iterated
+-- content). A global `id PRIMARY KEY` would let the first org
+-- claim the name and lock everyone else out.
+--
+-- We also keep UNIQUE (id, org_id) so downstream composite FKs from
+-- prompt_triggers/runs/projects/system_prompt_versions can use the
+-- column order they already use elsewhere in the schema
+-- (`(child_col, org_id) REFERENCES prompts(id, org_id)`). Postgres
+-- requires the FK column order to match a unique constraint exactly.
 CREATE TABLE prompts (
-  id              TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  id              TEXT NOT NULL DEFAULT gen_random_uuid()::text,
   org_id          UUID NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
   creator_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   team_id         UUID REFERENCES teams(id) ON DELETE SET NULL,
@@ -565,14 +575,24 @@ CREATE TABLE prompts (
   allowed_tools   TEXT NOT NULL DEFAULT '',
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (org_id, id),
   UNIQUE (id, org_id)
 );
 
--- system_prompt_versions — read-only global ref; written only by migrations.
+-- system_prompt_versions — version-tracking sidecar. Now per-org
+-- because prompts themselves are per-org (an org that iterates its
+-- copy of 'system-pr-review' tracks a different hash than another
+-- org with the default content). Read-access goes through RLS so
+-- one tenant doesn't see another's version drift; writes are
+-- REVOKE'd from tf_app (deploy-actor-only — see seed-flow callout
+-- near the bottom of the migration).
 CREATE TABLE system_prompt_versions (
-  prompt_id    TEXT PRIMARY KEY REFERENCES prompts(id) ON DELETE CASCADE,
+  org_id       UUID NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  prompt_id    TEXT NOT NULL,
   content_hash TEXT NOT NULL,
-  applied_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+  applied_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (org_id, prompt_id),
+  FOREIGN KEY (prompt_id, org_id) REFERENCES prompts(id, org_id) ON DELETE CASCADE
 );
 
 CREATE TABLE projects (
@@ -1203,6 +1223,7 @@ ALTER TABLE jira_project_status_rules  ENABLE ROW LEVEL SECURITY;
 ALTER TABLE preferences                ENABLE ROW LEVEL SECURITY;
 -- TF data tables:
 ALTER TABLE prompts                    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE system_prompt_versions     ENABLE ROW LEVEL SECURITY;
 ALTER TABLE projects                   ENABLE ROW LEVEL SECURITY;
 ALTER TABLE project_knowledge          ENABLE ROW LEVEL SECURITY;
 ALTER TABLE entities                   ENABLE ROW LEVEL SECURITY;
@@ -1418,6 +1439,13 @@ CREATE POLICY prompts_modify ON prompts FOR ALL
   USING (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id) AND creator_user_id = tf.current_user_id())
   WITH CHECK (org_id = tf.current_org_id() AND creator_user_id = tf.current_user_id()
               AND tf.user_has_org_access(org_id));
+
+-- system_prompt_versions: org members can SELECT their own org's
+-- version rows. Writes are REVOKE'd from tf_app entirely (see the
+-- read-only ref section near end-of-migration) so no INSERT/UPDATE/
+-- DELETE policy is needed — the GRANT-level lockdown is the gate.
+CREATE POLICY system_prompt_versions_select ON system_prompt_versions FOR SELECT
+  USING (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id));
 
 CREATE POLICY projects_select ON projects FOR SELECT
   USING (org_id = tf.current_org_id()
