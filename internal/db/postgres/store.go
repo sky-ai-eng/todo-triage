@@ -80,7 +80,16 @@ func New(admin, app *sql.DB) db.Stores {
 		// tf.user_is_org_admin() per 202605120001; Seed has no JWT
 		// claims and must run admin-side).
 		Triggers: newTriggerStore(app, admin),
-		Tx:       s,
+		// Agents.Create routes through admin (bootstrap has no JWT
+		// claims and the agents_insert policy gates on
+		// tf.user_is_org_admin); every other method on app. Same
+		// pool-split pattern as PromptStore + TaskRuleStore.
+		Agents: newAgentStore(app, admin),
+		// TeamAgents.AddForTeam routes through admin for the same
+		// bootstrap reason; SetEnabled/Overrides/Remove/Get run on
+		// app where RLS gates by team membership.
+		TeamAgents: newTeamAgentStore(app, admin),
+		Tx:         s,
 	}
 	return s.stores
 }
@@ -109,12 +118,14 @@ func New(admin, app *sql.DB) db.Stores {
 // test-side door into it.
 func NewForTx(tx *sql.Tx) db.TxStores {
 	return db.TxStores{
-		Scores:    newScoreStore(tx),
-		Prompts:   newTxPromptStore(tx),
-		Swipes:    newSwipeStore(tx),
-		Dashboard: newDashboardStore(tx),
-		Secrets:   newSecretStore(tx),
-		TaskRules: newTxTaskRuleStore(tx),
-		Triggers:  newTxTriggerStore(tx),
+		Scores:     newScoreStore(tx),
+		Prompts:    newTxPromptStore(tx),
+		Swipes:     newSwipeStore(tx),
+		Dashboard:  newDashboardStore(tx),
+		Secrets:    newSecretStore(tx),
+		TaskRules:  newTxTaskRuleStore(tx),
+		Triggers:   newTxTriggerStore(tx),
+		Agents:     newTxAgentStore(tx),
+		TeamAgents: newTxTeamAgentStore(tx),
 	}
 }

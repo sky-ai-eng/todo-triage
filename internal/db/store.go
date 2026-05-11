@@ -49,6 +49,17 @@ type Stores struct {
 	// now they ship as parallel stores with the same shape.
 	Triggers TriggerStore
 
+	// Agents owns the agents table — the org's workload identity.
+	// One row per org. Bootstrap-only Create (admin pool in Postgres);
+	// reads + admin-gated updates run on the app pool. See SKY-260.
+	Agents AgentStore
+
+	// TeamAgents owns team_agents — per-team membership for the
+	// agent + per-team config overrides. Bootstrap-only AddForTeam
+	// (admin pool in Postgres); SetEnabled/SetOverrides/Remove run
+	// on the app pool and gate on team membership via RLS.
+	TeamAgents TeamAgentStore
+
 	// Tx is the transaction runner — handlers that need atomic
 	// multi-store writes call Tx.WithTx and receive a TxStores with
 	// every field tx-bound. Postgres impl also sets the JWT claims
@@ -62,13 +73,15 @@ type Stores struct {
 // in the same transaction. Fields are added as their parent stores
 // land in successive waves.
 type TxStores struct {
-	Scores    ScoreStore
-	Prompts   PromptStore
-	Swipes    SwipeStore
-	Dashboard DashboardStore
-	Secrets   SecretStore
-	TaskRules TaskRuleStore
-	Triggers  TriggerStore
+	Scores     ScoreStore
+	Prompts    PromptStore
+	Swipes     SwipeStore
+	Dashboard  DashboardStore
+	Secrets    SecretStore
+	TaskRules  TaskRuleStore
+	Triggers   TriggerStore
+	Agents     AgentStore
+	TeamAgents TeamAgentStore
 }
 
 // TxRunner runs fn inside a single database transaction. Postgres
