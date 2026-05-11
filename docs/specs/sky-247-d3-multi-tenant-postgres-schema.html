@@ -410,14 +410,14 @@ footer {
 <section class="block" id="roles">
   <div class="section-label">§4</div>
   <h2>Roles &amp; connection pattern</h2>
-  <p class="lede">The supabase-idiomatic <code>authenticator</code> + <code>SET LOCAL ROLE</code> pattern, adapted for our Go-backend-on-Postgres setup. One LOGIN role at the connection level (image-shipped <code>authenticator</code>); one NOLOGIN role at the transaction level (<code>tf_app</code>) that RLS policies actually gate against. Migrations and tests both run as <code>postgres</code> superuser, which bypasses RLS — that's intentional for setup, but it means RLS-asserting tests must <code>SET LOCAL ROLE tf_app</code> or the assertions are silently meaningless.</p>
+  <p class="lede">The supabase-idiomatic <code>authenticator</code> + <code>SET LOCAL ROLE</code> pattern, adapted for our Go-backend-on-Postgres setup. One LOGIN role at the connection level (image-shipped <code>authenticator</code>); one NOLOGIN role at the transaction level (<code>tf_app</code>) that RLS policies actually gate against. Migrations and tests use the AdminDB connection as <code>supabase_admin</code> (the image demotes <code>postgres</code>), which bypasses RLS — that's intentional for setup, but it means RLS-asserting tests must <code>SET LOCAL ROLE tf_app</code> or the assertions are silently meaningless.</p>
 
   <h3>Role inventory</h3>
   <table class="matrix">
     <thead><tr><th style="width: 22%;">Role</th><th style="width: 18%;">Origin</th><th style="width: 18%;">Login / bypassrls</th><th>Used for</th></tr></thead>
     <tbody>
-      <tr><td><code>postgres</code></td><td>Image default</td><td>LOGIN, BYPASSRLS</td><td>Goose migrations + test setup. Never serves user requests.</td></tr>
-      <tr><td><code>supabase_admin</code></td><td>Image</td><td>LOGIN, SUPERUSER</td><td>Image-internal admin; we don't connect as this.</td></tr>
+      <tr><td><code>postgres</code></td><td>Image default</td><td>LOGIN, BYPASSRLS</td><td>Present in the image, but not our AdminDB login in this setup because the image demotes it.</td></tr>
+      <tr><td><code>supabase_admin</code></td><td>Image</td><td>LOGIN, SUPERUSER</td><td>AdminDB login used for goose migrations and pgtest/test setup. Never serves user requests.</td></tr>
       <tr><td><code>authenticator</code></td><td>Image</td><td>LOGIN, NOINHERIT, no privileges of its own</td><td>The connection role. App's pgx pool dials as authenticator. NOINHERIT means it has no privileges until it <code>SET ROLE</code>s into a granted member.</td></tr>
       <tr><td><code>tf_app</code></td><td><strong>Created by our migration</strong></td><td>NOLOGIN, NOINHERIT, BYPASSRLS=false</td><td>The transaction role. Every <code>WithTx</code> opens a tx, <code>SET LOCAL ROLE tf_app</code>, sets <code>request.jwt.claims</code>, runs queries. RLS policies gate against this role's identity.</td></tr>
       <tr><td><code>service_role</code> / <code>authenticated</code> / <code>anon</code></td><td>Image (Supabase convention)</td><td>NOLOGIN, varying</td><td>Reserved for PostgREST/Realtime if we ever add them. We don't grant them anything; we don't connect through them. Untouched by our migration.</td></tr>
