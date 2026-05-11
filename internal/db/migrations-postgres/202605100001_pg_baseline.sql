@@ -1162,7 +1162,7 @@ CREATE INDEX idx_task_rules_org_event_enabled
     ON task_rules(org_id, event_type) WHERE enabled = TRUE;
 
 CREATE UNIQUE INDEX idx_prompt_triggers_prompt_event_trigger_unique
-    ON prompt_triggers(prompt_id, event_type, trigger_type);
+    ON prompt_triggers(org_id, prompt_id, event_type, trigger_type);
 CREATE INDEX idx_prompt_triggers_org_event ON prompt_triggers(org_id, event_type) WHERE enabled = TRUE;
 CREATE INDEX idx_prompt_triggers_prompt_created ON prompt_triggers(prompt_id, created_at);
 
