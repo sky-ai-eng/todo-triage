@@ -47,7 +47,7 @@ func TestTeamAgentStore_Postgres_NonMemberCannotToggle(t *testing.T) {
 
 	// dave is a member of the org (so org-access predicate passes for
 	// joined queries) but only joins platform; toggling mobile must
-	// fail the team_agents_modify RLS predicate.
+	// fail the team_agents_update RLS predicate (user_in_team gate).
 	daveID := seedPgMember(t, h, orgID, "dave", "member")
 	if _, err := h.AdminDB.Exec(
 		`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'member')`,
@@ -116,6 +116,72 @@ func TestTeamAgentStore_Postgres_NonMemberCannotToggle(t *testing.T) {
 	}
 	if !enabled {
 		t.Error("mobile bot disabled by non-member; RLS didn't gate")
+	}
+}
+
+// TestTeamAgentStore_Postgres_BlocksCrossOrgInsert pins the fix
+// from migration 202605120004. Without the agents.org_id = teams.org_id
+// predicate on team_agents_insert, a member of org A's team could
+// INSERT (team_id=team-in-A, agent_id=guessed-agent-uuid-from-B) and
+// the policy would accept it because user_in_team(team_id) is true.
+// The subsequent JOIN that resolves "this team's bot" would silently
+// dispatch to the wrong tenant's agent.
+//
+// The regression check: an org-A team member directly INSERTs a
+// team_agents row pointing at org B's agent and expects RLS refusal.
+func TestTeamAgentStore_Postgres_BlocksCrossOrgInsert(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+
+	orgA := seedPgOrgForAgents(t, h)
+	orgB := seedPgOrgForAgents(t, h)
+	teamA := seedPgTeam(t, h, orgA, "team-a")
+	aliceID := seedPgMember(t, h, orgA, "alice", "member")
+	if _, err := h.AdminDB.Exec(
+		`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'member')`,
+		aliceID, teamA,
+	); err != nil {
+		t.Fatalf("alice team-a membership: %v", err)
+	}
+
+	adminStores := pgstore.New(h.AdminDB, h.AdminDB)
+	if _, err := adminStores.Agents.Create(context.Background(), orgA, domain.Agent{DisplayName: "Bot A"}); err != nil {
+		t.Fatalf("seed agent A: %v", err)
+	}
+	if _, err := adminStores.Agents.Create(context.Background(), orgB, domain.Agent{DisplayName: "Bot B"}); err != nil {
+		t.Fatalf("seed agent B: %v", err)
+	}
+	var agentBID string
+	if err := h.AdminDB.QueryRow(`SELECT id FROM agents WHERE org_id = $1`, orgB).Scan(&agentBID); err != nil {
+		t.Fatalf("read agent B id: %v", err)
+	}
+
+	// Alice (member of org-A's team-a) attempts to INSERT a team_agents
+	// row that points at org B's agent. RLS must filter this row out
+	// of the INSERT's WITH CHECK — Postgres surfaces the policy
+	// refusal as ERROR 42501 "new row violates row-level security
+	// policy" rather than a 0-rows-affected outcome on INSERT.
+	err := h.WithUser(t, aliceID, orgA, func(tx *sql.Tx) error {
+		_, err := tx.Exec(
+			`INSERT INTO team_agents (team_id, agent_id, enabled) VALUES ($1, $2, TRUE)`,
+			teamA, agentBID,
+		)
+		return err
+	})
+	if err == nil {
+		t.Fatal("cross-org team_agents INSERT succeeded; team member can reach another org's agent via team_agents")
+	}
+
+	// Sanity: no team_agents row exists for team-a after the failed
+	// attempt — the policy refused at INSERT time, no row was written.
+	var count int
+	if err := h.AdminDB.QueryRow(
+		`SELECT COUNT(*) FROM team_agents WHERE team_id = $1`, teamA,
+	).Scan(&count); err != nil {
+		t.Fatalf("re-read team-a: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("team_agents row count for team-a=%d after failed cross-org INSERT; want 0", count)
 	}
 }
 

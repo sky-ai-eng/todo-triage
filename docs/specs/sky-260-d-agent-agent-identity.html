@@ -509,25 +509,46 @@ $$;
 <span class="kw">ALTER TABLE</span> team_agents <span class="kw">ENABLE ROW LEVEL SECURITY</span>;
 
 <span class="com">-- agents: org-wide read (any member can see "who is our bot"),
--- admin-only writes (rename, model, credential changes are sensitive).</span>
+-- admin-only writes (rename, model, credential changes are sensitive).
+-- Writes split into separate INSERT/UPDATE/DELETE policies rather than
+-- one FOR ALL so future tickets can re-gate any single op (e.g. tighten
+-- DELETE) without touching the others — matches the prompt_triggers
+-- split from 202605120001.</span>
 <span class="kw">CREATE POLICY</span> agents_select <span class="kw">ON</span> agents
-  <span class="kw">FOR SELECT TO</span> tf_app <span class="kw">USING</span> (tf.user_has_org_access(org_id));
+  <span class="kw">FOR SELECT TO</span> tf_app <span class="kw">USING</span> (org_id = tf.current_org_id() <span class="kw">AND</span> tf.user_has_org_access(org_id));
 
-<span class="kw">CREATE POLICY</span> agents_modify <span class="kw">ON</span> agents
-  <span class="kw">FOR ALL TO</span> tf_app
-  <span class="kw">USING</span>      (tf.user_is_org_admin(org_id))
-  <span class="kw">WITH CHECK</span> (tf.user_is_org_admin(org_id));
+<span class="kw">CREATE POLICY</span> agents_insert <span class="kw">ON</span> agents <span class="kw">FOR INSERT</span>
+  <span class="kw">WITH CHECK</span> (org_id = tf.current_org_id() <span class="kw">AND</span> tf.user_is_org_admin(org_id));
+
+<span class="kw">CREATE POLICY</span> agents_update <span class="kw">ON</span> agents <span class="kw">FOR UPDATE</span>
+  <span class="kw">USING</span>      (org_id = tf.current_org_id() <span class="kw">AND</span> tf.user_is_org_admin(org_id))
+  <span class="kw">WITH CHECK</span> (org_id = tf.current_org_id() <span class="kw">AND</span> tf.user_is_org_admin(org_id));
+
+<span class="kw">CREATE POLICY</span> agents_delete <span class="kw">ON</span> agents <span class="kw">FOR DELETE</span>
+  <span class="kw">USING</span> (org_id = tf.current_org_id() <span class="kw">AND</span> tf.user_is_org_admin(org_id));
 
 <span class="com">-- team_agents: team-member read + write (toggling the bot for your own
 -- team is a team-member power, not an admin power; rename/credential
--- changes happen at the agents level above and are admin-gated there).</span>
+-- changes happen at the agents level above and are admin-gated there).
+-- The insert + update WITH CHECK additionally pins agents.org_id =
+-- teams.org_id at write time so a team member can't write a row
+-- pointing at another org's agent (migration 202605120004).</span>
 <span class="kw">CREATE POLICY</span> team_agents_select <span class="kw">ON</span> team_agents
   <span class="kw">FOR SELECT TO</span> tf_app <span class="kw">USING</span> (tf.user_in_team(team_id));
 
-<span class="kw">CREATE POLICY</span> team_agents_modify <span class="kw">ON</span> team_agents
-  <span class="kw">FOR ALL TO</span> tf_app
+<span class="kw">CREATE POLICY</span> team_agents_insert <span class="kw">ON</span> team_agents <span class="kw">FOR INSERT</span>
+  <span class="kw">WITH CHECK</span> (tf.user_in_team(team_id)
+              <span class="kw">AND EXISTS</span> (<span class="kw">SELECT</span> 1 <span class="kw">FROM</span> teams t <span class="kw">JOIN</span> agents a <span class="kw">ON</span> a.org_id = t.org_id
+                           <span class="kw">WHERE</span> t.id = team_id <span class="kw">AND</span> a.id = agent_id));
+
+<span class="kw">CREATE POLICY</span> team_agents_update <span class="kw">ON</span> team_agents <span class="kw">FOR UPDATE</span>
   <span class="kw">USING</span>      (tf.user_in_team(team_id))
-  <span class="kw">WITH CHECK</span> (tf.user_in_team(team_id));
+  <span class="kw">WITH CHECK</span> (tf.user_in_team(team_id)
+              <span class="kw">AND EXISTS</span> (<span class="kw">SELECT</span> 1 <span class="kw">FROM</span> teams t <span class="kw">JOIN</span> agents a <span class="kw">ON</span> a.org_id = t.org_id
+                           <span class="kw">WHERE</span> t.id = team_id <span class="kw">AND</span> a.id = agent_id));
+
+<span class="kw">CREATE POLICY</span> team_agents_delete <span class="kw">ON</span> team_agents <span class="kw">FOR DELETE</span>
+  <span class="kw">USING</span> (tf.user_in_team(team_id));
 
 <span class="com">-- +goose Down
 SELECT 'down not supported';</span>
@@ -591,8 +612,9 @@ SELECT 'down not supported';</span>
 )
 
 <span class="com">// AgentStore is the workload-identity store. One row per org. Writes are
-// admin-gated in Postgres via the agents_modify policy; SQLite's
-// assertLocalOrg pins identity to the synthetic single-org world.</span>
+// admin-gated in Postgres via the agents_insert/agents_update/agents_delete
+// policies; SQLite's assertLocalOrg pins identity to the synthetic
+// single-org world.</span>
 <span class="kw">type</span> AgentStore <span class="kw">interface</span> {
   <span class="com">// GetForOrg returns the single agent row for the org, or nil if not
   // yet bootstrapped. Stores call this on every credential lookup.</span>
@@ -735,21 +757,21 @@ SELECT 'down not supported';</span>
 // inserted and BEFORE any team is created for the org. Uses the admin
 // pool internally because no JWT claims exist yet (org_memberships row
 // for the founder is also inserted in the same handler transaction).</span>
-<span class="kw">func</span> (s *Stores) <span class="fn">BootstrapAgentForOrg</span>(ctx context.Context, orgID <span class="kw">string</span>) (<span class="kw">string</span>, error) {
-  <span class="kw">return</span> s.Agents.<span class="fn">Create</span>(ctx, orgID, domain.Agent{
+<span class="kw">func</span> <span class="fn">BootstrapAgentForOrg</span>(ctx context.Context, stores Stores, orgID <span class="kw">string</span>) (<span class="kw">string</span>, error) {
+  <span class="kw">return</span> stores.Agents.<span class="fn">Create</span>(ctx, orgID, domain.Agent{
     DisplayName: <span class="str">"Triage Factory Bot"</span>,
   })
 }
 
 <span class="com">// Called from the future team-create handler (D7) AFTER the teams row
 // is inserted. Looks up the org's agent and inserts the team_agents row.</span>
-<span class="kw">func</span> (s *Stores) <span class="fn">BootstrapTeamAgent</span>(ctx context.Context, orgID, teamID <span class="kw">string</span>) error {
-  agent, err := s.Agents.<span class="fn">GetForOrg</span>(ctx, orgID)
+<span class="kw">func</span> <span class="fn">BootstrapTeamAgent</span>(ctx context.Context, stores Stores, orgID, teamID <span class="kw">string</span>) error {
+  agent, err := stores.Agents.<span class="fn">GetForOrg</span>(ctx, orgID)
   <span class="kw">if</span> err != <span class="kw">nil</span> { <span class="kw">return</span> err }
   <span class="kw">if</span> agent == <span class="kw">nil</span> {
     <span class="kw">return</span> fmt.<span class="fn">Errorf</span>(<span class="str">"bootstrap: org %s has no agent — call BootstrapAgentForOrg first"</span>, orgID)
   }
-  <span class="kw">return</span> s.TeamAgents.<span class="fn">AddForTeam</span>(ctx, orgID, teamID, agent.ID)
+  <span class="kw">return</span> stores.TeamAgents.<span class="fn">AddForTeam</span>(ctx, orgID, teamID, agent.ID)
 }
 </pre>
 
@@ -757,21 +779,14 @@ SELECT 'down not supported';</span>
     <strong>Why these are functions, not handlers:</strong> the org-create + team-create HTTP handlers don't exist yet (D5/D7). Building them inside this PR would bloat the diff and couple to auth work that hasn't landed. Defining the bootstrap functions now means the handler tickets just call them — clean handoff.
   </div>
 
+  <div class="callout">
+    <strong>Why package-level functions instead of methods on Stores:</strong> earlier drafts of this spec attached bootstrap as <code>(s *Stores) Bootstrap...</code> methods. The implementation moved them to package-level functions taking <code>db.Stores</code> by value because (a) handlers depend on the specific store interfaces they need rather than the whole bundle, and (b) the bootstrap functions don't need to mutate <code>Stores</code> — they just call into the store interfaces it carries. Both shapes work; the package-level form reads better at the call site (<code>db.BootstrapLocalAgent(ctx, stores)</code> vs <code>stores.BootstrapLocalAgent(ctx)</code>) and keeps <code>Stores</code> a pure DI bundle.
+  </div>
+
   <h3>Admin-pool routing for bootstrap</h3>
-  <p>Bootstrap functions in multi mode must use the admin pool (BYPASSRLS), not the app pool. Reasoning: the founder's JWT exists in the org-create flow, but their <code>org_memberships</code> row is being inserted in the same transaction — at the moment we insert the agents row, <code>tf.user_is_org_admin(org_id)</code> returns false (no membership row yet), so the <code>agents_modify</code> RLS policy would refuse. Same pattern as PromptStore.Seed and TriggerStore.Seed land via the admin pool.</p>
+  <p>Bootstrap functions in multi mode must use the admin pool (BYPASSRLS), not the app pool. Reasoning: the founder's JWT exists in the org-create flow, but their <code>org_memberships</code> row is being inserted in the same transaction — at the moment we insert the agents row, <code>tf.user_is_org_admin(org_id)</code> returns false (no membership row yet), so the <code>agents_insert</code> RLS policy would refuse. Same pattern as PromptStore.Seed and TriggerStore.Seed land via the admin pool.</p>
 
-  <p>This is enforced by the Postgres impl's <code>Create</code> routing to the admin pool when called from <code>Bootstrap*</code>. The simplest mechanism is a separate <code>BootstrapCreate</code> variant on the store, or an explicit "this is system context" flag — recommend the explicit method (parallels <code>TriggerStore.Seed</code>'s admin-pool routing). Final shape:</p>
-
-<pre class="code"><span class="com">// AgentStore impl in postgres: Create() routes to app pool; an internal
-// helper used by BootstrapAgentForOrg routes to admin pool. Surface this
-// as a separate method to keep "system context" explicit in the API.</span>
-<span class="kw">type</span> AgentStore <span class="kw">interface</span> {
-  <span class="com">// ... existing methods ...</span>
-  CreateSystem(ctx context.Context, orgID <span class="kw">string</span>, a domain.Agent) (<span class="kw">string</span>, error)
-}
-</pre>
-
-  <p><code>BootstrapAgentForOrg</code> calls <code>CreateSystem</code>; user-initiated paths (none in v1, but kept for future "create an extra agent" feature) call <code>Create</code>.</p>
+  <p>The Postgres <code>AgentStore.Create</code> routes <em>unconditionally</em> through the admin pool — there is no separate <code>CreateSystem</code> method. Justification: the only legitimate caller in v1 is bootstrap, and a public Create that routes through the app pool would expose an admin-only surface (agents_insert is admin-gated). If a future ticket needs user-initiated agent creation (e.g. admin UI creating extra agents per team), it adds a separate method then. Earlier drafts of this spec proposed <code>CreateSystem</code> as the explicit "system context" variant; the implementation simplified to one Create with admin-pool routing because the second method had no caller.</p>
 
   <h3>Existing installs (v1.10.1 → current)</h3>
   <p>Forward-only, idempotent, invisible. There is no backfill migration and no manual step. Three pieces line up to make this work:</p>
@@ -872,7 +887,7 @@ SELECT 'down not supported';</span>
     </li>
     <li>
       <span class="step-title">Postgres impls</span>
-      <span class="step-body"><code>internal/db/postgres/agents.go</code>, <code>internal/db/postgres/team_agents.go</code>. Admin/app pool split: Create + Update + SetGitHubApp* + SetGitHubPATUser route to app pool (RLS enforces admin). CreateSystem routes to admin pool. Read methods route to app pool. UUID validation up front on all string-keyed lookups (returns nil/no-op on invalid; same pattern as TaskRuleStore / TriggerStore after the SKY-260-precedent fixup).</span>
+      <span class="step-body"><code>internal/db/postgres/agents.go</code>, <code>internal/db/postgres/team_agents.go</code>. Admin/app pool split: Create + AddForTeam route to the admin pool (bootstrap-only callers, no JWT claims). Update + SetGitHubApp* + SetGitHubPATUser + SetEnabled + SetOverrides + Remove route to the app pool; RLS enforces admin (agents) or team-membership (team_agents). Read methods route to app pool. UUID validation up front on all string-keyed lookups (returns nil/no-op on invalid; same pattern as TaskRuleStore / TriggerStore after the SKY-260-precedent fixup).</span>
     </li>
     <li>
       <span class="step-title">Wire into <code>db.Stores</code></span>
@@ -888,7 +903,7 @@ SELECT 'down not supported';</span>
     </li>
     <li>
       <span class="step-title">Bootstrap functions</span>
-      <span class="step-body"><code>internal/db/bootstrap.go</code>: <code>BootstrapAgentForOrg</code> + <code>BootstrapTeamAgent</code> as methods on <code>*Stores</code>. Call <code>CreateSystem</code> + <code>AddForTeam</code> respectively. Test in <code>internal/db/bootstrap_test.go</code>: fresh-org bootstrap leaves exactly one agents row + one team_agents row per teamID supplied.</span>
+      <span class="step-body"><code>internal/db/bootstrap.go</code>: <code>BootstrapAgentForOrg</code> + <code>BootstrapTeamAgent</code> as package-level functions taking <code>db.Stores</code>. Call <code>stores.Agents.Create</code> + <code>stores.TeamAgents.AddForTeam</code> respectively (both impls route through the admin pool internally). Test in <code>internal/db/bootstrap_test.go</code>: fresh-org bootstrap leaves exactly one agents row + one team_agents row per teamID supplied.</span>
     </li>
     <li>
       <span class="step-title">Local install bootstrap wiring</span>
@@ -948,8 +963,8 @@ SELECT 'down not supported';</span>
         <td>Patch BootstrapLocalAgent. The migration alone creates the tables; the row insert is at startup, not migration time, so a missed insert just means "next boot fixes it."</td>
       </tr>
       <tr>
-        <td>Postgres RLS policy on <code>agents_modify</code> blocks the bootstrap because no <code>org_memberships</code> row exists yet for the founder</td>
-        <td>BootstrapAgentForOrg calls <code>CreateSystem</code> which routes through the admin pool (BYPASSRLS). Same pattern as PromptStore.Seed and TriggerStore.Seed.</td>
+        <td>Postgres RLS policy on <code>agents_insert</code> blocks the bootstrap because no <code>org_memberships</code> row exists yet for the founder</td>
+        <td>BootstrapAgentForOrg calls <code>stores.Agents.Create</code>, which routes through the admin pool (BYPASSRLS) unconditionally — admin-pool routing is the Create method's contract, not a separate CreateSystem variant. Same pattern as PromptStore.Seed and TriggerStore.Seed.</td>
         <td>Move BootstrapAgentForOrg further into the org-create handler's transaction so the org_memberships row exists by the time the agents insert hits — but admin pool is cleaner.</td>
       </tr>
       <tr>

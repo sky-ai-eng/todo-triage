@@ -21,7 +21,7 @@ import (
 //   - Startup / org-create bootstrap (internal/db/bootstrap.go) —
 //     Create with admin-pool routing in Postgres because at org-create
 //     time no org_memberships row exists yet for the founder and the
-//     agents_modify RLS policy would refuse.
+//     agents_insert RLS policy would refuse.
 //   - Future admin UI (SKY-257 / D14) — Update + SetGitHubAppInstallation
 //   - SetGitHubPATUser via the app pool, admin-gated by RLS.
 //   - D11 (GitHub App install flow, SKY-263) — SetGitHubAppInstallation
@@ -33,7 +33,8 @@ import (
 //
 //   - app pool — tf_app, RLS-active. GetForOrg, Update, SetGitHubApp*,
 //     SetGitHubPATUser. agents_select gates reads by org access;
-//     agents_modify gates writes by org admin.
+//     agents_insert/agents_update/agents_delete each gate writes by
+//     tf.user_is_org_admin(org_id).
 //   - admin pool — supabase_admin, BYPASSRLS. Create only. Justified
 //     because boot-time bootstrap has no JWT claims and the founder's
 //     org_memberships row is being inserted in the same transaction

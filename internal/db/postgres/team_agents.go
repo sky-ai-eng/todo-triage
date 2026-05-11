@@ -14,9 +14,14 @@ import (
 // # Pool split
 //
 //   - app   — tf_app, RLS-active. GetForTeam, SetEnabled, SetOverrides,
-//     Remove, ListForOrg. team_agents_select + team_agents_modify both
+//     Remove, ListForOrg. team_agents_select plus the write policies
+//     (team_agents_insert/team_agents_update/team_agents_delete) all
 //     gate on tf.user_in_team(team_id), so team members read/write
-//     their own team's row but not other teams'.
+//     their own team's row but not other teams'. The insert/update
+//     policies additionally enforce agents.org_id = teams.org_id at
+//     write time (migration 202605120004) — without that, a team
+//     member who guessed another org's agent UUID could create a
+//     cross-org reference.
 //   - admin — supabase_admin, BYPASSRLS. AddForTeam only. Same
 //     reasoning as AgentStore.Create: bootstrap runs without claims
 //     (org-create + team-create handlers, internal/db/bootstrap.go).
