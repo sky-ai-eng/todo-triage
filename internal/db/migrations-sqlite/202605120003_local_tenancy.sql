@@ -210,7 +210,15 @@ SELECT '00000000-0000-0000-0000-000000001000',
        default_model,
        default_autonomy_suitability,
        github_app_installation_id,
-       github_pat_user_id,
+       CASE
+           WHEN agents_pre_269.github_pat_user_id IS NULL THEN NULL
+           WHEN EXISTS (
+               SELECT 1
+               FROM users
+               WHERE users.id = agents_pre_269.github_pat_user_id
+           ) THEN agents_pre_269.github_pat_user_id
+           ELSE NULL
+       END,
        jira_service_account_id,
        created_at,
        updated_at
