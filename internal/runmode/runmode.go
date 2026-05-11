@@ -46,15 +46,16 @@ const (
 	ModeMulti Mode = "multi"
 )
 
-// Local-mode sentinel identity values. Three constants — one each for
-// org, team, user — used as the canonical local-mode identity at every
-// API entry point. Pre-SKY-269 these were synthetic runtime constants
-// with no DB row backing them; post-SKY-269 the SQLite migration
-// inserts one row per sentinel into orgs/teams/users so FKs from
-// every resource table have a real target. The byte values here MUST
-// match the migration's INSERTs verbatim — TestBootstrapLocalTenancy_
-// ConstantsMatchRows asserts the equivalence so any drift fails CI
-// rather than producing silently-broken FKs at runtime.
+// Local-mode sentinel identity values. Four constants — one each for
+// org, team, user, and agent — used as the canonical local-mode
+// identity values at every API entry point. Pre-SKY-269 these were
+// synthetic runtime constants with no DB row backing them; post-
+// SKY-269 the SQLite migration inserts one row per sentinel into
+// orgs/teams/users so FKs from every resource table have a real
+// target. The byte values here MUST match the migration's INSERTs
+// verbatim — TestBootstrapLocalTenancy_ConstantsMatchRows asserts the
+// equivalence so any drift fails CI rather than producing silently-
+// broken FKs at runtime.
 //
 // The nil-shape UUIDs (00000000-...000N) are deliberately chosen for
 // log visibility — a row id starting with thirty zeros is instantly
