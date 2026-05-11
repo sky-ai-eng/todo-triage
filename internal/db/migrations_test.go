@@ -93,6 +93,24 @@ func seedFullLegacyState(t *testing.T, database *sql.DB) {
 			UNIQUE(source, source_id)
 		);
 		INSERT INTO entities (id, source, source_id, kind) VALUES ('e1', 'github', 'owner/repo#1', 'pr');
+
+		-- Tables that forward SQLite migrations (post-baseline) ALTER.
+		-- Real legacy installs ran the pre-goose runner which created
+		-- these; the fixture has to mirror that or new migrations
+		-- targeting them error on "no such table". Add to this block
+		-- whenever a new forward migration alters an existing table.
+		CREATE TABLE prompt_triggers (
+			id TEXT PRIMARY KEY,
+			prompt_id TEXT NOT NULL,
+			trigger_type TEXT NOT NULL DEFAULT 'event',
+			event_type TEXT NOT NULL,
+			scope_predicate_json TEXT,
+			breaker_threshold INTEGER NOT NULL DEFAULT 4,
+			min_autonomy_suitability REAL NOT NULL DEFAULT 0.0,
+			enabled BOOLEAN NOT NULL DEFAULT 1,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);
 	`); err != nil {
 		t.Fatalf("seed schema + data: %v", err)
 	}

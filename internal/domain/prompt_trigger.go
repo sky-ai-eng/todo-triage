@@ -13,6 +13,7 @@ type PromptTrigger struct {
 	BreakerThreshold       int       `json:"breaker_threshold"`        // consecutive-failure count that trips the per-(entity, prompt) breaker
 	MinAutonomySuitability float64   `json:"min_autonomy_suitability"` // 0.0 = fire immediately; >0 = defer until AI scores above threshold
 	Enabled                bool      `json:"enabled"`
+	Source                 string    `json:"source"` // "system" (shipped, admin-managed) | "user" (user-authored)
 	CreatedAt              time.Time `json:"created_at"`
 	UpdatedAt              time.Time `json:"updated_at"`
 }
@@ -20,4 +21,13 @@ type PromptTrigger struct {
 // Valid trigger types. Only "event" is supported in V1; others are reserved.
 const (
 	TriggerTypeEvent = "event"
+)
+
+// PromptTriggerSource values. Mirrors prompts.source + task_rules.source so
+// the system-row pattern (admin-only modify on shipped rows, see migrations
+// 202605110001 + the trigger-equivalent) reads uniformly across all three
+// resources.
+const (
+	PromptTriggerSourceSystem = "system"
+	PromptTriggerSourceUser   = "user"
 )

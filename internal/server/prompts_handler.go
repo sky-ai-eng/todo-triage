@@ -124,7 +124,7 @@ func (s *Server) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Block deletion if the prompt is referenced by any auto-triggers
-	triggers, err := db.ListTriggersForPrompt(s.db, id)
+	triggers, err := s.triggers.ListForPrompt(r.Context(), runmode.LocalDefaultOrg, id)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

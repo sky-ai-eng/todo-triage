@@ -34,6 +34,7 @@ func New(conn *sql.DB) db.Stores {
 		Dashboard: newDashboardStore(conn),
 		Secrets:   newSecretStore(),
 		TaskRules: newTaskRuleStore(conn),
+		Triggers:  newTriggerStore(conn),
 		Tx:        s,
 	}
 	return s.stores

@@ -49,6 +49,7 @@ type Router struct {
 	db        *sql.DB
 	prompts   dbpkg.PromptStore
 	taskRules dbpkg.TaskRuleStore
+	triggers  dbpkg.TriggerStore
 	spawner   Delegator
 	scorer    Scorer
 	ws        *websocket.Hub
@@ -70,11 +71,12 @@ type Router struct {
 }
 
 // NewRouter creates a Router.
-func NewRouter(db *sql.DB, prompts dbpkg.PromptStore, taskRules dbpkg.TaskRuleStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
+func NewRouter(db *sql.DB, prompts dbpkg.PromptStore, taskRules dbpkg.TaskRuleStore, triggers dbpkg.TriggerStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
 	return &Router{
 		db:         db,
 		prompts:    prompts,
 		taskRules:  taskRules,
+		triggers:   triggers,
 		spawner:    spawner,
 		scorer:     scorer,
 		ws:         ws,
@@ -191,7 +193,7 @@ func (r *Router) HandleEvent(evt domain.Event) {
 	}
 
 	// Step 6: Match prompt_triggers for this event type.
-	triggers, err := dbpkg.GetActiveTriggersForEvent(r.db, evt.EventType)
+	triggers, err := r.triggers.GetActiveForEvent(context.Background(), runmode.LocalDefaultOrg, evt.EventType)
 	if err != nil {
 		log.Printf("[router] failed to query triggers for %s: %v", evt.EventType, err)
 	}
@@ -537,7 +539,7 @@ func (r *Router) attemptDrainOne(firing *domain.PendingFiring) (runID, skipReaso
 		return "", domain.PendingFiringSkipTaskClosed, nil
 	}
 
-	trigger, err := dbpkg.GetPromptTrigger(r.db, firing.TriggerID)
+	trigger, err := r.triggers.Get(context.Background(), runmode.LocalDefaultOrg, firing.TriggerID)
 	if err != nil {
 		return "", "", fmt.Errorf("trigger lookup: %w", err)
 	}
@@ -609,7 +611,7 @@ func (r *Router) reDeriveTask(taskID string) {
 	}
 
 	// Fetch triggers for this event type.
-	triggers, err := dbpkg.GetActiveTriggersForEvent(r.db, task.EventType)
+	triggers, err := r.triggers.GetActiveForEvent(context.Background(), runmode.LocalDefaultOrg, task.EventType)
 	if err != nil {
 		log.Printf("[router] re-derive: failed to query triggers for %s: %v", task.EventType, err)
 		return

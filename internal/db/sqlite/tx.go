@@ -36,6 +36,7 @@ func (s *Store) WithTx(ctx context.Context, orgID, userID string, fn func(db.TxS
 		Dashboard: newDashboardStore(tx),
 		Secrets:   newSecretStore(),
 		TaskRules: newTaskRuleStore(tx),
+		Triggers:  newTriggerStore(tx),
 	}
 	if err := fn(txStores); err != nil {
 		return err

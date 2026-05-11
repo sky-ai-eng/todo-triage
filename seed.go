@@ -12,19 +12,25 @@ import (
 )
 
 // seedDefaultPrompts seeds the shipped system prompts via PromptStore
-// per org. Local mode iterates a single synthetic org
-// (runmode.LocalDefaultOrg); multi mode will iterate stores.Orgs.ListAll
-// once Wave 4 lands OrgStore — same loop shape, different source. Until
-// then this is a one-element slice with a TODO so the shape is right.
+// AND the shipped system triggers via TriggerStore per org. Local mode
+// iterates a single synthetic org (runmode.LocalDefaultOrg); multi
+// mode will iterate stores.Orgs.ListAll once Wave 4 lands OrgStore —
+// same loop shape, different source. Until then this is a one-element
+// slice with a TODO so the shape is right.
 //
-// Calls into PromptStore.SeedOrUpdate which:
-//   - SQLite: writes to the single conn.
-//   - Postgres: routes the writes to the admin pool internally (the
-//     system_prompt_versions sidecar is REVOKE'd from tf_app per D3).
+// Calls into:
+//   - PromptStore.SeedOrUpdate — SQLite: single conn; Postgres: admin
+//     pool internally (the system_prompt_versions sidecar is REVOKE'd
+//     from tf_app per D3).
+//   - TriggerStore.Seed — same admin-pool routing in Postgres because
+//     shipped triggers have NULL creator_user_id + visibility='org'
+//     and the modify policy gates org-visible writes on
+//     tf.user_is_org_admin() (migration 202605120001).
 //
-// Prompt-trigger seeding still uses db.SeedPromptTrigger because the
-// RuleStore migration lands in Wave 1's follow-up PRs.
-func seedDefaultPrompts(database *sql.DB, prompts db.PromptStore) {
+// Order matters: prompts seed first so the FK from
+// prompt_triggers.prompt_id → prompts.id is satisfied for the
+// shipped triggers Seed inserts.
+func seedDefaultPrompts(database *sql.DB, prompts db.PromptStore, triggers db.TriggerStore) {
 	ctx := context.Background()
 
 	// TODO(SKY-246 wave 4): when OrgStore lands, replace this hard-coded
@@ -72,105 +78,15 @@ func seedDefaultPrompts(database *sql.DB, prompts db.PromptStore) {
 				log.Printf("[seed] warning: failed to seed %s in org %s: %v", p.ID, orgID, err)
 			}
 		}
+		// Triggers ship after prompts in the same orgID iteration so
+		// the FK from prompt_triggers.prompt_id → prompts.id resolves
+		// in Postgres (where the constraint is composite on
+		// (prompt_id, org_id)).
+		if err := triggers.Seed(ctx, orgID); err != nil {
+			log.Printf("[seed] warning: failed to seed prompt_triggers in org %s: %v", orgID, err)
+		}
 	}
-
-	// --- Default triggers --------------------------------------------------
-	// All shipped disabled. System triggers are reference examples users
-	// opt into (or disable and replace with their own variations). Predicates
-	// kept conservative.
-
-	authorIsSelf := `{"author_is_self":true}`
-	assigneeIsSelf := `{"assignee_is_self":true}`
-
-	// Trigger: CI fix on own PRs.
-	if err := db.SeedPromptTrigger(database, domain.PromptTrigger{
-		ID:                 "system-trigger-ci-fix",
-		PromptID:           "system-ci-fix",
-		TriggerType:        domain.TriggerTypeEvent,
-		EventType:          domain.EventGitHubPRCICheckFailed,
-		ScopePredicateJSON: &authorIsSelf,
-		BreakerThreshold:   3,
-		Enabled:            false,
-	}); err != nil {
-		log.Printf("[seed] warning: failed to seed CI fix trigger: %v", err)
-	}
-
-	// Trigger: merge conflict resolution on own PRs.
-	if err := db.SeedPromptTrigger(database, domain.PromptTrigger{
-		ID:                 "system-trigger-conflict-resolution",
-		PromptID:           "system-conflict-resolution",
-		TriggerType:        domain.TriggerTypeEvent,
-		EventType:          domain.EventGitHubPRConflicts,
-		ScopePredicateJSON: &authorIsSelf,
-		BreakerThreshold:   2,
-		Enabled:            false,
-	}); err != nil {
-		log.Printf("[seed] warning: failed to seed conflict resolution trigger: %v", err)
-	}
-
-	// Trigger: Jira issue implementation on tickets assigned to the user.
-	if err := db.SeedPromptTrigger(database, domain.PromptTrigger{
-		ID:                 "system-trigger-jira-implement",
-		PromptID:           "system-jira-implement",
-		TriggerType:        domain.TriggerTypeEvent,
-		EventType:          domain.EventJiraIssueAssigned,
-		ScopePredicateJSON: &assigneeIsSelf,
-		BreakerThreshold:   2,
-		Enabled:            false,
-	}); err != nil {
-		log.Printf("[seed] warning: failed to seed Jira implement trigger: %v", err)
-	}
-
-	// Companion trigger for the belated-discovery path (SKY-173): a ticket
-	// that had open subtasks on first poll suppresses assigned/available
-	// and only emits became_atomic when the decomposition collapses. Users
-	// who enable auto-implementation on assignment almost certainly want
-	// the same behavior for this belated signal — ship a parallel trigger
-	// rather than quietly dropping post-decomposition tickets on the floor.
-	if err := db.SeedPromptTrigger(database, domain.PromptTrigger{
-		ID:                 "system-trigger-jira-implement-atomic",
-		PromptID:           "system-jira-implement",
-		TriggerType:        domain.TriggerTypeEvent,
-		EventType:          domain.EventJiraIssueBecameAtomic,
-		ScopePredicateJSON: &assigneeIsSelf,
-		BreakerThreshold:   2,
-		Enabled:            false,
-	}); err != nil {
-		log.Printf("[seed] warning: failed to seed Jira implement atomic trigger: %v", err)
-	}
-
-	// Trigger: auto-review PRs when someone requests your review. No
-	// predicate needed — review_requested only fires when the session user
-	// is added to the PR's review request list (diff.go scopes this at emit
-	// time), so the event itself is already user-scoped. 5-minute cooldown
-	// because a second review on the same PR right after the first is
-	// pointless unless the PR changed, and new commits on the same PR route
-	// through a different event type entirely.
-	if err := db.SeedPromptTrigger(database, domain.PromptTrigger{
-		ID:               "system-trigger-pr-review",
-		PromptID:         "system-pr-review",
-		TriggerType:      domain.TriggerTypeEvent,
-		EventType:        domain.EventGitHubPRReviewRequested,
-		BreakerThreshold: 3,
-		Enabled:          false,
-	}); err != nil {
-		log.Printf("[seed] warning: failed to seed PR review trigger: %v", err)
-	}
-
-	// Trigger: fix review feedback when changes are requested on the user's
-	// own PR. Fires regardless of reviewer identity — self-review loop and
-	// external reviewer response route through the same prompt since the
-	// action is the same. Users who only want automation for one or the
-	// other can narrow the predicate.
-	if err := db.SeedPromptTrigger(database, domain.PromptTrigger{
-		ID:                 "system-trigger-fix-review-feedback",
-		PromptID:           "system-fix-review-feedback",
-		TriggerType:        domain.TriggerTypeEvent,
-		EventType:          domain.EventGitHubPRReviewChangesRequested,
-		ScopePredicateJSON: &authorIsSelf,
-		BreakerThreshold:   3,
-		Enabled:            false,
-	}); err != nil {
-		log.Printf("[seed] warning: failed to seed fix-review-feedback trigger: %v", err)
-	}
+	// The old inline-each-trigger shape moved into db.ShippedPromptTriggers
+	// + TriggerStore.Seed when SKY-246 landed TriggerStore. If you want to
+	// add or modify a shipped trigger, edit that list — not this file.
 }
