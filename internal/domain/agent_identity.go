@@ -10,17 +10,19 @@ import "time"
 // give the bot first-class identity separate from human users.
 //
 // Credentials: at most one of GitHubAppInstallationID / GitHubPATUserID
-// is populated in v1. Multi mode prefers App install; local + B2C trials
-// fall back to PAT-borrow. Local mode leaves both empty because the
-// PAT lives in the OS keychain and is looked up at run dispatch, not
-// referenced by FK into a users table that doesn't exist locally.
+// is populated in v1. Multi mode prefers App install; local + B2C
+// trials fall back to PAT-borrow. Post-SKY-269 local mode populates
+// GitHubPATUserID with the sentinel user (the lone human in the
+// synthetic single-tenant world) at bootstrap; the PAT itself still
+// lives in the OS keychain and is looked up at run dispatch via the
+// user identity here.
 type Agent struct {
 	ID                         string
 	DisplayName                string
 	DefaultModel               string   // "" = no default; consumer falls through to global default
 	DefaultAutonomySuitability *float64 // nil = no default; consumer uses the trigger-level threshold instead
 	GitHubAppInstallationID    string   // "" if no App installed
-	GitHubPATUserID            string   // "" if not borrowing a PAT (always "" in local mode)
+	GitHubPATUserID            string   // "" if not borrowing a PAT; post-SKY-269 local mode populates with the sentinel user at bootstrap
 	JiraServiceAccountID       string   // "" if no Jira service account (v2 surface)
 	CreatedAt                  time.Time
 	UpdatedAt                  time.Time
