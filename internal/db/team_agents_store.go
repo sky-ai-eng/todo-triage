@@ -28,9 +28,10 @@ import (
 // # Pool split (Postgres)
 //
 //   - app pool — tf_app, RLS-active. Everything except AddForTeam.
-//     team_agents_select + team_agents_modify both gate on
-//     tf.user_in_team(team_id), so team members can read and write
-//     their own team's row but not other teams'. Per the locked
+//     team_agents_select plus the write policies
+//     team_agents_insert/team_agents_update/team_agents_delete all
+//     gate on tf.user_in_team(team_id), so team members can read and
+//     write their own team's row but not other teams'. Per the locked
 //     architecture decision: team-bot toggling is a team-member power,
 //     not an admin-only power.
 //   - admin pool — supabase_admin, BYPASSRLS. AddForTeam only. Same
