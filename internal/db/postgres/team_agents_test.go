@@ -185,6 +185,122 @@ func TestTeamAgentStore_Postgres_BlocksCrossOrgInsert(t *testing.T) {
 	}
 }
 
+// TestTeamAgentStore_Postgres_BlocksOtherOrgWhileInActiveOrg pins the
+// fix from migration 202605120005. Without the tf.team_in_current_org
+// predicate, a user with memberships in two orgs could SELECT / UPDATE
+// team_agents rows in org B while their JWT claims org_id = A — a
+// tenancy break vs every other table in the schema (compare
+// teams_select / memberships_select which both require
+// t.org_id = tf.current_org_id()).
+//
+// The scenario: Charlie belongs to teams in both orgA and orgB. He
+// makes a request with JWT claims org_id = orgA, but the SQL path
+// addresses orgB's team. Without the org pin, RLS lets it through
+// because user_in_team(team_b) is true. The fix refuses.
+func TestTeamAgentStore_Postgres_BlocksOtherOrgWhileInActiveOrg(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+
+	orgA := seedPgOrgForAgents(t, h)
+	orgB := seedPgOrgForAgents(t, h)
+	teamA := seedPgTeam(t, h, orgA, "team-a")
+	teamB := seedPgTeam(t, h, orgB, "team-b")
+
+	// Charlie is a member of both orgs and both teams.
+	charlieID := seedPgMember(t, h, orgA, "charlie", "member")
+	if _, err := h.AdminDB.Exec(
+		`INSERT INTO org_memberships (org_id, user_id, role) VALUES ($1, $2, 'member')`,
+		orgB, charlieID,
+	); err != nil {
+		t.Fatalf("charlie orgB membership: %v", err)
+	}
+	for _, teamID := range []string{teamA, teamB} {
+		if _, err := h.AdminDB.Exec(
+			`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'member')`,
+			charlieID, teamID,
+		); err != nil {
+			t.Fatalf("charlie membership %s: %v", teamID, err)
+		}
+	}
+
+	adminStores := pgstore.New(h.AdminDB, h.AdminDB)
+	for _, orgID := range []string{orgA, orgB} {
+		if _, err := adminStores.Agents.Create(context.Background(), orgID, domain.Agent{DisplayName: "Bot"}); err != nil {
+			t.Fatalf("seed agent for %s: %v", orgID, err)
+		}
+	}
+	agentB := mustAgentIDForOrg(t, h, orgB)
+	for _, p := range []struct{ team, agent string }{{teamA, mustAgentIDForOrg(t, h, orgA)}, {teamB, agentB}} {
+		if err := adminStores.TeamAgents.AddForTeam(context.Background(), "", p.team, p.agent); err != nil {
+			t.Fatalf("seed team_agents %s/%s: %v", p.team, p.agent, err)
+		}
+	}
+
+	// Charlie's session is on orgA. He attempts to UPDATE orgB's
+	// team_agents row. RLS must filter the row out of the USING set
+	// (the team_in_current_org predicate fails because teamB.org_id
+	// != orgA). Expected outcome: 0 rows affected.
+	err := h.WithUser(t, charlieID, orgA, func(tx *sql.Tx) error {
+		res, err := tx.Exec(
+			`UPDATE team_agents SET enabled = FALSE WHERE team_id = $1 AND agent_id = $2`,
+			teamB, agentB,
+		)
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		if n != 0 {
+			return fmt.Errorf("cross-org UPDATE while in orgA context matched %d rows on teamB; want 0", n)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("cross-org UPDATE assertion: %v", err)
+	}
+
+	// And the orgB team_agents row is still enabled.
+	var enabled bool
+	if err := h.AdminDB.QueryRow(
+		`SELECT enabled FROM team_agents WHERE team_id = $1`, teamB,
+	).Scan(&enabled); err != nil {
+		t.Fatalf("re-read teamB: %v", err)
+	}
+	if !enabled {
+		t.Error("teamB bot disabled via cross-org write; RLS didn't gate on current_org_id")
+	}
+
+	// Same predicate must apply to SELECT — Charlie in orgA can't
+	// READ orgB's team_agents row even though he is a member of teamB.
+	err = h.WithUser(t, charlieID, orgA, func(tx *sql.Tx) error {
+		var count int
+		if err := tx.QueryRow(
+			`SELECT COUNT(*) FROM team_agents WHERE team_id = $1`, teamB,
+		).Scan(&count); err != nil {
+			return err
+		}
+		if count != 0 {
+			return fmt.Errorf("cross-org SELECT while in orgA context returned %d rows on teamB; want 0", count)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("cross-org SELECT assertion: %v", err)
+	}
+}
+
+// mustAgentIDForOrg reads the deterministic agent id back. Used by
+// the cross-org test which needs both orgs' agent ids without going
+// through GetForOrg (which is itself app-pool-gated and would need a
+// JWT claims setup).
+func mustAgentIDForOrg(t *testing.T, h *pgtest.Harness, orgID string) string {
+	t.Helper()
+	var id string
+	if err := h.AdminDB.QueryRow(`SELECT id FROM agents WHERE org_id = $1`, orgID).Scan(&id); err != nil {
+		t.Fatalf("read agent id for org %s: %v", orgID, err)
+	}
+	return id
+}
+
 // seedPgTeam inserts a teams row under the given org and returns its id.
 func seedPgTeam(t *testing.T, h *pgtest.Harness, orgID, slug string) string {
 	t.Helper()

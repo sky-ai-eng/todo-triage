@@ -201,6 +201,84 @@ func TestAgentStore_Postgres_AdminCanUpdate(t *testing.T) {
 	}
 }
 
+// TestAgentStore_Postgres_BlocksCrossOrgPATUser pins the
+// github_pat_user_id integrity fix from migration 202605120005.
+// Without the same-org constraint, an org admin in A could write
+// agents.github_pat_user_id = <bob-from-org-B>. Downstream credential
+// lookup goes through Vault wrappers gated by tf.current_org_id() so
+// the cross-org PAT itself isn't reachable, but the row's integrity
+// is wrong. Defense in depth: RLS refuses the write directly.
+func TestAgentStore_Postgres_BlocksCrossOrgPATUser(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+
+	orgA := seedPgOrgForAgents(t, h)
+	orgB := seedPgOrgForAgents(t, h)
+
+	// daveID is admin of orgA only.
+	daveID := seedPgMember(t, h, orgA, "dave", "admin")
+	// bobBID is a member of orgB only — does NOT belong to orgA.
+	bobBID := mustOwnerUserForOrg(t, h, orgB)
+
+	adminStores := pgstore.New(h.AdminDB, h.AdminDB)
+	if _, err := adminStores.Agents.Create(context.Background(), orgA, domain.Agent{DisplayName: "Bot A"}); err != nil {
+		t.Fatalf("seed agent A: %v", err)
+	}
+	var agentAID string
+	if err := h.AdminDB.QueryRow(`SELECT id FROM agents WHERE org_id = $1`, orgA).Scan(&agentAID); err != nil {
+		t.Fatalf("read agent A id: %v", err)
+	}
+
+	// Dave (org-A admin) attempts to set agents.github_pat_user_id
+	// to a user that only belongs to org B. Even though dave passes
+	// the tf.user_is_org_admin(orgA) check, the new WITH CHECK
+	// predicate refuses because bobB has no org_memberships row in
+	// orgA. Postgres surfaces a row-level-security policy violation
+	// (42501) rather than a 0-rows-affected outcome on this kind of
+	// WITH CHECK failure.
+	err := h.WithUser(t, daveID, orgA, func(tx *sql.Tx) error {
+		_, err := tx.Exec(
+			`UPDATE agents SET github_pat_user_id = $1 WHERE id = $2`,
+			bobBID, agentAID,
+		)
+		return err
+	})
+	if err == nil {
+		t.Fatal("cross-org github_pat_user_id UPDATE succeeded; integrity gate missing")
+	}
+
+	// Sanity: the row's github_pat_user_id is still NULL.
+	var patUser sql.NullString
+	if err := h.AdminDB.QueryRow(
+		`SELECT github_pat_user_id FROM agents WHERE id = $1`, agentAID,
+	).Scan(&patUser); err != nil {
+		t.Fatalf("re-read agent A: %v", err)
+	}
+	if patUser.Valid {
+		t.Errorf("github_pat_user_id corrupted by refused UPDATE: %q", patUser.String)
+	}
+
+	// Defense check: dave CAN set it to a user that IS in org A.
+	aliceAID := seedPgMember(t, h, orgA, "alice", "member")
+	err = h.WithUser(t, daveID, orgA, func(tx *sql.Tx) error {
+		res, err := tx.Exec(
+			`UPDATE agents SET github_pat_user_id = $1 WHERE id = $2`,
+			aliceAID, agentAID,
+		)
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		if n != 1 {
+			return fmt.Errorf("same-org PAT UPDATE matched %d rows; want 1", n)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("same-org PAT UPDATE: %v", err)
+	}
+}
+
 // seedPgOrgForAgents stages (user, org, org_membership) so agents.org_id
 // FK satisfies. Returns the org id.
 func seedPgOrgForAgents(t *testing.T, h *pgtest.Harness) string {

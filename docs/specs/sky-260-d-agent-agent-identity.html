@@ -513,16 +513,37 @@ $$;
 -- Writes split into separate INSERT/UPDATE/DELETE policies rather than
 -- one FOR ALL so future tickets can re-gate any single op (e.g. tighten
 -- DELETE) without touching the others — matches the prompt_triggers
--- split from 202605120001.</span>
+-- split from 202605120001.
+--
+-- INSERT + UPDATE WITH CHECK additionally enforce that
+-- github_pat_user_id (when populated) references a user with an
+-- org_memberships row in this agent's org (migration 202605120005).
+-- Without that constraint, an admin in org A could write
+-- agents.github_pat_user_id = bob-from-org-B; Vault wrappers gate the
+-- actual PAT lookup by tf.current_org_id() so cross-org credential
+-- theft isn't reachable, but the row's integrity is wrong and we
+-- refuse the write directly as defense in depth.</span>
 <span class="kw">CREATE POLICY</span> agents_select <span class="kw">ON</span> agents
   <span class="kw">FOR SELECT TO</span> tf_app <span class="kw">USING</span> (org_id = tf.current_org_id() <span class="kw">AND</span> tf.user_has_org_access(org_id));
 
 <span class="kw">CREATE POLICY</span> agents_insert <span class="kw">ON</span> agents <span class="kw">FOR INSERT</span>
-  <span class="kw">WITH CHECK</span> (org_id = tf.current_org_id() <span class="kw">AND</span> tf.user_is_org_admin(org_id));
+  <span class="kw">WITH CHECK</span> (
+    org_id = tf.current_org_id()
+    <span class="kw">AND</span> tf.user_is_org_admin(org_id)
+    <span class="kw">AND</span> (github_pat_user_id <span class="kw">IS NULL</span>
+         <span class="kw">OR EXISTS</span> (<span class="kw">SELECT</span> 1 <span class="kw">FROM</span> org_memberships
+                      <span class="kw">WHERE</span> user_id = github_pat_user_id <span class="kw">AND</span> org_id = agents.org_id))
+  );
 
 <span class="kw">CREATE POLICY</span> agents_update <span class="kw">ON</span> agents <span class="kw">FOR UPDATE</span>
   <span class="kw">USING</span>      (org_id = tf.current_org_id() <span class="kw">AND</span> tf.user_is_org_admin(org_id))
-  <span class="kw">WITH CHECK</span> (org_id = tf.current_org_id() <span class="kw">AND</span> tf.user_is_org_admin(org_id));
+  <span class="kw">WITH CHECK</span> (
+    org_id = tf.current_org_id()
+    <span class="kw">AND</span> tf.user_is_org_admin(org_id)
+    <span class="kw">AND</span> (github_pat_user_id <span class="kw">IS NULL</span>
+         <span class="kw">OR EXISTS</span> (<span class="kw">SELECT</span> 1 <span class="kw">FROM</span> org_memberships
+                      <span class="kw">WHERE</span> user_id = github_pat_user_id <span class="kw">AND</span> org_id = agents.org_id))
+  );
 
 <span class="kw">CREATE POLICY</span> agents_delete <span class="kw">ON</span> agents <span class="kw">FOR DELETE</span>
   <span class="kw">USING</span> (org_id = tf.current_org_id() <span class="kw">AND</span> tf.user_is_org_admin(org_id));
@@ -530,25 +551,37 @@ $$;
 <span class="com">-- team_agents: team-member read + write (toggling the bot for your own
 -- team is a team-member power, not an admin power; rename/credential
 -- changes happen at the agents level above and are admin-gated there).
--- The insert + update WITH CHECK additionally pins agents.org_id =
--- teams.org_id at write time so a team member can't write a row
--- pointing at another org's agent (migration 202605120004).</span>
+-- Every policy pins to (1) the active request org via
+-- tf.team_in_current_org(team_id) and (2) team membership via
+-- tf.user_in_team(team_id). Without the org pin, a user with
+-- memberships in multiple orgs could operate on rows in org B while
+-- their JWT claims org_id = A — same shape as the
+-- teams_select / memberships_select t.org_id = tf.current_org_id()
+-- pins in the baseline. INSERT + UPDATE WITH CHECK additionally
+-- require the referenced agent's org_id = tf.current_org_id() so a
+-- team member can't write a row pointing at another org's agent
+-- (migrations 202605120004 + 202605120005).</span>
 <span class="kw">CREATE POLICY</span> team_agents_select <span class="kw">ON</span> team_agents
-  <span class="kw">FOR SELECT TO</span> tf_app <span class="kw">USING</span> (tf.user_in_team(team_id));
+  <span class="kw">FOR SELECT TO</span> tf_app
+  <span class="kw">USING</span> (tf.team_in_current_org(team_id) <span class="kw">AND</span> tf.user_in_team(team_id));
 
 <span class="kw">CREATE POLICY</span> team_agents_insert <span class="kw">ON</span> team_agents <span class="kw">FOR INSERT</span>
-  <span class="kw">WITH CHECK</span> (tf.user_in_team(team_id)
-              <span class="kw">AND EXISTS</span> (<span class="kw">SELECT</span> 1 <span class="kw">FROM</span> teams t <span class="kw">JOIN</span> agents a <span class="kw">ON</span> a.org_id = t.org_id
-                           <span class="kw">WHERE</span> t.id = team_id <span class="kw">AND</span> a.id = agent_id));
+  <span class="kw">WITH CHECK</span> (
+    tf.team_in_current_org(team_id) <span class="kw">AND</span> tf.user_in_team(team_id)
+    <span class="kw">AND EXISTS</span> (<span class="kw">SELECT</span> 1 <span class="kw">FROM</span> agents a
+                 <span class="kw">WHERE</span> a.id = agent_id <span class="kw">AND</span> a.org_id = tf.current_org_id())
+  );
 
 <span class="kw">CREATE POLICY</span> team_agents_update <span class="kw">ON</span> team_agents <span class="kw">FOR UPDATE</span>
-  <span class="kw">USING</span>      (tf.user_in_team(team_id))
-  <span class="kw">WITH CHECK</span> (tf.user_in_team(team_id)
-              <span class="kw">AND EXISTS</span> (<span class="kw">SELECT</span> 1 <span class="kw">FROM</span> teams t <span class="kw">JOIN</span> agents a <span class="kw">ON</span> a.org_id = t.org_id
-                           <span class="kw">WHERE</span> t.id = team_id <span class="kw">AND</span> a.id = agent_id));
+  <span class="kw">USING</span>      (tf.team_in_current_org(team_id) <span class="kw">AND</span> tf.user_in_team(team_id))
+  <span class="kw">WITH CHECK</span> (
+    tf.team_in_current_org(team_id) <span class="kw">AND</span> tf.user_in_team(team_id)
+    <span class="kw">AND EXISTS</span> (<span class="kw">SELECT</span> 1 <span class="kw">FROM</span> agents a
+                 <span class="kw">WHERE</span> a.id = agent_id <span class="kw">AND</span> a.org_id = tf.current_org_id())
+  );
 
 <span class="kw">CREATE POLICY</span> team_agents_delete <span class="kw">ON</span> team_agents <span class="kw">FOR DELETE</span>
-  <span class="kw">USING</span> (tf.user_in_team(team_id));
+  <span class="kw">USING</span> (tf.team_in_current_org(team_id) <span class="kw">AND</span> tf.user_in_team(team_id));
 
 <span class="com">-- +goose Down
 SELECT 'down not supported';</span>
