@@ -33,8 +33,10 @@ import (
 )
 
 // Store holds the two Postgres connection pools + the bundle of
-// resource-store implementations wired against them. Returned by
-// New(); the bundle (db.Stores) is what main.go hands to handlers.
+// resource-store implementations wired against them. New returns the
+// assembled db.Stores bundle for application wiring; downstream
+// consumers such as handlers should depend on the specific store
+// interfaces they need rather than the whole bundle.
 type Store struct {
 	admin *sql.DB
 	app   *sql.DB
