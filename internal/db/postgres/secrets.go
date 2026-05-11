@@ -3,7 +3,6 @@ package postgres
 import (
 	"context"
 	"database/sql"
-	"errors"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 )
@@ -52,18 +51,15 @@ func (s *secretStore) Put(ctx context.Context, orgID, key, value, description st
 
 func (s *secretStore) Get(ctx context.Context, orgID, key string) (string, error) {
 	var got sql.NullString
-	err := s.q.QueryRowContext(ctx,
+	// vault_get_org_secret always returns exactly one row — NULL when
+	// the secret doesn't exist, the value otherwise. Any error
+	// (including sql.ErrNoRows) means the wrapper's shape regressed
+	// or the connection failed; let it propagate so the caller sees
+	// the anomaly instead of an "" that looks like "not configured".
+	if err := s.q.QueryRowContext(ctx,
 		`SELECT public.vault_get_org_secret($1::uuid, $2::text)`,
 		orgID, key,
-	).Scan(&got)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			// vault_get_org_secret always returns one row (NULL when
-			// the secret doesn't exist), so ErrNoRows is a transport
-			// anomaly worth surfacing — but be defensive in case a
-			// future wrapper rewrite changes that shape.
-			return "", nil
-		}
+	).Scan(&got); err != nil {
 		return "", err
 	}
 	if !got.Valid {

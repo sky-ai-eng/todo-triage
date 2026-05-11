@@ -19,7 +19,7 @@ import (
 // the SQLite SwipeStore impl. Each subtest opens a fresh in-memory
 // DB so swipe_events state doesn't leak between assertions.
 func TestSwipeStore_SQLite(t *testing.T) {
-	dbtest.RunSwipeStoreConformance(t, func(t *testing.T) (db.SwipeStore, string, dbtest.TaskSeederForSwipes, dbtest.TaskReaderForSwipes) {
+	dbtest.RunSwipeStoreConformance(t, func(t *testing.T) (db.SwipeStore, string, dbtest.TaskSeederForSwipes, dbtest.TaskReaderForSwipes, dbtest.SwipeAuditReader) {
 		t.Helper()
 		conn := openSQLiteForTest(t)
 		stores := sqlitestore.New(conn)
@@ -32,8 +32,38 @@ func TestSwipeStore_SQLite(t *testing.T) {
 			t.Helper()
 			return readSQLiteTask(t, conn, taskID)
 		}
-		return stores.Swipes, runmode.LocalDefaultOrg, seed, read
+		readAudit := func(t *testing.T, taskID string) []string {
+			t.Helper()
+			return readSQLiteSwipeAudit(t, conn, taskID)
+		}
+		return stores.Swipes, runmode.LocalDefaultOrg, seed, read, readAudit
 	})
+}
+
+// readSQLiteSwipeAudit returns swipe_events.action rows for a task,
+// oldest first. Used by the harness to pin the audit-log invariants
+// (RecordSwipe writes one, RequeueTask writes none, UndoLastSwipe
+// appends 'undo'). Schema-coupled to swipe_events; the harness
+// itself is schema-blind.
+func readSQLiteSwipeAudit(t *testing.T, conn *sql.DB, taskID string) []string {
+	t.Helper()
+	rows, err := conn.Query(`SELECT action FROM swipe_events WHERE task_id = ? ORDER BY id`, taskID)
+	if err != nil {
+		t.Fatalf("readSQLiteSwipeAudit %s: %v", taskID, err)
+	}
+	defer rows.Close()
+	var actions []string
+	for rows.Next() {
+		var action string
+		if err := rows.Scan(&action); err != nil {
+			t.Fatalf("scan swipe_events action: %v", err)
+		}
+		actions = append(actions, action)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("readSQLiteSwipeAudit iteration: %v", err)
+	}
+	return actions
 }
 
 // seedSQLiteTaskForSwipes creates an entity + event + task row for

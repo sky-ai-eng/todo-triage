@@ -23,7 +23,7 @@ import (
 func TestSwipeStore_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
 
-	dbtest.RunSwipeStoreConformance(t, func(t *testing.T) (db.SwipeStore, string, dbtest.TaskSeederForSwipes, dbtest.TaskReaderForSwipes) {
+	dbtest.RunSwipeStoreConformance(t, func(t *testing.T) (db.SwipeStore, string, dbtest.TaskSeederForSwipes, dbtest.TaskReaderForSwipes, dbtest.SwipeAuditReader) {
 		t.Helper()
 		h.Reset(t)
 		orgID, userID := seedPgOrgAndUserForSwipes(t, h)
@@ -37,7 +37,11 @@ func TestSwipeStore_Postgres(t *testing.T) {
 			t.Helper()
 			return readPgTask(t, h.AdminDB, taskID)
 		}
-		return stores.Swipes, orgID, seed, read
+		readAudit := func(t *testing.T, taskID string) []string {
+			t.Helper()
+			return readPgSwipeAudit(t, h.AdminDB, taskID)
+		}
+		return stores.Swipes, orgID, seed, read, readAudit
 	})
 }
 
@@ -109,4 +113,29 @@ func readPgTask(t *testing.T, conn *sql.DB, taskID string) (string, time.Time) {
 		return status, snoozeUntil.Time
 	}
 	return status, time.Time{}
+}
+
+// readPgSwipeAudit returns swipe_events.action rows for a task,
+// oldest first (ORDER BY id; BIGSERIAL is monotonic per insert).
+// Used by the harness to pin the audit-log invariants — same
+// shape as the SQLite reader.
+func readPgSwipeAudit(t *testing.T, conn *sql.DB, taskID string) []string {
+	t.Helper()
+	rows, err := conn.Query(`SELECT action FROM swipe_events WHERE task_id = $1 ORDER BY id`, taskID)
+	if err != nil {
+		t.Fatalf("readPgSwipeAudit %s: %v", taskID, err)
+	}
+	defer rows.Close()
+	var actions []string
+	for rows.Next() {
+		var action string
+		if err := rows.Scan(&action); err != nil {
+			t.Fatalf("scan swipe_events action: %v", err)
+		}
+		actions = append(actions, action)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("readPgSwipeAudit iteration: %v", err)
+	}
+	return actions
 }

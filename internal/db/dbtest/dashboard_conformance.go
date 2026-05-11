@@ -58,10 +58,15 @@ func RunDashboardStoreConformance(t *testing.T, factory DashboardStoreFactory) {
 	t.Run("Stats_CountsMergedClosedAwaitingDraft", func(t *testing.T) {
 		store, orgID, seed := factory(t)
 		now := time.Now().UTC()
-		recent := now.Add(-2 * 24 * time.Hour).Format(time.RFC3339)
+		// 2 days ago — comfortably inside both the 30-day Stats
+		// window and the 14-day MergedOverTime window so the bucket
+		// assertion below has a stable target.
+		recentTime := now.Add(-2 * 24 * time.Hour)
+		recentDateKey := recentTime.Format("2006-01-02")
+		recentRFC := recentTime.Format(time.RFC3339)
 
-		seed(t, domain.PRSnapshot{Number: 1, Author: username, State: "MERGED", Merged: true, MergedAt: recent})
-		seed(t, domain.PRSnapshot{Number: 2, Author: username, State: "CLOSED", ClosedAt: recent})
+		seed(t, domain.PRSnapshot{Number: 1, Author: username, State: "MERGED", Merged: true, MergedAt: recentRFC})
+		seed(t, domain.PRSnapshot{Number: 2, Author: username, State: "CLOSED", ClosedAt: recentRFC})
 		seed(t, domain.PRSnapshot{Number: 3, Author: username, State: "OPEN"})
 		seed(t, domain.PRSnapshot{Number: 4, Author: username, State: "OPEN", IsDraft: true})
 		// Someone else's open PR — should NOT count toward the user's totals.
@@ -74,6 +79,35 @@ func RunDashboardStoreConformance(t *testing.T, factory DashboardStoreFactory) {
 		if stats.Merged != 1 || stats.Closed != 1 || stats.Awaiting != 1 || stats.Draft != 1 {
 			t.Fatalf("counts wrong: merged=%d closed=%d awaiting=%d draft=%d (want 1 each)",
 				stats.Merged, stats.Closed, stats.Awaiting, stats.Draft)
+		}
+
+		// MergedOverTime bucket-level pin. The doc promises "the
+		// merged PR shows up on its mergedAt date"; assert it does,
+		// AND that no other bucket got accidentally incremented
+		// (sum across buckets must equal the merged count, so a
+		// future refactor that double-counts or shifts the bucket
+		// math fails here).
+		if len(stats.MergedOverTime) != 14 {
+			t.Fatalf("timeline len=%d want 14", len(stats.MergedOverTime))
+		}
+		var bucketSum int
+		var foundRecentBucket bool
+		for _, b := range stats.MergedOverTime {
+			bucketSum += b.Count
+			if b.Date == recentDateKey {
+				foundRecentBucket = true
+				if b.Count != 1 {
+					t.Errorf("bucket %s count=%d, want 1 (merged PR's mergedAt date)", b.Date, b.Count)
+				}
+			} else if b.Count != 0 {
+				t.Errorf("bucket %s count=%d, want 0 (no merged PR on this day)", b.Date, b.Count)
+			}
+		}
+		if !foundRecentBucket {
+			t.Errorf("merged PR's date %s missing from timeline buckets", recentDateKey)
+		}
+		if bucketSum != stats.Merged {
+			t.Errorf("bucket sum=%d != stats.Merged=%d (timeline + count drift)", bucketSum, stats.Merged)
 		}
 	})
 
