@@ -322,7 +322,7 @@ function StationChassis({ info }: { info: ClickedStationInfo | null }) {
     () =>
       (info?.queued ?? []).map((e) => ({
         key: e.id,
-        dot: '#c47a5a',
+        dot: '#a85a3a',
         body: <QueuedEntityRow entity={e} />,
         href: e.url || undefined,
         tooltip: <EntityTooltip entity={e} />,
@@ -344,14 +344,14 @@ function StationChassis({ info }: { info: ClickedStationInfo | null }) {
     >
       <Tray
         label="Queue"
-        accent="#c47a5a"
+        accent="#a85a3a"
         widthClass="w-[28%]"
         emptyMessage="Idle — no entities waiting"
         items={queueItems}
       />
       <Tray
         label={info?.label ?? '—'}
-        accent="#5a8c6a"
+        accent="#3f6b4d"
         widthClass="flex-1"
         emptyMessage="No runs in flight"
         items={runs.map((r) => ({
@@ -643,16 +643,16 @@ function runStatusColor(status: string): string {
     case 'worktree_created':
     case 'agent_starting':
     case 'running':
-      return '#5a8c6a' // --color-claim (sage)
+      return '#3f6b4d' // --color-claim (sage)
     case 'awaiting_input':
     case 'pending_approval':
-      return '#b8943a' // --color-snooze (warm amber)
+      return '#8a6e1f' // --color-snooze (warm amber)
     case 'failed':
-      return '#c45a5a' // --color-dismiss (warm rose)
+      return '#a84545' // --color-dismiss (warm rose)
     case 'cancelled':
-      return '#a09a94' // --color-text-tertiary (neutral)
+      return '#6b6560' // --color-text-tertiary (neutral)
     default:
-      return '#6b6560' // --color-text-secondary
+      return '#4a4541' // --color-text-secondary
   }
 }
 

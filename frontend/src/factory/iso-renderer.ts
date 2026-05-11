@@ -286,7 +286,7 @@ export class IsoScene {
 
     // Grid lines, drawn just above the ground plane so they're
     // visible against it. Tinted with the project accent terracotta
-    // (--color-accent #c47a5a) at very low alpha so the grid carries
+    // (--color-accent #a85a3a) at very low alpha so the grid carries
     // the same warm hue as the rest of the app and station footprint
     // pads — and stays barely-there at normal zoom, only resolving
     // into faint blueprint structure when the camera leans in.
@@ -297,7 +297,7 @@ export class IsoScene {
         lines.push([new Vector3(i, 0, 0), new Vector3(i, size, 0)])
       }
       const grid = MeshBuilder.CreateLineSystem('iso-grid', { lines }, this.scene)
-      grid.color = Color3.FromHexString('#c47a5a')
+      grid.color = Color3.FromHexString('#a85a3a')
       grid.alpha = 0.06
       grid.alwaysSelectAsActiveMesh = true
       this.gridMesh = grid

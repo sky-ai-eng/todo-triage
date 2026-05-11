@@ -9,14 +9,14 @@
   --color-border-glass: rgba(255, 255, 255, 0.7);
   --color-border-subtle: rgba(0, 0, 0, 0.06);
   --color-text-primary: #1a1a1a;
-  --color-text-secondary: #6b6560;
-  --color-text-tertiary: #a09a94;
-  --color-accent: #c47a5a;
-  --color-accent-soft: rgba(196, 122, 90, 0.12);
-  --color-dismiss: #c45a5a;
-  --color-claim: #5a8c6a;
-  --color-delegate: #7a6aad;
-  --color-snooze: #b8943a;
+  --color-text-secondary: #4a4541;
+  --color-text-tertiary: #6b6560;
+  --color-accent: #a85a3a;
+  --color-accent-soft: rgba(168, 90, 58, 0.14);
+  --color-dismiss: #a84545;
+  --color-claim: #3f6b4d;
+  --color-delegate: #5e4f8f;
+  --color-snooze: #8a6e1f;
 }
 
 body {
@@ -39,22 +39,22 @@ body {
   --diff-font-size: 12.5px;
 
   /* Insert (addition) — warm sage green */
-  --diff-gutter-insert-background-color: rgba(90, 140, 106, 0.08);
+  --diff-gutter-insert-background-color: rgba(63, 107, 77, 0.1);
   --diff-gutter-insert-text-color: var(--color-claim);
-  --diff-code-insert-background-color: rgba(90, 140, 106, 0.1);
+  --diff-code-insert-background-color: rgba(63, 107, 77, 0.12);
   --diff-code-insert-text-color: inherit;
-  --diff-code-insert-edit-background-color: rgba(90, 140, 106, 0.24);
+  --diff-code-insert-edit-background-color: rgba(63, 107, 77, 0.28);
 
   /* Delete (removal) — warm rose */
-  --diff-gutter-delete-background-color: rgba(196, 90, 90, 0.08);
+  --diff-gutter-delete-background-color: rgba(168, 69, 69, 0.1);
   --diff-gutter-delete-text-color: var(--color-dismiss);
-  --diff-code-delete-background-color: rgba(196, 90, 90, 0.1);
+  --diff-code-delete-background-color: rgba(168, 69, 69, 0.12);
   --diff-code-delete-text-color: inherit;
-  --diff-code-delete-edit-background-color: rgba(196, 90, 90, 0.24);
+  --diff-code-delete-edit-background-color: rgba(168, 69, 69, 0.28);
 
   /* Selection */
-  --diff-gutter-selected-background-color: rgba(196, 122, 90, 0.08);
-  --diff-code-selected-background-color: rgba(196, 122, 90, 0.06);
+  --diff-gutter-selected-background-color: rgba(168, 90, 58, 0.1);
+  --diff-code-selected-background-color: rgba(168, 90, 58, 0.08);
 
   /* Omit (collapsed) line */
   --diff-omit-gutter-line-color: var(--color-border-subtle);
@@ -99,12 +99,12 @@ body {
 .token.prolog,
 .token.doctype,
 .token.cdata {
-  color: #a09a94;
+  color: #6b6560;
   font-style: italic;
 }
 
 .token.punctuation {
-  color: #8a8480;
+  color: #5e5852;
 }
 
 .token.property,
@@ -113,7 +113,7 @@ body {
 .token.number,
 .token.constant,
 .token.symbol {
-  color: #b06040;
+  color: #8a4a2e;
 }
 
 .token.selector,
@@ -121,30 +121,30 @@ body {
 .token.string,
 .token.char,
 .token.builtin {
-  color: #5a8c6a;
+  color: #3f6b4d;
 }
 
 .token.operator,
 .token.entity,
 .token.url {
-  color: #8a7060;
+  color: #6a5440;
 }
 
 .token.atrule,
 .token.attr-value,
 .token.keyword {
-  color: #7a6aad;
+  color: #5e4f8f;
 }
 
 .token.function,
 .token.class-name {
-  color: #c47a5a;
+  color: #a85a3a;
 }
 
 .token.regex,
 .token.important,
 .token.variable {
-  color: #b8943a;
+  color: #8a6e1f;
 }
 
 .token.important,
