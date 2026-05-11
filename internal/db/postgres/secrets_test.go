@@ -20,7 +20,7 @@ import (
 // what makes the secret subsystem safe against a claims-less caller
 // reading any org's data.
 //
-// We construct the store against the tx (newPostgresSecretStoreOnTx)
+// We construct the store against the tx with pgstore.NewForTx(tx)
 // so every call rides the same connection that has SET LOCAL ROLE
 // tf_app + the JWT claim. Without this the vault function refuses
 // with "missing org context" — the right failure mode, but not
