@@ -151,15 +151,16 @@ func TestBootstrapLocalTenancy_ConstantsMatchRows(t *testing.T) {
 		{"team", "teams", "id", runmode.LocalDefaultTeamID},
 		{"user", "users", "id", runmode.LocalDefaultUserID},
 	} {
-		var got string
+		var n int
 		if err := conn.QueryRow(
-			`SELECT ` + c.column + ` FROM ` + c.table + ` LIMIT 1`,
-		).Scan(&got); err != nil {
-			t.Fatalf("read %s.%s: %v", c.table, c.column, err)
+			`SELECT COUNT(*) FROM `+c.table+` WHERE `+c.column+` = ?`,
+			c.want,
+		).Scan(&n); err != nil {
+			t.Fatalf("count %s.%s=%q: %v", c.table, c.column, c.want, err)
 		}
-		if got != c.want {
-			t.Errorf("%s sentinel drift: migration inserted %q, runmode.LocalDefault%sID = %q",
-				c.name, got, c.name, c.want)
+		if n != 1 {
+			t.Errorf("%s sentinel row count for %s.%s=%q = %d, want 1",
+				c.name, c.table, c.column, c.want, n)
 		}
 	}
 
