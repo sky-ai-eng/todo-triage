@@ -98,26 +98,5 @@ type PromptStore interface {
 	// prompts handler can depend on a single store. When RunStore
 	// lands (wave 3b) this stays put — the read still keys on
 	// prompt_id and PromptStore is the right ownership root.
-	Stats(ctx context.Context, orgID string, id string) (*PromptStats, error)
-}
-
-// PromptStats holds aggregated performance data for a single prompt.
-// Lives next to PromptStore so handlers depending on the interface
-// don't need a second import to render the response.
-type PromptStats struct {
-	TotalRuns     int        `json:"total_runs"`
-	CompletedRuns int        `json:"completed_runs"`
-	FailedRuns    int        `json:"failed_runs"`
-	SuccessRate   float64    `json:"success_rate"` // 0-1
-	AvgCostUSD    float64    `json:"avg_cost_usd"`
-	AvgDurationMs int        `json:"avg_duration_ms"`
-	TotalCostUSD  float64    `json:"total_cost_usd"`
-	LastUsedAt    *string    `json:"last_used_at"` // RFC3339 or null — never-used surfaces as null in the API
-	RunsPerDay    []DayCount `json:"runs_per_day"` // last 30 days, oldest first
-}
-
-// DayCount is a single day's run count for the prompts-page sparkline.
-type DayCount struct {
-	Date  string `json:"date"` // "2026-04-01"
-	Count int    `json:"count"`
+	Stats(ctx context.Context, orgID string, id string) (*domain.PromptStats, error)
 }

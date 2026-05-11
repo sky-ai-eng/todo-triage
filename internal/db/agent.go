@@ -469,20 +469,6 @@ func ListTakenOverRunIDs(database *sql.DB) ([]string, error) {
 	return ids, rows.Err()
 }
 
-// TakenOverRun is a slim view of a taken-over run for the
-// `triagefactory resume` CLI's picker. Carries just enough to render
-// the user's choices and exec into the right session — the path,
-// session id, and a task title for context. SourceID lets us show
-// "PR #42" or "SKY-194" so the user can tell takeovers apart.
-type TakenOverRun struct {
-	RunID        string
-	SessionID    string
-	WorktreePath string
-	TaskTitle    string
-	SourceID     string
-	CompletedAt  time.Time
-}
-
 // ListTakenOverRunsForResume returns every taken-over run in the local
 // DB, joined with its task + entity for display, ordered newest-first.
 // Used by the CLI's resume command — the bare-call default picks
@@ -494,7 +480,7 @@ type TakenOverRun struct {
 // runs.task_id → tasks.entity_id → entities. LEFT JOIN throughout so
 // a deleted task or entity doesn't drop the run from the list — the
 // user can still resume even if the upstream task got cleaned up.
-func ListTakenOverRunsForResume(database *sql.DB) ([]TakenOverRun, error) {
+func ListTakenOverRunsForResume(database *sql.DB) ([]domain.TakenOverRun, error) {
 	// completed_at and started_at returned as raw columns rather than
 	// COALESCE'd into one — the SQLite driver can scan a column of
 	// declared DATETIME type into sql.NullTime, but a COALESCE
@@ -517,9 +503,9 @@ func ListTakenOverRunsForResume(database *sql.DB) ([]TakenOverRun, error) {
 	}
 	defer rows.Close()
 
-	var out []TakenOverRun
+	var out []domain.TakenOverRun
 	for rows.Next() {
-		var r TakenOverRun
+		var r domain.TakenOverRun
 		var completedAt, startedAt sql.NullTime
 		if err := rows.Scan(&r.RunID, &r.SessionID, &r.WorktreePath, &r.TaskTitle, &r.SourceID, &completedAt, &startedAt); err != nil {
 			return nil, err
@@ -781,18 +767,8 @@ func MessagesForRun(database *sql.DB, runID string) ([]domain.AgentMessage, erro
 	return messages, rows.Err()
 }
 
-// TokenTotals holds summed token counts for a run.
-type TokenTotals struct {
-	Model               string
-	InputTokens         int
-	OutputTokens        int
-	CacheReadTokens     int
-	CacheCreationTokens int
-	NumTurns            int
-}
-
 // RunTokenTotals sums token usage across all assistant messages in a run.
-func RunTokenTotals(database *sql.DB, runID string) (*TokenTotals, error) {
+func RunTokenTotals(database *sql.DB, runID string) (*domain.TokenTotals, error) {
 	row := database.QueryRow(`
 		SELECT COALESCE(MAX(model), ''),
 		       COALESCE(SUM(input_tokens), 0),
@@ -804,7 +780,7 @@ func RunTokenTotals(database *sql.DB, runID string) (*TokenTotals, error) {
 		WHERE run_id = ? AND role = 'assistant'
 	`, runID)
 
-	var t TokenTotals
+	var t domain.TokenTotals
 	if err := row.Scan(&t.Model, &t.InputTokens, &t.OutputTokens, &t.CacheReadTokens, &t.CacheCreationTokens, &t.NumTurns); err != nil {
 		return nil, err
 	}

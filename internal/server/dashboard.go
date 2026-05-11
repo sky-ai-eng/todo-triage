@@ -38,7 +38,7 @@ func (s *Server) handleDashboardStats(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDashboardPRs(w http.ResponseWriter, r *http.Request) {
 	creds, err := auth.Load()
 	if err != nil || creds.GitHubPAT == "" || creds.GitHubUsername == "" {
-		writeJSON(w, http.StatusOK, []db.PRSummaryRow{})
+		writeJSON(w, http.StatusOK, []domain.PRSummaryRow{})
 		return
 	}
 
@@ -48,7 +48,7 @@ func (s *Server) handleDashboardPRs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if prs == nil {
-		prs = []db.PRSummaryRow{}
+		prs = []domain.PRSummaryRow{}
 	}
 	writeJSON(w, http.StatusOK, prs)
 }

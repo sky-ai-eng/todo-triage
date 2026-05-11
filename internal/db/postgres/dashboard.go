@@ -22,7 +22,7 @@ func newDashboardStore(q queryer) db.DashboardStore { return &dashboardStore{q: 
 
 var _ db.DashboardStore = (*dashboardStore)(nil)
 
-func (s *dashboardStore) Stats(ctx context.Context, orgID, username string, sinceDays int) (*db.DashboardStats, error) {
+func (s *dashboardStore) Stats(ctx context.Context, orgID, username string, sinceDays int) (*domain.DashboardStats, error) {
 	since := time.Now().AddDate(0, 0, -sinceDays)
 
 	rows, err := s.q.QueryContext(ctx, `
@@ -34,7 +34,7 @@ func (s *dashboardStore) Stats(ctx context.Context, orgID, username string, sinc
 	}
 	defer rows.Close()
 
-	stats := &db.DashboardStats{}
+	stats := &domain.DashboardStats{}
 	mergedByDay := make(map[string]int)
 
 	for rows.Next() {
@@ -90,7 +90,7 @@ func (s *dashboardStore) Stats(ctx context.Context, orgID, username string, sinc
 	return stats, nil
 }
 
-func (s *dashboardStore) PRs(ctx context.Context, orgID, username string) ([]db.PRSummaryRow, error) {
+func (s *dashboardStore) PRs(ctx context.Context, orgID, username string) ([]domain.PRSummaryRow, error) {
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT snapshot_json FROM entities
 		WHERE org_id = $1 AND source = 'github' AND snapshot_json IS NOT NULL
@@ -101,7 +101,7 @@ func (s *dashboardStore) PRs(ctx context.Context, orgID, username string) ([]db.
 	}
 	defer rows.Close()
 
-	var prs []db.PRSummaryRow
+	var prs []domain.PRSummaryRow
 	for rows.Next() {
 		var snapJSON []byte
 		if err := rows.Scan(&snapJSON); err != nil {
@@ -122,7 +122,7 @@ func (s *dashboardStore) PRs(ctx context.Context, orgID, username string) ([]db.
 		if snap.Merged {
 			state = "merged"
 		}
-		prs = append(prs, db.PRSummaryRow{
+		prs = append(prs, domain.PRSummaryRow{
 			Number:    snap.Number,
 			Title:     snap.Title,
 			Repo:      snap.Repo,
@@ -155,12 +155,12 @@ func dashboardStateToLower(s string) string {
 	}
 }
 
-func buildDashboardTimeline(buckets map[string]int, days int) []db.DashboardPoint {
-	points := make([]db.DashboardPoint, 0, days)
+func buildDashboardTimeline(buckets map[string]int, days int) []domain.DashboardPoint {
+	points := make([]domain.DashboardPoint, 0, days)
 	now := time.Now()
 	for i := days - 1; i >= 0; i-- {
 		key := now.AddDate(0, 0, -i).Format("2006-01-02")
-		points = append(points, db.DashboardPoint{Date: key, Count: buckets[key]})
+		points = append(points, domain.DashboardPoint{Date: key, Count: buckets[key]})
 	}
 	return points
 }

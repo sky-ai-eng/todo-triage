@@ -296,8 +296,8 @@ func (s *promptStore) IncrementUsage(ctx context.Context, orgID string, id strin
 // Like SQLite, the three queries are intentionally separate rather
 // than a single CTE — a CTE refactor is a future optimization, not a
 // port. If we change it, both backends move together.
-func (s *promptStore) Stats(ctx context.Context, orgID string, promptID string) (*db.PromptStats, error) {
-	stats := &db.PromptStats{}
+func (s *promptStore) Stats(ctx context.Context, orgID string, promptID string) (*domain.PromptStats, error) {
+	stats := &domain.PromptStats{}
 
 	// COALESCE on the SUM(CASE…) columns because SUM over zero rows
 	// is NULL in Postgres and *int Scan rejects NULL — the
@@ -364,7 +364,7 @@ func (s *promptStore) Stats(ctx context.Context, orgID string, promptID string) 
 
 	for i := 29; i >= 0; i-- {
 		d := time.Now().AddDate(0, 0, -i).Format("2006-01-02")
-		stats.RunsPerDay = append(stats.RunsPerDay, db.DayCount{Date: d, Count: dayMap[d]})
+		stats.RunsPerDay = append(stats.RunsPerDay, domain.DayCount{Date: d, Count: dayMap[d]})
 	}
 	return stats, nil
 }

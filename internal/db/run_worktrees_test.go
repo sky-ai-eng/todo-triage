@@ -41,7 +41,7 @@ func TestInsertRunWorktree_Idempotent(t *testing.T) {
 	database := newTestDB(t)
 	seedJiraRun(t, database, "r1")
 
-	inserted, winning, err := InsertRunWorktree(database, RunWorktree{
+	inserted, winning, err := InsertRunWorktree(database, domain.RunWorktree{
 		RunID: "r1", RepoID: "owner/repo", Path: "/tmp/wt/r1/owner/repo", FeatureBranch: "feature/SKY-1",
 	})
 	if err != nil {
@@ -56,7 +56,7 @@ func TestInsertRunWorktree_Idempotent(t *testing.T) {
 
 	// Idempotent re-insert returns the existing (winning) path with inserted=false.
 	// Caller passes a different path to confirm we read the row, not echo the input.
-	inserted, winning, err = InsertRunWorktree(database, RunWorktree{
+	inserted, winning, err = InsertRunWorktree(database, domain.RunWorktree{
 		RunID: "r1", RepoID: "owner/repo", Path: "/tmp/wt/r1-DIFFERENT/owner/repo", FeatureBranch: "feature/SKY-1",
 	})
 	if err != nil {
@@ -74,7 +74,7 @@ func TestGetRunWorktreeByRepo(t *testing.T) {
 	database := newTestDB(t)
 	seedJiraRun(t, database, "r1")
 
-	if _, _, err := InsertRunWorktree(database, RunWorktree{
+	if _, _, err := InsertRunWorktree(database, domain.RunWorktree{
 		RunID: "r1", RepoID: "owner/repo", Path: "/p1", FeatureBranch: "feature/SKY-1",
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
@@ -105,7 +105,7 @@ func TestGetRunWorktrees_OrderAndScope(t *testing.T) {
 	seedJiraRun(t, database, "r1")
 	seedJiraRun(t, database, "r2")
 
-	for _, w := range []RunWorktree{
+	for _, w := range []domain.RunWorktree{
 		{RunID: "r1", RepoID: "owner/a", Path: "/p1", FeatureBranch: "feature/SKY-1"},
 		{RunID: "r1", RepoID: "owner/b", Path: "/p2", FeatureBranch: "feature/SKY-1"},
 		{RunID: "r2", RepoID: "owner/a", Path: "/p3", FeatureBranch: "feature/SKY-2"},
@@ -136,7 +136,7 @@ func TestRunWorktrees_CascadeOnRunDelete(t *testing.T) {
 	database := newTestDB(t)
 	seedJiraRun(t, database, "r1")
 
-	if _, _, err := InsertRunWorktree(database, RunWorktree{
+	if _, _, err := InsertRunWorktree(database, domain.RunWorktree{
 		RunID: "r1", RepoID: "owner/a", Path: "/p1", FeatureBranch: "feature/SKY-1",
 	}); err != nil {
 		t.Fatalf("insert: %v", err)

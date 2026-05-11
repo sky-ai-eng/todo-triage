@@ -3,30 +3,9 @@ package db
 import (
 	"database/sql"
 	"fmt"
-	"time"
-)
 
-// RunWorktree records a worktree materialized for a given run by the
-// agent's `triagefactory exec workspace add` invocation. The composite
-// PK (run_id, repo_id) makes the insert idempotent: a second `workspace
-// add` for the same repo within the same run hits ON CONFLICT and the
-// caller looks up the existing path.
-//
-// Path is the absolute on-disk worktree location, typically
-// /tmp/triagefactory-runs/{run_id}/{owner}/{repo}/. FeatureBranch is
-// the branch name `git worktree add` checked out (e.g. "feature/SKY-220").
-//
-// FK to runs cascades on delete so wiping a run cleans up its worktree
-// records here. The on-disk worktrees themselves are reaped by the
-// spawner's runAgent cleanup defer (which lists this table at run
-// terminal) plus the startup orphan sweep at worktree.CleanupWithOptions.
-type RunWorktree struct {
-	RunID         string
-	RepoID        string
-	Path          string
-	FeatureBranch string
-	CreatedAt     time.Time
-}
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+)
 
 // InsertRunWorktree reserves a row for a worktree the caller is about
 // to create. Used as the cross-process serialization point: two
@@ -53,7 +32,7 @@ type RunWorktree struct {
 //     so the next attempt can retry.
 //   - On loser (inserted=false): do NOT create the worktree; return
 //     winningPath so the agent cd's into the canonical location.
-func InsertRunWorktree(database *sql.DB, w RunWorktree) (inserted bool, winningPath string, err error) {
+func InsertRunWorktree(database *sql.DB, w domain.RunWorktree) (inserted bool, winningPath string, err error) {
 	res, err := database.Exec(`
 		INSERT OR IGNORE INTO run_worktrees (run_id, repo_id, path, feature_branch)
 		VALUES (?, ?, ?, ?)
@@ -102,13 +81,13 @@ func DeleteRunWorktree(database *sql.DB, runID, repoID string) error {
 // pair, or (nil, nil) if none exists. Used by the CLI to short-circuit
 // the create+insert path when the agent re-invokes `workspace add`
 // against an already-materialized repo.
-func GetRunWorktreeByRepo(database *sql.DB, runID, repoID string) (*RunWorktree, error) {
+func GetRunWorktreeByRepo(database *sql.DB, runID, repoID string) (*domain.RunWorktree, error) {
 	row := database.QueryRow(`
 		SELECT run_id, repo_id, path, feature_branch, created_at
 		  FROM run_worktrees
 		 WHERE run_id = ? AND repo_id = ?
 	`, runID, repoID)
-	var w RunWorktree
+	var w domain.RunWorktree
 	if err := row.Scan(&w.RunID, &w.RepoID, &w.Path, &w.FeatureBranch, &w.CreatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
@@ -121,7 +100,7 @@ func GetRunWorktreeByRepo(database *sql.DB, runID, repoID string) (*RunWorktree,
 // GetRunWorktrees returns every worktree materialized for a run, in
 // insertion order. The spawner's cleanup defer iterates this list and
 // calls worktree.RemoveAt on each path before nuking the run-root.
-func GetRunWorktrees(database *sql.DB, runID string) ([]RunWorktree, error) {
+func GetRunWorktrees(database *sql.DB, runID string) ([]domain.RunWorktree, error) {
 	rows, err := database.Query(`
 		SELECT run_id, repo_id, path, feature_branch, created_at
 		  FROM run_worktrees
@@ -133,9 +112,9 @@ func GetRunWorktrees(database *sql.DB, runID string) ([]RunWorktree, error) {
 	}
 	defer rows.Close()
 
-	out := []RunWorktree{}
+	out := []domain.RunWorktree{}
 	for rows.Next() {
-		var w RunWorktree
+		var w domain.RunWorktree
 		if err := rows.Scan(&w.RunID, &w.RepoID, &w.Path, &w.FeatureBranch, &w.CreatedAt); err != nil {
 			return nil, err
 		}
