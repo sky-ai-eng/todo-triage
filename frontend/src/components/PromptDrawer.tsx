@@ -120,6 +120,8 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
   const [name, setName] = useState('')
   const [body, setBody] = useState('')
   const [source, setSource] = useState('user')
+  const [model, setModel] = useState('')
+  const [defaultModel, setDefaultModel] = useState('')
   const [stats, setStats] = useState<PromptStatsData | null>(null)
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState(false)
@@ -131,11 +133,28 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
 
   const open = promptId !== null || isNew
 
+  // Refreshes when the drawer (re)opens so a Settings change is
+  // reflected in the "Default" option's label without a page reload.
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    fetch('/api/settings')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!cancelled && data?.ai?.model) setDefaultModel(data.ai.model)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [open])
+
   useEffect(() => {
     if (isNew) {
       setName('')
       setBody('')
       setSource('user')
+      setModel('')
       setStats(null)
       setError('')
       return
@@ -152,6 +171,7 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
         setName(data.name)
         setBody(data.body)
         setSource(data.source)
+        setModel(data.model ?? '')
         setError('')
       })
       .catch(() => {
@@ -224,12 +244,12 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
         ? await fetch('/api/prompts', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, body }),
+            body: JSON.stringify({ name, body, model }),
           })
         : await fetch(`/api/prompts/${promptId}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, body }),
+            body: JSON.stringify({ name, body, model }),
           })
       if (!res.ok) {
         toast.error(await readError(res, `Failed to ${isNew ? 'create' : 'save'} prompt`))
@@ -331,6 +351,26 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
                   rows={16}
                   className="w-full px-3 py-2.5 rounded-lg border border-border-subtle bg-white/50 text-[13px] text-text-primary font-mono leading-relaxed placeholder:text-text-tertiary focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 transition-colors resize-y"
                 />
+              </div>
+
+              <div>
+                <label className="block text-[12px] font-medium text-text-secondary mb-1.5">
+                  Model
+                </label>
+                <select
+                  value={model}
+                  onChange={(e) => setModel(e.target.value)}
+                  className="w-full px-3 py-2 rounded-lg border border-border-subtle bg-white/50 text-[13px] text-text-primary focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 transition-colors"
+                >
+                  <option value="">Default{defaultModel ? ` (${defaultModel})` : ''}</option>
+                  <option value="haiku">Haiku (fast, cheap)</option>
+                  <option value="sonnet">Sonnet (balanced)</option>
+                  <option value="opus">Opus (most capable)</option>
+                </select>
+                <p className="text-[10px] text-text-tertiary mt-1.5">
+                  Default tracks the model chosen in Settings — change it there and every prompt
+                  using Default follows.
+                </p>
               </div>
 
               {/* Template variables reference — grouped by applicability so
