@@ -138,8 +138,18 @@ func TestBootstrapTeamAgent_ErrorsWhenOrgHasNoAgent(t *testing.T) {
 //
 // Postgres doesn't need an equivalent because its migration uses no
 // hardcoded sentinels — every UUID is gen_random_uuid() at insert.
+//
+// Coverage: all four sentinel constants — org, team, user, agent —
+// plus the two cross-row membership rows that reference combinations
+// of them. The agent row is populated by BootstrapLocalAgent at boot
+// (not by the migration itself), so the test runs that first to put
+// the agent row in place before the constant-matches-row check.
 func TestBootstrapLocalTenancy_ConstantsMatchRows(t *testing.T) {
 	conn := openInMemorySQLite(t)
+	stores := sqlitestore.New(conn)
+	if err := db.BootstrapLocalAgent(t.Context(), stores); err != nil {
+		t.Fatalf("BootstrapLocalAgent: %v", err)
+	}
 
 	for _, c := range []struct {
 		name   string
@@ -150,6 +160,7 @@ func TestBootstrapLocalTenancy_ConstantsMatchRows(t *testing.T) {
 		{"org", "orgs", "id", runmode.LocalDefaultOrgID},
 		{"team", "teams", "id", runmode.LocalDefaultTeamID},
 		{"user", "users", "id", runmode.LocalDefaultUserID},
+		{"agent", "agents", "id", runmode.LocalDefaultAgentID},
 	} {
 		var n int
 		if err := conn.QueryRow(
@@ -159,31 +170,44 @@ func TestBootstrapLocalTenancy_ConstantsMatchRows(t *testing.T) {
 			t.Fatalf("count %s.%s=%q: %v", c.table, c.column, c.want, err)
 		}
 		if n != 1 {
-			t.Errorf("%s sentinel row count for %s.%s=%q = %d, want 1",
+			t.Errorf("%s sentinel row count for %s.%s=%q = %d, want 1 — runmode constant has drifted from migration literal",
 				c.name, c.table, c.column, c.want, n)
 		}
 	}
 
-	// memberships + org_memberships rows reference all three above —
-	// a row mismatch here means one of the constants drifted too.
-	var n int
-	if err := conn.QueryRow(`
-		SELECT COUNT(*) FROM org_memberships
-		WHERE user_id = ? AND org_id = ?
-	`, runmode.LocalDefaultUserID, runmode.LocalDefaultOrgID).Scan(&n); err != nil {
-		t.Fatalf("count org_memberships: %v", err)
-	}
-	if n != 1 {
-		t.Errorf("org_memberships sentinel row count = %d, want 1 (FK target for every resource table)", n)
-	}
-	if err := conn.QueryRow(`
-		SELECT COUNT(*) FROM memberships
-		WHERE user_id = ? AND team_id = ?
-	`, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID).Scan(&n); err != nil {
-		t.Fatalf("count memberships: %v", err)
-	}
-	if n != 1 {
-		t.Errorf("memberships sentinel row count = %d, want 1", n)
+	// org_memberships + memberships + team_agents cross-reference
+	// combinations of the four sentinels. A failure here surfaces a
+	// drift on whichever pair doesn't resolve, even when the single-
+	// table checks above all pass (e.g. if memberships drifted on
+	// team_id but the teams row hadn't).
+	for _, c := range []struct {
+		name  string
+		query string
+		args  []any
+	}{
+		{
+			"org_memberships(user, org)",
+			`SELECT COUNT(*) FROM org_memberships WHERE user_id = ? AND org_id = ?`,
+			[]any{runmode.LocalDefaultUserID, runmode.LocalDefaultOrgID},
+		},
+		{
+			"memberships(user, team)",
+			`SELECT COUNT(*) FROM memberships WHERE user_id = ? AND team_id = ?`,
+			[]any{runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID},
+		},
+		{
+			"team_agents(team, agent)",
+			`SELECT COUNT(*) FROM team_agents WHERE team_id = ? AND agent_id = ?`,
+			[]any{runmode.LocalDefaultTeamID, runmode.LocalDefaultAgentID},
+		},
+	} {
+		var n int
+		if err := conn.QueryRow(c.query, c.args...).Scan(&n); err != nil {
+			t.Fatalf("count %s: %v", c.name, err)
+		}
+		if n != 1 {
+			t.Errorf("%s row count = %d, want 1 — one of the sentinel constants drifted", c.name, n)
+		}
 	}
 }
 

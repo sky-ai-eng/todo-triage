@@ -94,12 +94,22 @@ func buildSchemaBundle() (string, error) {
 	//   - events_catalog    — FK target for task_rules.event_type and
 	//     prompt_triggers.event_type; many tests INSERT against it.
 	//   - tenancy sentinels — the SKY-269 migration inserts five rows
-	//     into orgs/teams/users/org_memberships/memberships that every
-	//     resource table now FKs into. The agents + team_agents tables
-	//     are rebuilt as part of the same migration and carry one row
-	//     pinning the local bot identity. Without these rows in the
-	//     bundle, post-269 tests can't INSERT into any FK-bearing
-	//     resource table because the FK target would be missing.
+	//     into orgs/teams/users/org_memberships/memberships and adds
+	//     org_id/team_id/creator_user_id columns to resource tables
+	//     with NOT NULL DEFAULT pointing at these sentinel UUIDs.
+	//     SQLite ALTER can't declare FK constraints on existing
+	//     columns, so resource tables aren't structurally FK'd — but
+	//     the agents + team_agents rebuilds in the same migration DO
+	//     declare FKs to orgs/teams/agents, and tests that INSERT
+	//     into those tables need the parent rows present.
+	//
+	// agents + team_agents are included in the dump list defensively.
+	// They're empty in the template (the SKY-260 migration creates the
+	// table but BootstrapLocalAgent — the function that populates the
+	// row — runs at main.go startup, not during Migrate). The
+	// dumpTableInserts call produces zero INSERTs for empty tables,
+	// so listing them is a no-op today; the list documents intent in
+	// case a future migration starts seeding default agent rows.
 	for _, table := range []string{
 		"goose_db_version", "events_catalog",
 		"orgs", "teams", "users", "org_memberships", "memberships",

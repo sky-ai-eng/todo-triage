@@ -6,8 +6,29 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/pressly/goose/v3"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	_ "modernc.org/sqlite"
 )
+
+// migrateUpTo brings the database forward to the named version using
+// the same FS + dialect plumbing runMigrations does. Helper for the
+// upgrade-path tests that stage an in-between state before testing
+// a specific subsequent migration.
+func migrateUpTo(t *testing.T, db *sql.DB, version int64) {
+	t.Helper()
+	treeFS, treeDir, err := migrationsFor("sqlite3")
+	if err != nil {
+		t.Fatalf("migrationsFor sqlite3: %v", err)
+	}
+	goose.SetBaseFS(treeFS)
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatalf("SetDialect: %v", err)
+	}
+	if err := goose.UpTo(db, treeDir, version); err != nil {
+		t.Fatalf("goose UpTo %d: %v", version, err)
+	}
+}
 
 // openMigrationsTestDB returns a fresh, schema-less in-memory SQLite
 // for migration tests. Distinct from newTestDB (which calls Migrate
@@ -182,6 +203,111 @@ func seedFullLegacyState(t *testing.T, database *sql.DB) {
 		if _, err := database.Exec(`INSERT INTO schema_migrations (version) VALUES (?)`, v); err != nil {
 			t.Fatalf("seed legacy version %q: %v", v, err)
 		}
+	}
+}
+
+// TestMigrate_SKY269BackfillsPATUserOnUpgrade pins the upgrade-path
+// fix from 202605120003_local_tenancy.sql. Pre-269 installs ran the
+// SKY-260 migration which created an agents row with
+// github_pat_user_id NULL (no users FK target existed locally yet).
+// Post-269 the column references users(id) — and BootstrapLocalAgent
+// at the next boot would NOT touch the existing row because Create's
+// INSERT OR IGNORE conflicts on UNIQUE(org_id). The migration itself
+// runs the backfill UPDATE so the upgrade path resolves cleanly.
+//
+// The test stages: a goose-stamped install at version 202605120002
+// (post-prompts_model, pre-local_tenancy) with an agents row in the
+// pre-269 shape (NULL github_pat_user_id). Then Migrate forwards
+// through 202605120003. After: the agents row's github_pat_user_id
+// equals runmode.LocalDefaultUserID.
+func TestMigrate_SKY269BackfillsPATUserOnUpgrade(t *testing.T) {
+	database := openMigrationsTestDB(t)
+
+	// Apply baseline + everything through 202605120002. Then stop
+	// short of 202605120003 so we can stage a pre-269 agents row
+	// before the local_tenancy migration runs.
+	migrateUpTo(t, database, 202605120002)
+
+	// Stage: a pre-269 agents row with NULL github_pat_user_id. This
+	// matches what SKY-260's bootstrap would have inserted on a
+	// pre-prompts_model install. id is the BootstrapAgentID value
+	// the pre-269 store used (UUID5 derived from "default"); the
+	// 202605120003 rebuild rewrites it to LocalDefaultAgentID.
+	if _, err := database.Exec(`
+		INSERT INTO agents (id, display_name, github_pat_user_id, github_app_installation_id)
+		VALUES ('pre-269-derived-id', 'Triage Factory Bot', NULL, NULL)
+	`); err != nil {
+		t.Fatalf("seed pre-269 agents row: %v", err)
+	}
+	if _, err := database.Exec(`
+		INSERT INTO team_agents (team_id, agent_id, enabled)
+		VALUES ('default', 'pre-269-derived-id', 1)
+	`); err != nil {
+		t.Fatalf("seed pre-269 team_agents row: %v", err)
+	}
+
+	if err := Migrate(database, "sqlite3"); err != nil {
+		t.Fatalf("Migrate forward through 202605120003: %v", err)
+	}
+
+	var patUserID sql.NullString
+	if err := database.QueryRow(
+		`SELECT github_pat_user_id FROM agents WHERE org_id = ?`,
+		runmode.LocalDefaultOrgID,
+	).Scan(&patUserID); err != nil {
+		t.Fatalf("read post-migration agents row: %v", err)
+	}
+	if !patUserID.Valid {
+		t.Fatal("github_pat_user_id is still NULL after upgrade; backfill UPDATE didn't fire")
+	}
+	if patUserID.String != runmode.LocalDefaultUserID {
+		t.Errorf("github_pat_user_id = %q, want %q (sentinel user)",
+			patUserID.String, runmode.LocalDefaultUserID)
+	}
+}
+
+// TestMigrate_SKY269PreservesExistingPATConfig pins the other side of
+// the backfill: if a pre-269 install had github_app_installation_id
+// or github_pat_user_id set to anything non-NULL, the backfill
+// UPDATE must NOT clobber it. The migration gates on both fields
+// being NULL exactly for this reason.
+func TestMigrate_SKY269PreservesExistingPATConfig(t *testing.T) {
+	database := openMigrationsTestDB(t)
+	migrateUpTo(t, database, 202605120002)
+	// Stage: agents row with github_app_installation_id set — a user
+	// who'd configured an App install pre-269. (Hypothetical pre-269
+	// because SKY-260 didn't ship a UI for this, but defending in
+	// depth against any DB that has it.)
+	if _, err := database.Exec(`
+		INSERT INTO agents (id, display_name, github_app_installation_id)
+		VALUES ('pre-269-with-app', 'Triage Factory Bot', '12345')
+	`); err != nil {
+		t.Fatalf("seed pre-269 agents row: %v", err)
+	}
+	if _, err := database.Exec(`
+		INSERT INTO team_agents (team_id, agent_id, enabled)
+		VALUES ('default', 'pre-269-with-app', 1)
+	`); err != nil {
+		t.Fatalf("seed pre-269 team_agents row: %v", err)
+	}
+
+	if err := Migrate(database, "sqlite3"); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	var installID sql.NullString
+	var patUserID sql.NullString
+	if err := database.QueryRow(
+		`SELECT github_app_installation_id, github_pat_user_id FROM agents WHERE org_id = ?`,
+		runmode.LocalDefaultOrgID,
+	).Scan(&installID, &patUserID); err != nil {
+		t.Fatalf("read post-migration agents row: %v", err)
+	}
+	if !installID.Valid || installID.String != "12345" {
+		t.Errorf("github_app_installation_id = %v; want preserved as '12345'", installID)
+	}
+	if patUserID.Valid {
+		t.Errorf("github_pat_user_id = %q; want NULL (App was already set, backfill must skip)", patUserID.String)
 	}
 }
 

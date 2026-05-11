@@ -253,5 +253,26 @@ DROP TABLE team_agents_pre_269;
 
 CREATE INDEX IF NOT EXISTS idx_team_agents_agent ON team_agents(agent_id);
 
+-- === Upgrade-path PAT backfill =============================================
+-- A pre-269 install carries an agents row with github_pat_user_id NULL
+-- (the column had no FK target locally back then). Post-269 the column
+-- references users(id) — and Create's INSERT OR IGNORE shape means
+-- BootstrapLocalAgent on a re-boot does NOT update the row's
+-- credential fields when the UNIQUE(org_id) conflict fires. Without
+-- this UPDATE, the upgrade path leaves github_pat_user_id NULL forever
+-- even though the sentinel user is right there to point at.
+--
+-- The gate (both credential fields IS NULL) preserves any deliberate
+-- user state: if someone had set an App install or a custom PAT-borrow
+-- target pre-269 (which the SKY-260 SQLite schema did permit even
+-- though it wasn't wired into Create's default path), we don't
+-- clobber it.
+UPDATE agents
+SET github_pat_user_id = '00000000-0000-0000-0000-000000000100',
+    updated_at = CURRENT_TIMESTAMP
+WHERE org_id = '00000000-0000-0000-0000-000000000001'
+  AND github_pat_user_id IS NULL
+  AND github_app_installation_id IS NULL;
+
 -- +goose Down
 SELECT 'down not supported';

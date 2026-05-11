@@ -22,7 +22,7 @@ type Agent struct {
 	DefaultModel               string   // "" = no default; consumer falls through to global default
 	DefaultAutonomySuitability *float64 // nil = no default; consumer uses the trigger-level threshold instead
 	GitHubAppInstallationID    string   // "" if no App installed
-	GitHubPATUserID            string   // "" if not borrowing a PAT (always "" in local mode)
+	GitHubPATUserID            string   // "" if not borrowing a PAT; post-SKY-269 local mode populates with the sentinel user at bootstrap
 	JiraServiceAccountID       string   // "" if no Jira service account (v2 surface)
 	CreatedAt                  time.Time
 	UpdatedAt                  time.Time
