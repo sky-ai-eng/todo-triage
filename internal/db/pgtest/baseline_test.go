@@ -2251,6 +2251,231 @@ func getEventForEntity(t *testing.T, h *Harness, entityID string) string {
 	return id
 }
 
+// TestRLS_BaselineCrossOrgPin_MultiOrgUser pins the fix from migration
+// 202605120007. Four cases for a user (Charlie) with admin memberships
+// in two orgs, exercising the realistic shape "I'm operating in orgB
+// right now but I have privileges in orgA too":
+//
+//  1. users_select — Charlie in orgA context queries users; can see
+//     himself + Alice (orgA owner) but NOT Bob (orgB-only).
+//  2. memberships_insert — Charlie's session is on orgB but he tries
+//     to INSERT into teamA (which is in orgA). Pre-fix this would
+//     succeed because the org-blind helper saw him as team-admin of
+//     teamA. With the pin, the team_in_current_org check refuses.
+//  3. org_memberships_insert — Charlie's session is on orgB but he
+//     tries to add a new user to orgA's org_memberships. Pre-fix this
+//     would succeed because user_is_org_admin(orgA) passed. With the
+//     pin, org_id = tf.current_org_id() check refuses.
+//  4. team_settings_select — Charlie in orgA cannot read orgB's
+//     team_settings, only orgA's (where he's a member).
+//
+// Pre-202605120007 every gate passed because the helpers (user_is_team_admin,
+// user_is_org_admin_via_team, user_is_org_admin) check membership/role
+// in the TARGET row's org, not the active session's. The new pin via
+// tf.team_in_current_org / org_id = tf.current_org_id() refuses these.
+func TestRLS_BaselineCrossOrgPin_MultiOrgUser(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	orgA, aliceID, teamA := seedOrgWithUser(t, h, "alice")
+	orgB, bobID, teamB := seedOrgWithUser(t, h, "bob")
+
+	// Charlie: org admin in both orgA and orgB; team admin in both teams.
+	charlieID := seedUser(t, h, "charlie")
+	for _, orgID := range []string{orgA, orgB} {
+		mustExec(t, h.AdminDB,
+			`INSERT INTO org_memberships (user_id, org_id, role) VALUES ($1, $2, 'admin')`,
+			charlieID, orgID)
+	}
+	for _, teamID := range []string{teamA, teamB} {
+		mustExec(t, h.AdminDB,
+			`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'admin')`,
+			charlieID, teamID)
+	}
+	mustExec(t, h.AdminDB,
+		`INSERT INTO team_settings (team_id) VALUES ($1)`, teamA)
+	mustExec(t, h.AdminDB,
+		`INSERT INTO team_settings (team_id) VALUES ($1)`, teamB)
+
+	// (1) users_select pinned to current_org_id.
+	if err := h.WithUser(t, charlieID, orgA, func(tx *sql.Tx) error {
+		ids := map[string]bool{}
+		rows, err := tx.Query(`SELECT id FROM users`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				return err
+			}
+			ids[id] = true
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if !ids[charlieID] {
+			return fmt.Errorf("charlie not in own user list")
+		}
+		if !ids[aliceID] {
+			return fmt.Errorf("alice (orgA owner) missing — current_org pin should still allow same-org users")
+		}
+		if ids[bobID] {
+			return fmt.Errorf("bob (orgB-only) visible from orgA context — cross-org users_select leak")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("users_select pin: %v", err)
+	}
+
+	// (2) memberships_insert refuses cross-org team writes.
+	// Charlie's session claims org_id = orgB. He attempts to INSERT a
+	// memberships row that points at teamA (in orgA). Pre-fix this
+	// would pass because the user_is_team_admin helper sees him as
+	// admin of teamA regardless of which org his JWT claims. With
+	// the pin, tf.team_in_current_org(teamA) returns false because
+	// teamA.org_id (orgA) != tf.current_org_id() (orgB). Exec error
+	// propagates up through WithUser as the closure's return value
+	// (returning nil from the closure after a failed Exec would try
+	// to Commit on an already-aborted tx and obscure the real error).
+	err := h.WithUser(t, charlieID, orgB, func(tx *sql.Tx) error {
+		_, e := tx.Exec(
+			`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'member')`,
+			bobID, teamA,
+		)
+		return e
+	})
+	if err == nil {
+		t.Error("memberships INSERT into teamA from orgB context succeeded — cross-org write leak")
+	} else {
+		assertPgCode(t, err, "42501", "memberships cross-org INSERT")
+	}
+
+	// (3) org_memberships_insert refuses cross-org admin writes.
+	// Charlie's session claims org_id = orgB. He attempts to INSERT
+	// into orgA's org_memberships. Pre-fix this would pass because
+	// user_is_org_admin(orgA) returns true regardless of current_org_id.
+	// With the pin (org_id = tf.current_org_id()), refused.
+	someoneID := seedUser(t, h, "newbie")
+	err = h.WithUser(t, charlieID, orgB, func(tx *sql.Tx) error {
+		_, e := tx.Exec(
+			`INSERT INTO org_memberships (user_id, org_id, role) VALUES ($1, $2, 'member')`,
+			someoneID, orgA,
+		)
+		return e
+	})
+	if err == nil {
+		t.Error("org_memberships INSERT into orgA from orgB context succeeded — cross-org admin write leak")
+	} else {
+		assertPgCode(t, err, "42501", "org_memberships cross-org INSERT")
+	}
+
+	// (4) team_settings cross-org SELECT pinned. Charlie in orgA reads
+	// team_settings; sees teamA's row but not teamB's.
+	if err := h.WithUser(t, charlieID, orgA, func(tx *sql.Tx) error {
+		teams := map[string]bool{}
+		rows, err := tx.Query(`SELECT team_id FROM team_settings`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var tid string
+			if err := rows.Scan(&tid); err != nil {
+				return err
+			}
+			teams[tid] = true
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if !teams[teamA] {
+			return fmt.Errorf("teamA settings not visible in orgA context")
+		}
+		if teams[teamB] {
+			return fmt.Errorf("teamB settings visible in orgA context — cross-org team_settings_select leak")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("team_settings pin: %v", err)
+	}
+}
+
+// TestRLS_OrgMembershipsBootstrapStillWorks pins that the org_memberships
+// founder self-insert path survives the 202605120007 tightening. The
+// bootstrap branch on org_memberships_insert is
+//
+//	(user_id = tf.current_user_id() AND tf.user_owns_org(...))
+//
+// which depends only on the caller's identity + ownership and
+// intentionally does NOT require current_org_id matching. That's the
+// safety net for two realistic JWT shapes the auth flow produces during
+// first-signup:
+//
+//  1. Claims already re-issued with the new org_id (matching-claims).
+//  2. Claims not yet re-issued — tf.current_org_id() returns NULL via
+//     the 202605120002 GUC hardening short-circuit. The bootstrap
+//     branch doesn't reference current_org_id and so still succeeds.
+//
+// Both shapes get a separate assertion here because both are realistic
+// and we want the policy to stay tolerant of either.
+func TestRLS_OrgMembershipsBootstrapStillWorks(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	// Shape (1): claims re-issued with new org_id.
+	founder1ID := seedUser(t, h, "founder1")
+	var org1ID string
+	if err := h.AdminDB.QueryRow(`
+		INSERT INTO orgs (slug, name, owner_user_id) VALUES ('founder-org-1', 'Founder Org 1', $1) RETURNING id
+	`, founder1ID).Scan(&org1ID); err != nil {
+		t.Fatalf("seed org1: %v", err)
+	}
+	if err := h.WithUser(t, founder1ID, org1ID, func(tx *sql.Tx) error {
+		_, err := tx.Exec(
+			`INSERT INTO org_memberships (user_id, org_id, role) VALUES ($1, $2, 'owner')`,
+			founder1ID, org1ID,
+		)
+		return err
+	}); err != nil {
+		t.Fatalf("founder bootstrap (matching-claims shape): %v", err)
+	}
+
+	// Shape (2): claims not yet re-issued. WithUser still marshals
+	// {"sub": ..., "org_id": ""}, and the 202605120002 hardening of
+	// tf.current_org_id() short-circuits the empty string to NULL.
+	// That matches the realistic no-org-claim shape during first
+	// signup before the auth flow has issued an org cookie.
+	founder2ID := seedUser(t, h, "founder2")
+	var org2ID string
+	if err := h.AdminDB.QueryRow(`
+		INSERT INTO orgs (slug, name, owner_user_id) VALUES ('founder-org-2', 'Founder Org 2', $1) RETURNING id
+	`, founder2ID).Scan(&org2ID); err != nil {
+		t.Fatalf("seed org2: %v", err)
+	}
+	if err := h.WithUser(t, founder2ID, "", func(tx *sql.Tx) error {
+		// Sanity probe: confirm tf.current_org_id() actually returns
+		// NULL when org_id claim is empty string (not '' UUID). If the
+		// helper ever stops short-circuiting, this surfaces here rather
+		// than as a confusing policy failure below.
+		var orgIDNull bool
+		if err := tx.QueryRow(`SELECT tf.current_org_id() IS NULL`).Scan(&orgIDNull); err != nil {
+			return fmt.Errorf("probe current_org_id: %w", err)
+		}
+		if !orgIDNull {
+			return fmt.Errorf("tf.current_org_id() with empty org_id claim is not NULL — 202605120002 hardening regressed")
+		}
+		_, err := tx.Exec(
+			`INSERT INTO org_memberships (user_id, org_id, role) VALUES ($1, $2, 'owner')`,
+			founder2ID, org2ID,
+		)
+		return err
+	}); err != nil {
+		t.Fatalf("founder bootstrap (no-org-claim shape): %v", err)
+	}
+}
+
 // assertPgCode asserts that err is a *pgconn.PgError with the given
 // SQLSTATE. Postgres error message text drifts across versions, but
 // SQLSTATE codes are spec-stable — assert codes, not text. The
