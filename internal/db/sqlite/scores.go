@@ -50,27 +50,29 @@ func (s *scoreStore) UpdateTaskScores(ctx context.Context, orgID string, updates
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
-	// Single-stmt loop inside whatever tx (or DB) backs s.q. Callers
-	// wanting atomicity across the batch route through Stores.Tx.WithTx
-	// — outside a tx we still want per-row durability rather than
-	// "best effort" partial application, so the loop is fine.
-	stmt, err := prepareContext(ctx, s.q, `
-		UPDATE tasks
-		SET priority_score = ?, autonomy_suitability = ?, ai_summary = ?,
-		    priority_reasoning = ?, scoring_status = 'scored'
-		WHERE id = ?
-	`)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
-
-	for _, u := range updates {
-		if _, err := stmt.ExecContext(ctx, u.PriorityScore, u.AutonomySuitability, u.Summary, u.PriorityReasoning, u.ID); err != nil {
+	// All-or-nothing across the batch: a mid-loop failure must roll
+	// back any rows that already flipped to 'scored'. inTx reuses the
+	// caller's *sql.Tx if we're already inside one (so this remains
+	// composable with Stores.Tx.WithTx), or opens a fresh tx when
+	// called against a *sql.DB.
+	return inTx(ctx, s.q, func(q queryer) error {
+		stmt, err := prepareContext(ctx, q, `
+			UPDATE tasks
+			SET priority_score = ?, autonomy_suitability = ?, ai_summary = ?,
+			    priority_reasoning = ?, scoring_status = 'scored'
+			WHERE id = ?
+		`)
+		if err != nil {
 			return err
 		}
-	}
-	return nil
+		defer stmt.Close()
+		for _, u := range updates {
+			if _, err := stmt.ExecContext(ctx, u.PriorityScore, u.AutonomySuitability, u.Summary, u.PriorityReasoning, u.ID); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func (s *scoreStore) UnscoredTasks(ctx context.Context, orgID string) ([]domain.Task, error) {
@@ -123,6 +125,32 @@ func prepareContext(ctx context.Context, q queryer, query string) (*sql.Stmt, er
 		return v.PrepareContext(ctx, query)
 	default:
 		return nil, fmt.Errorf("sqlite store: unexpected queryer type %T", q)
+	}
+}
+
+// inTx runs fn against a queryer that's guaranteed to be a transaction:
+//   - if q is already a *sql.Tx (caller composed us inside Stores.Tx.WithTx),
+//     fn runs against that tx directly so the outer commit/rollback wins.
+//   - if q is a *sql.DB, inTx opens a fresh tx, runs fn against it, and
+//     commits or rolls back based on fn's return. This is the path that
+//     gives store methods documented as "atomic across the batch" their
+//     atomicity even when called outside an explicit WithTx.
+func inTx(ctx context.Context, q queryer, fn func(queryer) error) error {
+	switch v := q.(type) {
+	case *sql.Tx:
+		return fn(v)
+	case *sql.DB:
+		tx, err := v.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if err := fn(tx); err != nil {
+			return err
+		}
+		return tx.Commit()
+	default:
+		return fmt.Errorf("sqlite store: unexpected queryer type %T", q)
 	}
 }
 

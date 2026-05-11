@@ -62,30 +62,11 @@ func New(admin, app *sql.DB) db.Stores {
 	return s.stores
 }
 
-// OpenAdmin opens a connection pool against the superuser DSN. Wraps
-// sql.Open with the pgx driver so callers don't have to remember the
-// driver name. Caller owns the returned *sql.DB and is responsible
-// for Close().
-func OpenAdmin(dsn string) (*sql.DB, error) {
-	return openPGX(dsn)
-}
-
-// OpenApp opens a connection pool against the tf_app authenticator
-// DSN. Same wrapper as OpenAdmin — kept as a separate function for
-// future-proofing (the app pool may want different sql.DB tuning
-// once we have multi-mode in production, e.g. MaxIdleConns).
-func OpenApp(dsn string) (*sql.DB, error) {
-	return openPGX(dsn)
-}
-
-func openPGX(dsn string) (*sql.DB, error) {
-	conn, err := sql.Open("pgx", dsn)
-	if err != nil {
-		return nil, err
-	}
-	if err := conn.Ping(); err != nil {
-		_ = conn.Close()
-		return nil, err
-	}
-	return conn, nil
-}
+// Connection openers (OpenAdmin, OpenApp) are NOT defined here in
+// wave 0. main.go fatals before reaching them; introducing them now
+// would require registering the pgx stdlib driver inside this
+// package (a side-effect import) without any caller exercising it.
+// SKY-251 (D7) owns the multi-mode startup wiring and will add the
+// openers alongside the config + DSN plumbing that actually consumes
+// them. Tests construct *sql.DB via the pgtest harness, which
+// registers the pgx driver itself.

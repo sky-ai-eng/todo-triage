@@ -199,31 +199,42 @@ func main() {
 		}
 	}
 
-	database, err := db.Open()
-	if err != nil {
-		log.Fatalf("failed to open database: %v", err)
-	}
-	defer database.Close()
-
-	if err := db.Migrate(database, "sqlite3"); err != nil {
-		log.Fatalf("failed to migrate database: %v", err)
-	}
-
-	// Wire the per-resource store bundle (SKY-246 D2). Wave 0 + the
-	// ScoreStore pilot ship in this branch; later waves populate the
-	// remaining bundle fields. Multi mode's startup wiring (Postgres
-	// admin + app pools) lands with SKY-251 (D7) — refusing to boot
-	// here rather than silently running against the local SQLite
-	// file is the safer failure mode for a misconfigured TF_MODE.
-	var stores db.Stores
+	// Runmode dispatch (SKY-246 D2 wave 0): open the right backend
+	// for the mode and wire the per-resource store bundle against
+	// it. The dispatch wraps db.Open/db.Migrate so a misconfigured
+	// TF_MODE=multi fails fast — without this guard, the local
+	// SQLite file at ~/.triagefactory/triagefactory.db would be
+	// created and migrated before the multi branch could reject.
+	//
+	// Multi mode is unreachable end-to-end until the v1 multi-tenant
+	// epic (SKY-242) completes: every store needs to migrate to the
+	// per-resource interface, and D7 needs to wire the Postgres
+	// connection config. Until then, packages outside the converted
+	// stores still call db.X(*sql.DB, ...) helpers that emit SQLite
+	// SQL — pointed at Postgres they'd produce runtime errors. The
+	// fatal here makes the unreachable state explicit instead of
+	// surfacing later as a pile of confusing SQL failures.
+	var (
+		database *sql.DB
+		stores   db.Stores
+	)
 	switch runmode.Current() {
 	case runmode.ModeLocal:
+		var err error
+		database, err = db.Open()
+		if err != nil {
+			log.Fatalf("failed to open database: %v", err)
+		}
+		if err := db.Migrate(database, "sqlite3"); err != nil {
+			log.Fatalf("failed to migrate database: %v", err)
+		}
 		stores = sqlitestore.New(database)
 	case runmode.ModeMulti:
-		log.Fatalf("TF_MODE=multi: Postgres connection wiring lands in SKY-251 (D7); refusing to boot")
+		log.Fatalf("TF_MODE=multi: multi-tenant mode is not yet wired end-to-end; see SKY-242 (v1 multi-tenant epic). Unset TF_MODE to run in local mode.")
 	default:
 		log.Fatalf("unknown runmode: %v", runmode.Current())
 	}
+	defer database.Close()
 
 	// Wire the config package against the DB and run the one-shot
 	// import of any pre-DB ~/.triagefactory/config.yaml. Must happen

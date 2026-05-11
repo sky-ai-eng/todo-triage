@@ -46,17 +46,24 @@ func (s *scoreStore) ResetScoringToPending(ctx context.Context, orgID string, ta
 }
 
 func (s *scoreStore) UpdateTaskScores(ctx context.Context, orgID string, updates []domain.TaskScoreUpdate) error {
-	for _, u := range updates {
-		if _, err := s.q.ExecContext(ctx, `
-			UPDATE tasks
-			SET priority_score = $1, autonomy_suitability = $2, ai_summary = $3,
-			    priority_reasoning = $4, scoring_status = 'scored'
-			WHERE id = $5 AND org_id = $6
-		`, u.PriorityScore, u.AutonomySuitability, u.Summary, u.PriorityReasoning, u.ID, orgID); err != nil {
-			return err
+	// All-or-nothing across the batch: a mid-loop failure must roll
+	// back any rows that already flipped to 'scored'. inTx reuses the
+	// caller's *sql.Tx if we're already inside one (so this remains
+	// composable with Stores.Tx.WithTx), or opens a fresh tx when
+	// called against a *sql.DB.
+	return inTx(ctx, s.q, func(q queryer) error {
+		for _, u := range updates {
+			if _, err := q.ExecContext(ctx, `
+				UPDATE tasks
+				SET priority_score = $1, autonomy_suitability = $2, ai_summary = $3,
+				    priority_reasoning = $4, scoring_status = 'scored'
+				WHERE id = $5 AND org_id = $6
+			`, u.PriorityScore, u.AutonomySuitability, u.Summary, u.PriorityReasoning, u.ID, orgID); err != nil {
+				return err
+			}
 		}
-	}
-	return nil
+		return nil
+	})
 }
 
 func (s *scoreStore) UnscoredTasks(ctx context.Context, orgID string) ([]domain.Task, error) {
