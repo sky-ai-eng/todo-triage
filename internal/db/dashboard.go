@@ -1,12 +1,34 @@
 package db
 
 import (
-	"database/sql"
-	"encoding/json"
-	"time"
-
-	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"context"
 )
+
+//go:generate go run github.com/vektra/mockery/v2 --name=DashboardStore --output=./mocks --case=underscore --with-expecter
+
+// DashboardStore is a read-only projection over entities + their
+// snapshot_json blobs. Doesn't own any table — every method
+// aggregates data EntityStore would otherwise have to expose.
+// Carved out as its own interface so the dashboard handler depends
+// on a 2-method surface rather than pulling in the full
+// EntityStore + JSON-snapshot reading.
+//
+// Both methods take the GitHub username because every aggregation
+// attributes counts to "the user" — without it the totals are
+// meaningless. The handler reads username from the auth context
+// before calling.
+type DashboardStore interface {
+	// Stats returns aggregate PR counts (merged/closed/awaiting/
+	// draft) for the user over the last `sinceDays` days, plus
+	// reviews-given / reviews-received totals and a 14-day
+	// merged-per-day timeline for the sparkline.
+	Stats(ctx context.Context, orgID, username string, sinceDays int) (*DashboardStats, error)
+
+	// PRs returns the PR summary rows authored by username, newest
+	// last_polled_at first. Drives the dashboard's "your open PRs"
+	// list.
+	PRs(ctx context.Context, orgID, username string) ([]PRSummaryRow, error)
+}
 
 // DashboardStats holds aggregated PR statistics derived from entity snapshots.
 type DashboardStats struct {
@@ -19,6 +41,7 @@ type DashboardStats struct {
 	MergedOverTime  []DashboardPoint `json:"merged_over_time"`
 }
 
+// DashboardPoint is one bucket of the merged-over-time sparkline.
 type DashboardPoint struct {
 	Date  string `json:"date"`
 	Count int    `json:"count"`
@@ -36,156 +59,4 @@ type PRSummaryRow struct {
 	CreatedAt string   `json:"created_at"`
 	UpdatedAt string   `json:"updated_at"`
 	HTMLURL   string   `json:"html_url"`
-}
-
-// GetDashboardStats computes dashboard statistics from entity snapshots.
-// username is the authenticated user's GitHub login, used to attribute reviews.
-func GetDashboardStats(database *sql.DB, username string, sinceDays int) (*DashboardStats, error) {
-	since := time.Now().AddDate(0, 0, -sinceDays)
-
-	rows, err := database.Query(`
-		SELECT snapshot_json FROM entities
-		WHERE source = 'github' AND snapshot_json IS NOT NULL AND snapshot_json != ''
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	stats := &DashboardStats{}
-	mergedByDay := make(map[string]int)
-
-	for rows.Next() {
-		var snapJSON string
-		if err := rows.Scan(&snapJSON); err != nil {
-			continue
-		}
-
-		var snap domain.PRSnapshot
-		if err := json.Unmarshal([]byte(snapJSON), &snap); err != nil {
-			continue
-		}
-
-		if snap.Author == username {
-			// Our PR — count status and reviews received
-			switch {
-			case snap.Merged:
-				mergedAt, err := time.Parse(time.RFC3339, snap.MergedAt)
-				if err == nil && mergedAt.After(since) {
-					stats.Merged++
-					mergedByDay[mergedAt.Format("2006-01-02")]++
-				}
-
-			case snap.State == "CLOSED":
-				closedAt, err := time.Parse(time.RFC3339, snap.ClosedAt)
-				if err == nil && closedAt.After(since) {
-					stats.Closed++
-				}
-
-			case snap.State == "OPEN" && snap.IsDraft:
-				stats.Draft++
-
-			case snap.State == "OPEN":
-				stats.Awaiting++
-			}
-
-			for _, review := range snap.Reviews {
-				if review.Author != username {
-					stats.ReviewsReceived++
-				}
-			}
-		} else {
-			// Someone else's PR — only count reviews we gave
-			for _, review := range snap.Reviews {
-				if review.Author == username {
-					stats.ReviewsGiven++
-				}
-			}
-		}
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	// Build merged timeline — last 14 days, per day
-	stats.MergedOverTime = buildTimeline(mergedByDay, 14)
-
-	return stats, nil
-}
-
-// GetDashboardPRs returns PR summaries from entities for the dashboard list.
-// Only includes PRs authored by the given username.
-func GetDashboardPRs(database *sql.DB, username string) ([]PRSummaryRow, error) {
-	rows, err := database.Query(`
-		SELECT snapshot_json FROM entities
-		WHERE source = 'github' AND snapshot_json IS NOT NULL AND snapshot_json != ''
-		ORDER BY last_polled_at DESC
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var prs []PRSummaryRow
-	for rows.Next() {
-		var snapJSON string
-		if err := rows.Scan(&snapJSON); err != nil {
-			continue
-		}
-
-		var snap domain.PRSnapshot
-		if err := json.Unmarshal([]byte(snapJSON), &snap); err != nil {
-			continue
-		}
-		if snap.Author != username {
-			continue
-		}
-
-		state := stateToLower(snap.State)
-		if snap.Merged {
-			state = "merged"
-		}
-
-		prs = append(prs, PRSummaryRow{
-			Number:    snap.Number,
-			Title:     snap.Title,
-			Repo:      snap.Repo,
-			Author:    snap.Author,
-			State:     state,
-			Draft:     snap.IsDraft,
-			Labels:    snap.Labels,
-			CreatedAt: snap.CreatedAt,
-			UpdatedAt: snap.UpdatedAt,
-			HTMLURL:   snap.URL,
-		})
-	}
-
-	return prs, rows.Err()
-}
-
-func stateToLower(s string) string {
-	switch s {
-	case "OPEN":
-		return "open"
-	case "CLOSED":
-		return "closed"
-	case "MERGED":
-		return "merged"
-	default:
-		return s
-	}
-}
-
-func buildTimeline(buckets map[string]int, days int) []DashboardPoint {
-	var points []DashboardPoint
-	now := time.Now()
-	for i := days - 1; i >= 0; i-- {
-		key := now.AddDate(0, 0, -i).Format("2006-01-02")
-		points = append(points, DashboardPoint{
-			Date:  key,
-			Count: buckets[key],
-		})
-	}
-	return points
 }

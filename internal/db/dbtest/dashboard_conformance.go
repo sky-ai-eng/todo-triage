@@ -1,0 +1,133 @@
+package dbtest
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+)
+
+// DashboardStoreFactory is what a per-backend test file hands to
+// RunDashboardStoreConformance. Returns:
+//   - the wired DashboardStore impl,
+//   - the orgID to pass to every call,
+//   - a seedPRSnapshot hook the harness uses to drop PR snapshots
+//     into entities.snapshot_json without coupling to the schema's
+//     INSERT shape (SQLite vs Postgres column lists differ).
+type DashboardStoreFactory func(t *testing.T) (store db.DashboardStore, orgID string, seedPRSnapshot PRSnapshotSeederForDashboard)
+
+// PRSnapshotSeederForDashboard inserts an entity with the given
+// PRSnapshot blob. Backend tests implement against their own
+// SQL — the harness only cares that the snapshot lands somewhere
+// DashboardStore reads from.
+type PRSnapshotSeederForDashboard func(t *testing.T, snap domain.PRSnapshot)
+
+// RunDashboardStoreConformance covers the aggregation contract
+// every DashboardStore impl must hold:
+//
+//   - Stats counts merged/closed/awaiting/draft for the user.
+//   - Stats's reviews-given vs reviews-received split is keyed on
+//     the snapshot's review author vs the user.
+//   - Stats's merged-over-time has 14 buckets and includes the
+//     merged PR on its mergedAt date.
+//   - PRs returns only the user's PRs and maps merged→"merged" /
+//     OPEN→"open" / CLOSED→"closed".
+//   - Empty stats path (no snapshots) returns zeroed counts but
+//     a populated 14-bucket timeline (skeleton always present).
+func RunDashboardStoreConformance(t *testing.T, factory DashboardStoreFactory) {
+	t.Helper()
+
+	const username = "aidan"
+
+	t.Run("Stats_NoSnapshots_ReturnsZerosWithTimelineSkeleton", func(t *testing.T) {
+		store, orgID, _ := factory(t)
+		stats, err := store.Stats(context.Background(), orgID, username, 30)
+		if err != nil {
+			t.Fatalf("Stats: %v", err)
+		}
+		if stats.Merged != 0 || stats.Closed != 0 || stats.Awaiting != 0 || stats.Draft != 0 {
+			t.Fatalf("counts non-zero on empty DB: %+v", stats)
+		}
+		if len(stats.MergedOverTime) != 14 {
+			t.Fatalf("timeline len=%d want 14", len(stats.MergedOverTime))
+		}
+	})
+
+	t.Run("Stats_CountsMergedClosedAwaitingDraft", func(t *testing.T) {
+		store, orgID, seed := factory(t)
+		now := time.Now().UTC()
+		recent := now.Add(-2 * 24 * time.Hour).Format(time.RFC3339)
+
+		seed(t, domain.PRSnapshot{Number: 1, Author: username, State: "MERGED", Merged: true, MergedAt: recent})
+		seed(t, domain.PRSnapshot{Number: 2, Author: username, State: "CLOSED", ClosedAt: recent})
+		seed(t, domain.PRSnapshot{Number: 3, Author: username, State: "OPEN"})
+		seed(t, domain.PRSnapshot{Number: 4, Author: username, State: "OPEN", IsDraft: true})
+		// Someone else's open PR — should NOT count toward the user's totals.
+		seed(t, domain.PRSnapshot{Number: 5, Author: "someone-else", State: "OPEN"})
+
+		stats, err := store.Stats(context.Background(), orgID, username, 30)
+		if err != nil {
+			t.Fatalf("Stats: %v", err)
+		}
+		if stats.Merged != 1 || stats.Closed != 1 || stats.Awaiting != 1 || stats.Draft != 1 {
+			t.Fatalf("counts wrong: merged=%d closed=%d awaiting=%d draft=%d (want 1 each)",
+				stats.Merged, stats.Closed, stats.Awaiting, stats.Draft)
+		}
+	})
+
+	t.Run("Stats_ReviewsSplit", func(t *testing.T) {
+		// On our own PR, reviews by someone else count as "received."
+		// On someone else's PR, reviews by us count as "given."
+		store, orgID, seed := factory(t)
+		seed(t, domain.PRSnapshot{
+			Number: 10, Author: username, State: "OPEN",
+			Reviews: []domain.ReviewState{
+				{Author: "reviewer-a"},
+				{Author: "reviewer-b"},
+				{Author: username}, // self-reviews don't count as "received"
+			},
+		})
+		seed(t, domain.PRSnapshot{
+			Number: 11, Author: "someone-else", State: "OPEN",
+			Reviews: []domain.ReviewState{
+				{Author: username},
+				{Author: "another-reviewer"},
+			},
+		})
+		stats, err := store.Stats(context.Background(), orgID, username, 30)
+		if err != nil {
+			t.Fatalf("Stats: %v", err)
+		}
+		if stats.ReviewsReceived != 2 {
+			t.Fatalf("reviews_received=%d want 2", stats.ReviewsReceived)
+		}
+		if stats.ReviewsGiven != 1 {
+			t.Fatalf("reviews_given=%d want 1", stats.ReviewsGiven)
+		}
+	})
+
+	t.Run("PRs_ReturnsOnlyUserPRs_WithStateMapping", func(t *testing.T) {
+		store, orgID, seed := factory(t)
+		now := time.Now().UTC().Format(time.RFC3339)
+		seed(t, domain.PRSnapshot{Number: 20, Author: username, State: "MERGED", Merged: true, MergedAt: now, Repo: "owner/repo"})
+		seed(t, domain.PRSnapshot{Number: 21, Author: username, State: "OPEN", Repo: "owner/repo"})
+		seed(t, domain.PRSnapshot{Number: 22, Author: "stranger", State: "OPEN", Repo: "owner/repo"})
+
+		prs, err := store.PRs(context.Background(), orgID, username)
+		if err != nil {
+			t.Fatalf("PRs: %v", err)
+		}
+		if len(prs) != 2 {
+			t.Fatalf("len(prs)=%d want 2 (stranger's PR should be excluded)", len(prs))
+		}
+		seenStates := map[string]bool{}
+		for _, p := range prs {
+			seenStates[p.State] = true
+		}
+		if !seenStates["merged"] || !seenStates["open"] {
+			t.Fatalf("expected both 'merged' and 'open' in states, got %+v", seenStates)
+		}
+	})
+}

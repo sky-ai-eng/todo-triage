@@ -10,6 +10,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/config"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -136,7 +137,7 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	newStatus, err := db.RecordSwipe(s.db, id, req.Action, req.HesitationMs)
+	newStatus, err := s.swipes.RecordSwipe(r.Context(), runmode.LocalDefaultOrg, id, req.Action, req.HesitationMs)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -273,7 +274,7 @@ func (s *Server) handleSnooze(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := db.SnoozeTask(s.db, id, until, req.HesitationMs); err != nil {
+	if err := s.swipes.SnoozeTask(r.Context(), runmode.LocalDefaultOrg, id, until, req.HesitationMs); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -310,7 +311,7 @@ func (s *Server) handleUndo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := db.UndoLastSwipe(s.db, id); err != nil {
+	if err := s.swipes.UndoLastSwipe(r.Context(), runmode.LocalDefaultOrg, id); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -347,7 +348,7 @@ func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ok, err := db.RequeueTask(s.db, id)
+	ok, err := s.swipes.RequeueTask(r.Context(), runmode.LocalDefaultOrg, id)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

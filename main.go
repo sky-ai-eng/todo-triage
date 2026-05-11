@@ -265,7 +265,7 @@ func main() {
 		openBrowser(fmt.Sprintf("http://localhost%s", addr))
 	}
 
-	srv := server.New(database, stores.Prompts)
+	srv := server.New(database, stores.Prompts, stores.Swipes, stores.Dashboard)
 
 	distFS, err := frontendDist()
 	if err != nil {

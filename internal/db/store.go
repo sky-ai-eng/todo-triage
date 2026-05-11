@@ -24,6 +24,19 @@ type Stores struct {
 	// REVOKE'd from tf_app); every other method runs on the app pool.
 	Prompts PromptStore
 
+	// Swipes owns the swipe_events audit log + the task-status
+	// transitions that follow each swipe.
+	Swipes SwipeStore
+
+	// Dashboard is a read-only projection over entities + their
+	// snapshot_json blobs. Owns no table.
+	Dashboard DashboardStore
+
+	// Secrets is the per-org secret bag. Multi-only — SQLite impl
+	// returns ErrNotApplicableInLocal for every method (local-mode
+	// credentials live in the OS keychain, not the DB).
+	Secrets SecretStore
+
 	// Tx is the transaction runner — handlers that need atomic
 	// multi-store writes call Tx.WithTx and receive a TxStores with
 	// every field tx-bound. Postgres impl also sets the JWT claims
@@ -37,8 +50,11 @@ type Stores struct {
 // in the same transaction. Fields are added as their parent stores
 // land in successive waves.
 type TxStores struct {
-	Scores  ScoreStore
-	Prompts PromptStore
+	Scores    ScoreStore
+	Prompts   PromptStore
+	Swipes    SwipeStore
+	Dashboard DashboardStore
+	Secrets   SecretStore
 }
 
 // TxRunner runs fn inside a single database transaction. Postgres
