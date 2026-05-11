@@ -14,6 +14,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // ErrYieldNotResumable is returned by ResumeAfterYield when the run
@@ -80,7 +81,7 @@ func (s *Spawner) ResumeAfterYield(runID, agentMessage string) error {
 	// Resolve extra allowed tools from the prompt used for this run.
 	var extraTools string
 	if run.PromptID != "" {
-		if p, err := db.GetPrompt(s.database, run.PromptID); err == nil && p != nil {
+		if p, err := s.prompts.Get(context.Background(), runmode.LocalDefaultOrg, run.PromptID); err == nil && p != nil {
 			extraTools = s.collectExtraTools(p.AllowedTools)
 		}
 	}

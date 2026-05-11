@@ -1,6 +1,7 @@
 package curator
 
 import (
+	"context"
 	"database/sql"
 	_ "embed" // required by //go:embed
 	"fmt"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // specSkillDirName is the per-session subdirectory Claude Code scans for
@@ -40,11 +42,11 @@ var jiraFormattingSkillTemplate string
 // points at) and the user expects the Curator's next turn to pick up
 // the change without a session reset. Writing fresh on every dispatch
 // is the cheapest way to honor that.
-func materializeSpecSkill(database *sql.DB, project *domain.Project, cwd string) error {
+func materializeSpecSkill(database *sql.DB, prompts db.PromptStore, project *domain.Project, cwd string) error {
 	if project == nil {
 		return nil
 	}
-	prompt, err := resolveSpecPrompt(database, project)
+	prompt, err := resolveSpecPrompt(prompts, project)
 	if err != nil {
 		return err
 	}
@@ -94,9 +96,10 @@ func materializeJiraFormattingSkill(cwd string) error {
 // deleted prompt, both fall through to the default — the schema's
 // ON DELETE SET NULL drops dangling FKs but a stale in-memory project
 // row could still carry the deleted id, so we re-check.
-func resolveSpecPrompt(database *sql.DB, project *domain.Project) (*domain.Prompt, error) {
+func resolveSpecPrompt(prompts db.PromptStore, project *domain.Project) (*domain.Prompt, error) {
+	ctx := context.Background()
 	if project.SpecAuthorshipPromptID != "" {
-		p, err := db.GetPrompt(database, project.SpecAuthorshipPromptID)
+		p, err := prompts.Get(ctx, runmode.LocalDefaultOrg, project.SpecAuthorshipPromptID)
 		if err != nil {
 			return nil, fmt.Errorf("load configured spec prompt: %w", err)
 		}
@@ -106,7 +109,7 @@ func resolveSpecPrompt(database *sql.DB, project *domain.Project) (*domain.Promp
 		log.Printf("[curator] project %s references missing spec prompt %s; falling back to system default",
 			project.ID, project.SpecAuthorshipPromptID)
 	}
-	p, err := db.GetPrompt(database, domain.SystemTicketSpecPromptID)
+	p, err := prompts.Get(ctx, runmode.LocalDefaultOrg, domain.SystemTicketSpecPromptID)
 	if err != nil {
 		return nil, fmt.Errorf("load default spec prompt: %w", err)
 	}

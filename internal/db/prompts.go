@@ -1,218 +1,115 @@
 package db
 
 import (
-	"crypto/sha256"
-	"database/sql"
-	"encoding/hex"
-	"fmt"
-	"time"
+	"context"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// SeedOrUpdateSystemPrompt inserts a shipped prompt if missing, or updates it
-// when the shipped body changes and the local row has not been user-modified.
-// Version state is recorded in system_prompt_versions so subsequent seed runs
-// with unchanged shipped content are no-ops (no churn to prompts.updated_at,
-// which the UI orders by).
-func SeedOrUpdateSystemPrompt(db *sql.DB, p domain.Prompt) error {
-	if p.Source == "" {
-		p.Source = "system"
-	}
-	now := time.Now()
-	// Include name and source in the hash so shipped renames/re-sourcing trigger
-	// an update even when the body is unchanged. Null bytes prevent collisions
-	// between different field combinations.
-	h := sha256.Sum256([]byte(p.Name + "\x00" + p.Body + "\x00" + p.Source))
-	hash := hex.EncodeToString(h[:])
+//go:generate go run github.com/vektra/mockery/v2 --name=PromptStore --output=./mocks --case=underscore --with-expecter
 
-	tx, err := db.Begin()
-	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
-	}
-	defer tx.Rollback()
+// PromptStore owns prompts + the system_prompt_versions sidecar that
+// tracks shipped-content hashes. Three audiences:
+//
+//   - HTTP handlers (server/prompts_handler.go, server/triggers_handler.go,
+//     server/projects.go) — full CRUD.
+//   - Delegated agents (delegate/*, curator/skill.go) — read prompt body
+//     before dispatch + bump usage_count.
+//   - Startup seeder (seed.go) — SeedOrUpdate per shipped system prompt.
+//   - Skills importer (skills/importer.go) — Get/Create/UpdateImported/Hide
+//     to mirror local SKILL.md files into the prompts table.
+//
+// Postgres / RLS note: in multi mode, system_prompt_versions has
+// INSERT/UPDATE/DELETE REVOKE'd from tf_app per D3 — only the deploy
+// actor (supabase_admin) can write the sidecar. SeedOrUpdate is the
+// one method that touches that sidecar, so the Postgres impl routes
+// it to the admin pool internally; every other method runs on the
+// app pool. SQLite has no role concept; both pools collapse to one
+// connection and assertLocalOrg pins orgID to LocalDefaultOrg.
+type PromptStore interface {
+	// SeedOrUpdate inserts a shipped system prompt if missing or
+	// updates it when the shipped (name, body, source) hash changed
+	// since the last seed, skipping user-modified rows so local
+	// customizations survive a re-seed. Recorded in
+	// system_prompt_versions so identical re-seeds are no-ops (no
+	// churn to prompts.updated_at — the UI orders by it).
+	//
+	// Atomic: prompts insert/update + system_prompt_versions upsert
+	// happen in one transaction so the version row never races ahead
+	// of the prompt row.
+	//
+	// Postgres-only: must run on the admin connection because
+	// system_prompt_versions writes are REVOKE'd from tf_app. The
+	// impl picks the right pool internally — callers don't (and
+	// shouldn't) choose.
+	SeedOrUpdate(ctx context.Context, orgID string, p domain.Prompt) error
 
-	var (
-		exists       bool
-		userModified int
-	)
-	switch err := tx.QueryRow(`SELECT user_modified FROM prompts WHERE id = ?`, p.ID).Scan(&userModified); {
-	case err == sql.ErrNoRows:
-		exists = false
-	case err != nil:
-		return fmt.Errorf("read prompt: %w", err)
-	default:
-		exists = true
-	}
+	// List returns all non-hidden prompts ordered by updated_at DESC.
+	List(ctx context.Context, orgID string) ([]domain.Prompt, error)
 
-	if !exists {
-		if _, err := tx.Exec(`
-			INSERT INTO prompts (id, name, body, source, usage_count, user_modified, created_at, updated_at)
-			VALUES (?, ?, ?, ?, 0, 0, ?, ?)
-		`, p.ID, p.Name, p.Body, p.Source, now, now); err != nil {
-			return err
-		}
-		if err := upsertSystemPromptVersion(tx, p.ID, hash, now); err != nil {
-			return err
-		}
-		return tx.Commit()
-	}
+	// Get returns one prompt by id (regardless of hidden state) or
+	// (nil, nil) if not found.
+	Get(ctx context.Context, orgID string, id string) (*domain.Prompt, error)
 
-	// Row exists. Never touch user-modified prompts — they're intentional
-	// local edits and we shouldn't claim a new shipped hash was applied.
-	if userModified != 0 {
-		return tx.Commit()
-	}
+	// Create inserts a new prompt (user or imported source).
+	// Caller-provided ID — the handler generates UUIDs upstream.
+	Create(ctx context.Context, orgID string, p domain.Prompt) error
 
-	// Compare against the previously applied shipped hash. If it matches,
-	// the shipped content hasn't changed since the last seed run and we
-	// skip both writes to avoid bumping updated_at / applied_at on every
-	// startup. A missing version row (legacy prompt predating version
-	// tracking) falls through to the update branch and gets overwritten
-	// with the current shipped content.
-	var priorHash sql.NullString
-	if err := tx.QueryRow(
-		`SELECT content_hash FROM system_prompt_versions WHERE prompt_id = ?`,
-		p.ID,
-	).Scan(&priorHash); err != nil && err != sql.ErrNoRows {
-		return fmt.Errorf("read prior prompt version: %w", err)
-	}
-	if priorHash.Valid && priorHash.String == hash {
-		return tx.Commit()
-	}
+	// Update changes name + body and stamps user_modified=true. The
+	// flag tells SeedOrUpdate to leave the row alone on subsequent
+	// shipped-content updates.
+	Update(ctx context.Context, orgID string, id, name, body string) error
 
-	if _, err := tx.Exec(`
-		UPDATE prompts
-		SET name = ?, body = ?, source = ?, updated_at = ?
-		WHERE id = ?
-	`, p.Name, p.Body, p.Source, now, p.ID); err != nil {
-		return err
-	}
-	if err := upsertSystemPromptVersion(tx, p.ID, hash, now); err != nil {
-		return err
-	}
-	return tx.Commit()
+	// UpdateImported updates a re-imported skill's metadata + body
+	// + allowed_tools WITHOUT setting user_modified, because the
+	// change came from a file re-import not a user edit.
+	UpdateImported(ctx context.Context, orgID string, id, name, body, allowedTools string) error
+
+	// Delete hard-deletes a prompt + its bindings (FK CASCADE).
+	// Handlers call this only for user-source prompts; system /
+	// imported prompts go through Hide instead.
+	Delete(ctx context.Context, orgID string, id string) error
+
+	// Hide soft-deletes a prompt (hidden=true). Used for system /
+	// imported prompts so they disappear from List but remain
+	// available to historical runs that already reference them.
+	Hide(ctx context.Context, orgID string, id string) error
+
+	// Unhide reverses Hide.
+	Unhide(ctx context.Context, orgID string, id string) error
+
+	// IncrementUsage bumps usage_count by 1. Called from the
+	// delegate spawner when a run picks the prompt; the count
+	// drives the prompts page's sort heuristic.
+	IncrementUsage(ctx context.Context, orgID string, id string) error
+
+	// Stats aggregates runs.* for this prompt — totals, success
+	// rate, cost, last-used, runs-per-day-for-30-days. The
+	// underlying queries hit the runs table; logically a Run-side
+	// concern but keyed on prompt_id, so it lives here so the
+	// prompts handler can depend on a single store. When RunStore
+	// lands (wave 3b) this stays put — the read still keys on
+	// prompt_id and PromptStore is the right ownership root.
+	Stats(ctx context.Context, orgID string, id string) (*PromptStats, error)
 }
 
-func upsertSystemPromptVersion(tx *sql.Tx, promptID, hash string, now time.Time) error {
-	if _, err := tx.Exec(`
-		INSERT INTO system_prompt_versions (prompt_id, content_hash, applied_at)
-		VALUES (?, ?, ?)
-		ON CONFLICT(prompt_id) DO UPDATE SET
-			content_hash = excluded.content_hash,
-			applied_at = excluded.applied_at
-		WHERE system_prompt_versions.content_hash != excluded.content_hash
-	`, promptID, hash, now); err != nil {
-		return fmt.Errorf("upsert system prompt version: %w", err)
-	}
-	return nil
+// PromptStats holds aggregated performance data for a single prompt.
+// Lives next to PromptStore so handlers depending on the interface
+// don't need a second import to render the response.
+type PromptStats struct {
+	TotalRuns     int        `json:"total_runs"`
+	CompletedRuns int        `json:"completed_runs"`
+	FailedRuns    int        `json:"failed_runs"`
+	SuccessRate   float64    `json:"success_rate"` // 0-1
+	AvgCostUSD    float64    `json:"avg_cost_usd"`
+	AvgDurationMs int        `json:"avg_duration_ms"`
+	TotalCostUSD  float64    `json:"total_cost_usd"`
+	LastUsedAt    *string    `json:"last_used_at"` // RFC3339 or null — never-used surfaces as null in the API
+	RunsPerDay    []DayCount `json:"runs_per_day"` // last 30 days, oldest first
 }
 
-// SeedPrompt inserts a prompt if it doesn't exist.
-func SeedPrompt(db *sql.DB, p domain.Prompt) error {
-	// Skip if already seeded
-	var exists int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM prompts WHERE id = ?`, p.ID).Scan(&exists); err != nil {
-		return fmt.Errorf("check prompt existence: %w", err)
-	}
-	if exists > 0 {
-		return nil
-	}
-
-	now := time.Now()
-	_, err := db.Exec(`
-		INSERT INTO prompts (id, name, body, source, usage_count, created_at, updated_at)
-		VALUES (?, ?, ?, ?, 0, ?, ?)
-	`, p.ID, p.Name, p.Body, p.Source, now, now)
-	return err
-}
-
-// ListPrompts returns all non-hidden prompts.
-func ListPrompts(db *sql.DB) ([]domain.Prompt, error) {
-	rows, err := db.Query(`
-		SELECT id, name, body, source, allowed_tools, usage_count, created_at, updated_at
-		FROM prompts WHERE hidden = 0 ORDER BY updated_at DESC
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var prompts []domain.Prompt
-	for rows.Next() {
-		var p domain.Prompt
-		if err := rows.Scan(&p.ID, &p.Name, &p.Body, &p.Source, &p.AllowedTools, &p.UsageCount, &p.CreatedAt, &p.UpdatedAt); err != nil {
-			return nil, err
-		}
-		prompts = append(prompts, p)
-	}
-	return prompts, rows.Err()
-}
-
-// GetPrompt returns a single prompt by ID.
-func GetPrompt(db *sql.DB, id string) (*domain.Prompt, error) {
-	var p domain.Prompt
-	err := db.QueryRow(`
-		SELECT id, name, body, source, allowed_tools, usage_count, created_at, updated_at
-		FROM prompts WHERE id = ?
-	`, id).Scan(&p.ID, &p.Name, &p.Body, &p.Source, &p.AllowedTools, &p.UsageCount, &p.CreatedAt, &p.UpdatedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &p, nil
-}
-
-// CreatePrompt inserts a new prompt.
-func CreatePrompt(db *sql.DB, p domain.Prompt) error {
-	now := time.Now()
-	_, err := db.Exec(`
-		INSERT INTO prompts (id, name, body, source, allowed_tools, usage_count, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, 0, ?, ?)
-	`, p.ID, p.Name, p.Body, p.Source, p.AllowedTools, now, now)
-	return err
-}
-
-// UpdatePrompt updates a prompt's name and body.
-func UpdatePrompt(db *sql.DB, id, name, body string) error {
-	_, err := db.Exec(`
-		UPDATE prompts SET name = ?, body = ?, user_modified = 1, updated_at = ? WHERE id = ?
-	`, name, body, time.Now(), id)
-	return err
-}
-
-// UpdateImportedPrompt updates name, body, and allowed_tools atomically
-// for an imported (skill-file) prompt. Unlike UpdatePrompt it does NOT
-// set user_modified because the change comes from a file re-import.
-func UpdateImportedPrompt(db *sql.DB, id, name, body, allowedTools string) error {
-	_, err := db.Exec(`
-		UPDATE prompts SET name = ?, body = ?, allowed_tools = ?, updated_at = ? WHERE id = ?
-	`, name, body, allowedTools, time.Now(), id)
-	return err
-}
-
-// DeletePrompt removes a prompt and its bindings (CASCADE).
-func DeletePrompt(db *sql.DB, id string) error {
-	_, err := db.Exec(`DELETE FROM prompts WHERE id = ?`, id)
-	return err
-}
-
-// HidePrompt soft-deletes a prompt by setting hidden = 1.
-func HidePrompt(db *sql.DB, id string) error {
-	_, err := db.Exec(`UPDATE prompts SET hidden = 1 WHERE id = ?`, id)
-	return err
-}
-
-// UnhidePrompt restores a hidden prompt.
-func UnhidePrompt(db *sql.DB, id string) error {
-	_, err := db.Exec(`UPDATE prompts SET hidden = 0 WHERE id = ?`, id)
-	return err
-}
-
-// IncrementPromptUsage bumps the usage_count for a prompt.
-func IncrementPromptUsage(db *sql.DB, promptID string) error {
-	_, err := db.Exec(`UPDATE prompts SET usage_count = usage_count + 1 WHERE id = ?`, promptID)
-	return err
+// DayCount is a single day's run count for the prompts-page sparkline.
+type DayCount struct {
+	Date  string `json:"date"` // "2026-04-01"
+	Count int    `json:"count"`
 }

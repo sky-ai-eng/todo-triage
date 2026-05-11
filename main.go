@@ -265,7 +265,7 @@ func main() {
 		openBrowser(fmt.Sprintf("http://localhost%s", addr))
 	}
 
-	srv := server.New(database)
+	srv := server.New(database, stores.Prompts)
 
 	distFS, err := frontendDist()
 	if err != nil {
@@ -304,10 +304,10 @@ func main() {
 	if err := db.SeedTaskRules(database); err != nil {
 		log.Fatalf("failed to seed task rules: %v", err)
 	}
-	seedDefaultPrompts(database)
+	seedDefaultPrompts(database, stores.Prompts)
 
 	// Auto-import Claude Code skill files as prompts
-	skills.ImportAll(database)
+	skills.ImportAll(database, stores.Prompts)
 
 	// Event bus — central pub/sub replacing direct callbacks
 	bus := eventbus.New()
@@ -499,7 +499,7 @@ func main() {
 	}
 
 	// Create spawner once — credentials are hot-swapped in place
-	spawner := delegate.NewSpawner(database, nil, wsHub, "")
+	spawner := delegate.NewSpawner(database, stores.Prompts, nil, wsHub, "")
 	srv.SetSpawner(spawner)
 
 	// SKY-220: wire the classifier wait into the spawner's setup path.
@@ -526,7 +526,7 @@ func main() {
 	} else if n > 0 {
 		log.Printf("[curator] cancelled %d orphaned non-terminal curator requests from prior process", n)
 	}
-	curatorRuntime := curator.New(database, wsHub, "")
+	curatorRuntime := curator.New(database, stores.Prompts, wsHub, "")
 	srv.SetCurator(curatorRuntime)
 
 	// Knowledge-base file watcher — fires `project_knowledge_updated`
@@ -544,7 +544,7 @@ func main() {
 	// Event router — records events, creates/bumps tasks, auto-delegates on
 	// matching triggers, runs inline close checks. Also handles post-scoring
 	// re-derive via the scorer callback wired above.
-	eventRouter = routing.NewRouter(database, spawner, scorer, wsHub)
+	eventRouter = routing.NewRouter(database, stores.Prompts, spawner, scorer, wsHub)
 	bus.Subscribe(eventbus.Subscriber{
 		Name:   "router",
 		Filter: []string{"github:", "jira:"},

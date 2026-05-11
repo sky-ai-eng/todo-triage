@@ -21,6 +21,7 @@ import (
 // Server is the main HTTP server for Triage Factory.
 type Server struct {
 	db                 *sql.DB
+	prompts            db.PromptStore
 	mux                *http.ServeMux
 	static             fs.FS
 	ws                 *websocket.Hub
@@ -67,12 +68,17 @@ func (s *Server) projectMutex(id string) *sync.Mutex {
 	return v.(*sync.Mutex)
 }
 
-// New creates a new server with the given database and registers all routes.
-func New(db *sql.DB) *Server {
+// New creates a new server with the given database, store bundle, and
+// registers all routes. The store bundle gives handlers access to the
+// per-resource stores migrated under SKY-246 (currently Prompts and
+// Scores); raw *sql.DB stays available for handlers that haven't been
+// migrated to a store yet.
+func New(database *sql.DB, prompts db.PromptStore) *Server {
 	s := &Server{
-		db:  db,
-		mux: http.NewServeMux(),
-		ws:  websocket.NewHub(),
+		db:      database,
+		prompts: prompts,
+		mux:     http.NewServeMux(),
+		ws:      websocket.NewHub(),
 	}
 	s.routes()
 	return s

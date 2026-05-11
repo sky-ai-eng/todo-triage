@@ -30,7 +30,8 @@ func (s *Store) WithTx(ctx context.Context, orgID, userID string, fn func(db.TxS
 	defer func() { _ = tx.Rollback() }()
 
 	txStores := db.TxStores{
-		Scores: newScoreStore(tx),
+		Scores:  newScoreStore(tx),
+		Prompts: newPromptStore(tx, tx),
 	}
 	if err := fn(txStores); err != nil {
 		return err

@@ -271,7 +271,7 @@ func (s *projectSession) dispatch(requestID string) {
 	// take effect on the next turn without a session reset (SKY-221).
 	// Failure is non-fatal: the user's chat turn should still answer
 	// even if skill writing hits a permission glitch.
-	if err := materializeSpecSkill(s.curator.database, project, cwd); err != nil {
+	if err := materializeSpecSkill(s.curator.database, s.curator.prompts, project, cwd); err != nil {
 		log.Printf("[curator] warning: materialize spec skill for project %s: %v", s.projectID, err)
 	}
 	if err := materializeJiraFormattingSkill(cwd); err != nil {

@@ -1,6 +1,7 @@
 package skills
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // ImportResult summarizes what happened during an import run.
@@ -23,7 +25,13 @@ type ImportResult struct {
 
 // ImportAll discovers and imports Claude Code skill files from both
 // personal (~/.claude/skills/) and project-scoped (./.claude/skills/) locations.
-func ImportAll(database *sql.DB) ImportResult {
+//
+// Takes both *sql.DB (for the duplicate-detection raw scans that
+// haven't migrated to a store method yet — wave 1 carry-over) and
+// PromptStore (for the routable Get/Create/UpdateImported/Hide
+// calls).
+func ImportAll(database *sql.DB, prompts db.PromptStore) ImportResult {
+	ctx := context.Background()
 	var result ImportResult
 
 	home, err := os.UserHomeDir()
@@ -74,7 +82,7 @@ func ImportAll(database *sql.DB) ImportResult {
 			seenFiles[normalizedPath] = struct{}{}
 
 			result.Scanned++
-			if err := importSkillFile(database, path, normalizedPath); err != nil {
+			if err := importSkillFile(ctx, database, prompts, path, normalizedPath); err != nil {
 				if err == errSkillUnchanged || err == errSkillDuplicate {
 					result.Skipped++
 				} else {
@@ -86,7 +94,7 @@ func ImportAll(database *sql.DB) ImportResult {
 		}
 	}
 
-	hiddenDuplicates, err := hideDuplicateImportedPrompts(database)
+	hiddenDuplicates, err := hideDuplicateImportedPrompts(ctx, database, prompts)
 	if err != nil {
 		result.Errors = append(result.Errors, "deduplicate imported prompts: "+err.Error())
 	} else if hiddenDuplicates > 0 {
@@ -105,7 +113,7 @@ var (
 	errSkillDuplicate = fmt.Errorf("duplicate imported skill")
 )
 
-func importSkillFile(database *sql.DB, path string, canonicalPath string) error {
+func importSkillFile(ctx context.Context, database *sql.DB, prompts db.PromptStore, path string, canonicalPath string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -119,7 +127,7 @@ func importSkillFile(database *sql.DB, path string, canonicalPath string) error 
 	id := promptIDForPath(canonicalPath)
 
 	// Check if already exists
-	existing, err := db.GetPrompt(database, id)
+	existing, err := prompts.Get(ctx, runmode.LocalDefaultOrg, id)
 	if err != nil {
 		return err
 	}
@@ -128,7 +136,7 @@ func importSkillFile(database *sql.DB, path string, canonicalPath string) error 
 		if existing.Body == meta.Body && existing.Name == meta.Name && existing.AllowedTools == meta.AllowedTools {
 			return errSkillUnchanged
 		}
-		if err := db.UpdateImportedPrompt(database, id, meta.Name, meta.Body, meta.AllowedTools); err != nil {
+		if err := prompts.UpdateImported(ctx, runmode.LocalDefaultOrg, id, meta.Name, meta.Body, meta.AllowedTools); err != nil {
 			return err
 		}
 		log.Printf("[skills] updated %q from %s", meta.Name, path)
@@ -136,7 +144,9 @@ func importSkillFile(database *sql.DB, path string, canonicalPath string) error 
 	}
 
 	// Skip creating a duplicate imported prompt if the same skill body/name is
-	// already present from another path.
+	// already present from another path. The raw-SQL scan stays here for
+	// now — its "find by content fingerprint" semantics don't map cleanly
+	// onto PromptStore yet, and that helper migrates in a later wave.
 	duplicateID, err := findVisibleImportedPromptByContent(database, meta.Name, meta.Body, meta.AllowedTools)
 	if err != nil {
 		return err
@@ -154,7 +164,7 @@ func importSkillFile(database *sql.DB, path string, canonicalPath string) error 
 		AllowedTools: meta.AllowedTools,
 	}
 
-	if err := db.CreatePrompt(database, prompt); err != nil {
+	if err := prompts.Create(ctx, runmode.LocalDefaultOrg, prompt); err != nil {
 		return err
 	}
 
@@ -371,7 +381,7 @@ func findVisibleImportedPromptByContent(database *sql.DB, name, body, allowedToo
 	return id, nil
 }
 
-func hideDuplicateImportedPrompts(database *sql.DB) (int, error) {
+func hideDuplicateImportedPrompts(ctx context.Context, database *sql.DB, prompts db.PromptStore) (int, error) {
 	rows, err := database.Query(`
 		SELECT p.id, p.name, p.body, p.allowed_tools, COUNT(t.id) AS trigger_count
 		FROM prompts p
@@ -425,7 +435,7 @@ func hideDuplicateImportedPrompts(database *sql.DB) (int, error) {
 
 	hiddenCount := 0
 	for _, id := range idsToHide {
-		if err := db.HidePrompt(database, id); err != nil {
+		if err := prompts.Hide(ctx, runmode.LocalDefaultOrg, id); err != nil {
 			return hiddenCount, err
 		}
 		hiddenCount++

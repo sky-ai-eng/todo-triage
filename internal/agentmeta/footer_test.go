@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 
 	_ "modernc.org/sqlite"
 )
@@ -54,8 +56,10 @@ func seedFooterRun(t *testing.T, database *sql.DB, fix runFooterFixture) {
 	if err != nil {
 		t.Fatalf("task: %v", err)
 	}
-	if existing, _ := db.GetPrompt(database, "footer-test-prompt"); existing == nil {
-		if err := db.CreatePrompt(database, domain.Prompt{ID: "footer-test-prompt", Name: "T", Body: "x", Source: "user"}); err != nil {
+	prompts := sqlitestore.New(database).Prompts
+	ctx := t.Context()
+	if existing, _ := prompts.Get(ctx, runmode.LocalDefaultOrg, "footer-test-prompt"); existing == nil {
+		if err := prompts.Create(ctx, runmode.LocalDefaultOrg, domain.Prompt{ID: "footer-test-prompt", Name: "T", Body: "x", Source: "user"}); err != nil {
 			t.Fatalf("prompt: %v", err)
 		}
 	}

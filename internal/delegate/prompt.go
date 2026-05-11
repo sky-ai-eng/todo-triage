@@ -6,14 +6,15 @@
 package delegate
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/skills"
 )
 
@@ -40,7 +41,7 @@ func (s *Spawner) resolvePrompt(task domain.Task, explicitPromptID string) (*dom
 		return nil, fmt.Errorf("%w — select one from the prompt picker", ErrPromptUnspecified)
 	}
 
-	p, err := db.GetPrompt(s.database, explicitPromptID)
+	p, err := s.prompts.Get(context.Background(), runmode.LocalDefaultOrg, explicitPromptID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load prompt %s: %w", explicitPromptID, err)
 	}

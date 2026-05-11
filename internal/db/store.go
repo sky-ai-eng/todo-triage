@@ -19,6 +19,11 @@ type Stores struct {
 	// Subsequent waves add the remaining 21 fields here.
 	Scores ScoreStore
 
+	// Prompts owns prompts + system_prompt_versions. SeedOrUpdate is
+	// routed to the admin pool in Postgres (sidecar writes are
+	// REVOKE'd from tf_app); every other method runs on the app pool.
+	Prompts PromptStore
+
 	// Tx is the transaction runner — handlers that need atomic
 	// multi-store writes call Tx.WithTx and receive a TxStores with
 	// every field tx-bound. Postgres impl also sets the JWT claims
@@ -32,7 +37,8 @@ type Stores struct {
 // in the same transaction. Fields are added as their parent stores
 // land in successive waves.
 type TxStores struct {
-	Scores ScoreStore
+	Scores  ScoreStore
+	Prompts PromptStore
 }
 
 // TxRunner runs fn inside a single database transaction. Postgres

@@ -6,6 +6,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // seedYieldedRun creates an entity → event → task → prompt → run
@@ -26,7 +27,7 @@ func seedYieldedRun(t *testing.T, s *Server, req *domain.YieldRequest) string {
 	if err != nil {
 		t.Fatalf("task: %v", err)
 	}
-	if err := db.CreatePrompt(s.db, domain.Prompt{ID: "p", Name: "T", Body: "x", Source: "user"}); err != nil {
+	if err := s.prompts.Create(t.Context(), runmode.LocalDefaultOrg, domain.Prompt{ID: "p", Name: "T", Body: "x", Source: "user"}); err != nil {
 		t.Fatalf("prompt: %v", err)
 	}
 	runID := "run-yielded"

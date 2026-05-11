@@ -13,6 +13,7 @@ import (
 	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
@@ -46,6 +47,7 @@ type Delegator interface {
 //  8. Runs inline close checks for the event type
 type Router struct {
 	db      *sql.DB
+	prompts dbpkg.PromptStore
 	spawner Delegator
 	scorer  Scorer
 	ws      *websocket.Hub
@@ -67,9 +69,10 @@ type Router struct {
 }
 
 // NewRouter creates a Router.
-func NewRouter(db *sql.DB, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
+func NewRouter(db *sql.DB, prompts dbpkg.PromptStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
 	return &Router{
 		db:         db,
+		prompts:    prompts,
 		spawner:    spawner,
 		scorer:     scorer,
 		ws:         ws,
@@ -293,7 +296,7 @@ func (r *Router) tryAutoDelegate(task *domain.Task, trigger domain.PromptTrigger
 		// generic message if the lookup fails since the breaker trip itself
 		// is the load-bearing signal. One toast per trip (happens rarely).
 		promptName := ""
-		if p, perr := dbpkg.GetPrompt(r.db, trigger.PromptID); perr == nil && p != nil {
+		if p, perr := r.prompts.Get(context.Background(), runmode.LocalDefaultOrg, trigger.PromptID); perr == nil && p != nil {
 			promptName = p.Name
 		}
 		if promptName == "" {

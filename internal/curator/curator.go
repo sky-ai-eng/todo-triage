@@ -19,6 +19,7 @@ import (
 // coherent.
 type Curator struct {
 	database *sql.DB
+	prompts  db.PromptStore
 	wsHub    *websocket.Hub
 
 	mu       sync.Mutex
@@ -31,9 +32,10 @@ type Curator struct {
 
 // New constructs a Curator. Call db.CancelOrphanedNonTerminalCuratorRequests
 // at startup before constructing — see main.go wiring.
-func New(database *sql.DB, wsHub *websocket.Hub, model string) *Curator {
+func New(database *sql.DB, prompts db.PromptStore, wsHub *websocket.Hub, model string) *Curator {
 	return &Curator{
 		database: database,
+		prompts:  prompts,
 		wsHub:    wsHub,
 		model:    model,
 		sessions: make(map[string]*projectSession),

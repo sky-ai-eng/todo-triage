@@ -57,7 +57,12 @@ func New(admin, app *sql.DB) db.Stores {
 	s := &Store{admin: admin, app: app}
 	s.stores = db.Stores{
 		Scores: newScoreStore(admin),
-		Tx:     s,
+		// PromptStore needs both pools: SeedOrUpdate writes to
+		// system_prompt_versions (REVOKE'd from tf_app — admin only),
+		// every other method runs on the app pool. The impl picks
+		// per-method internally.
+		Prompts: newPromptStore(app, admin),
+		Tx:      s,
 	}
 	return s.stores
 }

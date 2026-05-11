@@ -8,6 +8,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	_ "modernc.org/sqlite"
 )
 
@@ -114,7 +115,7 @@ func TestImportAll_DedupesResolvedSearchDirs(t *testing.T) {
 	writeSkillFile(t, home, "review-pr", "Review pull requests carefully.")
 
 	database := newTestDB(t)
-	result := ImportAll(database)
+	result := ImportAll(database, testPromptStore(database))
 	if len(result.Errors) > 0 {
 		t.Fatalf("ImportAll errors: %v", result.Errors)
 	}
@@ -143,7 +144,7 @@ func TestImportAll_DedupesByNameAndBodyAcrossLocations(t *testing.T) {
 	writeSkillFile(t, project, "merge-helper", content)
 
 	database := newTestDB(t)
-	result := ImportAll(database)
+	result := ImportAll(database, testPromptStore(database))
 	if len(result.Errors) > 0 {
 		t.Fatalf("ImportAll errors: %v", result.Errors)
 	}
@@ -169,7 +170,9 @@ func TestImportAll_HidesExistingDuplicateImportedPrompts(t *testing.T) {
 
 	database := newTestDB(t)
 	body := "Triage and prioritize incoming work."
-	if err := db.CreatePrompt(database, domain.Prompt{
+	prompts := testPromptStore(database)
+	ctx := t.Context()
+	if err := prompts.Create(ctx, runmode.LocalDefaultOrg, domain.Prompt{
 		ID:     "imported-duplicate-a",
 		Name:   "triage",
 		Body:   body,
@@ -177,7 +180,7 @@ func TestImportAll_HidesExistingDuplicateImportedPrompts(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create first duplicate prompt: %v", err)
 	}
-	if err := db.CreatePrompt(database, domain.Prompt{
+	if err := prompts.Create(ctx, runmode.LocalDefaultOrg, domain.Prompt{
 		ID:     "imported-duplicate-b",
 		Name:   "triage",
 		Body:   body,
@@ -186,7 +189,7 @@ func TestImportAll_HidesExistingDuplicateImportedPrompts(t *testing.T) {
 		t.Fatalf("create second duplicate prompt: %v", err)
 	}
 
-	result := ImportAll(database)
+	result := ImportAll(database, testPromptStore(database))
 	if len(result.Errors) > 0 {
 		t.Fatalf("ImportAll errors: %v", result.Errors)
 	}
@@ -222,7 +225,7 @@ func TestImportAll_UsesDiscoveredPathForDefaultName(t *testing.T) {
 	}
 
 	database := newTestDB(t)
-	result := ImportAll(database)
+	result := ImportAll(database, testPromptStore(database))
 	if len(result.Errors) > 0 {
 		t.Fatalf("ImportAll errors: %v", result.Errors)
 	}
@@ -245,7 +248,9 @@ func TestImportAll_DoesNotHideDuplicatePromptReferencedByTrigger(t *testing.T) {
 	keepID := "imported-duplicate-with-trigger"
 	hideID := "imported-duplicate-no-trigger"
 
-	if err := db.CreatePrompt(database, domain.Prompt{
+	prompts := testPromptStore(database)
+	ctx := t.Context()
+	if err := prompts.Create(ctx, runmode.LocalDefaultOrg, domain.Prompt{
 		ID:     keepID,
 		Name:   "triage",
 		Body:   body,
@@ -253,7 +258,7 @@ func TestImportAll_DoesNotHideDuplicatePromptReferencedByTrigger(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create triggered duplicate prompt: %v", err)
 	}
-	if err := db.CreatePrompt(database, domain.Prompt{
+	if err := prompts.Create(ctx, runmode.LocalDefaultOrg, domain.Prompt{
 		ID:     hideID,
 		Name:   "triage",
 		Body:   body,
@@ -275,7 +280,7 @@ func TestImportAll_DoesNotHideDuplicatePromptReferencedByTrigger(t *testing.T) {
 		t.Fatalf("create trigger for duplicate prompt: %v", err)
 	}
 
-	result := ImportAll(database)
+	result := ImportAll(database, testPromptStore(database))
 	if len(result.Errors) > 0 {
 		t.Fatalf("ImportAll errors: %v", result.Errors)
 	}
