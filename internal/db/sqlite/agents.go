@@ -65,7 +65,7 @@ func (s *agentStore) Create(ctx context.Context, orgID string, a domain.Agent) (
 	// shape just keeps "the local bot has the local user's identity"
 	// true from the moment the row appears.
 	patUser := a.GitHubPATUserID
-	if patUser == "" && orgID == runmode.LocalDefaultOrgID {
+	if patUser == "" && a.GitHubAppInstallationID == "" && orgID == runmode.LocalDefaultOrgID {
 		patUser = runmode.LocalDefaultUserID
 	}
 	// INSERT OR IGNORE handles the idempotency case where the row
