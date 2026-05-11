@@ -1,16 +1,29 @@
 package routing
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 	_ "modernc.org/sqlite"
 )
+
+// updateScores wraps the SQLite ScoreStore's UpdateTaskScores to keep
+// the existing rederive tests terse while the D2 ScoreStore rewrite
+// is in flight. Inlining the bundle constructor per call is fine
+// for tests (negligible per-test cost) and avoids threading a
+// Stores bundle through every helper in this file.
+func updateScores(t *testing.T, database *sql.DB, updates []domain.TaskScoreUpdate) error {
+	t.Helper()
+	return sqlitestore.New(database).Scores.UpdateTaskScores(context.Background(), runmode.LocalDefaultOrg, updates)
+}
 
 // noopScorer satisfies the Scorer interface without doing anything.
 type noopScorer struct{}
@@ -104,7 +117,7 @@ func TestReDeriveAfterScoring_AboveThreshold_Delegates(t *testing.T) {
 
 	// Score the task above threshold
 	score := 0.8
-	err := db.UpdateTaskScores(database, []domain.TaskScoreUpdate{{
+	err := updateScores(t, database, []domain.TaskScoreUpdate{{
 		ID:                  taskID,
 		PriorityScore:       0.5,
 		AutonomySuitability: score,
@@ -140,7 +153,7 @@ func TestReDeriveAfterScoring_BelowThreshold_Skips(t *testing.T) {
 
 	// Score below threshold
 	score := 0.4
-	err := db.UpdateTaskScores(database, []domain.TaskScoreUpdate{{
+	err := updateScores(t, database, []domain.TaskScoreUpdate{{
 		ID:                  taskID,
 		PriorityScore:       0.5,
 		AutonomySuitability: score,
@@ -169,7 +182,7 @@ func TestReDeriveAfterScoring_AlreadyDelegated_Skips(t *testing.T) {
 	taskID, _ := setupReDeriveScenario(t, database, 0.6)
 
 	// Score above threshold
-	err := db.UpdateTaskScores(database, []domain.TaskScoreUpdate{{
+	err := updateScores(t, database, []domain.TaskScoreUpdate{{
 		ID:                  taskID,
 		PriorityScore:       0.5,
 		AutonomySuitability: 0.9,
@@ -222,7 +235,7 @@ func TestReDeriveAfterScoring_ZeroThresholdTrigger_SkippedByReDerive(t *testing.
 	})
 
 	// Score the task
-	db.UpdateTaskScores(database, []domain.TaskScoreUpdate{{
+	_ = updateScores(t, database, []domain.TaskScoreUpdate{{
 		ID: task.ID, PriorityScore: 0.5, AutonomySuitability: 0.9, Summary: "test",
 	}})
 
@@ -267,7 +280,7 @@ func TestReDeriveAfterScoring_PredicateMismatch_Skips(t *testing.T) {
 	})
 
 	// Score above threshold
-	db.UpdateTaskScores(database, []domain.TaskScoreUpdate{{
+	_ = updateScores(t, database, []domain.TaskScoreUpdate{{
 		ID: task.ID, PriorityScore: 0.5, AutonomySuitability: 0.9, Summary: "test",
 	}})
 

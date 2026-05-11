@@ -1,72 +1,45 @@
 package db
 
 import (
-	"database/sql"
+	"context"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// MarkScoring sets scoring_status = 'in_progress' for the given task IDs.
-func MarkScoring(database *sql.DB, taskIDs []string) error {
-	for _, id := range taskIDs {
-		if _, err := database.Exec(`UPDATE tasks SET scoring_status = 'in_progress' WHERE id = ?`, id); err != nil {
-			return err
-		}
-	}
-	return nil
-}
+//go:generate go run github.com/vektra/mockery/v2 --name=ScoreStore --output=./mocks --case=underscore --with-expecter
 
-// ResetScoringToPending flips scoring_status back to 'pending' for the given
-// task IDs. Used when a scoring batch failed so the tasks are retried on the
-// next cycle — without this, MarkScoring would have left them stuck in
-// 'in_progress' (UnscoredTasks only picks up 'pending') and they'd never
-// be rescored.
-func ResetScoringToPending(database *sql.DB, taskIDs []string) error {
-	for _, id := range taskIDs {
-		if _, err := database.Exec(`UPDATE tasks SET scoring_status = 'pending' WHERE id = ?`, id); err != nil {
-			return err
-		}
-	}
-	return nil
-}
+// ScoreStore owns the scoring-pipeline reads + writes against the
+// tasks table's scoring_status / priority_score / autonomy_suitability
+// / ai_summary / priority_reasoning columns. Logically a TaskStore
+// concern, split into its own interface to keep TaskStore focused on
+// task lifecycle and so the AI scorer (the sole production caller)
+// can depend on a 4-method surface instead of the full task surface.
+//
+// All methods take orgID. Local mode passes runmode.LocalDefaultOrg
+// (asserted by the SQLite impl). Multi mode passes the scorer's
+// current org context; the Postgres impl includes org_id in WHERE
+// clauses as defense in depth alongside RLS.
+type ScoreStore interface {
+	// MarkScoring flips scoring_status to 'in_progress' for the given
+	// task IDs. Called by the runner before dispatching a batch to
+	// the LLM so concurrent triggers don't re-pick the same tasks.
+	MarkScoring(ctx context.Context, orgID string, taskIDs []string) error
 
-// UpdateTaskScores applies AI-generated scores and summaries to tasks,
-// and sets scoring_status = 'scored'.
-func UpdateTaskScores(database *sql.DB, updates []domain.TaskScoreUpdate) error {
-	tx, err := database.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
+	// ResetScoringToPending flips scoring_status back to 'pending'.
+	// Used when a scoring batch failed so the tasks are retried on
+	// the next cycle — without this, MarkScoring would have left
+	// them stuck in 'in_progress' (UnscoredTasks only picks up
+	// 'pending') and they'd never be rescored.
+	ResetScoringToPending(ctx context.Context, orgID string, taskIDs []string) error
 
-	stmt, err := tx.Prepare(`
-		UPDATE tasks
-		SET priority_score = ?, autonomy_suitability = ?, ai_summary = ?,
-		    priority_reasoning = ?, scoring_status = 'scored'
-		WHERE id = ?
-	`)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
+	// UpdateTaskScores applies AI-generated scores and summaries to
+	// tasks and sets scoring_status = 'scored'. Atomic across the
+	// whole batch (single tx); a partial-application failure rolls
+	// back so the runner sees an all-or-nothing outcome.
+	UpdateTaskScores(ctx context.Context, orgID string, updates []domain.TaskScoreUpdate) error
 
-	for _, u := range updates {
-		_, err := stmt.Exec(u.PriorityScore, u.AutonomySuitability, u.Summary, u.PriorityReasoning, u.ID)
-		if err != nil {
-			return err
-		}
-	}
-
-	return tx.Commit()
-}
-
-// UnscoredTasks returns queued tasks that haven't been scored yet.
-func UnscoredTasks(database *sql.DB) ([]domain.Task, error) {
-	return queryTasks(database, `
-		SELECT `+taskColumnsWithEntity+`
-		FROM tasks t
-		JOIN entities e ON t.entity_id = e.id
-		WHERE t.status = 'queued' AND t.scoring_status = 'pending'
-		ORDER BY t.created_at DESC
-	`)
+	// UnscoredTasks returns queued tasks that haven't been scored
+	// yet (status='queued' AND scoring_status='pending'), joined to
+	// their entity. Used by the runner to discover work per cycle.
+	UnscoredTasks(ctx context.Context, orgID string) ([]domain.Task, error)
 }

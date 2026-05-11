@@ -16,6 +16,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/config"
 	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
@@ -208,6 +209,22 @@ func main() {
 		log.Fatalf("failed to migrate database: %v", err)
 	}
 
+	// Wire the per-resource store bundle (SKY-246 D2). Wave 0 + the
+	// ScoreStore pilot ship in this branch; later waves populate the
+	// remaining bundle fields. Multi mode's startup wiring (Postgres
+	// admin + app pools) lands with SKY-251 (D7) — refusing to boot
+	// here rather than silently running against the local SQLite
+	// file is the safer failure mode for a misconfigured TF_MODE.
+	var stores db.Stores
+	switch runmode.Current() {
+	case runmode.ModeLocal:
+		stores = sqlitestore.New(database)
+	case runmode.ModeMulti:
+		log.Fatalf("TF_MODE=multi: Postgres connection wiring lands in SKY-251 (D7); refusing to boot")
+	default:
+		log.Fatalf("unknown runmode: %v", runmode.Current())
+	}
+
 	// Wire the config package against the DB and run the one-shot
 	// import of any pre-DB ~/.triagefactory/config.yaml. Must happen
 	// after Migrate (settings table is created there) and before any
@@ -385,7 +402,7 @@ func main() {
 	// Actual initialization happens below after the spawner is created.
 	var eventRouter *routing.Router
 
-	scorer := ai.NewRunner(database, ai.RunnerCallbacks{
+	scorer := ai.NewRunner(database, stores.Scores, runmode.LocalDefaultOrg, ai.RunnerCallbacks{
 		OnScoringStarted: func(taskIDs []string) {
 			wsHub.Broadcast(websocket.Event{
 				Type: "scoring_started",

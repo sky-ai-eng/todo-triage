@@ -28,8 +28,17 @@ type RunnerCallbacks struct {
 
 // Runner manages AI scoring as a background process.
 // It exposes a Trigger channel that pollers signal after ingesting new tasks.
+//
+// The 4 DB operations the runner does itself (UnscoredTasks, MarkScoring,
+// ResetScoringToPending, UpdateTaskScores) go through db.ScoreStore so
+// the same code path serves both SQLite (local) and Postgres (multi).
+// The runner still holds the raw *sql.DB because ScoreTasks (the
+// LLM-driven scorer in scorer.go) does its own multi-store reads
+// against the connection — that path migrates in a later D2 wave.
 type Runner struct {
 	database     *sql.DB
+	scores       db.ScoreStore
+	orgID        string // scoring context org — runmode.LocalDefaultOrg in local mode
 	callbacks    RunnerCallbacks
 	profileReady func() bool // returns true when repo profiles are available
 	trigger      chan struct{}
@@ -38,9 +47,11 @@ type Runner struct {
 	running      bool
 }
 
-func NewRunner(database *sql.DB, callbacks RunnerCallbacks) *Runner {
+func NewRunner(database *sql.DB, scores db.ScoreStore, orgID string, callbacks RunnerCallbacks) *Runner {
 	return &Runner{
 		database:  database,
+		scores:    scores,
+		orgID:     orgID,
 		callbacks: callbacks,
 		trigger:   make(chan struct{}, 1),
 		stop:      make(chan struct{}),
@@ -119,7 +130,7 @@ func (r *Runner) run(ctx context.Context) {
 		return
 	}
 
-	tasks, err := db.UnscoredTasks(r.database)
+	tasks, err := r.scores.UnscoredTasks(ctx, r.orgID)
 	if err != nil {
 		log.Printf("[ai] error fetching unscored tasks: %v", err)
 		r.reportError(err)
@@ -139,7 +150,7 @@ func (r *Runner) run(ctx context.Context) {
 	}
 
 	// Persist scoring state before calling AI
-	if err := db.MarkScoring(r.database, taskIDs); err != nil {
+	if err := r.scores.MarkScoring(ctx, r.orgID, taskIDs); err != nil {
 		log.Printf("[ai] error marking tasks as scoring: %v", err)
 	}
 
@@ -155,7 +166,7 @@ func (r *Runner) run(ctx context.Context) {
 		// them will be transitioned to 'scored'. Reset the whole set back
 		// to 'pending' so the next cycle retries them; otherwise they stay
 		// stuck forever (UnscoredTasks only picks 'pending').
-		if resetErr := db.ResetScoringToPending(r.database, taskIDs); resetErr != nil {
+		if resetErr := r.scores.ResetScoringToPending(ctx, r.orgID, taskIDs); resetErr != nil {
 			log.Printf("[ai] warning: failed to reset tasks to pending after scoring failure: %v", resetErr)
 		}
 		return
@@ -177,7 +188,7 @@ func (r *Runner) run(ctx context.Context) {
 			}
 		}
 		if len(skippedIDs) > 0 {
-			if resetErr := db.ResetScoringToPending(r.database, skippedIDs); resetErr != nil {
+			if resetErr := r.scores.ResetScoringToPending(ctx, r.orgID, skippedIDs); resetErr != nil {
 				log.Printf("[ai] warning: failed to reset %d skipped tasks to pending: %v", len(skippedIDs), resetErr)
 			}
 		}
@@ -197,14 +208,14 @@ func (r *Runner) run(ctx context.Context) {
 		}
 	}
 
-	if err := db.UpdateTaskScores(r.database, updates); err != nil {
+	if err := r.scores.UpdateTaskScores(ctx, r.orgID, updates); err != nil {
 		log.Printf("[ai] error saving scores: %v", err)
 		r.reportError(err)
 		// UpdateTaskScores failing means the in-memory scores are lost AND
 		// the scored tasks are still marked 'in_progress'. Reset everything
 		// still in that state so the next cycle re-scores. Previously-reset
 		// skipped tasks are already 'pending' and the reset is idempotent.
-		if resetErr := db.ResetScoringToPending(r.database, taskIDs); resetErr != nil {
+		if resetErr := r.scores.ResetScoringToPending(ctx, r.orgID, taskIDs); resetErr != nil {
 			log.Printf("[ai] warning: failed to reset tasks to pending after save failure: %v", resetErr)
 		}
 		return
