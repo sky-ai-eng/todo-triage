@@ -77,7 +77,7 @@ CREATE OR REPLACE FUNCTION public.vault_put_org_secret(
   p_description TEXT DEFAULT NULL
 ) RETURNS UUID
 LANGUAGE plpgsql SECURITY DEFINER
-SET search_path TO public, vault, pg_temp
+SET search_path = pg_catalog, public
 AS $$
 DECLARE
   v_full_name TEXT := 'org/' || p_org_id::text || '/' || p_key;
@@ -116,7 +116,7 @@ CREATE OR REPLACE FUNCTION public.vault_get_org_secret(
   p_key    TEXT
 ) RETURNS TEXT
 LANGUAGE plpgsql SECURITY DEFINER
-SET search_path TO public, vault, pg_temp
+SET search_path = pg_catalog, public
 AS $$
 DECLARE
   v_full_name TEXT := 'org/' || p_org_id::text || '/' || p_key;
@@ -147,7 +147,7 @@ CREATE OR REPLACE FUNCTION public.vault_delete_org_secret(
   p_key    TEXT
 ) RETURNS BOOLEAN
 LANGUAGE plpgsql SECURITY DEFINER
-SET search_path TO public, vault, pg_temp
+SET search_path = pg_catalog, public
 AS $$
 DECLARE
   v_full_name TEXT := 'org/' || p_org_id::text || '/' || p_key;
@@ -294,7 +294,7 @@ CREATE TABLE memberships (
 -- +goose StatementBegin
 CREATE OR REPLACE FUNCTION tf.user_has_org_access(target_org UUID) RETURNS BOOLEAN
 LANGUAGE SQL STABLE SECURITY DEFINER
-SET search_path = public, tf, pg_temp
+SET search_path = pg_catalog, public
 AS $$
   SELECT EXISTS (
     SELECT 1 FROM org_memberships
@@ -313,7 +313,7 @@ GRANT EXECUTE ON FUNCTION tf.user_has_org_access TO tf_app;
 -- +goose StatementBegin
 CREATE OR REPLACE FUNCTION tf.user_is_org_admin(target_org UUID) RETURNS BOOLEAN
 LANGUAGE SQL STABLE SECURITY DEFINER
-SET search_path = public, tf, pg_temp
+SET search_path = pg_catalog, public
 AS $$
   SELECT EXISTS (
     SELECT 1 FROM org_memberships
@@ -332,7 +332,7 @@ GRANT EXECUTE ON FUNCTION tf.user_is_org_admin TO tf_app;
 -- +goose StatementBegin
 CREATE OR REPLACE FUNCTION tf.user_owns_org(target_org UUID) RETURNS BOOLEAN
 LANGUAGE SQL STABLE SECURITY DEFINER
-SET search_path = public, tf, pg_temp
+SET search_path = pg_catalog, public
 AS $$
   SELECT EXISTS (
     SELECT 1 FROM orgs WHERE id = target_org AND owner_user_id = tf.current_user_id()
@@ -346,7 +346,7 @@ GRANT EXECUTE ON FUNCTION tf.user_owns_org TO tf_app;
 -- +goose StatementBegin
 CREATE OR REPLACE FUNCTION tf.user_is_team_admin(target_team UUID) RETURNS BOOLEAN
 LANGUAGE SQL STABLE SECURITY DEFINER
-SET search_path = public, tf, pg_temp
+SET search_path = pg_catalog, public
 AS $$
   SELECT EXISTS (
     SELECT 1 FROM memberships m
@@ -367,7 +367,7 @@ GRANT EXECUTE ON FUNCTION tf.user_is_team_admin TO tf_app;
 -- +goose StatementBegin
 CREATE OR REPLACE FUNCTION tf.user_is_org_admin_via_team(target_team UUID) RETURNS BOOLEAN
 LANGUAGE SQL STABLE SECURITY DEFINER
-SET search_path = public, tf, pg_temp
+SET search_path = pg_catalog, public
 AS $$
   SELECT EXISTS (
     SELECT 1 FROM teams t
@@ -386,6 +386,11 @@ GRANT EXECUTE ON FUNCTION tf.user_is_org_admin_via_team TO tf_app;
 -- +goose StatementBegin
 CREATE OR REPLACE FUNCTION tf.set_updated_at() RETURNS trigger
 LANGUAGE plpgsql
+-- Hardened search_path: pg_catalog explicit (defense against
+-- attacker-shadowed built-ins) + public; pg_temp deliberately
+-- excluded to block temp-object hijacking. Trigger functions
+-- inherit the firing role's search_path unless set explicitly.
+SET search_path = pg_catalog, public
 AS $$
 BEGIN
   NEW.updated_at = now();
@@ -404,6 +409,7 @@ $$;
 -- +goose StatementBegin
 CREATE OR REPLACE FUNCTION tf.guard_org_owners() RETURNS trigger
 LANGUAGE plpgsql
+SET search_path = pg_catalog, public
 AS $$
 BEGIN
   IF EXISTS (
@@ -430,6 +436,7 @@ $$;
 -- +goose StatementBegin
 CREATE OR REPLACE FUNCTION tf.guard_org_owner_transfer() RETURNS trigger
 LANGUAGE plpgsql
+SET search_path = pg_catalog, public
 AS $$
 BEGIN
   IF NEW.owner_user_id IS DISTINCT FROM OLD.owner_user_id THEN
@@ -1044,6 +1051,7 @@ CREATE OR REPLACE FUNCTION public.update_project_knowledge(
   p_updated_by_run   UUID DEFAULT NULL
 ) RETURNS INT
 LANGUAGE plpgsql SECURITY INVOKER
+SET search_path = pg_catalog, public
 AS $$
 DECLARE
   v_new_version INT;

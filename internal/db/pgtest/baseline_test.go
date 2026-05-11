@@ -1904,6 +1904,80 @@ func TestSystemPromptSeeding_DeployActorOnly(t *testing.T) {
 	}
 }
 
+// TestSearchPathHardening_AllSensitiveFunctions — structural
+// assertion that every SECURITY DEFINER function and every trigger
+// function has the canonical hardened search_path:
+//
+//	pg_catalog explicit first (defense against shadowed built-ins),
+//	public second (where org_memberships et al. live),
+//	NO pg_temp (would let an attacker poison resolution by creating
+//	  a temp object that shadows a referenced table/operator —
+//	  CVE-2018-1058 class).
+//
+// Probes pg_proc.proconfig directly, so the test fails fast if a
+// future migration adds a SECURITY DEFINER without the right
+// hardening or quietly re-introduces pg_temp.
+func TestSearchPathHardening_AllSensitiveFunctions(t *testing.T) {
+	h := Shared(t)
+
+	// Functions we care about: every SECURITY DEFINER and every
+	// trigger function we own. (tf.current_user_id /
+	// tf.current_org_id are LANGUAGE SQL STABLE and reference only
+	// pg_catalog primitives — they're safe without explicit
+	// search_path, so they're not in this list.)
+	hardened := []struct {
+		schema, name string
+	}{
+		{"tf", "user_has_org_access"},
+		{"tf", "user_is_org_admin"},
+		{"tf", "user_is_team_admin"},
+		{"tf", "user_owns_org"},
+		{"tf", "user_is_org_admin_via_team"},
+		{"public", "vault_put_org_secret"},
+		{"public", "vault_get_org_secret"},
+		{"public", "vault_delete_org_secret"},
+		{"public", "update_project_knowledge"},
+		{"tf", "set_updated_at"},
+		{"tf", "guard_org_owners"},
+		{"tf", "guard_org_owner_transfer"},
+	}
+	for _, fn := range hardened {
+		// array_to_string collapses the text[] into a single scalar
+		// so we can Scan it directly without pulling in a Postgres
+		// array adapter. Each entry in proconfig is "KEY=VALUE";
+		// joining with '\n' makes parsing trivial.
+		var config sql.NullString
+		err := h.AdminDB.QueryRow(`
+			SELECT array_to_string(p.proconfig, E'\n')
+			  FROM pg_proc p JOIN pg_namespace n ON p.pronamespace = n.oid
+			 WHERE n.nspname = $1 AND p.proname = $2
+		`, fn.schema, fn.name).Scan(&config)
+		if err != nil {
+			t.Errorf("%s.%s: probe proconfig: %v", fn.schema, fn.name, err)
+			continue
+		}
+		var searchPath string
+		for _, line := range strings.Split(config.String, "\n") {
+			if strings.HasPrefix(line, "search_path=") {
+				searchPath = strings.TrimPrefix(line, "search_path=")
+				break
+			}
+		}
+		if searchPath == "" {
+			t.Errorf("%s.%s: no SET search_path — vulnerable to search_path hijack", fn.schema, fn.name)
+			continue
+		}
+		// pg_proc stores the value verbatim. Postgres normalizes
+		// some forms (quoted vs unquoted identifiers) — accept either.
+		if searchPath != "pg_catalog, public" && searchPath != "\"pg_catalog\", \"public\"" {
+			t.Errorf("%s.%s: search_path = %q, want %q", fn.schema, fn.name, searchPath, "pg_catalog, public")
+		}
+		if strings.Contains(searchPath, "pg_temp") {
+			t.Errorf("%s.%s: search_path contains pg_temp (%q) — hijack vector", fn.schema, fn.name, searchPath)
+		}
+	}
+}
+
 // TestRLS_TeamAdminNotOrgAdmin pins the two-axis role model: a team
 // admin who is only an org member (not an org admin) can manage their
 // own team but CANNOT mutate org-wide attributes. This is the
