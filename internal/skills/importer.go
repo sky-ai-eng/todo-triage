@@ -30,8 +30,12 @@ type ImportResult struct {
 // haven't migrated to a store method yet — wave 1 carry-over) and
 // PromptStore (for the routable Get/Create/UpdateImported/Hide
 // calls).
-func ImportAll(database *sql.DB, prompts db.PromptStore) ImportResult {
-	ctx := context.Background()
+//
+// ctx flows through every DB call and the per-file processing loop,
+// so the request-triggered import (POST /api/skills/import) cancels
+// promptly if the HTTP client disconnects or the request times out.
+// Startup callers pass context.Background.
+func ImportAll(ctx context.Context, database *sql.DB, prompts db.PromptStore) ImportResult {
 	var result ImportResult
 
 	home, err := os.UserHomeDir()
@@ -70,6 +74,10 @@ func ImportAll(database *sql.DB, prompts db.PromptStore) ImportResult {
 		}
 
 		for _, path := range matches {
+			if err := ctx.Err(); err != nil {
+				result.Errors = append(result.Errors, "import cancelled: "+err.Error())
+				return result
+			}
 			normalizedPath, err := normalizePath(path)
 			if err != nil {
 				result.Errors = append(result.Errors, fmt.Sprintf("normalize file %s: %v", path, err))
@@ -147,7 +155,7 @@ func importSkillFile(ctx context.Context, database *sql.DB, prompts db.PromptSto
 	// already present from another path. The raw-SQL scan stays here for
 	// now — its "find by content fingerprint" semantics don't map cleanly
 	// onto PromptStore yet, and that helper migrates in a later wave.
-	duplicateID, err := findVisibleImportedPromptByContent(database, meta.Name, meta.Body, meta.AllowedTools)
+	duplicateID, err := findVisibleImportedPromptByContent(ctx, database, meta.Name, meta.Body, meta.AllowedTools)
 	if err != nil {
 		return err
 	}
@@ -363,9 +371,9 @@ func promptFingerprint(name, body, allowedTools string) string {
 	return fmt.Sprintf("%x", sum)
 }
 
-func findVisibleImportedPromptByContent(database *sql.DB, name, body, allowedTools string) (string, error) {
+func findVisibleImportedPromptByContent(ctx context.Context, database *sql.DB, name, body, allowedTools string) (string, error) {
 	var id string
-	err := database.QueryRow(`
+	err := database.QueryRowContext(ctx, `
 		SELECT id
 		FROM prompts
 		WHERE source = 'imported' AND hidden = 0 AND name = ? AND body = ? AND allowed_tools = ?
@@ -382,7 +390,7 @@ func findVisibleImportedPromptByContent(database *sql.DB, name, body, allowedToo
 }
 
 func hideDuplicateImportedPrompts(ctx context.Context, database *sql.DB, prompts db.PromptStore) (int, error) {
-	rows, err := database.Query(`
+	rows, err := database.QueryContext(ctx, `
 		SELECT p.id, p.name, p.body, p.allowed_tools, COUNT(t.id) AS trigger_count
 		FROM prompts p
 		LEFT JOIN prompt_triggers t ON t.prompt_id = p.id

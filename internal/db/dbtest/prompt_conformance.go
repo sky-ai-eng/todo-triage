@@ -186,32 +186,43 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		}
 	})
 
-	t.Run("UpdateImported_PreservesUserModifiedFlag", func(t *testing.T) {
-		// Re-importing a skill file must NOT set user_modified — only
-		// human edits set that flag. Verified indirectly: import,
-		// re-seed shipped, confirm the re-import didn't shield the
-		// row from a system-side update.
-		//
-		// (We can't read user_modified directly through the
-		// PromptStore interface — it's an internal flag — so we
-		// assert behavior: SeedOrUpdate must overwrite an UpdateImported
-		// row but NOT an Update row.)
+	t.Run("UpdateImported_RoundtripsContent", func(t *testing.T) {
+		// UpdateImported is the file-importer's "re-import a changed
+		// SKILL.md" write — it updates name/body/allowed_tools without
+		// flipping user_modified (so a subsequent file change still
+		// re-imports cleanly). The user_modified flag is internal and
+		// not observable through the interface; the contract we CAN
+		// pin from the outside is that the three fields round-trip.
 		store, orgID, _ := factory(t)
 		ctx := context.Background()
-		if err := store.SeedOrUpdate(ctx, orgID, domain.Prompt{ID: "imported-1", Name: "Imported", Body: "v1", Source: "imported"}); err != nil {
-			t.Fatalf("seed: %v", err)
+		if err := store.Create(ctx, orgID, domain.Prompt{
+			ID: "imp-1", Name: "Imported", Body: "v1", Source: "imported", AllowedTools: "Read",
+		}); err != nil {
+			t.Fatalf("create: %v", err)
 		}
-		if err := store.UpdateImported(ctx, orgID, "imported-1", "Renamed", "v2", "Read"); err != nil {
+		if err := store.UpdateImported(ctx, orgID, "imp-1", "Renamed", "v2", "Read,Write"); err != nil {
 			t.Fatalf("update imported: %v", err)
 		}
-		// SeedOrUpdate with new shipped content should overwrite —
-		// because UpdateImported did NOT set user_modified.
-		if err := store.SeedOrUpdate(ctx, orgID, domain.Prompt{ID: "imported-1", Name: "Shipped", Body: "v3", Source: "imported"}); err != nil {
-			t.Fatalf("seed v3: %v", err)
+		got, _ := store.Get(ctx, orgID, "imp-1")
+		if got.Name != "Renamed" || got.Body != "v2" || got.AllowedTools != "Read,Write" {
+			t.Fatalf("after UpdateImported: name=%q body=%q tools=%q", got.Name, got.Body, got.AllowedTools)
 		}
-		got, _ := store.Get(ctx, orgID, "imported-1")
-		if got.Name != "Shipped" || got.Body != "v3" {
-			t.Fatalf("after re-seed of imported: name=%q body=%q want Shipped/v3", got.Name, got.Body)
+	})
+
+	t.Run("SeedOrUpdate_RejectsNonSystemSource", func(t *testing.T) {
+		// SeedOrUpdate is the shipped-content seeder; non-"system"
+		// sources are rejected so a misuse can't accidentally land
+		// version-sidecar rows on user/imported prompts (where a
+		// later re-seed could silently overwrite them).
+		store, orgID, _ := factory(t)
+		ctx := context.Background()
+		for _, src := range []string{"user", "imported", "garbage"} {
+			err := store.SeedOrUpdate(ctx, orgID, domain.Prompt{
+				ID: "bad-" + src, Name: "X", Body: "x", Source: src,
+			})
+			if err == nil {
+				t.Fatalf("SeedOrUpdate accepted Source=%q; should reject", src)
+			}
 		}
 	})
 

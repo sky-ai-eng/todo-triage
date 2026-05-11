@@ -73,6 +73,9 @@ func (s *promptStore) SeedOrUpdate(ctx context.Context, orgID string, p domain.P
 	if p.Source == "" {
 		p.Source = "system"
 	}
+	if p.Source != "system" {
+		return fmt.Errorf("postgres prompts: SeedOrUpdate only accepts Source=\"system\" (got %q); use Create or UpdateImported for non-system rows", p.Source)
+	}
 	hash := shippedContentHash(p)
 	now := time.Now().UTC()
 

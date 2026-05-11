@@ -115,7 +115,7 @@ func TestImportAll_DedupesResolvedSearchDirs(t *testing.T) {
 	writeSkillFile(t, home, "review-pr", "Review pull requests carefully.")
 
 	database := newTestDB(t)
-	result := ImportAll(database, testPromptStore(database))
+	result := ImportAll(t.Context(), database, testPromptStore(database))
 	if len(result.Errors) > 0 {
 		t.Fatalf("ImportAll errors: %v", result.Errors)
 	}
@@ -144,7 +144,7 @@ func TestImportAll_DedupesByNameAndBodyAcrossLocations(t *testing.T) {
 	writeSkillFile(t, project, "merge-helper", content)
 
 	database := newTestDB(t)
-	result := ImportAll(database, testPromptStore(database))
+	result := ImportAll(t.Context(), database, testPromptStore(database))
 	if len(result.Errors) > 0 {
 		t.Fatalf("ImportAll errors: %v", result.Errors)
 	}
@@ -189,7 +189,7 @@ func TestImportAll_HidesExistingDuplicateImportedPrompts(t *testing.T) {
 		t.Fatalf("create second duplicate prompt: %v", err)
 	}
 
-	result := ImportAll(database, testPromptStore(database))
+	result := ImportAll(t.Context(), database, testPromptStore(database))
 	if len(result.Errors) > 0 {
 		t.Fatalf("ImportAll errors: %v", result.Errors)
 	}
@@ -225,7 +225,7 @@ func TestImportAll_UsesDiscoveredPathForDefaultName(t *testing.T) {
 	}
 
 	database := newTestDB(t)
-	result := ImportAll(database, testPromptStore(database))
+	result := ImportAll(t.Context(), database, testPromptStore(database))
 	if len(result.Errors) > 0 {
 		t.Fatalf("ImportAll errors: %v", result.Errors)
 	}
@@ -280,7 +280,7 @@ func TestImportAll_DoesNotHideDuplicatePromptReferencedByTrigger(t *testing.T) {
 		t.Fatalf("create trigger for duplicate prompt: %v", err)
 	}
 
-	result := ImportAll(database, testPromptStore(database))
+	result := ImportAll(t.Context(), database, testPromptStore(database))
 	if len(result.Errors) > 0 {
 		t.Fatalf("ImportAll errors: %v", result.Errors)
 	}

@@ -38,6 +38,14 @@ type PromptStore interface {
 	// happen in one transaction so the version row never races ahead
 	// of the prompt row.
 	//
+	// Source contract: p.Source must be "" (defaulted to "system") or
+	// "system". Non-system sources are rejected — SeedOrUpdate is the
+	// shipped-content seeder; anything else (user prompts via the
+	// HTTP handler, imported skills via the file importer) goes
+	// through Create / UpdateImported. The version-sidecar would
+	// otherwise track non-system rows and re-seeds could silently
+	// overwrite them.
+	//
 	// Postgres-only: must run on the admin connection because
 	// system_prompt_versions writes are REVOKE'd from tf_app. The
 	// impl picks the right pool internally — callers don't (and

@@ -140,7 +140,7 @@ Use MCP tools to look things up.`
 	writeSkillFile(t, home, "mcp-skill", content)
 
 	database := newTestDB(t)
-	result := ImportAll(database, testPromptStore(database))
+	result := ImportAll(t.Context(), database, testPromptStore(database))
 	if len(result.Errors) > 0 {
 		t.Fatalf("ImportAll errors: %v", result.Errors)
 	}

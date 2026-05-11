@@ -68,11 +68,11 @@ func (s *Server) projectMutex(id string) *sync.Mutex {
 	return v.(*sync.Mutex)
 }
 
-// New creates a new server with the given database, store bundle, and
-// registers all routes. The store bundle gives handlers access to the
-// per-resource stores migrated under SKY-246 (currently Prompts and
-// Scores); raw *sql.DB stays available for handlers that haven't been
-// migrated to a store yet.
+// New creates a new server with the given database + the per-resource
+// stores migrated under SKY-246, and registers all routes. Today that's
+// just db.PromptStore; subsequent waves grow the argument list one
+// store at a time as their callers migrate. Raw *sql.DB stays
+// available for handlers that haven't been ported to a store yet.
 func New(database *sql.DB, prompts db.PromptStore) *Server {
 	s := &Server{
 		db:      database,

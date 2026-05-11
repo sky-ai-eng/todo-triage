@@ -306,8 +306,10 @@ func main() {
 	}
 	seedDefaultPrompts(database, stores.Prompts)
 
-	// Auto-import Claude Code skill files as prompts
-	skills.ImportAll(database, stores.Prompts)
+	// Auto-import Claude Code skill files as prompts. context.Background
+	// at startup — no request to inherit from, the import runs to
+	// completion or fails of its own accord.
+	skills.ImportAll(context.Background(), database, stores.Prompts)
 
 	// Event bus — central pub/sub replacing direct callbacks
 	bus := eventbus.New()
