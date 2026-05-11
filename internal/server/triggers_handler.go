@@ -6,14 +6,13 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 func (s *Server) handleTriggersList(w http.ResponseWriter, r *http.Request) {
-	triggers, err := db.ListPromptTriggers(s.db)
+	triggers, err := s.triggers.List(r.Context(), runmode.LocalDefaultOrg)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -95,8 +94,8 @@ func (s *Server) handleTriggerCreate(w http.ResponseWriter, r *http.Request) {
 		trigger.ScopePredicateJSON = &canonicalPredicate
 	}
 
-	if err := db.SavePromptTrigger(s.db, trigger); err != nil {
-		if strings.Contains(err.Error(), "UNIQUE constraint") {
+	if err := s.triggers.Create(r.Context(), runmode.LocalDefaultOrg, trigger); err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint") || strings.Contains(err.Error(), "duplicate key") {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "a trigger already exists for this prompt and event type"})
 			return
 		}
@@ -105,7 +104,7 @@ func (s *Server) handleTriggerCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Re-read to get server-set timestamps
-	created, _ := db.GetPromptTrigger(s.db, trigger.ID)
+	created, _ := s.triggers.Get(r.Context(), runmode.LocalDefaultOrg, trigger.ID)
 	if created != nil {
 		writeJSON(w, http.StatusCreated, created)
 	} else {
@@ -139,7 +138,7 @@ func (s *Server) handleTriggerUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	existing, err := db.GetPromptTrigger(s.db, id)
+	existing, err := s.triggers.Get(r.Context(), runmode.LocalDefaultOrg, id)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -177,13 +176,13 @@ func (s *Server) handleTriggerUpdate(w http.ResponseWriter, r *http.Request) {
 		updated.ScopePredicateJSON = &canonicalPredicate
 	}
 
-	if err := db.SavePromptTrigger(s.db, updated); err != nil {
+	if err := s.triggers.Update(r.Context(), runmode.LocalDefaultOrg, updated); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 
 	// Re-read so the response reflects the updated_at timestamp the DB set.
-	fresh, _ := db.GetPromptTrigger(s.db, id)
+	fresh, _ := s.triggers.Get(r.Context(), runmode.LocalDefaultOrg, id)
 	if fresh != nil {
 		writeJSON(w, http.StatusOK, fresh)
 	} else {
@@ -193,7 +192,7 @@ func (s *Server) handleTriggerUpdate(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleTriggerDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if err := db.DeletePromptTrigger(s.db, id); err != nil {
+	if err := s.triggers.Delete(r.Context(), runmode.LocalDefaultOrg, id); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -211,7 +210,7 @@ func (s *Server) handleTriggerToggle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Verify the trigger exists before updating
-	existing, err := db.GetPromptTrigger(s.db, id)
+	existing, err := s.triggers.Get(r.Context(), runmode.LocalDefaultOrg, id)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -221,7 +220,7 @@ func (s *Server) handleTriggerToggle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := db.SetTriggerEnabled(s.db, id, req.Enabled); err != nil {
+	if err := s.triggers.SetEnabled(r.Context(), runmode.LocalDefaultOrg, id, req.Enabled); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}

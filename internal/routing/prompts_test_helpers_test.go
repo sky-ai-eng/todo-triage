@@ -32,6 +32,35 @@ func testTaskRuleStore(database *sql.DB) db.TaskRuleStore {
 	return sqlitestore.New(database).TaskRules
 }
 
+// testTriggerStore returns a SQLite-backed TriggerStore for routing
+// tests. Same pattern — the router now reads triggers through the
+// store interface, so tests construct it the same way.
+func testTriggerStore(database *sql.DB) db.TriggerStore {
+	if database == nil {
+		return nil
+	}
+	return sqlitestore.New(database).Triggers
+}
+
+// createTriggerForTestRouting + setTriggerEnabledForTestRouting are
+// the raw-SQL replacements for db.SavePromptTrigger /
+// db.SetTriggerEnabled used by drain_test + rederive_test. They use
+// the store interface to keep the seed path consistent with what
+// production uses.
+func createTriggerForTestRouting(t *testing.T, database *sql.DB, trig domain.PromptTrigger) {
+	t.Helper()
+	if err := testTriggerStore(database).Create(context.Background(), runmode.LocalDefaultOrg, trig); err != nil {
+		t.Fatalf("createTriggerForTestRouting %s: %v", trig.ID, err)
+	}
+}
+
+func setTriggerEnabledForTestRouting(t *testing.T, database *sql.DB, id string, enabled bool) {
+	t.Helper()
+	if err := testTriggerStore(database).SetEnabled(context.Background(), runmode.LocalDefaultOrg, id, enabled); err != nil {
+		t.Fatalf("setTriggerEnabledForTestRouting %s: %v", id, err)
+	}
+}
+
 // createTestPrompt is the replacement for the deleted db.CreatePrompt
 // free-function. Routes through the store so test fixtures and
 // production share the same insert SQL.

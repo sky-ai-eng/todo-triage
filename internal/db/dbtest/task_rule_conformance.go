@@ -136,6 +136,56 @@ func RunTaskRuleStoreConformance(t *testing.T, factory TaskRuleStoreFactory) {
 		}
 	})
 
+	t.Run("Get_ReturnsNilOnInvalidUUID", func(t *testing.T) {
+		// Non-UUID strings (e.g. a stale slug from a legacy ID
+		// scheme, or a malformed URL param) should surface as
+		// not-found rather than as a Postgres parse error (22P02).
+		// SQLite's TEXT-keyed table naturally returns 0 rows; the
+		// Postgres impl validates UUID shape up front to match.
+		store, orgID := factory(t)
+		for _, garbage := range []string{
+			"not-a-uuid",
+			"system-rule-ci-check-failed", // the SQLite slug form
+			"",
+			"42",
+			"00000000-0000-0000-0000-00000000000", // one char short
+		} {
+			got, err := store.Get(context.Background(), orgID, garbage)
+			if err != nil {
+				t.Errorf("Get(%q): want (nil, nil) got error: %v", garbage, err)
+			}
+			if got != nil {
+				t.Errorf("Get(%q): want nil, got %+v", garbage, got)
+			}
+		}
+	})
+
+	t.Run("Mutations_OnInvalidUUID_AreNoops", func(t *testing.T) {
+		// Update / SetEnabled / Delete / Reorder on an invalid UUID
+		// return nil (no-op) rather than bubbling 22P02 from the
+		// Postgres column-type layer.
+		store, orgID := factory(t)
+		ctx := context.Background()
+		if err := store.SetEnabled(ctx, orgID, "not-a-uuid", false); err != nil {
+			t.Errorf("SetEnabled on invalid UUID: want nil, got %v", err)
+		}
+		if err := store.Delete(ctx, orgID, "not-a-uuid"); err != nil {
+			t.Errorf("Delete on invalid UUID: want nil, got %v", err)
+		}
+		if err := store.Update(ctx, orgID, domain.TaskRule{
+			ID: "not-a-uuid", EventType: domain.EventGitHubPRCICheckFailed,
+			Enabled: true, Name: "x", DefaultPriority: 0.5,
+		}); err != nil {
+			t.Errorf("Update on invalid UUID: want nil, got %v", err)
+		}
+		// Reorder skips invalid UUIDs in the batch rather than
+		// rolling back the whole tx — the contract is "best effort
+		// over the IDs the caller provided that still exist."
+		if err := store.Reorder(ctx, orgID, []string{"not-a-uuid", "also-not-a-uuid"}); err != nil {
+			t.Errorf("Reorder with all-invalid UUIDs: want nil, got %v", err)
+		}
+	})
+
 	t.Run("Create_AndRoundTrip", func(t *testing.T) {
 		store, orgID := factory(t)
 		ctx := context.Background()

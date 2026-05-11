@@ -24,12 +24,10 @@ func TestEnqueuePendingFiring_Insert(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
-	if err := SavePromptTrigger(database, domain.PromptTrigger{
+	createTriggerForTest(t, database, domain.PromptTrigger{
 		ID: "t1", PromptID: "p1", TriggerType: domain.TriggerTypeEvent,
 		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: 4, Enabled: true,
-	}); err != nil {
-		t.Fatalf("save trigger: %v", err)
-	}
+	})
 
 	inserted, err := EnqueuePendingFiring(database, entity.ID, task.ID, "t1", eventID)
 	if err != nil {
@@ -71,11 +69,11 @@ func TestPopPendingFiring_FIFO(t *testing.T) {
 	createPromptForTest(t, database, domain.Prompt{ID: "p2", Name: "P2", Body: "y", Source: "user"})
 	taskA, _, _ := FindOrCreateTask(database, entity.ID, domain.EventGitHubPRCICheckFailed, "buildA", eventID, 0.5)
 	taskB, _, _ := FindOrCreateTask(database, entity.ID, domain.EventGitHubPRCICheckFailed, "buildB", eventID, 0.5)
-	SavePromptTrigger(database, domain.PromptTrigger{
+	createTriggerForTest(t, database, domain.PromptTrigger{
 		ID: "tA", PromptID: "p1", TriggerType: domain.TriggerTypeEvent,
 		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: 4, Enabled: true,
 	})
-	SavePromptTrigger(database, domain.PromptTrigger{
+	createTriggerForTest(t, database, domain.PromptTrigger{
 		ID: "tB", PromptID: "p2", TriggerType: domain.TriggerTypeEvent,
 		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: 4, Enabled: true,
 	})
@@ -135,7 +133,7 @@ func TestEntityCanFireImmediately_GateLogic(t *testing.T) {
 		EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entity.ID, MetadataJSON: `{"check_name":"build"}`,
 	})
 	task, _, _ := FindOrCreateTask(database, entity.ID, domain.EventGitHubPRCICheckFailed, "build", eventID, 0.5)
-	SavePromptTrigger(database, domain.PromptTrigger{
+	createTriggerForTest(t, database, domain.PromptTrigger{
 		ID: "t1", PromptID: "p1", TriggerType: domain.TriggerTypeEvent,
 		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: 4, Enabled: true,
 	})
@@ -220,7 +218,7 @@ func TestEnqueueAfterFired(t *testing.T) {
 		EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entity.ID, MetadataJSON: `{"check_name":"build"}`,
 	})
 	task, _, _ := FindOrCreateTask(database, entity.ID, domain.EventGitHubPRCICheckFailed, "build", eventID, 0.5)
-	SavePromptTrigger(database, domain.PromptTrigger{
+	createTriggerForTest(t, database, domain.PromptTrigger{
 		ID: "t1", PromptID: "p1", TriggerType: domain.TriggerTypeEvent,
 		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: 4, Enabled: true,
 	})
@@ -279,7 +277,7 @@ func TestPendingFirings_CrossEntityIsolation(t *testing.T) {
 	taskA, _, _ := FindOrCreateTask(database, entA.ID, domain.EventGitHubPRCICheckFailed, "build", evtA, 0.5)
 	taskB, _, _ := FindOrCreateTask(database, entB.ID, domain.EventGitHubPRCICheckFailed, "build", evtB, 0.5)
 
-	SavePromptTrigger(database, domain.PromptTrigger{
+	createTriggerForTest(t, database, domain.PromptTrigger{
 		ID: "t1", PromptID: "p1", TriggerType: domain.TriggerTypeEvent,
 		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: 4, Enabled: true,
 	})
@@ -335,11 +333,11 @@ func TestEnqueue_SameTaskDifferentTrigger(t *testing.T) {
 		EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entity.ID, MetadataJSON: `{"check_name":"build"}`,
 	})
 	task, _, _ := FindOrCreateTask(database, entity.ID, domain.EventGitHubPRCICheckFailed, "build", eventID, 0.5)
-	SavePromptTrigger(database, domain.PromptTrigger{
+	createTriggerForTest(t, database, domain.PromptTrigger{
 		ID: "tA", PromptID: "p1", TriggerType: domain.TriggerTypeEvent,
 		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: 4, Enabled: true,
 	})
-	SavePromptTrigger(database, domain.PromptTrigger{
+	createTriggerForTest(t, database, domain.PromptTrigger{
 		ID: "tB", PromptID: "p2", TriggerType: domain.TriggerTypeEvent,
 		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: 4, Enabled: true,
 	})
@@ -376,7 +374,7 @@ func TestMarkTransitions_Idempotent(t *testing.T) {
 		EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entity.ID, MetadataJSON: `{"check_name":"build"}`,
 	})
 	task, _, _ := FindOrCreateTask(database, entity.ID, domain.EventGitHubPRCICheckFailed, "build", eventID, 0.5)
-	SavePromptTrigger(database, domain.PromptTrigger{
+	createTriggerForTest(t, database, domain.PromptTrigger{
 		ID: "t1", PromptID: "p1", TriggerType: domain.TriggerTypeEvent,
 		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: 4, Enabled: true,
 	})

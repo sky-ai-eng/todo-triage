@@ -265,7 +265,7 @@ func main() {
 		openBrowser(fmt.Sprintf("http://localhost%s", addr))
 	}
 
-	srv := server.New(database, stores.Prompts, stores.Swipes, stores.Dashboard, stores.TaskRules)
+	srv := server.New(database, stores.Prompts, stores.Swipes, stores.Dashboard, stores.TaskRules, stores.Triggers)
 
 	distFS, err := frontendDist()
 	if err != nil {
@@ -304,7 +304,7 @@ func main() {
 	if err := stores.TaskRules.Seed(context.Background(), runmode.LocalDefaultOrg); err != nil {
 		log.Fatalf("failed to seed task rules: %v", err)
 	}
-	seedDefaultPrompts(database, stores.Prompts)
+	seedDefaultPrompts(database, stores.Prompts, stores.Triggers)
 
 	// Auto-import Claude Code skill files as prompts. context.Background
 	// at startup — no request to inherit from, the import runs to
@@ -546,7 +546,7 @@ func main() {
 	// Event router — records events, creates/bumps tasks, auto-delegates on
 	// matching triggers, runs inline close checks. Also handles post-scoring
 	// re-derive via the scorer callback wired above.
-	eventRouter = routing.NewRouter(database, stores.Prompts, stores.TaskRules, spawner, scorer, wsHub)
+	eventRouter = routing.NewRouter(database, stores.Prompts, stores.TaskRules, stores.Triggers, spawner, scorer, wsHub)
 	bus.Subscribe(eventbus.Subscriber{
 		Name:   "router",
 		Filter: []string{"github:", "jira:"},

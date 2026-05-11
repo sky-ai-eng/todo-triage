@@ -43,6 +43,12 @@ type Stores struct {
 	// handlers do full CRUD.
 	TaskRules TaskRuleStore
 
+	// Triggers owns prompt_triggers — auto-delegation rules that fire
+	// a prompt on matching events. Companion to TaskRules; the two
+	// will eventually merge into event_handlers per SKY-259, but for
+	// now they ship as parallel stores with the same shape.
+	Triggers TriggerStore
+
 	// Tx is the transaction runner — handlers that need atomic
 	// multi-store writes call Tx.WithTx and receive a TxStores with
 	// every field tx-bound. Postgres impl also sets the JWT claims
@@ -62,6 +68,7 @@ type TxStores struct {
 	Dashboard DashboardStore
 	Secrets   SecretStore
 	TaskRules TaskRuleStore
+	Triggers  TriggerStore
 }
 
 // TxRunner runs fn inside a single database transaction. Postgres

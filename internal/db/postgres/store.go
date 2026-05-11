@@ -75,7 +75,12 @@ func New(admin, app *sql.DB) db.Stores {
 		// The impl routes Seed to admin (BYPASSRLS) and every CRUD
 		// method to app — same pool-split pattern PromptStore uses.
 		TaskRules: newTaskRuleStore(app, admin),
-		Tx:        s,
+		// Triggers follows the same pool-split for the same reason
+		// (prompt_triggers_update gates org-visible writes on
+		// tf.user_is_org_admin() per 202605120001; Seed has no JWT
+		// claims and must run admin-side).
+		Triggers: newTriggerStore(app, admin),
+		Tx:       s,
 	}
 	return s.stores
 }
@@ -110,5 +115,6 @@ func NewForTx(tx *sql.Tx) db.TxStores {
 		Dashboard: newDashboardStore(tx),
 		Secrets:   newSecretStore(tx),
 		TaskRules: newTxTaskRuleStore(tx),
+		Triggers:  newTxTriggerStore(tx),
 	}
 }

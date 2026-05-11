@@ -102,9 +102,7 @@ func setupReDeriveScenario(t *testing.T, database *sql.DB, minAutonomy float64) 
 		MinAutonomySuitability: minAutonomy,
 		Enabled:                true,
 	}
-	if err := db.SavePromptTrigger(database, trigger); err != nil {
-		t.Fatalf("save trigger: %v", err)
-	}
+	createTriggerForTestRouting(t, database, trigger)
 
 	return task.ID, trigger.ID
 }
@@ -130,7 +128,7 @@ func TestReDeriveAfterScoring_AboveThreshold_Delegates(t *testing.T) {
 	// gate-check path runs (suitability >= threshold, predicate matched)
 	// without panicking. The log output confirms the trigger fired.
 	ws := websocket.NewHub()
-	router := NewRouter(database, testPromptStore(database), testTaskRuleStore(database), nil, noopScorer{}, ws)
+	router := NewRouter(database, testPromptStore(database), testTaskRuleStore(database), testTriggerStore(database), nil, noopScorer{}, ws)
 
 	router.ReDeriveAfterScoring([]string{taskID})
 
@@ -162,7 +160,7 @@ func TestReDeriveAfterScoring_BelowThreshold_Skips(t *testing.T) {
 	}
 
 	ws := websocket.NewHub()
-	router := NewRouter(database, testPromptStore(database), testTaskRuleStore(database), nil, noopScorer{}, ws)
+	router := NewRouter(database, testPromptStore(database), testTaskRuleStore(database), testTriggerStore(database), nil, noopScorer{}, ws)
 	router.ReDeriveAfterScoring([]string{taskID})
 
 	// Task should remain queued — trigger was skipped
@@ -196,7 +194,7 @@ func TestReDeriveAfterScoring_AlreadyDelegated_Skips(t *testing.T) {
 	}
 
 	ws := websocket.NewHub()
-	router := NewRouter(database, testPromptStore(database), testTaskRuleStore(database), nil, noopScorer{}, ws)
+	router := NewRouter(database, testPromptStore(database), testTaskRuleStore(database), testTriggerStore(database), nil, noopScorer{}, ws)
 	router.ReDeriveAfterScoring([]string{taskID})
 
 	// Should still be delegated — re-derive skipped it
@@ -226,7 +224,7 @@ func TestReDeriveAfterScoring_ZeroThresholdTrigger_SkippedByReDerive(t *testing.
 	createTestPrompt(t, database, domain.Prompt{ID: "p2", Name: "Test2", Body: "Do", Source: "user"})
 
 	// Trigger with min_autonomy_suitability=0 (immediate fire, not deferred)
-	db.SavePromptTrigger(database, domain.PromptTrigger{
+	createTriggerForTestRouting(t, database, domain.PromptTrigger{
 		ID: "t-zero", PromptID: "p2", TriggerType: domain.TriggerTypeEvent,
 		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: 4,
 		MinAutonomySuitability: 0.0, Enabled: true,
@@ -238,7 +236,7 @@ func TestReDeriveAfterScoring_ZeroThresholdTrigger_SkippedByReDerive(t *testing.
 	}})
 
 	ws := websocket.NewHub()
-	router := NewRouter(database, testPromptStore(database), testTaskRuleStore(database), nil, noopScorer{}, ws)
+	router := NewRouter(database, testPromptStore(database), testTaskRuleStore(database), testTriggerStore(database), nil, noopScorer{}, ws)
 	router.ReDeriveAfterScoring([]string{task.ID})
 
 	// Task should remain queued — zero-threshold trigger is skipped in re-derive
@@ -270,7 +268,7 @@ func TestReDeriveAfterScoring_PredicateMismatch_Skips(t *testing.T) {
 
 	// Trigger with predicate requiring author_is_self=true
 	pred := `{"author_is_self":true}`
-	db.SavePromptTrigger(database, domain.PromptTrigger{
+	createTriggerForTestRouting(t, database, domain.PromptTrigger{
 		ID: "t-pred", PromptID: "p3", TriggerType: domain.TriggerTypeEvent,
 		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: 4,
 		MinAutonomySuitability: 0.5, Enabled: true,
@@ -283,7 +281,7 @@ func TestReDeriveAfterScoring_PredicateMismatch_Skips(t *testing.T) {
 	}})
 
 	ws := websocket.NewHub()
-	router := NewRouter(database, testPromptStore(database), testTaskRuleStore(database), nil, noopScorer{}, ws)
+	router := NewRouter(database, testPromptStore(database), testTaskRuleStore(database), testTriggerStore(database), nil, noopScorer{}, ws)
 	router.ReDeriveAfterScoring([]string{task.ID})
 
 	// Task should stay queued — predicate doesn't match

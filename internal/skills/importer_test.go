@@ -276,19 +276,14 @@ func TestImportAll_DoesNotHideDuplicatePromptReferencedByTrigger(t *testing.T) {
 		MinAutonomySuitability: 0,
 		Enabled:                true,
 	}
-	if err := db.SavePromptTrigger(database, trigger); err != nil {
-		t.Fatalf("create trigger for duplicate prompt: %v", err)
-	}
+	createTriggerForTestSkills(t, database, trigger)
 
 	result := ImportAll(t.Context(), database, testPromptStore(database))
 	if len(result.Errors) > 0 {
 		t.Fatalf("ImportAll errors: %v", result.Errors)
 	}
 
-	storedTrigger, err := db.GetPromptTrigger(database, trigger.ID)
-	if err != nil {
-		t.Fatalf("load trigger after import: %v", err)
-	}
+	storedTrigger := getTriggerForTestSkills(t, database, trigger.ID)
 	if storedTrigger == nil {
 		t.Fatal("expected trigger to remain after import")
 	}
