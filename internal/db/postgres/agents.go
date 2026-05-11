@@ -85,14 +85,16 @@ func (s *agentStore) Create(ctx context.Context, orgID string, a domain.Agent) (
 	if displayName == "" {
 		displayName = "Triage Factory Bot"
 	}
-	// Caller-supplied id wins; otherwise default to the deterministic
-	// per-org derivation so re-runs against the same org are stable
-	// (UNIQUE(org_id) handles idempotency either way; the predictable
-	// id is for tests + audit traces).
-	id := a.ID
-	if id == "" {
-		id = db.BootstrapAgentID(orgID)
-	}
+	// The row id is implementation-defined — always db.BootstrapAgentID(orgID).
+	// Caller-supplied a.ID is ignored. UNIQUE(org_id) here would catch
+	// a duplicate insert either way, but on conflict the caller's custom
+	// id would be silently dropped (we'd return the existing row's id
+	// instead), and the resulting "the id you asked for isn't the id you
+	// got" inconsistency is more surprising than just ignoring the field
+	// to start with. Matches the SQLite impl's stricter same-contract
+	// shape (where there's no UNIQUE constraint to catch the duplicate
+	// at all).
+	id := db.BootstrapAgentID(orgID)
 	// ON CONFLICT (org_id) DO NOTHING; the RETURNING clause is then
 	// empty on conflict, so we follow up with a SELECT to fetch the
 	// existing id when no row was inserted.

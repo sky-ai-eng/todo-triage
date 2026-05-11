@@ -55,8 +55,12 @@ type AgentStore interface {
 	// admin pool (BYPASSRLS) because the only legitimate caller is
 	// bootstrap; user-initiated agent creation isn't a v1 surface.
 	//
-	// Caller may leave Agent.ID empty — the impl fills it with
-	// BootstrapAgentID(orgID) for cross-backend id stability.
+	// Agent.ID on the input is IGNORED — the impl always uses
+	// BootstrapAgentID(orgID). Both backends honor this contract so
+	// GetForOrg can rely on the deterministic id (SQLite has no
+	// UNIQUE(org_id) constraint, so a caller-supplied custom id
+	// would create rows that GetForOrg's deterministic lookup could
+	// never reach). The returned id is the deterministic derivation.
 	Create(ctx context.Context, orgID string, a domain.Agent) (id string, err error)
 
 	// Update changes the agent's mutable metadata: display name,

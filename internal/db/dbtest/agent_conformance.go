@@ -80,6 +80,42 @@ func RunAgentStoreConformance(t *testing.T, factory AgentStoreFactory) {
 		}
 	})
 
+	t.Run("Create_IgnoresCallerSuppliedID", func(t *testing.T) {
+		// Regression: an earlier version of both impls let a caller-
+		// supplied a.ID override BootstrapAgentID(orgID). In SQLite
+		// (no UNIQUE(org_id)) that created rows GetForOrg's
+		// deterministic lookup couldn't reach AND let a subsequent
+		// empty-ID Create insert a second row. In Postgres the custom
+		// id was silently dropped on conflict, producing
+		// "the id you asked for isn't the id you got" surprises.
+		// Both backends now ignore a.ID and use the deterministic
+		// derivation; the returned id is the only id the row will
+		// ever have. This test pins that contract.
+		store, orgID := factory(t)
+		ctx := context.Background()
+		id, err := store.Create(ctx, orgID, domain.Agent{
+			ID:          "00000000-1111-2222-3333-444444444444",
+			DisplayName: "Custom",
+		})
+		if err != nil {
+			t.Fatalf("Create with caller-supplied ID: %v", err)
+		}
+		if id == "00000000-1111-2222-3333-444444444444" {
+			t.Fatal("Create returned caller's id; impl is honoring caller-supplied ID. Should ignore.")
+		}
+		// And GetForOrg must reach the row.
+		got, err := store.GetForOrg(ctx, orgID)
+		if err != nil {
+			t.Fatalf("GetForOrg: %v", err)
+		}
+		if got == nil {
+			t.Fatal("GetForOrg returned nil; caller-supplied ID created an unreachable row")
+		}
+		if got.ID != id {
+			t.Errorf("GetForOrg returned id=%q; Create returned id=%q; contract requires they match", got.ID, id)
+		}
+	})
+
 	t.Run("Create_DuplicateReturnsExistingID", func(t *testing.T) {
 		// Idempotency invariant. Bootstrap may run multiple times across
 		// boots; the second Create must NOT error and must NOT change

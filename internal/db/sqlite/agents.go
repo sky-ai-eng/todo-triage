@@ -59,13 +59,14 @@ func (s *agentStore) Create(ctx context.Context, orgID string, a domain.Agent) (
 		return "", err
 	}
 	now := time.Now().UTC()
-	// Caller may leave a.ID empty; the deterministic per-org id keeps
-	// re-runs idempotent without relying on a UNIQUE constraint that
-	// the SQLite shape doesn't have.
-	id := a.ID
-	if id == "" {
-		id = db.BootstrapAgentID(orgID)
-	}
+	// The row id is implementation-defined — always db.BootstrapAgentID(orgID).
+	// Caller-supplied a.ID is ignored. Allowing override would create a
+	// foot-gun: SQLite has no UNIQUE(org_id) column to enforce "one row
+	// per org" structurally, so a custom-id row would coexist with a
+	// later default-id Create and GetForOrg (which only reads by the
+	// derived id) would return the wrong one. Postgres has the same
+	// contract for symmetry.
+	id := db.BootstrapAgentID(orgID)
 	displayName := a.DisplayName
 	if displayName == "" {
 		displayName = "Triage Factory Bot"
