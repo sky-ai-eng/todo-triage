@@ -2669,13 +2669,13 @@ func TestRLS_NonAdminCannotInsertOrgVisible(t *testing.T) {
 	h := Shared(t)
 	h.Reset(t)
 
-	orgA, _, teamA := seedOrgWithUser(t, h, "alice")
+	orgA, alice, teamA := seedOrgWithUser(t, h, "alice")
 	carol := seedUser(t, h, "carol")
 	addOrgMember(t, h, carol, orgA, teamA, "member", "member") // org member but not admin
 
-	// Seed an entity + event so the task INSERTs below have a parent
-	// to reference (created via AdminDB so the seed bypasses the policy
-	// we're testing).
+	// Seed an entity + event + parent task + prompt so the task/runs
+	// INSERTs below have parents to reference (created via AdminDB so
+	// the seeds themselves bypass the policy we're testing).
 	entityA := seedEntity(t, h, orgA, "github", "octo/repo#org-insert")
 	var evtID string
 	if err := h.AdminDB.QueryRow(`
@@ -2683,6 +2683,9 @@ func TestRLS_NonAdminCannotInsertOrgVisible(t *testing.T) {
 	`, orgA, entityA).Scan(&evtID); err != nil {
 		t.Fatalf("seed event: %v", err)
 	}
+	// Parent task + prompt for the runs INSERT case below.
+	parentTaskID := seedTask(t, h, orgA, alice, entityA, "github:pr:opened")
+	parentPromptID := seedPrompt(t, h, orgA, alice, "p-org-insert")
 
 	// Each INSERT below would succeed without the admin gate (carol IS
 	// an org member, IS on teamA). The gate adds:
@@ -2705,6 +2708,12 @@ func TestRLS_NonAdminCannotInsertOrgVisible(t *testing.T) {
 			stmt: `INSERT INTO tasks (org_id, creator_user_id, team_id, visibility, entity_id, event_type, primary_event_id)
 				VALUES ($1, $2, $3, 'org', $4, 'github:pr:opened', $5)`,
 			args: []any{orgA, carol, teamA, entityA, evtID},
+		},
+		{
+			label: "runs",
+			stmt: `INSERT INTO runs (org_id, creator_user_id, team_id, visibility, task_id, prompt_id)
+				VALUES ($1, $2, $3, 'org', $4, $5)`,
+			args: []any{orgA, carol, teamA, parentTaskID, parentPromptID},
 		},
 		{
 			label: "prompts",

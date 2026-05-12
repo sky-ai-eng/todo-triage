@@ -224,18 +224,28 @@ func (s *promptStore) Get(ctx context.Context, orgID string, id string) (*domain
 
 func (s *promptStore) Create(ctx context.Context, orgID string, p domain.Prompt) error {
 	// creator_user_id is NOT NULL. Two execution contexts:
-	//   - Request path: WithTx has set request.jwt.claims, so
-	//     tf.current_user_id() returns the caller's UUID. That's
-	//     the right audit identity.
-	//   - System / deploy-time path (or tests against admin pool
-	//     with no claim): tf.current_user_id() returns NULL.
-	//     Fall back to the org's founder (orgs.owner_user_id) so
-	//     the constraint is always satisfied with a meaningful FK
-	//     target. "Org founder created this" is the natural reading
-	//     for anything written outside a user request.
+	//   - Production request path: WithTx has set request.jwt.claims,
+	//     so tf.current_user_id() returns the caller's UUID. That's
+	//     the audit identity, the value RLS prompts_insert checks
+	//     against (creator_user_id = tf.current_user_id()), and the
+	//     value persisted on the row.
+	//   - Tests configured with the admin pool as s.app (BYPASSRLS):
+	//     no JWT claims are set, so tf.current_user_id() is NULL.
+	//     RLS is bypassed entirely so the policy's creator-eq-caller
+	//     check doesn't run; the COALESCE fallback exists purely to
+	//     satisfy the column-level NOT NULL constraint by stamping
+	//     orgs.owner_user_id. The row reads "founder created this,"
+	//     which is the natural attribution when no user is on the
+	//     call.
+	//
+	// System / deploy-time seeding of shipped prompts goes through
+	// SeedOrUpdate on the admin pool, NOT through this method —
+	// shipped rows have creator_user_id NULL + visibility='org' per
+	// prompts_system_has_no_creator, which neither branch above
+	// supports. Don't read this fallback as a deploy-time path.
 	//
 	// team_id is derived from the caller's primary team membership;
-	// fallback to any team in the org for admin/system contexts. Post-
+	// fallback to any team in the org for admin/test contexts. Post-
 	// SKY-262 the team_visibility_requires_team CHECK requires team_id
 	// whenever visibility='team' (the new default).
 	_, err := s.app.ExecContext(ctx, `
