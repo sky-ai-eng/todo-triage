@@ -168,12 +168,17 @@ func SetTaskStatus(db *sql.DB, taskID, status string) error {
 // bot. Clears any existing user claim in the same UPDATE so the
 // XOR CHECK invariant holds throughout.
 func SetTaskClaimedByAgent(db *sql.DB, taskID, agentID string) error {
+	var claimedByAgentID any = agentID
+	if agentID == "" {
+		claimedByAgentID = nil
+	}
+
 	_, err := db.Exec(`
 		UPDATE tasks
 		   SET claimed_by_agent_id = ?,
 		       claimed_by_user_id  = NULL
 		 WHERE id = ?
-	`, agentID, taskID)
+	`, claimedByAgentID, taskID)
 	return err
 }
 
