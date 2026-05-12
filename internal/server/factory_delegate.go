@@ -199,36 +199,16 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delegate failed: no agent bootstrapped — set up the bot first"})
 		return
 	}
-	// Race-safe stamp: refuses to steal a user claim that landed
-	// during the race window between drag-to-bot and this UPDATE.
-	// If a user claimed the task simultaneously, return 409 — the
-	// bot's commitment never lands, and the user's claim wins.
-	// Same-agent rewrites are skipped as no-ops.
-	stampOK, serr := db.StampAgentClaimIfUnclaimed(s.db, task.ID, a.ID)
-	if serr != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "claim stamp failed: " + serr.Error()})
+	// HandoffAgentClaim handles all three legitimate factory drop
+	// transitions: unclaimed → bot, user-claimed-by-me → bot
+	// (a chip the user previously claimed via the Board), and the
+	// idempotent same-agent no-op. Refuses on a different-user
+	// claim — the factory drop shouldn't steal.
+	switch result, err := db.HandoffAgentClaim(s.db, task.ID, a.ID, runmode.LocalDefaultUserID); {
+	case err != nil:
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "claim stamp failed: " + err.Error()})
 		return
-	}
-	if !stampOK {
-		// Re-read to figure out who currently owns it.
-		cur, ferr := db.GetTask(s.db, task.ID)
-		if ferr != nil || cur == nil {
-			writeJSON(w, http.StatusConflict, map[string]string{
-				"error": "claim race lost; refetch task and retry",
-			})
-			return
-		}
-		if cur.ClaimedByUserID != "" {
-			writeJSON(w, http.StatusConflict, map[string]string{
-				"error": "task was claimed by a user during delegate; refusing to steal",
-			})
-			return
-		}
-		// Bot already owns it (e.g., a sibling factory drop landed
-		// first) — idempotent no-op, skip the broadcast and
-		// continue to the spawn so the user's gesture still gets
-		// a run if one isn't already underway.
-	} else {
+	case result == db.HandoffChanged:
 		s.ws.Broadcast(websocket.Event{
 			Type: "task_claimed",
 			Data: map[string]any{
@@ -237,6 +217,16 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 				"claimed_by_user_id":  "",
 			},
 		})
+	case result == db.HandoffNoOp:
+		// Bot already owns it (e.g., a sibling factory drop landed
+		// first). Skip the broadcast and continue to the spawn so
+		// the user's gesture still gets a run if one isn't already
+		// underway.
+	case result == db.HandoffRefused:
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "task is claimed by another user; refusing to steal",
+		})
+		return
 	}
 
 	// Now attempt the spawn. Delegate's failure modes (prompt not

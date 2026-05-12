@@ -7,8 +7,10 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
 // pendingApprovalFixture installs the full FK chain for a task whose
@@ -409,6 +411,73 @@ func TestHandleSwipe_ClaimAgainstBotClaimedIsTakeover(t *testing.T) {
 	}
 	if !claimedUser.Valid || claimedUser.String != runmode.LocalDefaultUserID {
 		t.Errorf("claimed_by_user_id = %v; want sentinel user", claimedUser)
+	}
+}
+
+// TestHandleSwipe_DelegateTransfersOwnUserClaim pins the SKY-133
+// flow: when the user drags their own claimed task from the You
+// lane to the Agent lane, the FE fires a delegate swipe. The
+// handler must accept the gesture as a legitimate user → bot
+// transfer, not refuse it as a stolen-claim race.
+//
+// This was broken in an earlier iteration where the delegate path
+// used a stamp helper that refused ANY non-NULL claimed_by_user_id
+// — HandoffAgentClaim is the post-fix helper that allows same-user
+// transfer while still refusing different-user theft.
+func TestHandleSwipe_DelegateTransfersOwnUserClaim(t *testing.T) {
+	s := newTestServer(t)
+	s.SetSpawner(delegate.NewSpawner(s.db, s.prompts, nil, nil, websocket.NewHub(), "haiku"))
+
+	// Seed a queued task already claimed by the local user — the
+	// pre-condition right before a You → Agent drag fires the
+	// delegate swipe.
+	const eventType = "github:pr:opened"
+	if _, err := s.db.Exec(
+		`INSERT INTO entities (id, source, source_id, kind, state)
+		 VALUES ('e_y2a', 'github', 'sky/repo#y2a', 'pr', 'active')`,
+	); err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO events (id, entity_id, event_type, dedup_key)
+		 VALUES ('ev_y2a', 'e_y2a', ?, '')`,
+		eventType,
+	); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
+		 VALUES ('task-y2a', 'e_y2a', ?, 'ev_y2a', 'queued', ?)`,
+		eventType, runmode.LocalDefaultUserID,
+	); err != nil {
+		t.Fatalf("seed user-claimed task: %v", err)
+	}
+
+	// Use a prompt id that won't resolve — the spawner will fail
+	// before producing a run, but the claim stamping is the part
+	// under test and that runs before the spawn. delegate_error in
+	// the response is expected; what we care about is that the
+	// transfer landed (claim flipped to bot).
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/task-y2a/swipe", map[string]any{
+		"action":        "delegate",
+		"hesitation_ms": 0,
+		"prompt_id":     "no-such-prompt",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (delegate accepted as user→bot transfer); body=%s", rec.Code, rec.Body.String())
+	}
+
+	var claimedAgent, claimedUser sql.NullString
+	if err := s.db.QueryRow(
+		`SELECT claimed_by_agent_id, claimed_by_user_id FROM tasks WHERE id = 'task-y2a'`,
+	).Scan(&claimedAgent, &claimedUser); err != nil {
+		t.Fatalf("scan task: %v", err)
+	}
+	if !claimedAgent.Valid || claimedAgent.String != runmode.LocalDefaultAgentID {
+		t.Errorf("claimed_by_agent_id = %v; want bot to have taken the claim", claimedAgent)
+	}
+	if claimedUser.Valid {
+		t.Errorf("claimed_by_user_id = %q; want NULL after transfer", claimedUser.String)
 	}
 }
 

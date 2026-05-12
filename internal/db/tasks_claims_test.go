@@ -132,7 +132,20 @@ func TestClaimQueuedTaskForUser_GuardsAgainstStealing(t *testing.T) {
 	// Second claim (different "user" — simulated via a synthetic id)
 	// must fail because the task is already claimed. The existing
 	// claim is preserved.
+	//
+	// Seed the synthetic user up front so the test exercises the
+	// WHERE guard rather than incidentally failing on the
+	// users(id) FK. Without the seed the test still passes
+	// today (the WHERE guard returns 0 rows so no FK check fires),
+	// but a future WHERE-guard regression would surface as an FK
+	// error instead of the proper "ok=true, claim stolen" signal.
 	intruder := "00000000-0000-0000-0000-0000000000ff"
+	if _, err := database.Exec(
+		`INSERT INTO users (id, display_name) VALUES (?, 'Intruder')`,
+		intruder,
+	); err != nil {
+		t.Fatalf("seed intruder user: %v", err)
+	}
 	ok, err = ClaimQueuedTaskForUser(database, task.ID, intruder)
 	if err != nil {
 		t.Fatalf("intruder claim: %v", err)
@@ -301,6 +314,127 @@ func TestStampAgentClaimIfUnclaimed(t *testing.T) {
 	if got.ClaimedByAgentID != "" {
 		t.Errorf("agent claim landed on top of user claim: got %q want empty", got.ClaimedByAgentID)
 	}
+}
+
+// TestHandoffAgentClaim covers all four cases of the user→bot
+// handoff helper: unclaimed lands, same-user-claim transfers, same-
+// agent is a no-op, different-user refuses. The "user-claimed →
+// bot" case is the load-bearing one — without it, the Board's
+// You → Agent drag (SKY-133) wouldn't work because the user's own
+// claim would block the bot stamp.
+func TestHandoffAgentClaim(t *testing.T) {
+	database := newTestDB(t)
+	seedLocalAgentForClaimTests(t, database)
+
+	// Helper: fresh task per subtest (the partial-unique index on
+	// (entity_id, event_type, dedup_key) would otherwise collide
+	// across cases).
+	mkTask := func(t *testing.T, suffix string) string {
+		t.Helper()
+		entity, _, err := FindOrCreateEntity(database, "github", "octo/repo#handoff-"+suffix, "pr", "Handoff "+suffix, "https://example.com/h-"+suffix)
+		if err != nil {
+			t.Fatalf("seed entity: %v", err)
+		}
+		eventID, err := RecordEvent(database, domain.Event{
+			EventType: domain.EventGitHubPROpened, EntityID: &entity.ID, MetadataJSON: `{}`,
+		})
+		if err != nil {
+			t.Fatalf("record event: %v", err)
+		}
+		task, _, err := FindOrCreateTask(database, entity.ID, domain.EventGitHubPROpened, "", eventID, 0.5)
+		if err != nil {
+			t.Fatalf("create task: %v", err)
+		}
+		return task.ID
+	}
+
+	t.Run("unclaimed lands as Changed", func(t *testing.T) {
+		taskID := mkTask(t, "unclaimed")
+		result, err := HandoffAgentClaim(database, taskID, runmode.LocalDefaultAgentID, runmode.LocalDefaultUserID)
+		if err != nil {
+			t.Fatalf("HandoffAgentClaim: %v", err)
+		}
+		if result != HandoffChanged {
+			t.Fatalf("result = %v, want HandoffChanged", result)
+		}
+		got, _ := GetTask(database, taskID)
+		if got.ClaimedByAgentID != runmode.LocalDefaultAgentID {
+			t.Errorf("agent claim not stamped: got %q", got.ClaimedByAgentID)
+		}
+	})
+
+	t.Run("same-user-claim transfers as Changed", func(t *testing.T) {
+		taskID := mkTask(t, "transfer")
+		if ok, err := ClaimQueuedTaskForUser(database, taskID, runmode.LocalDefaultUserID); err != nil || !ok {
+			t.Fatalf("pre-stage user claim: ok=%v err=%v", ok, err)
+		}
+		result, err := HandoffAgentClaim(database, taskID, runmode.LocalDefaultAgentID, runmode.LocalDefaultUserID)
+		if err != nil {
+			t.Fatalf("HandoffAgentClaim: %v", err)
+		}
+		if result != HandoffChanged {
+			t.Fatalf("result = %v, want HandoffChanged (same-user → bot transfer)", result)
+		}
+		got, _ := GetTask(database, taskID)
+		if got.ClaimedByAgentID != runmode.LocalDefaultAgentID {
+			t.Errorf("agent claim not stamped after transfer: got %q", got.ClaimedByAgentID)
+		}
+		if got.ClaimedByUserID != "" {
+			t.Errorf("user claim not cleared: got %q", got.ClaimedByUserID)
+		}
+	})
+
+	t.Run("same-agent is NoOp", func(t *testing.T) {
+		taskID := mkTask(t, "samebot")
+		if err := SetTaskClaimedByAgent(database, taskID, runmode.LocalDefaultAgentID); err != nil {
+			t.Fatalf("pre-stage bot claim: %v", err)
+		}
+		result, err := HandoffAgentClaim(database, taskID, runmode.LocalDefaultAgentID, runmode.LocalDefaultUserID)
+		if err != nil {
+			t.Fatalf("HandoffAgentClaim: %v", err)
+		}
+		if result != HandoffNoOp {
+			t.Errorf("result = %v, want HandoffNoOp (idempotent same-agent)", result)
+		}
+	})
+
+	t.Run("different-user refuses", func(t *testing.T) {
+		taskID := mkTask(t, "intruder")
+		// Seed a real users row for the FK — keeps the test FK-clean so
+		// the failure mode (if Handoff's WHERE guard regresses) is
+		// "ok=true claim stolen" instead of an incidental FK error.
+		const otherUserID = "00000000-0000-0000-0000-0000000009aa"
+		if _, err := database.Exec(
+			`INSERT INTO users (id, display_name) VALUES (?, 'Other User')`,
+			otherUserID,
+		); err != nil {
+			t.Fatalf("seed other user: %v", err)
+		}
+		if err := SetTaskClaimedByUser(database, taskID, otherUserID); err != nil {
+			t.Fatalf("pre-stage other user claim: %v", err)
+		}
+		result, err := HandoffAgentClaim(database, taskID, runmode.LocalDefaultAgentID, runmode.LocalDefaultUserID)
+		if err != nil {
+			t.Fatalf("HandoffAgentClaim: %v", err)
+		}
+		if result != HandoffRefused {
+			t.Errorf("result = %v, want HandoffRefused (different user owns it)", result)
+		}
+		got, _ := GetTask(database, taskID)
+		if got.ClaimedByUserID != otherUserID {
+			t.Errorf("other user's claim was overwritten: got %q want %q", got.ClaimedByUserID, otherUserID)
+		}
+	})
+
+	t.Run("missing task refuses", func(t *testing.T) {
+		result, err := HandoffAgentClaim(database, "no-such-task", runmode.LocalDefaultAgentID, runmode.LocalDefaultUserID)
+		if err != nil {
+			t.Fatalf("HandoffAgentClaim: %v", err)
+		}
+		if result != HandoffRefused {
+			t.Errorf("result = %v, want HandoffRefused for missing task", result)
+		}
+	})
 }
 
 // TestTakeoverClaimFromAgent pins the swipe-claim race-safe takeover

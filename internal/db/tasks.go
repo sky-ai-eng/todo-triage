@@ -250,6 +250,97 @@ func StampAgentClaimIfUnclaimed(db *sql.DB, taskID, agentID string) (bool, error
 	return n > 0, nil
 }
 
+// HandoffResult discriminates the three outcomes HandoffAgentClaim
+// can produce, so the caller can decide whether to broadcast on the
+// claim axis, skip broadcast (no-op), or surface a refusal as 409.
+type HandoffResult int
+
+const (
+	// HandoffChanged — claim actually moved (unclaimed → bot, or
+	// same-user → bot transfer). Caller broadcasts task_claimed.
+	HandoffChanged HandoffResult = iota
+	// HandoffNoOp — same agent already owns the task. Idempotent;
+	// caller skips the broadcast (and any sibling work like a
+	// duplicate run spawn if applicable).
+	HandoffNoOp
+	// HandoffRefused — a different user owns the task (or the task
+	// vanished mid-flight). Caller returns 409 — the gesture
+	// shouldn't steal.
+	HandoffRefused
+)
+
+// HandoffAgentClaim is the race-safe "user delegates to bot" helper.
+// Three legitimate inputs all land the task in the bot's lane:
+//
+//   - unclaimed → bot-claimed (matches the auto-trigger-style stamp).
+//   - user-claimed by THIS user → bot-claimed (explicit handoff: the
+//     Board's "You → Agent" drag, the swipe-up on a user-claimed
+//     card, factory drag-to-Agent on a card the user previously
+//     claimed).
+//   - bot-already-claimed by THIS agent → idempotent no-op.
+//
+// One refusal: a DIFFERENT user owns the task. The bot mustn't steal
+// what another teammate took on.
+//
+// All four cases resolve in a single guarded UPDATE; on 0 rows
+// affected the helper re-reads the row to differentiate no-op from
+// refused. (At N=1 the "different agent owns it" case isn't
+// reachable; if v2 multi-agent lands, that case currently falls
+// through to "stamp our agent" via the agent != $1 guard — revisit
+// the policy at that point.)
+//
+// This is distinct from StampAgentClaimIfUnclaimed: that helper is
+// for the AUTO-trigger path which has no user identity to transfer
+// from, so it refuses on any non-NULL claimed_by_user_id. Handoff
+// is for explicit user gestures where the user has a userID and
+// can legitimately transfer their own claim.
+func HandoffAgentClaim(db *sql.DB, taskID, agentID, userID string) (HandoffResult, error) {
+	if agentID == "" {
+		return HandoffRefused, fmt.Errorf("HandoffAgentClaim: empty agentID")
+	}
+	if userID == "" {
+		return HandoffRefused, fmt.Errorf("HandoffAgentClaim: empty userID")
+	}
+	res, err := db.Exec(`
+		UPDATE tasks
+		   SET claimed_by_agent_id = ?,
+		       claimed_by_user_id  = NULL
+		 WHERE id = ?
+		   AND (claimed_by_user_id  IS NULL OR claimed_by_user_id  = ?)
+		   AND (claimed_by_agent_id IS NULL OR claimed_by_agent_id != ?)
+	`, agentID, taskID, userID, agentID)
+	if err != nil {
+		return HandoffRefused, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return HandoffRefused, err
+	}
+	if n > 0 {
+		return HandoffChanged, nil
+	}
+	// 0 rows — re-read to figure out which guard tripped.
+	var curUser, curAgent sql.NullString
+	err = db.QueryRow(
+		`SELECT claimed_by_user_id, claimed_by_agent_id FROM tasks WHERE id = ?`,
+		taskID,
+	).Scan(&curUser, &curAgent)
+	if err == sql.ErrNoRows {
+		return HandoffRefused, nil
+	}
+	if err != nil {
+		return HandoffRefused, err
+	}
+	if curAgent.Valid && curAgent.String == agentID {
+		// Same agent already owns it — idempotent.
+		return HandoffNoOp, nil
+	}
+	// Either a different user owns it, or some other race state.
+	// Treat as refused so the caller doesn't accidentally proceed
+	// as if the claim landed.
+	return HandoffRefused, nil
+}
+
 // TakeoverClaimFromAgent atomically flips a bot-claimed task to a
 // user claim. Race-safe variant of SetTaskClaimedByUser for the
 // "user swipes claim on a bot-claimed task" path: guards on the

@@ -269,39 +269,24 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delegate failed: no agent bootstrapped — set up the bot first"})
 			return
 		}
-		// Race-safe stamp: refuses to steal a user claim that landed
-		// during the race window between swipe-up and this UPDATE.
-		// If a user claimed the task simultaneously, return 409 —
-		// the bot's commitment never lands, and the user's claim
-		// wins. Same-agent rewrites are skipped as no-ops (no
-		// redundant broadcast).
-		ok, err := db.StampAgentClaimIfUnclaimed(s.db, id, a.ID)
+		// HandoffAgentClaim covers all three legitimate user→bot
+		// transitions:
+		//   - unclaimed → bot (queue → Agent drag, swipe-up on an
+		//     unclaimed card)
+		//   - user-claimed-by-me → bot (the SKY-133 "You → Agent"
+		//     drag; user is explicitly transferring their own claim
+		//     to the bot)
+		//   - bot-already-claimed → no-op (idempotent)
+		// And one refusal: a DIFFERENT user owns it — the bot
+		// shouldn't steal what a teammate took on.
+		result, err := db.HandoffAgentClaim(s.db, id, a.ID, runmode.LocalDefaultUserID)
 		if err != nil {
 			log.Printf("[swipe] failed to stamp agent claim on task %s: %v", id, err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "claim stamp failed: " + err.Error()})
 			return
 		}
-		if !ok {
-			// Either a user beat us to it, or the bot already
-			// owns this task. Re-read to decide which.
-			cur, ferr := db.GetTask(s.db, id)
-			if ferr != nil || cur == nil {
-				// Refetch failed — treat as a race loss; let the FE
-				// reconcile via tasks_updated.
-				writeJSON(w, http.StatusConflict, map[string]string{
-					"error": "claim race lost; refetch task and retry",
-				})
-				return
-			}
-			if cur.ClaimedByUserID != "" {
-				writeJSON(w, http.StatusConflict, map[string]string{
-					"error": "task was claimed by a user during delegate; refusing to steal",
-				})
-				return
-			}
-			// Bot already owns it — idempotent no-op, fall through
-			// to the run-spawn step below without broadcasting.
-		} else {
+		switch result {
+		case db.HandoffChanged:
 			s.ws.Broadcast(websocket.Event{
 				Type: "task_claimed",
 				Data: map[string]any{
@@ -310,6 +295,14 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 					"claimed_by_user_id":  "",
 				},
 			})
+		case db.HandoffNoOp:
+			// Bot already owns it — fall through to the run-spawn
+			// step below without broadcasting.
+		case db.HandoffRefused:
+			writeJSON(w, http.StatusConflict, map[string]string{
+				"error": "task is claimed by another user; refusing to steal",
+			})
+			return
 		}
 	}
 
