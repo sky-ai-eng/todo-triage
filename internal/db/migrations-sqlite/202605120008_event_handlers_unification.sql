@@ -95,9 +95,9 @@ CREATE TABLE event_handlers (
 );
 
 CREATE UNIQUE INDEX event_handlers_id_org_unique ON event_handlers (id, org_id);
-CREATE INDEX idx_event_handlers_event_type_enabled ON event_handlers(event_type) WHERE enabled = 1;
-CREATE INDEX idx_event_handlers_kind ON event_handlers(kind);
-CREATE INDEX idx_event_handlers_prompt ON event_handlers(prompt_id) WHERE prompt_id IS NOT NULL;
+CREATE INDEX idx_event_handlers_event_type_enabled ON event_handlers(org_id, event_type) WHERE enabled = 1;
+CREATE INDEX idx_event_handlers_kind ON event_handlers(org_id, kind);
+CREATE INDEX idx_event_handlers_prompt ON event_handlers(org_id, prompt_id) WHERE prompt_id IS NOT NULL;
 
 -- ============================================================================
 -- (2) Backfill from task_rules and prompt_triggers, preserving IDs.
