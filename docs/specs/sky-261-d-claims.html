@@ -561,7 +561,7 @@ footer {
   <p>No RLS changes — the existing tasks + runs policies already gate on <code>org_id = tf.current_org_id()</code>; the new columns inherit row-level RLS.</p>
 
   <h3>SQLite</h3>
-  <p>No table rebuilds — all three columns go on via plain <code>ADD COLUMN</code> with inline column-level <code>REFERENCES</code>. The XOR CHECK is added via <code>ALTER TABLE ADD CHECK</code>, which SQLite supports without rebuild for non-table-level expression constraints.</p>
+  <p>The three new columns go on via plain <code>ADD COLUMN</code> with inline column-level <code>REFERENCES</code>. To enforce the XOR <code>CHECK</code> on <code>tasks</code>, SQLite requires rebuilding the <code>tasks</code> table, as described below.</p>
 
 <pre class="code"><span class="com">-- (1) Agents parity index.</span>
 <span class="kw">CREATE UNIQUE INDEX IF NOT EXISTS</span> agents_id_org_unique <span class="kw">ON</span> agents (id, org_id);
