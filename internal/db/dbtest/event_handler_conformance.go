@@ -205,6 +205,29 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		}
 	})
 
+	t.Run("Create_RejectsTriggerWithName", func(t *testing.T) {
+		// Defense-in-depth: the per-kind CHECK constraint forbids
+		// kind='trigger' with a non-NULL name. validateForCreate
+		// rejects the same shape earlier so the user gets a clearer
+		// error than the SQL integrity-violation surface.
+		store, orgID, seedPrompts := factory(t)
+		seedPrompts(t, "p-name-on-trigger")
+		breaker := 4
+		minAutonomy := 0.0
+		h := domain.EventHandler{
+			ID:                     uuid.New().String(),
+			Kind:                   domain.EventHandlerKindTrigger,
+			PromptID:               "p-name-on-trigger",
+			EventType:              domain.EventGitHubPRCICheckFailed,
+			BreakerThreshold:       &breaker,
+			MinAutonomySuitability: &minAutonomy,
+			Name:                   "shouldn't be here", // illegal on a trigger
+		}
+		if err := store.Create(context.Background(), orgID, h); err == nil {
+			t.Error("Create accepted a trigger with a non-empty name; want error")
+		}
+	})
+
 	t.Run("List_KindFilter", func(t *testing.T) {
 		store, orgID, seedPrompts := factory(t)
 		ctx := context.Background()

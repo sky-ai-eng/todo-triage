@@ -84,6 +84,7 @@ CREATE TABLE event_handlers (
       AND min_autonomy_suitability IS NOT NULL
       AND default_priority IS NULL
       AND sort_order IS NULL
+      AND name IS NULL
     )),
 
   -- System-row coherence: system rows have no human creator. Same shape

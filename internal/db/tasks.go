@@ -286,17 +286,25 @@ func GetTask(db *sql.DB, id string) (*domain.Task, error) {
 
 // QueuedTasks returns queued tasks ordered by the matching rule's
 // sort_order (category ordering) then priority_score DESC within each tier.
-// JOINs entities for display and event_handlers (kind='rule') for ordering.
-// Post-SKY-259 rules live in event_handlers; the JOIN filters on
-// kind='rule' so trigger rows (NULL sort_order) don't show up.
+// JOINs entities for display; the rule_order derived table picks the
+// MIN(sort_order) per event_type so the outer query stays one-row-per-task.
+//
+// A direct LEFT JOIN on event_handlers would multiply each task row by the
+// number of enabled kind='rule' handlers for its event_type — two rules on
+// the same event_type would surface every matching task twice with
+// nondeterministic ordering. The derived table collapses that to one row
+// per event_type before the join.
 func QueuedTasks(db *sql.DB) ([]domain.Task, error) {
 	return queryTasks(db, `
 		SELECT `+taskColumnsWithEntity+`
 		FROM tasks t
 		JOIN entities e ON t.entity_id = e.id
-		LEFT JOIN event_handlers tr ON t.event_type = tr.event_type
-		                            AND tr.enabled = 1
-		                            AND tr.kind = 'rule'
+		LEFT JOIN (
+			SELECT event_type, MIN(sort_order) AS sort_order
+			FROM event_handlers
+			WHERE enabled = 1 AND kind = 'rule'
+			GROUP BY event_type
+		) tr ON t.event_type = tr.event_type
 		WHERE t.status = 'queued'
 			AND (t.snooze_until IS NULL OR t.snooze_until <= datetime('now'))
 		ORDER BY COALESCE(tr.sort_order, 999) ASC, COALESCE(t.priority_score, 0.5) DESC

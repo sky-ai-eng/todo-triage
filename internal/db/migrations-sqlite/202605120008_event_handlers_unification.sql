@@ -91,6 +91,7 @@ CREATE TABLE event_handlers (
         AND min_autonomy_suitability IS NOT NULL
         AND default_priority IS NULL
         AND sort_order IS NULL
+        AND name IS NULL
     ))
 );
 
@@ -223,15 +224,16 @@ DROP TABLE task_rules;
 DROP TABLE prompt_triggers;
 
 -- ============================================================================
--- (6) Validate referential integrity before committing. Any dangling FK
---     surfaces here and aborts the migration.
+-- (6) Commit + re-enable foreign key enforcement.
+--
+--     SQLite's PRAGMA foreign_key_check would surface any dangling FK as
+--     a result-set row rather than as an error, so it can't abort a
+--     goose-driven migration on its own without an extra wrap. The
+--     structural safety net for this migration is the bootstrap-shape
+--     backfill tests + the conformance suite, which exercise the
+--     post-migration schema directly. We re-enable foreign_keys for
+--     the running connection so subsequent app writes are validated.
 -- ============================================================================
-
--- Note: PRAGMA foreign_key_check returns rows on violation rather than
--- raising an error. Goose treats it as a no-op statement; the structural
--- safety net is provided by the SELECT below — if it returns any row,
--- the next operation (a write that triggers FK validation) would fail.
--- The conformance tests cover the post-migration shape explicitly.
 
 COMMIT;
 

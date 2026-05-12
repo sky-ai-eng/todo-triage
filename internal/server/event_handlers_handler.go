@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"strings"
 
@@ -54,10 +55,18 @@ func (s *Server) handleEventHandlersList(w http.ResponseWriter, r *http.Request)
 
 // POST /api/event-handlers
 //
-// kind in body; per-kind fields are validated accordingly. Rule fields
-// (name, default_priority, sort_order) are required for kind=rule;
-// trigger fields (prompt_id, breaker_threshold, min_autonomy_suitability)
-// are required for kind=trigger.
+// kind in body; per-kind fields are validated accordingly.
+//
+//   - kind='rule':    name + event_type are required; default_priority
+//     defaults to 0.5 and sort_order to 0 when omitted.
+//     enabled defaults to true.
+//   - kind='trigger': prompt_id + event_type are required;
+//     breaker_threshold defaults to 4,
+//     min_autonomy_suitability to 0.0, enabled to false
+//     when omitted. The defaults are load-bearing for
+//     drag-to-create paths in the prompts UI that supply
+//     only the minimum identifying fields — match the
+//     pre-SKY-259 /api/triggers behavior.
 type createEventHandlerRequest struct {
 	Kind               string `json:"kind"`
 	EventType          string `json:"event_type"`
@@ -182,11 +191,22 @@ func (s *Server) handleEventHandlerCreate(w http.ResponseWriter, r *http.Request
 	}
 
 	if err := s.eventHandlers.Create(r.Context(), runmode.LocalDefaultOrg, h); err != nil {
+		// Driver-specific error strings ("UNIQUE constraint failed: ..." on
+		// SQLite, "duplicate key value violates unique constraint ..." on
+		// Postgres) leak schema names + index identifiers to clients.
+		// Sniff the substrings to classify but return a generic message;
+		// log the raw error for operators.
 		if strings.Contains(err.Error(), "UNIQUE constraint") || strings.Contains(err.Error(), "duplicate key") {
-			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			log.Printf("[event_handlers] create conflict (kind=%s, event_type=%s): %v", h.Kind, h.EventType, err)
+			writeJSON(w, http.StatusConflict, map[string]string{
+				"error": "An event handler with this configuration already exists.",
+			})
 			return
 		}
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		log.Printf("[event_handlers] create failed: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "Failed to create event handler.",
+		})
 		return
 	}
 	fresh, _ := s.eventHandlers.Get(r.Context(), runmode.LocalDefaultOrg, h.ID)

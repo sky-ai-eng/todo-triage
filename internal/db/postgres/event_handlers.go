@@ -522,7 +522,7 @@ func validateForCreate(h *domain.EventHandler) error {
 		if h.BreakerThreshold == nil || h.MinAutonomySuitability == nil {
 			return errors.New("event_handlers Create: trigger requires breaker_threshold and min_autonomy_suitability")
 		}
-		if h.DefaultPriority != nil || h.SortOrder != nil {
+		if h.DefaultPriority != nil || h.SortOrder != nil || h.Name != "" {
 			return errors.New("event_handlers Create: trigger must not populate rule-only fields")
 		}
 		// Normalize trigger_type — v1 only supports 'event'. Callers
