@@ -263,6 +263,108 @@ func TestMarkAgentRunTakenOver_AtomicRollsBackOnRaceLoss(t *testing.T) {
 	}
 }
 
+// TestMarkAgentRunTakenOver_AtomicRollsBackOnClaimRace pins the
+// second flavor of race-loss: the run flip succeeds (status not
+// terminal) but the task's claim has already moved out from under
+// us. Two staged variants — different-user claim and requeued
+// (both claim cols cleared) — exercise the WHERE clause's two
+// guards individually.
+//
+// Pre-fix MarkAgentRunTakenOver did the task UPDATE unconditionally
+// by task_id subquery, so a concurrent swipe-claim takeover or
+// /requeue between the run UPDATE and the task UPDATE would have
+// been silently overwritten. The post-fix guard refuses + rolls
+// the whole transaction back so neither the run nor the task is
+// mutated.
+func TestMarkAgentRunTakenOver_AtomicRollsBackOnClaimRace(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		stageTask func(t *testing.T, database *sql.DB, taskID, otherUserID string)
+	}{
+		{
+			name: "another_user_already_claimed",
+			stageTask: func(t *testing.T, database *sql.DB, taskID, otherUserID string) {
+				if err := SetTaskClaimedByUser(database, taskID, otherUserID); err != nil {
+					t.Fatalf("stage other-user claim: %v", err)
+				}
+			},
+		},
+		{
+			name: "task_was_requeued_clearing_bot_claim",
+			stageTask: func(t *testing.T, database *sql.DB, taskID, _ string) {
+				if _, err := database.Exec(
+					`UPDATE tasks SET claimed_by_agent_id = NULL, claimed_by_user_id = NULL WHERE id = ?`,
+					taskID,
+				); err != nil {
+					t.Fatalf("stage requeue: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			database := newTestDB(t)
+			runID := "run-claim-race-" + tc.name
+			taskID := takeoverFixture(t, database, runID, "running", "/tmp/triagefactory-runs/"+runID)
+
+			// Seed the agents row + the "other user" row up front
+			// so all FKs resolve regardless of which staging path
+			// the subtest takes.
+			if _, err := database.Exec(
+				`INSERT OR IGNORE INTO agents (id, org_id, display_name) VALUES (?, ?, 'Test Bot')`,
+				runmode.LocalDefaultAgentID, runmode.LocalDefaultOrgID,
+			); err != nil {
+				t.Fatalf("seed agent: %v", err)
+			}
+			const otherUserID = "00000000-0000-0000-0000-0000000007bb"
+			if _, err := database.Exec(
+				`INSERT INTO users (id, display_name) VALUES (?, 'Other User')`,
+				otherUserID,
+			); err != nil {
+				t.Fatalf("seed other user: %v", err)
+			}
+
+			// Start with bot claim. Stage the race by mutating to
+			// the concurrent-takeover/requeue post-state BEFORE
+			// calling MarkAgentRunTakenOver. The runs table still
+			// shows status='running', so the run UPDATE will pass
+			// its guard; only the task UPDATE's new claim guards
+			// should refuse.
+			if err := SetTaskClaimedByAgent(database, taskID, runmode.LocalDefaultAgentID); err != nil {
+				t.Fatalf("seed agent claim: %v", err)
+			}
+			tc.stageTask(t, database, taskID, otherUserID)
+
+			ok, err := MarkAgentRunTakenOver(database, runID, "/dest", runmode.LocalDefaultUserID)
+			if err != nil {
+				t.Fatalf("MarkAgentRunTakenOver: %v", err)
+			}
+			if ok {
+				t.Fatal("expected ok=false on claim-axis race-loss; tx should have rolled back")
+			}
+
+			// Run must be unchanged (status='running' from fixture).
+			run, err := GetAgentRun(database, runID)
+			if err != nil {
+				t.Fatalf("GetAgentRun: %v", err)
+			}
+			if run.Status != "running" {
+				t.Errorf("run.Status = %q; want 'running' (tx rollback should have reverted the run flip)", run.Status)
+			}
+
+			// Task claim must be unchanged from the staged state
+			// (not the LocalDefaultUserID we tried to flip to).
+			gotTask, err := GetTask(database, taskID)
+			if err != nil {
+				t.Fatalf("GetTask: %v", err)
+			}
+			if gotTask.ClaimedByUserID == runmode.LocalDefaultUserID {
+				t.Errorf("task.ClaimedByUserID = %q; want preserved (race-loss must not have stamped our user)",
+					gotTask.ClaimedByUserID)
+			}
+		})
+	}
+}
+
 // TestMarkAgentRunTakenOver_Active is the happy-path: an active run gets
 // marked taken_over with the right metadata and worktree_path is updated
 // to the takeover destination (so the row no longer points at the soon-

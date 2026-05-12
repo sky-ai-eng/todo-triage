@@ -210,6 +210,22 @@ func TestHandleFactoryDelegate_DelegateErrorPreservesClaim(t *testing.T) {
 	if task.ClaimedByAgentID == "" {
 		t.Errorf("task.ClaimedByAgentID empty; claim should be stamped despite spawn failure")
 	}
+
+	// Verify the swipe_events audit row was written even on the
+	// partial-success path. Pre-fix RecordSwipe only fired on the
+	// run-success path, leaving the user's drag-to-bot gesture
+	// audit-less when the spawn errored — inconsistent with swipe-
+	// delegate which audits at the top of the swipe handler.
+	var swipeCount int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM swipe_events WHERE task_id = ? AND action = 'delegate'`,
+		resp.TaskID,
+	).Scan(&swipeCount); err != nil {
+		t.Fatalf("scan swipe_events: %v", err)
+	}
+	if swipeCount != 1 {
+		t.Errorf("swipe_events count = %d, want 1 (audit must survive partial-success)", swipeCount)
+	}
 }
 
 // TestHandleFactoryDelegate_PendingTasksRoundtrip pins the snapshot →

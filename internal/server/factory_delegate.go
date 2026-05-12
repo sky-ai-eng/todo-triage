@@ -229,6 +229,21 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Record the swipe_events audit row BEFORE the spawn attempt.
+	// The audit captures the user's gesture (drag-to-bot), which is
+	// real regardless of whether the run materializes. The earlier
+	// "after-spawn-success only" placement meant partial-success
+	// gestures (claim stamped, spawn failed) had no audit trail —
+	// inconsistent with swipe-delegate (which audits at the top of
+	// the swipe handler) and with the SKY-261 B+ semantic that
+	// claim is commitment regardless of run outcome. RecordSwipe
+	// failure stays non-fatal because the claim col + WS broadcast
+	// already captured the state-level effect; the audit is best-
+	// effort.
+	if _, err := s.swipes.RecordSwipe(r.Context(), runmode.LocalDefaultOrg, task.ID, "delegate", 0); err != nil {
+		log.Printf("[factory] failed to record delegate swipe for task %s: %v", task.ID, err)
+	}
+
 	// Now attempt the spawn. Delegate's failure modes (prompt not
 	// found, DB error creating the run row) DON'T unstamp the claim
 	// — the user's commitment is real, the run just didn't fire.
@@ -239,15 +254,16 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	task.ClaimedByAgentID = a.ID
 	runID, err := s.spawner.Delegate(*task, req.PromptID, "manual", "")
 	if err != nil {
-		// Claim is already stamped (and broadcast). The run didn't
-		// fire — mirror the swipe-delegate convention: 200 OK with
-		// delegate_error populated and run_id empty. The FE reads
-		// delegate_error to render the "delegate didn't fire, retry"
-		// affordance on the now-bot-claimed card; refetch still fires
-		// so the Board picks up the new claim col + the task surfaces
-		// in the Agent lane immediately. Whether the underlying error
-		// was a 400-class (ErrPromptNotFound, ErrPromptUnspecified) or
-		// 500-class (DB, spawner internal) is irrelevant to the
+		// Claim is already stamped (and broadcast), swipe audit
+		// already recorded. The run didn't fire — mirror the
+		// swipe-delegate convention: 200 OK with delegate_error
+		// populated and run_id empty. The FE reads delegate_error
+		// to render the "delegate didn't fire, retry" affordance
+		// on the now-bot-claimed card; refetch still fires so the
+		// Board picks up the new claim col + the task surfaces in
+		// the Agent lane immediately. Whether the underlying error
+		// was a 400-class (ErrPromptNotFound, ErrPromptUnspecified)
+		// or 500-class (DB, spawner internal) is irrelevant to the
 		// caller — the response shape is the same.
 		writeJSON(w, http.StatusOK, factoryDelegateResponse{
 			TaskID:        task.ID,
@@ -256,15 +272,6 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 			ClaimStamped:  true,
 		})
 		return
-	}
-
-	// Run is real; commit the swipe_events audit row. RecordSwipe
-	// failure is non-fatal — the run is in flight and the claim is
-	// already stamped, so the gesture is fully captured at the
-	// state level even without the audit row.
-	if _, err := s.swipes.RecordSwipe(r.Context(), runmode.LocalDefaultOrg, task.ID, "delegate", 0); err != nil {
-		log.Printf("[factory] failed to record delegate swipe for task %s after run %s started: %v",
-			task.ID, runID, err)
 	}
 
 	writeJSON(w, http.StatusOK, factoryDelegateResponse{

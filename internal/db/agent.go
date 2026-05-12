@@ -297,11 +297,21 @@ func SetAgentRunSession(database *sql.DB, runID, sessionID string) error {
 // claimUserID="" is the legacy / test path: only the run is flipped.
 // Tests that pin run-flip behavior in isolation pass "".
 //
-// Returns ok=true when both UPDATEs landed; ok=false (no error) when
-// the run row was already in a terminal status — the caller treats
-// that as "the run finished on its own; takeover came too late" and
-// rolls back the worktree move. The race-loss case rolls back the
-// transaction before returning, so the task's claim is unchanged.
+// Returns ok=true when both UPDATEs landed; ok=false (no error) on
+// any race-loss, of which there are two flavors:
+//
+//   - run-race: the run row was already in a terminal status when
+//     we tried to flip it. "The run finished on its own; takeover
+//     came too late."
+//   - claim-race: the task's claim already moved out from under us
+//     (a concurrent swipe-claim takeover or /requeue) between our
+//     run UPDATE and our task UPDATE. The bot no longer owns the
+//     task, so the takeover's premise is gone.
+//
+// Both flavors trigger the deferred rollback, so neither the run
+// nor the task is mutated on race-loss. Caller treats ok=false the
+// same way regardless: call abortTakeover to clean up the worktree
+// copy and mark the run terminal.
 func MarkAgentRunTakenOver(database *sql.DB, runID, takeoverPath, claimUserID string) (bool, error) {
 	tx, err := database.Begin()
 	if err != nil {
@@ -341,13 +351,41 @@ func MarkAgentRunTakenOver(database *sql.DB, runID, takeoverPath, claimUserID st
 		// transaction guarantees the run's task_id is the one we
 		// just operated on (no race between the UPDATE and the
 		// subquery's SELECT).
-		if _, err := tx.Exec(`
+		//
+		// Race-safety guards on the task UPDATE itself: only fire
+		// when the bot still holds the claim AND no user has
+		// stepped in. In Postgres (READ COMMITTED) another
+		// transaction CAN commit changes to the task row between
+		// our run UPDATE and this task UPDATE — without the guards
+		// the takeover would silently overwrite a concurrent
+		// swipe-claim takeover or a /requeue's clear. SQLite's
+		// single-writer journal makes the race effectively
+		// impossible there, but Postgres needs the explicit
+		// protection. If the guards fail we return ok=false; the
+		// deferred rollback unwinds the run flip too, and the
+		// caller's abortTakeover cleans up the worktree move and
+		// marks the run terminal.
+		res, err := tx.Exec(`
 			UPDATE tasks
 			   SET claimed_by_user_id  = ?,
 			       claimed_by_agent_id = NULL
 			 WHERE id = (SELECT task_id FROM runs WHERE id = ?)
-		`, claimUserID, runID); err != nil {
+			   AND claimed_by_agent_id IS NOT NULL
+			   AND claimed_by_user_id  IS NULL
+		`, claimUserID, runID)
+		if err != nil {
 			return false, err
+		}
+		taskN, err := res.RowsAffected()
+		if err != nil {
+			return false, err
+		}
+		if taskN == 0 {
+			// Race-lost on the task claim axis. Roll the whole
+			// transaction back (including the run flip we just
+			// did). Same downstream cleanup as the run-race path:
+			// caller calls abortTakeover.
+			return false, nil
 		}
 	}
 
