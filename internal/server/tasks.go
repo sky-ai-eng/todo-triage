@@ -154,18 +154,41 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 	// lifecycle (status). Sticky claims past close preserve the
 	// audit shape: status='done' + claim populated = "this person
 	// or bot was on it when it finished."
+	//
+	// Errors here are surfaced as 500 so the client retries rather than
+	// silently diverging — RecordSwipe already updated status, so a
+	// silent claim-stamp failure would leave status+claim out of sync.
+	// Both UPDATEs are idempotent on retry. Full atomicity (single
+	// transaction across status + claim) would require extending
+	// SwipeStore.RecordSwipe to accept claim params; deferred.
 	switch req.Action {
 	case "claim":
 		if err := db.SetTaskClaimedByUser(s.db, id, runmode.LocalDefaultUserID); err != nil {
 			log.Printf("[swipe] failed to stamp user claim on task %s: %v", id, err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "claim stamp failed: " + err.Error()})
+			return
 		}
 	case "delegate":
-		if s.agents != nil {
-			if a, err := s.agents.GetForOrg(r.Context(), runmode.LocalDefaultOrg); err == nil && a != nil {
-				if err := db.SetTaskClaimedByAgent(s.db, id, a.ID); err != nil {
-					log.Printf("[swipe] failed to stamp agent claim on task %s: %v", id, err)
-				}
-			}
+		if s.agents == nil {
+			log.Printf("[swipe] agent claim skipped on task %s: AgentStore not configured", id)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delegate failed: agent store not configured"})
+			return
+		}
+		a, aerr := s.agents.GetForOrg(r.Context(), runmode.LocalDefaultOrg)
+		if aerr != nil {
+			log.Printf("[swipe] agent lookup failed on task %s delegate: %v", id, aerr)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delegate failed: agent lookup: " + aerr.Error()})
+			return
+		}
+		if a == nil {
+			log.Printf("[swipe] delegate aborted on task %s: no agent bootstrapped yet", id)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delegate failed: no agent bootstrapped — set up the bot first"})
+			return
+		}
+		if err := db.SetTaskClaimedByAgent(s.db, id, a.ID); err != nil {
+			log.Printf("[swipe] failed to stamp agent claim on task %s: %v", id, err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "claim stamp failed: " + err.Error()})
+			return
 		}
 	}
 

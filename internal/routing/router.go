@@ -304,30 +304,6 @@ func (r *Router) tryAutoDelegate(task *domain.Task, trigger domain.EventHandler,
 		return
 	}
 
-	// SKY-261 D-Claims: stamp agent claim now, after the breaker gate
-	// passed and BEFORE the entity gate decision. Both downstream
-	// branches (immediate fire AND queued via pending_firings) are
-	// committed-to-the-bot paths from this point — entity-busy just
-	// delays the fire, it doesn't cancel the commitment. The earlier
-	// gates (config.AI.AutoDelegateEnabled kill switch upstream,
-	// min_autonomy_suitability > 0 deferral, breaker trip just above)
-	// all return BEFORE this point, so a task whose run won't fire
-	// stays unclaimed — the Board correctly shows it as queue-for-
-	// human until autonomy is suitable / breaker clears / kill switch
-	// flips back on.
-	//
-	// The post-scoring re-derive path (ReDeriveAfterScoring) also lands
-	// here for deferred triggers — same stamp semantics apply.
-	if r.agents != nil {
-		if a, aerr := r.agents.GetForOrg(context.Background(), runmode.LocalDefaultOrg); aerr == nil && a != nil {
-			if serr := dbpkg.SetTaskClaimedByAgent(r.db, task.ID, a.ID); serr != nil {
-				log.Printf("[router] failed to stamp agent claim on task %s: %v", task.ID, serr)
-			} else {
-				task.ClaimedByAgentID = a.ID
-			}
-		}
-	}
-
 	// Per-entity gate. Closed if any auto run is active on the entity OR
 	// any pending_firings rows are already queued (FIFO fairness).
 	canFire, err := dbpkg.EntityCanFireImmediately(r.db, entityID)
@@ -345,6 +321,14 @@ func (r *Router) tryAutoDelegate(task *domain.Task, trigger domain.EventHandler,
 		if inserted {
 			log.Printf("[router] queued firing on entity %s (task %s, trigger %s) — entity busy",
 				entityID, task.ID, trigger.ID)
+			// SKY-261 D-Claims: pending firing landed in the queue,
+			// commit the task to the org's agent. Stamp here (after
+			// EnqueuePendingFiring succeeded) so a failed enqueue
+			// doesn't leave a phantom claim on an otherwise queued
+			// task. !inserted means a duplicate firing already in the
+			// queue — the original enqueue already stamped, no re-
+			// stamp needed.
+			r.stampAgentClaim(task)
 		} else {
 			log.Printf("[router] firing collapsed on entity %s (task %s, trigger %s) — duplicate already queued",
 				entityID, task.ID, trigger.ID)
@@ -354,7 +338,41 @@ func (r *Router) tryAutoDelegate(task *domain.Task, trigger domain.EventHandler,
 
 	if _, err := r.fireDelegate(task, trigger); err != nil {
 		log.Printf("[router] fire failed for task %s (trigger %s): %v", task.ID, trigger.ID, err)
+		return
 	}
+	// SKY-261 D-Claims: fireDelegate succeeded (run inserted + spawner
+	// goroutine launched) — stamp the agent claim. Done AFTER success
+	// so a fireDelegate that fails + reverts to status='queued'
+	// doesn't leave a phantom bot claim on a task that's back in the
+	// human-triage queue.
+	r.stampAgentClaim(task)
+}
+
+// stampAgentClaim writes claimed_by_agent_id on a task using the org's
+// agent row. SKY-261 D-Claims helper — called from the two commitment
+// points in tryAutoDelegate (post-fireDelegate success, post-
+// EnqueuePendingFiring success). Both paths converge on "the bot has
+// committed to this task." Nil-safe on r.agents and on GetForOrg
+// returning (nil, nil) — both leave the claim unstamped rather than
+// crashing, which matches the "transient seam between db init and
+// agent bootstrap" case noted in §4 of the spec.
+func (r *Router) stampAgentClaim(task *domain.Task) {
+	if r.agents == nil {
+		return
+	}
+	a, err := r.agents.GetForOrg(context.Background(), runmode.LocalDefaultOrg)
+	if err != nil {
+		log.Printf("[router] agent lookup failed for task %s claim stamp: %v", task.ID, err)
+		return
+	}
+	if a == nil {
+		return
+	}
+	if err := dbpkg.SetTaskClaimedByAgent(r.db, task.ID, a.ID); err != nil {
+		log.Printf("[router] failed to stamp agent claim on task %s: %v", task.ID, err)
+		return
+	}
+	task.ClaimedByAgentID = a.ID
 }
 
 // fireDelegate transitions the task to delegated status, broadcasts the
