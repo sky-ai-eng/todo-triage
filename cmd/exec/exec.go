@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/pressly/goose/v3"
+
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/gh"
 	jiraexec "github.com/sky-ai-eng/triage-factory/cmd/exec/jira"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/workspace"
@@ -37,6 +39,11 @@ func Handle(args []string) {
 		os.Exit(1)
 	}
 	defer conn.Close()
+	// Silence goose's per-invocation logging ("no migrations to run…")
+	// — exec runs on every delegated-agent tool call and the noise
+	// drowns out the actual command output. Migration errors still
+	// surface via the returned error.
+	goose.SetLogger(goose.NopLogger())
 	if err := db.Migrate(conn, "sqlite3"); err != nil {
 		fmt.Fprintf(os.Stderr, "error running migrations: %v\n", err)
 		os.Exit(1)
