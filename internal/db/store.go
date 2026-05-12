@@ -37,17 +37,12 @@ type Stores struct {
 	// credentials live in the OS keychain, not the DB).
 	Secrets SecretStore
 
-	// TaskRules owns the declarative task_rules table — what
-	// event-shaped situations should produce a Board card. The
-	// router reads via GetEnabledForEvent on every routed event;
-	// handlers do full CRUD.
-	TaskRules TaskRuleStore
-
-	// Triggers owns prompt_triggers — auto-delegation rules that fire
-	// a prompt on matching events. Companion to TaskRules; the two
-	// will eventually merge into event_handlers per SKY-259, but for
-	// now they ship as parallel stores with the same shape.
-	Triggers TriggerStore
+	// EventHandlers owns the unified event_handlers table (post-SKY-259):
+	// rules + triggers as one primitive with a kind discriminator.
+	// Rules create unclaimed tasks (human triage); triggers also fire
+	// an auto-delegation prompt. The router reads via GetEnabledForEvent
+	// on every routed event; handlers do full CRUD per kind.
+	EventHandlers EventHandlerStore
 
 	// Agents owns the agents table — the org's workload identity.
 	// One row per org. Bootstrap-only Create (admin pool in Postgres);
@@ -73,15 +68,14 @@ type Stores struct {
 // in the same transaction. Fields are added as their parent stores
 // land in successive waves.
 type TxStores struct {
-	Scores     ScoreStore
-	Prompts    PromptStore
-	Swipes     SwipeStore
-	Dashboard  DashboardStore
-	Secrets    SecretStore
-	TaskRules  TaskRuleStore
-	Triggers   TriggerStore
-	Agents     AgentStore
-	TeamAgents TeamAgentStore
+	Scores        ScoreStore
+	Prompts       PromptStore
+	Swipes        SwipeStore
+	Dashboard     DashboardStore
+	Secrets       SecretStore
+	EventHandlers EventHandlerStore
+	Agents        AgentStore
+	TeamAgents    TeamAgentStore
 }
 
 // TxRunner runs fn inside a single database transaction. Postgres

@@ -20,8 +20,9 @@ import (
 
 func TestHandleEvent_BecameAtomic_ExistingTask_NoDuplicate(t *testing.T) {
 	database := newTestDB(t)
-	if err := testTaskRuleStore(database).Seed(t.Context(), runmode.LocalDefaultOrg); err != nil {
-		t.Fatalf("seed task rules: %v", err)
+	seedHandlerFKTargets(t, database)
+	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrg); err != nil {
+		t.Fatalf("seed event handlers: %v", err)
 	}
 
 	entity, _, err := db.FindOrCreateEntity(database, "jira", "SKY-500", "issue",
@@ -69,7 +70,7 @@ func TestHandleEvent_BecameAtomic_ExistingTask_NoDuplicate(t *testing.T) {
 	atomicJSON, _ := json.Marshal(atomicMeta)
 
 	ws := websocket.NewHub()
-	router := NewRouter(database, testPromptStore(database), testTaskRuleStore(database), testTriggerStore(database), nil, noopScorer{}, ws)
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, noopScorer{}, ws)
 
 	router.HandleEvent(domain.Event{
 		EventType:    domain.EventJiraIssueBecameAtomic,
@@ -100,8 +101,9 @@ func TestHandleEvent_BecameAtomic_NoExistingTask_CreatesTask(t *testing.T) {
 	// the duplicate case — it doesn't break the normal belated-discovery
 	// flow.
 	database := newTestDB(t)
-	if err := testTaskRuleStore(database).Seed(t.Context(), runmode.LocalDefaultOrg); err != nil {
-		t.Fatalf("seed task rules: %v", err)
+	seedHandlerFKTargets(t, database)
+	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrg); err != nil {
+		t.Fatalf("seed event handlers: %v", err)
 	}
 
 	entity, _, err := db.FindOrCreateEntity(database, "jira", "SKY-501", "issue",
@@ -119,7 +121,7 @@ func TestHandleEvent_BecameAtomic_NoExistingTask_CreatesTask(t *testing.T) {
 	metaJSON, _ := json.Marshal(meta)
 
 	ws := websocket.NewHub()
-	router := NewRouter(database, testPromptStore(database), testTaskRuleStore(database), testTriggerStore(database), nil, noopScorer{}, ws)
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, noopScorer{}, ws)
 
 	router.HandleEvent(domain.Event{
 		EventType:    domain.EventJiraIssueBecameAtomic,

@@ -5,7 +5,7 @@ import BindingGraph from '../components/BindingGraph'
 import ForgivingBanner from '../components/ForgivingBanner'
 import TaskRuleEditor from '../components/TaskRuleEditor'
 import TriggerConfigPanel from '../components/TriggerConfigPanel'
-import type { PromptTrigger, TaskRule } from '../types'
+import type { TriggerHandler, RuleHandler } from '../types'
 
 export default function Prompts() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -13,7 +13,7 @@ export default function Prompts() {
   const [graphKey, setGraphKey] = useState(0)
 
   // Trigger config panel state.
-  const [editingTrigger, setEditingTrigger] = useState<PromptTrigger | null>(null)
+  const [editingTrigger, setEditingTrigger] = useState<TriggerHandler | null>(null)
 
   // Forgiving banner state.
   const [bannerEventType, setBannerEventType] = useState<string | null>(null)
@@ -49,19 +49,21 @@ export default function Prompts() {
   const handleTriggerDeleted = useCallback(async (eventType: string) => {
     try {
       const [triggersRes, rulesRes] = await Promise.all([
-        fetch('/api/triggers').then((r) => {
+        fetch('/api/event-handlers?kind=trigger').then((r) => {
           if (!r.ok) throw new Error()
           return r.json()
         }),
-        fetch('/api/task-rules').then((r) => {
+        fetch('/api/event-handlers?kind=rule').then((r) => {
           if (!r.ok) throw new Error()
           return r.json()
         }),
       ])
-      const hasTrigger = (triggersRes as PromptTrigger[]).some(
+      const hasTrigger = (triggersRes as TriggerHandler[]).some(
         (t) => t.event_type === eventType && t.enabled,
       )
-      const hasRule = (rulesRes as TaskRule[]).some((r) => r.event_type === eventType && r.enabled)
+      const hasRule = (rulesRes as RuleHandler[]).some(
+        (r) => r.event_type === eventType && r.enabled,
+      )
       if (!hasTrigger && !hasRule) {
         setBannerEventType(eventType)
       }

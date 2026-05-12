@@ -15,7 +15,7 @@ import {
   applyNodeChanges,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import type { Prompt, PromptTrigger } from '../types'
+import type { Prompt, TriggerHandler } from '../types'
 
 interface EventType {
   id: string
@@ -27,7 +27,7 @@ interface EventType {
 
 interface GraphProps {
   onPromptClick?: (promptId: string) => void
-  onTriggerClick?: (trigger: PromptTrigger) => void
+  onTriggerClick?: (trigger: TriggerHandler) => void
   onTriggerDeleted?: (eventType: string, predicate?: string | null) => void
 }
 
@@ -201,7 +201,7 @@ function saveLayout(layout: SavedLayout) {
 function BindingGraphInner({ onPromptClick, onTriggerClick, onTriggerDeleted }: GraphProps) {
   const [eventTypes, setEventTypes] = useState<EventType[]>([])
   const [prompts, setPrompts] = useState<Prompt[]>([])
-  const [triggers, setTriggers] = useState<PromptTrigger[]>([])
+  const [triggers, setTriggers] = useState<TriggerHandler[]>([])
   const [nodes, setNodes] = useState<Node[]>([])
   const [loading, setLoading] = useState(true)
   const [activeEventIds, setActiveEventIds] = useState<Set<string>>(new Set())
@@ -232,14 +232,14 @@ function BindingGraphInner({ onPromptClick, onTriggerClick, onTriggerDeleted }: 
       const [etRes, pRes, tRes] = await Promise.all([
         fetch('/api/event-types').then((r) => parseOrThrow(r, 'event-types')),
         fetch('/api/prompts').then((r) => parseOrThrow(r, 'prompts')),
-        fetch('/api/triggers').then((r) => parseOrThrow(r, 'triggers')),
+        fetch('/api/event-handlers?kind=trigger').then((r) => parseOrThrow(r, 'triggers')),
       ])
       setEventTypes(etRes)
       setPrompts(pRes)
       setTriggers(tRes)
 
       const saved = layoutRef.current
-      const boundIds = new Set((tRes as PromptTrigger[]).map((t) => t.event_type))
+      const boundIds = new Set((tRes as TriggerHandler[]).map((t) => t.event_type))
       const active = new Set<string>()
       for (const id of Object.keys(saved.eventPositions)) active.add(id)
       for (const id of boundIds) active.add(id)
@@ -263,7 +263,7 @@ function BindingGraphInner({ onPromptClick, onTriggerClick, onTriggerDeleted }: 
       const toDelete = triggersRef.current.filter((t) => t.event_type === eventTypeId)
       Promise.all(
         toDelete.map((t) =>
-          fetch(`/api/triggers/${encodeURIComponent(t.id)}`, { method: 'DELETE' }),
+          fetch(`/api/event-handlers/${encodeURIComponent(t.id)}`, { method: 'DELETE' }),
         ),
       ).then(() => {
         setActiveEventIds((prev) => {
@@ -388,10 +388,10 @@ function BindingGraphInner({ onPromptClick, onTriggerClick, onTriggerDeleted }: 
       if (!eventType || !promptId) return
 
       try {
-        await fetch('/api/triggers', {
+        await fetch('/api/event-handlers', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ prompt_id: promptId, event_type: eventType }),
+          body: JSON.stringify({ kind: 'trigger', prompt_id: promptId, event_type: eventType }),
         })
         fetchAll()
       } catch {
@@ -406,7 +406,7 @@ function BindingGraphInner({ onPromptClick, onTriggerClick, onTriggerDeleted }: 
       // Capture trigger info before deletion for the forgiving banner callback.
       const deleted = triggersRef.current.find((t) => t.id === triggerId)
       try {
-        await fetch(`/api/triggers/${encodeURIComponent(triggerId)}`, { method: 'DELETE' })
+        await fetch(`/api/event-handlers/${encodeURIComponent(triggerId)}`, { method: 'DELETE' })
         await fetchAll()
         // Notify parent so it can check coverage and show the forgiving banner.
         if (deleted) {

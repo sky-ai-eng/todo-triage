@@ -242,7 +242,7 @@ var orgScopedTables = []string{
 	"pending_firings",
 	"run_memory", "run_messages", "run_artifacts", "runs",
 	"task_events", "tasks",
-	"prompt_triggers", "task_rules",
+	"event_handlers",
 	"events", "entity_links", "entities",
 	"project_knowledge", "projects",
 	"repo_profiles", "poller_state",

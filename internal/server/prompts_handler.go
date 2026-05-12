@@ -157,8 +157,10 @@ func (s *Server) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Block deletion if the prompt is referenced by any auto-triggers
-	triggers, err := s.triggers.ListForPrompt(r.Context(), runmode.LocalDefaultOrg, id)
+	// Block deletion if the prompt is referenced by any auto-triggers.
+	// Post-SKY-259 triggers live in event_handlers with kind='trigger';
+	// ListForPrompt returns only those.
+	triggers, err := s.eventHandlers.ListForPrompt(r.Context(), runmode.LocalDefaultOrg, id)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

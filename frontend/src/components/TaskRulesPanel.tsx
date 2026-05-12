@@ -19,7 +19,7 @@ import {
 import { CSS } from '@dnd-kit/utilities'
 import EventBadge from './EventBadge'
 import TaskRuleEditor from './TaskRuleEditor'
-import type { TaskRule } from '../types'
+import type { RuleHandler } from '../types'
 import { toast } from './Toast/toastStore'
 import { readError } from '../lib/api'
 
@@ -29,9 +29,9 @@ interface TaskRulesPanelProps {
 }
 
 export default function TaskRulesPanel({ open, onClose }: TaskRulesPanelProps) {
-  const [rules, setRules] = useState<TaskRule[]>([])
+  const [rules, setRules] = useState<RuleHandler[]>([])
   const [loading, setLoading] = useState(false)
-  const [editingRule, setEditingRule] = useState<TaskRule | null>(null)
+  const [editingRule, setEditingRule] = useState<RuleHandler | null>(null)
   const [creating, setCreating] = useState(false)
   const [refreshKey, setRefreshKey] = useState(0)
 
@@ -51,7 +51,7 @@ export default function TaskRulesPanel({ open, onClose }: TaskRulesPanelProps) {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoading(true)
 
-    fetch('/api/task-rules')
+    fetch('/api/event-handlers?kind=rule')
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`)
         return r.json()
@@ -74,12 +74,12 @@ export default function TaskRulesPanel({ open, onClose }: TaskRulesPanelProps) {
   const refresh = useCallback(() => setRefreshKey((k) => k + 1), [])
 
   // Inline enabled toggle — optimistic update + PATCH.
-  const toggleEnabled = useCallback(async (rule: TaskRule) => {
+  const toggleEnabled = useCallback(async (rule: RuleHandler) => {
     const prev = rule.enabled
     setRules((rs) => rs.map((r) => (r.id === rule.id ? { ...r, enabled: !prev } : r)))
 
     try {
-      const res = await fetch(`/api/task-rules/${encodeURIComponent(rule.id)}`, {
+      const res = await fetch(`/api/event-handlers/${encodeURIComponent(rule.id)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled: !prev }),
@@ -106,7 +106,7 @@ export default function TaskRulesPanel({ open, onClose }: TaskRulesPanelProps) {
       setRules(reordered) // Optimistic
 
       try {
-        const res = await fetch('/api/task-rules/reorder', {
+        const res = await fetch('/api/event-handlers/reorder', {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(reordered.map((r) => r.id)),
@@ -236,7 +236,7 @@ function SortableRuleRow({
   onEdit,
   onToggle,
 }: {
-  rule: TaskRule
+  rule: RuleHandler
   onEdit: () => void
   onToggle: () => void
 }) {

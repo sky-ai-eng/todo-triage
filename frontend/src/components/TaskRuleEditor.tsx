@@ -4,12 +4,12 @@ import * as Tooltip from '@radix-ui/react-tooltip'
 import { X } from 'lucide-react'
 import PredicateEditor from './PredicateEditor'
 import Slider from './Slider'
-import type { TaskRule, EventType } from '../types'
+import type { RuleHandler, EventType } from '../types'
 import { toast } from './Toast/toastStore'
 
 interface TaskRuleEditorProps {
   open: boolean
-  rule: TaskRule | null // null = create mode
+  rule: RuleHandler | null // null = create mode
   prefillEventType?: string
   prefillPredicate?: string // JSON string, for forgiving banner pre-fill
   onClose: () => void
@@ -135,7 +135,7 @@ export default function TaskRuleEditor({
         }
 
         if (Object.keys(body).length > 0) {
-          const res = await fetch(`/api/task-rules/${encodeURIComponent(rule.id)}`, {
+          const res = await fetch(`/api/event-handlers/${encodeURIComponent(rule.id)}`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
@@ -146,8 +146,10 @@ export default function TaskRuleEditor({
           }
         }
       } else {
-        // POST — create.
+        // POST — create. kind='rule' tells the unified endpoint which
+        // per-kind shape to expect; without it the handler rejects.
         const body: Record<string, unknown> = {
+          kind: 'rule',
           event_type: eventType,
           name: name.trim(),
           default_priority: priority,
@@ -158,7 +160,7 @@ export default function TaskRuleEditor({
           body.scope_predicate_json = predicateJSON
         }
 
-        const res = await fetch('/api/task-rules', {
+        const res = await fetch('/api/event-handlers', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
@@ -195,7 +197,7 @@ export default function TaskRuleEditor({
     setDeleting(true)
     setError('')
     try {
-      const res = await fetch(`/api/task-rules/${encodeURIComponent(rule.id)}`, {
+      const res = await fetch(`/api/event-handlers/${encodeURIComponent(rule.id)}`, {
         method: 'DELETE',
       })
       if (!res.ok) {

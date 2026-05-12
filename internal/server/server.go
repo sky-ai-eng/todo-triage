@@ -24,8 +24,7 @@ type Server struct {
 	prompts            db.PromptStore
 	swipes             db.SwipeStore
 	dashboard          db.DashboardStore
-	taskRules          db.TaskRuleStore
-	triggers           db.TriggerStore
+	eventHandlers      db.EventHandlerStore
 	mux                *http.ServeMux
 	static             fs.FS
 	ws                 *websocket.Hub
@@ -77,16 +76,15 @@ func (s *Server) projectMutex(id string) *sync.Mutex {
 // argument list grows one store at a time as their callers migrate;
 // raw *sql.DB stays available for handlers that haven't been ported
 // to a store yet.
-func New(database *sql.DB, prompts db.PromptStore, swipes db.SwipeStore, dashboard db.DashboardStore, taskRules db.TaskRuleStore, triggers db.TriggerStore) *Server {
+func New(database *sql.DB, prompts db.PromptStore, swipes db.SwipeStore, dashboard db.DashboardStore, eventHandlers db.EventHandlerStore) *Server {
 	s := &Server{
-		db:        database,
-		prompts:   prompts,
-		swipes:    swipes,
-		dashboard: dashboard,
-		taskRules: taskRules,
-		triggers:  triggers,
-		mux:       http.NewServeMux(),
-		ws:        websocket.NewHub(),
+		db:            database,
+		prompts:       prompts,
+		swipes:        swipes,
+		dashboard:     dashboard,
+		eventHandlers: eventHandlers,
+		mux:           http.NewServeMux(),
+		ws:            websocket.NewHub(),
 	}
 	s.routes()
 	return s
@@ -195,17 +193,17 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/event-types", s.handleEventTypes)
 	s.mux.HandleFunc("GET /api/event-schemas", s.handleEventSchemasList)
 	s.mux.HandleFunc("GET /api/event-schemas/{event_type}", s.handleEventSchemaGet)
-	s.mux.HandleFunc("GET /api/triggers", s.handleTriggersList)
-	s.mux.HandleFunc("POST /api/triggers", s.handleTriggerCreate)
-	s.mux.HandleFunc("PUT /api/triggers/{id}", s.handleTriggerUpdate)
-	s.mux.HandleFunc("DELETE /api/triggers/{id}", s.handleTriggerDelete)
-	s.mux.HandleFunc("POST /api/triggers/{id}/toggle", s.handleTriggerToggle)
-
-	s.mux.HandleFunc("GET /api/task-rules", s.handleTaskRulesList)
-	s.mux.HandleFunc("POST /api/task-rules", s.handleTaskRuleCreate)
-	s.mux.HandleFunc("PUT /api/task-rules/reorder", s.handleTaskRuleReorder)
-	s.mux.HandleFunc("PATCH /api/task-rules/{id}", s.handleTaskRuleUpdate)
-	s.mux.HandleFunc("DELETE /api/task-rules/{id}", s.handleTaskRuleDelete)
+	// Unified event_handlers endpoints (SKY-259). Replace the former
+	// /api/task-rules + /api/triggers split — kind is passed as ?kind=
+	// on list, in the body on create, derived on update.
+	s.mux.HandleFunc("GET /api/event-handlers", s.handleEventHandlersList)
+	s.mux.HandleFunc("POST /api/event-handlers", s.handleEventHandlerCreate)
+	s.mux.HandleFunc("PUT /api/event-handlers/reorder", s.handleEventHandlerReorder)
+	s.mux.HandleFunc("PATCH /api/event-handlers/{id}", s.handleEventHandlerUpdate)
+	s.mux.HandleFunc("PUT /api/event-handlers/{id}", s.handleEventHandlerUpdate)
+	s.mux.HandleFunc("DELETE /api/event-handlers/{id}", s.handleEventHandlerDelete)
+	s.mux.HandleFunc("POST /api/event-handlers/{id}/toggle", s.handleEventHandlerToggle)
+	s.mux.HandleFunc("POST /api/event-handlers/{id}/promote", s.handleEventHandlerPromote)
 	s.mux.HandleFunc("GET /api/prompts", s.handlePromptsList)
 	s.mux.HandleFunc("POST /api/prompts", s.handlePromptCreate)
 	s.mux.HandleFunc("GET /api/prompts/{id}", s.handlePromptGet)
