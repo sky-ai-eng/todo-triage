@@ -36,6 +36,13 @@ type taskJSON struct {
 	AISummary           string   `json:"ai_summary,omitempty"`
 	PriorityReasoning   string   `json:"priority_reasoning,omitempty"`
 	CloseReason         string   `json:"close_reason,omitempty"`
+	// SnoozeUntil — populated when the task is in a snoozed state.
+	// SKY-261 B+: snooze is orthogonal to claim, so a claimed task
+	// can be snoozed (e.g., "bot owns this but wait until Tuesday").
+	// The Board renders snoozed cards with a "wakes at X" badge so
+	// the user sees them in their owner's lane (You / Agent) without
+	// needing a separate Snoozed column.
+	SnoozeUntil string `json:"snooze_until,omitempty"`
 	// OpenSubtaskCount lets the UI flag a task whose Jira entity has open
 	// subtasks — the "consider decomposing" signal (SKY-173). Zero for
 	// GitHub tasks and Jira tickets without subtasks.
@@ -43,6 +50,10 @@ type taskJSON struct {
 }
 
 func taskToJSON(t domain.Task) taskJSON {
+	snoozeUntil := ""
+	if t.SnoozeUntil != nil {
+		snoozeUntil = t.SnoozeUntil.Format(time.RFC3339)
+	}
 	return taskJSON{
 		ID:                  t.ID,
 		EntityID:            t.EntityID,
@@ -63,6 +74,7 @@ func taskToJSON(t domain.Task) taskJSON {
 		AISummary:           t.AISummary,
 		PriorityReasoning:   t.PriorityReasoning,
 		CloseReason:         t.CloseReason,
+		SnoozeUntil:         snoozeUntil,
 		OpenSubtaskCount:    t.OpenSubtaskCount,
 	}
 }

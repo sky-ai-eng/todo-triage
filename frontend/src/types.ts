@@ -21,6 +21,13 @@ export interface Task {
   ai_summary?: string
   priority_reasoning?: string
   close_reason?: string
+  // RFC3339 timestamp when the task is snoozed; absent/empty when
+  // it isn't. SKY-261 B+: claim is orthogonal to lifecycle, so a
+  // snoozed task can still be user- or bot-claimed (e.g., "bot owns
+  // this, but wait until Tuesday"). Board renders snoozed cards
+  // with a "wakes at X" badge in their owner's lane (You / Agent)
+  // rather than hiding them in a separate Snoozed column.
+  snooze_until?: string
   // Non-zero when the Jira entity has open subtasks (status not in
   // Done.Members). UI surfaces a "consider decomposing" hint when set —
   // the task was created before subtasks appeared, or the user added them

@@ -24,13 +24,25 @@ const TaskCard = forwardRef<HTMLDivElement, Props & React.HTMLAttributes<HTMLDiv
     // Normalize once so the condition and the prop share the same non-nullable
     // value — avoids the non-null assertion on a field typed as optional.
     const subtaskCount = task.open_subtask_count ?? 0
+    // SKY-261 B+: snooze is orthogonal to claim. A claimed-and-snoozed
+    // task is "owned by X, wait until Y" — first-class in the owner's
+    // lane (You / Agent) rather than hidden in a separate Snoozed column.
+    // We render the badge whenever snooze_until is in the future;
+    // past-time means the snooze has elapsed and the wake-on-bump path
+    // will move it back to status='queued' on the next event.
+    const snoozedUntil = parseFutureSnooze(task.snooze_until)
+    const isSnoozed = snoozedUntil !== null
 
     return (
       <div
         ref={ref}
         style={style}
         className={`bg-surface-raised backdrop-blur-xl border ${
-          delegateFailed ? 'border-snooze/40' : 'border-border-glass'
+          delegateFailed
+            ? 'border-snooze/40'
+            : isSnoozed
+              ? 'border-snooze/25 opacity-80'
+              : 'border-border-glass'
         } rounded-2xl p-4 shadow-sm shadow-black/[0.02] transition-shadow cursor-grab active:cursor-grabbing ${
           isDragging ? 'shadow-lg shadow-black/[0.08] border-accent/30 z-50' : ''
         }`}
@@ -40,6 +52,7 @@ const TaskCard = forwardRef<HTMLDivElement, Props & React.HTMLAttributes<HTMLDiv
           <SourceBadge task={task} />
           <EventBadge eventType={task.event_type} compact />
           {subtaskCount > 0 && <SubtaskHint count={subtaskCount} />}
+          {isSnoozed && <SnoozedBadge until={snoozedUntil} />}
           {delegateFailed && <DelegateFailedBadge message={delegateFailed.message} />}
         </div>
 
@@ -144,4 +157,48 @@ function DelegateFailedBadge({ message }: { message: string }) {
       delegate didn't fire
     </span>
   )
+}
+
+// SnoozedBadge surfaces "task is owned but parked until X." A claimed-
+// and-snoozed task lives in its owner's lane (You / Agent) — the
+// badge is the signal that the owner is deferring action, not that
+// the task is unowned. Uses the same snooze amber as DelegateFailed
+// + the muted card opacity to read "set aside on purpose."
+function SnoozedBadge({ until }: { until: Date }) {
+  return (
+    <span
+      title={`Snoozed until ${until.toLocaleString()}. Wakes automatically on next matching event, or via the Requeue affordance.`}
+      className="inline-flex items-center gap-1 rounded-full border border-snooze/30 bg-snooze/[0.08] px-1.5 py-0.5 text-[10px] font-medium text-snooze"
+    >
+      <span aria-hidden>⏾</span>
+      wakes {formatSnoozeUntil(until)}
+    </span>
+  )
+}
+
+// parseFutureSnooze returns the snooze target as a Date when the
+// task is currently snoozed (timestamp parseable + in the future).
+// Returns null otherwise — past timestamps mean the snooze has
+// elapsed and the wake-on-bump path will move the task back to
+// status='queued' on the next event; in the meantime we don't need
+// to render the badge as if the user still owns the deferral.
+function parseFutureSnooze(snoozeUntil: string | undefined): Date | null {
+  if (!snoozeUntil) return null
+  const d = new Date(snoozeUntil)
+  if (Number.isNaN(d.getTime())) return null
+  if (d.getTime() <= Date.now()) return null
+  return d
+}
+
+// formatSnoozeUntil prints "in 2h" / "in 3d" / "Mar 5" so the badge
+// stays compact. Coarse buckets only — the full timestamp lives in
+// the title attribute for hover-to-see.
+function formatSnoozeUntil(until: Date): string {
+  const diff = until.getTime() - Date.now()
+  const hours = Math.floor(diff / (1000 * 60 * 60))
+  if (hours < 1) return 'soon'
+  if (hours < 24) return `in ${hours}h`
+  const days = Math.floor(hours / 24)
+  if (days < 7) return `in ${days}d`
+  return until.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
