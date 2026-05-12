@@ -276,7 +276,7 @@ footer {
     </div>
     <div class="topbar__meta">
       <span class="pill pill--size">SIZE · M</span>
-      <span class="pill pill--draft">DRAFT v0.5</span>
+      <span class="pill pill--draft">DRAFT v0.6</span>
     </div>
   </div>
 </div>
@@ -284,7 +284,7 @@ footer {
 <header class="hero">
   <div class="sub">SKY-261 · sequenced after SKY-259 (shipped) · unblocks SKY-264 D-Predicate · finishes wiring SKY-260 D-Agent</div>
   <h1>D-Claims: task claim flow + run actor</h1>
-  <p class="lede">Three nullable FKs. <code>tasks.claimed_by_agent_id</code> and <code>tasks.claimed_by_user_id</code> are mutually exclusive (CHECK) — together they form the "currently responsible" axis. <code>runs.actor_agent_id</code> is the immutable audit pointer stamped by the spawner. Status stays orthogonal: it tracks lifecycle (queued/delegated/closed), the claim columns track responsibility, the "queue view" is a derived filter. No column on <code>event_handlers</code> — in v1 the kind discriminator is enough; v2 multi-agent picks its own shape.</p>
+  <p class="lede">Three nullable FKs. <code>tasks.claimed_by_agent_id</code> and <code>tasks.claimed_by_user_id</code> are mutually exclusive (CHECK) — together they form the "currently responsible" axis. <code>runs.actor_agent_id</code> is the immutable audit pointer stamped by the spawner. Status stays orthogonal but narrowed: it tracks genuine lifecycle (queued / snoozed / done / dismissed), with <code>'claimed'</code> and <code>'delegated'</code> dropped as denormalizations now that the claim columns carry responsibility. The "queue view" is a derived filter on unclaimed-and-active rows. No column on <code>event_handlers</code> — in v1 the kind discriminator is enough; v2 multi-agent picks its own shape.</p>
   <div class="hero__meta">
     <span class="meta-pill"><strong>SCOPE</strong> · 1 PG + 1 SQLite migration · router + spawner + delegate/claim/takeover handlers · Board's per-member filter</span>
     <span class="meta-pill"><strong>XOR</strong> · <code>CHECK (claimed_by_agent_id IS NULL OR claimed_by_user_id IS NULL)</code></span>
@@ -366,7 +366,7 @@ footer {
     <div class="axes-cell axes-cell--status">
       <h6>1. Lifecycle (existing)</h6>
       <div class="col">tasks.status</div>
-      <div class="ctx">Macro-states: <code>queued</code>, <code>delegated</code>, <code>closed</code>, <code>snoozed</code>, etc. Already exists. <strong>Unchanged in this PR.</strong> Does NOT enumerate "user-claimed-but-not-closed" — that's a claim-col concern.</div>
+      <div class="ctx">Macro-states: <code>queued</code>, <code>snoozed</code>, <code>done</code>, <code>dismissed</code>. <code>'claimed'</code> and <code>'delegated'</code> are dropped in this PR — both were denormalizations of responsibility, which now lives on the claim cols. Does NOT enumerate "user-claimed-but-not-closed" — that's a claim-col concern.</div>
     </div>
     <div class="axes-cell axes-cell--claim">
       <h6>2. Responsibility (new)</h6>
@@ -381,7 +381,7 @@ footer {
   </div>
 
   <div class="callout callout--good">
-    <strong>The queue view is a derived filter, not a status value.</strong> "What's in the queue" = <code>WHERE claimed_by_agent_id IS NULL AND claimed_by_user_id IS NULL AND status NOT IN ('closed', 'snoozed')</code>. Team-scoped via the existing <code>team_id</code> + visibility/RLS. A user claiming a queued task is a claim-column transition, not a status change. This is what makes the "user claims without involving the bot" case clean — no new status enum value needed.
+    <strong>The queue view is a derived filter, not a status value.</strong> "What's in the queue" = <code>WHERE claimed_by_agent_id IS NULL AND claimed_by_user_id IS NULL AND status NOT IN ('done', 'dismissed', 'snoozed')</code>. Team-scoped via the existing <code>team_id</code> + visibility/RLS. A user claiming a queued task is a claim-column transition, not a status change. This is what makes the "user claims without involving the bot" case clean — no new status enum value needed.
   </div>
 </section>
 
@@ -445,7 +445,7 @@ footer {
 <section class="block" id="flow">
   <div class="section-label">§4</div>
   <h2>State transitions</h2>
-  <p class="lede">Every transition is small and explicit. The XOR CHECK is the safety net.</p>
+  <p class="lede">Every transition is small and explicit. The XOR CHECK is the safety net. Status never moves on claim or delegate — those gestures change responsibility (claim cols) only. Status only moves on genuine lifecycle changes: snooze, done, dismiss.</p>
 
   <table class="matrix">
     <thead><tr>
@@ -467,7 +467,7 @@ footer {
         <td>Trigger match (auto-delegate)</td>
         <td><strong>org agent</strong></td>
         <td>NULL</td>
-        <td>queued → delegated</td>
+        <td>queued (unchanged)</td>
         <td>org agent (stamped at spawn)</td>
       </tr>
       <tr>
@@ -481,21 +481,21 @@ footer {
         <td>User drags queued task → bot</td>
         <td><strong>org agent</strong></td>
         <td>NULL</td>
-        <td>queued → delegated</td>
+        <td>queued (unchanged)</td>
         <td>org agent (stamped at spawn)</td>
       </tr>
       <tr>
         <td>User takes over a bot-running task</td>
         <td>NULL (cleared)</td>
         <td><strong>user (set)</strong></td>
-        <td>delegated (unchanged)</td>
+        <td>queued (unchanged)</td>
         <td>org agent (unchanged — immutable)</td>
       </tr>
       <tr>
-        <td>Task closes (any path)</td>
+        <td>User snoozes / completes / dismisses</td>
         <td>unchanged (sticky)</td>
         <td>unchanged (sticky)</td>
-        <td>→ closed</td>
+        <td>→ snoozed / done / dismissed</td>
         <td>unchanged</td>
       </tr>
       <tr>
@@ -509,7 +509,7 @@ footer {
   </table>
 
   <div class="callout callout--good">
-    <strong>Sticky claims past close.</strong> When a task closes, the claim columns are not cleared. They become the audit answer to "who was responsible when this finished?" Lifecycle's <code>status='closed'</code> + <code>closed_at</code> + <code>close_reason</code> tell the lifecycle story; <code>claimed_by_*</code> tell the responsibility story; <code>runs.actor_agent_id</code> tells the execution story. Three answers, three axes.
+    <strong>Sticky claims past close.</strong> When a task closes (<code>status='done'</code> or <code>'dismissed'</code>), the claim columns are not cleared. They become the audit answer to "who was responsible when this finished?" Lifecycle's <code>status</code> + <code>closed_at</code> + <code>close_reason</code> tell the lifecycle story; <code>claimed_by_*</code> tell the responsibility story; <code>runs.actor_agent_id</code> tells the execution story. Three answers, three axes.
   </div>
 
   <div class="callout callout--warn">
@@ -637,13 +637,12 @@ actorAgentID := task.ClaimedByAgentID
 <span class="com">// INSERT runs(..., actor_agent_id) VALUES (..., $N)</span></pre>
 
   <h3>3. User-delegate handler — drag-to-bot / "Delegate"</h3>
-  <p>The HTTP handler that today flips <code>task.status = 'delegated'</code> and spawns a run (lives in <code>internal/server/tasks_handler.go</code> / swipe handler / delegate handler — wherever the relevant action wires up) gains one UPDATE in the same transaction:</p>
+  <p>The HTTP handler that handles "delegate this task to the bot" (swipe-right / drag-to-Agent-column / factory drop on runs-tray) stamps the agent claim BEFORE attempting the spawn. Status is not touched — the task remains <code>'queued'</code> on the lifecycle axis; only the claim col flips. A failed spawn doesn't unstamp the claim: commitment is real even when execution didn't fire, and the Board renders a "delegate failed, retry" affordance on the bot-claimed card.</p>
 <pre class="code"><span class="kw">UPDATE</span> tasks
    <span class="kw">SET</span> claimed_by_agent_id = $1,        <span class="com">-- org's agent.id</span>
-       claimed_by_user_id  = <span class="kw">NULL</span>,    <span class="com">-- XOR safety; usually already NULL</span>
-       status              = <span class="str">'delegated'</span>
+       claimed_by_user_id  = <span class="kw">NULL</span>     <span class="com">-- XOR safety; usually already NULL</span>
  <span class="kw">WHERE</span> id = $2 <span class="kw">AND</span> org_id = $3
-   <span class="kw">AND</span> status <span class="kw">NOT IN</span> (<span class="str">'closed'</span>, <span class="str">'snoozed'</span>);</pre>
+   <span class="kw">AND</span> status <span class="kw">NOT IN</span> (<span class="str">'done'</span>, <span class="str">'dismissed'</span>, <span class="str">'snoozed'</span>);</pre>
 
   <h3>4. User-claim handler — "I'll take this myself"</h3>
   <p>A new endpoint (or extension of an existing claim/take action — TBD with the UI). Pure claim-col write, no status change:</p>
@@ -682,7 +681,7 @@ actorAgentID := task.ClaimedByAgentID
 <span class="kw">WHERE</span> t.org_id = $org_id <span class="kw">AND</span> t.team_id = $team_id
   <span class="kw">AND</span> (
     <span class="com">-- Currently responsible (active only)</span>
-    (t.status <span class="kw">NOT IN</span> (<span class="str">'closed'</span>, <span class="str">'snoozed'</span>) <span class="kw">AND</span> (
+    (t.status <span class="kw">NOT IN</span> (<span class="str">'done'</span>, <span class="str">'dismissed'</span>, <span class="str">'snoozed'</span>) <span class="kw">AND</span> (
       (<span class="str">$kind</span> = <span class="str">'user'</span>  <span class="kw">AND</span> t.claimed_by_user_id  = $member_id) <span class="kw">OR</span>
       (<span class="str">$kind</span> = <span class="str">'agent'</span> <span class="kw">AND</span> t.claimed_by_agent_id = $member_id)
     ))
@@ -785,7 +784,7 @@ actorAgentID := task.ClaimedByAgentID
     </li>
     <li>
       <span class="step-title">Tests + lint + ship</span>
-      <span class="step-body"><code>go test ./... &amp;&amp; ./scripts/lint.sh &amp;&amp; cd frontend &amp;&amp; npm run build &amp;&amp; cd .. &amp;&amp; go build</code>. Smoke test the full state machine: queue → trigger fires → delegated → close (claim sticks); queue → user claims → still queued (status) but claim_by_user populated; queue → user delegates → delegated; bot run → takeover → claim flips, run preserved.</span>
+      <span class="step-body"><code>go test ./... &amp;&amp; ./scripts/lint.sh &amp;&amp; cd frontend &amp;&amp; npm run build &amp;&amp; cd .. &amp;&amp; go build</code>. Smoke test the full state machine: queue → trigger fires → still queued + bot-claimed → close (claim sticks); queue → user claims → still queued + user-claimed; queue → user delegates → still queued + bot-claimed; bot run → takeover → user-claim flips, run preserved.</span>
     </li>
   </ol>
 </section>
@@ -838,7 +837,7 @@ actorAgentID := task.ClaimedByAgentID
     <li><span class="tag tag--green">PASS</span> Trigger match: task has <code>claimed_by_agent_id = org's agent</code>, <code>claimed_by_user_id = NULL</code>; resulting run has <code>actor_agent_id = org's agent</code>.</li>
     <li><span class="tag tag--green">PASS</span> Rule match: task has both claim cols NULL; status = queued; appears in the queue view.</li>
     <li><span class="tag tag--green">PASS</span> User claims a queued task: <code>claimed_by_user_id = user</code>, <code>claimed_by_agent_id = NULL</code>, status unchanged. Task drops out of the queue view. No run spawned.</li>
-    <li><span class="tag tag--green">PASS</span> User drags queued task → bot: <code>claimed_by_agent_id = org's agent</code>, status → delegated, run spawns with <code>actor_agent_id = org's agent</code>.</li>
+    <li><span class="tag tag--green">PASS</span> User drags queued task → bot: <code>claimed_by_agent_id = org's agent</code>, status unchanged (stays <code>'queued'</code>), run spawns with <code>actor_agent_id = org's agent</code>.</li>
     <li><span class="tag tag--green">PASS</span> User takes over an active bot run: <code>claimed_by_agent_id</code> → NULL, <code>claimed_by_user_id</code> → user (atomic); <code>runs.actor_agent_id</code> unchanged.</li>
     <li><span class="tag tag--green">PASS</span> Task close (any path): claim columns sticky — preserve the responsibility audit alongside <code>closed_at</code> + <code>close_reason</code>.</li>
     <li><span class="tag tag--green">PASS</span> Per-member Board filter: same query shape returns sensible result sets for both user and bot chips in a synthetic scenario (mixed rule, trigger, user-claim, takeover history).</li>
@@ -855,7 +854,7 @@ actorAgentID := task.ClaimedByAgentID
 </main>
 
 <footer>
-  SKY-261 · D-Claims · v0.5 · 2026-05-12
+  SKY-261 · D-Claims · v0.6 · 2026-05-12
 </footer>
 </body>
 </html>

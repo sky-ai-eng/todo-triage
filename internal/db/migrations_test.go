@@ -551,6 +551,169 @@ func TestMigrate_PreRunnerInstallErrors(t *testing.T) {
 	}
 }
 
+// TestMigrate_DClaimsCleanupBackfillsClaimFromPendingFirings covers the
+// upgrade case where pre-existing pending_firings reference tasks
+// that stayed in status='queued' (the firing was queued behind a busy
+// entity, not promoted to 'delegated' yet). After SKY-261 D-Claims,
+// the drainer (router.attemptDrainOne) refuses to fire unless the
+// task carries a bot claim. Without the backfill, every legacy firing
+// would be silently skipped as stale on first post-upgrade boot.
+//
+// The 202605120011_d_claims_status_cleanup.sql migration's step (3)
+// stamps claimed_by_agent_id on any task with a 'pending' firing and
+// both claim cols still NULL. This test pins that behavior.
+func TestMigrate_DClaimsCleanupBackfillsClaimFromPendingFirings(t *testing.T) {
+	database := openMigrationsTestDB(t)
+
+	// Step up to D-Claims (claim cols exist) but not cleanup yet.
+	migrateUpTo(t, database, 202605120010)
+
+	// Seed: an agent row so step (3)'s subquery has something to
+	// stamp; a queued task with NULL claim cols; a pending_firing
+	// pointing at the task. FKs are disabled for the bulk seed so we
+	// don't have to materialize the entire entity/event/handler graph
+	// — the backfill UPDATE only reads tasks.id and pending_firings'
+	// task_id/org_id/status, none of which need their FK targets to
+	// resolve for the assertion. We re-enable before stepping forward.
+	if _, err := database.Exec(`PRAGMA foreign_keys=OFF`); err != nil {
+		t.Fatalf("disable FKs for seed: %v", err)
+	}
+	const orgID = runmode.LocalDefaultOrgID
+	if _, err := database.Exec(
+		`INSERT INTO agents (id, org_id, display_name) VALUES (?, ?, 'Test Bot')`,
+		runmode.LocalDefaultAgentID, orgID,
+	); err != nil {
+		t.Fatalf("seed agent: %v", err)
+	}
+	if _, err := database.Exec(
+		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, org_id, creator_user_id, visibility)
+		 VALUES ('task-legacy', 'entity-x', 'pr_review_requested', 'event-x', 'queued', ?, ?, 'team')`,
+		orgID, runmode.LocalDefaultUserID,
+	); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+	if _, err := database.Exec(
+		`INSERT INTO pending_firings (org_id, entity_id, task_id, trigger_id, triggering_event_id, status)
+		 VALUES (?, 'entity-x', 'task-legacy', 'trigger-x', 'event-x', 'pending')`,
+		orgID,
+	); err != nil {
+		t.Fatalf("seed legacy pending_firing: %v", err)
+	}
+	// Also seed a firing on a non-existent task — the EXISTS clause
+	// has to be the gate, not a SELECT-LEFT-JOIN that would silently
+	// stamp every claim-NULL task in the table.
+	if _, err := database.Exec(
+		`INSERT INTO pending_firings (org_id, entity_id, task_id, trigger_id, triggering_event_id, status)
+		 VALUES (?, 'entity-y', 'task-other', 'trigger-x', 'event-x', 'fired')`,
+		orgID,
+	); err != nil {
+		t.Fatalf("seed fired pending_firing: %v", err)
+	}
+	// And a task with no firing at all — must stay unclaimed.
+	if _, err := database.Exec(
+		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, org_id, creator_user_id, visibility)
+		 VALUES ('task-naked', 'entity-y', 'pr_review_requested', 'event-y', 'queued', ?, ?, 'team')`,
+		orgID, runmode.LocalDefaultUserID,
+	); err != nil {
+		t.Fatalf("seed naked task: %v", err)
+	}
+	if _, err := database.Exec(`PRAGMA foreign_keys=ON`); err != nil {
+		t.Fatalf("re-enable FKs: %v", err)
+	}
+
+	// Apply cleanup + every subsequent migration.
+	if err := Migrate(database, "sqlite3"); err != nil {
+		t.Fatalf("Migrate forward through cleanup: %v", err)
+	}
+
+	var claimedAgent sql.NullString
+	if err := database.QueryRow(
+		`SELECT claimed_by_agent_id FROM tasks WHERE id = 'task-legacy'`,
+	).Scan(&claimedAgent); err != nil {
+		t.Fatalf("read task post-migration: %v", err)
+	}
+	if !claimedAgent.Valid {
+		t.Fatal("claimed_by_agent_id is still NULL — pending-firing backfill didn't fire; legacy automations would be dropped on upgrade")
+	}
+	if claimedAgent.String != runmode.LocalDefaultAgentID {
+		t.Errorf("claimed_by_agent_id = %q, want %q (the org's agent)",
+			claimedAgent.String, runmode.LocalDefaultAgentID)
+	}
+
+	// The naked task (no pending firing) must NOT be stamped — that
+	// would over-claim and put unrelated queued work into the bot's
+	// lane on upgrade.
+	var nakedClaim sql.NullString
+	if err := database.QueryRow(
+		`SELECT claimed_by_agent_id FROM tasks WHERE id = 'task-naked'`,
+	).Scan(&nakedClaim); err != nil {
+		t.Fatalf("read naked task: %v", err)
+	}
+	if nakedClaim.Valid {
+		t.Errorf("naked task picked up a claim (%q) — backfill EXISTS clause is too permissive", nakedClaim.String)
+	}
+}
+
+// TestMigrate_DClaimsCleanupSkipsBackfillWhenClaimAlreadySet is the
+// guard side of the backfill: a task that ALREADY carries a user
+// claim (or a bot claim, e.g. because step 2 just stamped it) must
+// not be reclaimed by step 3. The UPDATE gates on both claim cols
+// being NULL precisely to be idempotent here.
+func TestMigrate_DClaimsCleanupSkipsBackfillWhenClaimAlreadySet(t *testing.T) {
+	database := openMigrationsTestDB(t)
+	migrateUpTo(t, database, 202605120010)
+
+	if _, err := database.Exec(`PRAGMA foreign_keys=OFF`); err != nil {
+		t.Fatalf("disable FKs for seed: %v", err)
+	}
+	const orgID = runmode.LocalDefaultOrgID
+	if _, err := database.Exec(
+		`INSERT INTO agents (id, org_id, display_name) VALUES (?, ?, 'Test Bot')`,
+		runmode.LocalDefaultAgentID, orgID,
+	); err != nil {
+		t.Fatalf("seed agent: %v", err)
+	}
+	// Task ALREADY claimed by the user. The backfill must not touch
+	// this row even though a pending firing references it (an unusual
+	// but possible state — manual claim raced with the trigger's
+	// firing enqueue pre-upgrade).
+	if _, err := database.Exec(
+		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id, org_id, creator_user_id, visibility)
+		 VALUES ('task-user-claimed', 'entity-x', 'pr_review_requested', 'event-x', 'queued', ?, ?, ?, 'team')`,
+		runmode.LocalDefaultUserID, orgID, runmode.LocalDefaultUserID,
+	); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+	if _, err := database.Exec(
+		`INSERT INTO pending_firings (org_id, entity_id, task_id, trigger_id, triggering_event_id, status)
+		 VALUES (?, 'entity-x', 'task-user-claimed', 'trigger-x', 'event-x', 'pending')`,
+		orgID,
+	); err != nil {
+		t.Fatalf("seed pending_firing: %v", err)
+	}
+	if _, err := database.Exec(`PRAGMA foreign_keys=ON`); err != nil {
+		t.Fatalf("re-enable FKs: %v", err)
+	}
+
+	if err := Migrate(database, "sqlite3"); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	var claimedAgent sql.NullString
+	var claimedUser sql.NullString
+	if err := database.QueryRow(
+		`SELECT claimed_by_agent_id, claimed_by_user_id FROM tasks WHERE id = 'task-user-claimed'`,
+	).Scan(&claimedAgent, &claimedUser); err != nil {
+		t.Fatalf("read task post-migration: %v", err)
+	}
+	if claimedAgent.Valid {
+		t.Errorf("claimed_by_agent_id = %q; want NULL (XOR violation: user already claimed)", claimedAgent.String)
+	}
+	if !claimedUser.Valid || claimedUser.String != runmode.LocalDefaultUserID {
+		t.Errorf("claimed_by_user_id = %v; want preserved as the original user", claimedUser)
+	}
+}
+
 func tableExists(t *testing.T, db *sql.DB, name string) bool {
 	t.Helper()
 	var n int

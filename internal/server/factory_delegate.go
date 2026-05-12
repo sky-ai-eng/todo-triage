@@ -222,10 +222,10 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, delegate.ErrPromptNotFound) || errors.Is(err, delegate.ErrPromptUnspecified) {
 			status = http.StatusBadRequest
 		}
-		writeJSON(w, status, map[string]string{
+		writeJSON(w, status, map[string]any{
 			"error":         err.Error(),
 			"task_id":       task.ID,
-			"claim_stamped": "true",
+			"claim_stamped": true,
 		})
 		return
 	}
