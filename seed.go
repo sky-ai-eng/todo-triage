@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"log"
 
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
@@ -30,7 +29,7 @@ import (
 // Order matters: prompts seed first so the FK from
 // event_handlers.prompt_id → prompts.id is satisfied for shipped
 // trigger rows.
-func seedDefaultPrompts(database *sql.DB, prompts db.PromptStore, handlers db.EventHandlerStore) {
+func seedDefaultPrompts(prompts db.PromptStore, handlers db.EventHandlerStore) {
 	ctx := context.Background()
 
 	// TODO(SKY-246 wave 4): when OrgStore lands, replace this hard-coded

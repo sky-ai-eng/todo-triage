@@ -304,7 +304,7 @@ func main() {
 	if err := db.SeedEventTypes(database); err != nil {
 		log.Fatalf("failed to seed event types: %v", err)
 	}
-	seedDefaultPrompts(database, stores.Prompts, stores.EventHandlers)
+	seedDefaultPrompts(stores.Prompts, stores.EventHandlers)
 
 	// Bootstrap the local-mode agent identity (SKY-260 D-Agent). One
 	// agents row + one team_agents row for the synthetic LocalDefaultOrg

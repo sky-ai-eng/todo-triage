@@ -391,17 +391,30 @@ func findVisibleImportedPromptByContent(ctx context.Context, database *sql.DB, n
 
 func hideDuplicateImportedPrompts(ctx context.Context, database *sql.DB, prompts db.PromptStore) (int, error) {
 	// Post-SKY-259: prompt_triggers folded into event_handlers with
-	// kind='trigger'. The LEFT JOIN filter pins to that kind so rules
-	// don't count toward the "is this prompt actively used by a trigger"
-	// signal — rules never carry a prompt_id.
+	// kind='trigger'. The LEFT JOIN must also match on org_id — both
+	// tables carry org_id post-SKY-269, and the Postgres composite FK
+	// from event_handlers.(prompt_id, org_id) → prompts.(id, org_id)
+	// means a trigger in org A and a prompt with the same id in org B
+	// would otherwise be counted as referencing each other.
+	//
+	// The outer query is also scoped to the local org explicitly:
+	// ImportAll is local-mode only today (the skills runner reads
+	// ~/.claude/skills which is a per-machine concept), so pinning the
+	// SELECT to LocalDefaultOrg keeps the trigger_count tenant-correct
+	// here and avoids leaking imported prompts from any other org_id
+	// that might exist in the same DB during tests.
 	rows, err := database.QueryContext(ctx, `
 		SELECT p.id, p.name, p.body, p.allowed_tools, COUNT(t.id) AS trigger_count
 		FROM prompts p
-		LEFT JOIN event_handlers t ON t.prompt_id = p.id AND t.kind = 'trigger'
+		LEFT JOIN event_handlers t
+		       ON t.prompt_id = p.id
+		      AND t.org_id   = p.org_id
+		      AND t.kind     = 'trigger'
 		WHERE p.source = 'imported' AND p.hidden = 0
+		  AND p.org_id = ?
 		GROUP BY p.id, p.name, p.body, p.allowed_tools, p.updated_at, p.created_at
 		ORDER BY trigger_count DESC, p.updated_at DESC, p.created_at DESC, p.id ASC
-	`)
+	`, runmode.LocalDefaultOrg)
 	if err != nil {
 		return 0, err
 	}
