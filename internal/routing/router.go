@@ -710,8 +710,31 @@ func (r *Router) reDeriveTask(taskID string) {
 		return
 	}
 
-	// Only re-derive queued tasks — claimed/delegated/done are already handled.
+	// Only re-derive queued tasks. Post-SKY-261 B+ the lifecycle axis
+	// collapsed to {queued, snoozed, done, dismissed} so this gate
+	// also has to cover snoozed (a snoozed task is on a "wait" until
+	// its wake-on-bump event lands; a deferred-threshold re-derive
+	// should not bypass that signal). done/dismissed naturally fall
+	// out of the != "queued" check.
 	if task.Status != "queued" {
+		return
+	}
+
+	// Re-derive must not promote a task that's already claimed. After
+	// SKY-261 B+ the responsibility axis lives on the claim cols, not
+	// status — so a queued task may still be "already taken" by either
+	// the bot (auto-delegate already fired and enqueued a firing, or
+	// drag-to-bot stamped) or a user ("I'll take this myself" claim).
+	// Without this guard, re-derive could:
+	//   - stamp an agent claim onto a user-claimed task (XOR violation
+	//     blocked at the DB level, but the visible state would be a
+	//     spurious 500 log + WS toast)
+	//   - fire a second bot run on a task the bot is already
+	//     committed to (duplicate firing, breaker noise)
+	// Either claim col set = "not the re-derive's business; the
+	// commitment is real and the lifecycle event that ends the
+	// commitment will arrive via its own path."
+	if task.ClaimedByAgentID != "" || task.ClaimedByUserID != "" {
 		return
 	}
 

@@ -174,11 +174,19 @@ func TestReDeriveAfterScoring_BelowThreshold_Skips(t *testing.T) {
 	}
 }
 
-func TestReDeriveAfterScoring_AlreadyDelegated_Skips(t *testing.T) {
+// TestReDeriveAfterScoring_BotClaimed_Skips covers the post-SKY-261 B+
+// shape of "already delegated": the responsibility axis lives on
+// claimed_by_agent_id, not on status='delegated' (which is gone).
+// Re-derive must skip claim-stamped tasks regardless of their status
+// — they're not the re-derive's business. Without this guard, a
+// queued-but-bot-claimed task would fire a duplicate firing on every
+// re-derive cycle.
+func TestReDeriveAfterScoring_BotClaimed_Skips(t *testing.T) {
 	database := newTestDB(t)
 	taskID, _ := setupReDeriveScenario(t, database, 0.6)
 
-	// Score above threshold
+	// Score above threshold so the re-derive's autonomy gate would
+	// otherwise let the trigger fire.
 	err := updateScores(t, database, []domain.TaskScoreUpdate{{
 		ID:                  taskID,
 		PriorityScore:       0.5,
@@ -189,19 +197,130 @@ func TestReDeriveAfterScoring_AlreadyDelegated_Skips(t *testing.T) {
 		t.Fatalf("update scores: %v", err)
 	}
 
-	// Manually set task to delegated
-	if err := db.SetTaskStatus(database, taskID, "delegated"); err != nil {
-		t.Fatalf("set status: %v", err)
+	// Seed the local-sentinel agent row to satisfy the FK on
+	// claimed_by_agent_id. setupReDeriveScenario doesn't bootstrap
+	// agents — drain_test.go does the same inline seed.
+	if _, err := database.Exec(
+		`INSERT OR IGNORE INTO agents (id, org_id, display_name) VALUES (?, ?, 'Test Bot')`,
+		runmode.LocalDefaultAgentID, runmode.LocalDefaultOrgID,
+	); err != nil {
+		t.Fatalf("seed agent: %v", err)
+	}
+	// Stamp the bot claim — task stays status='queued' but the
+	// responsibility axis is committed.
+	if err := db.SetTaskClaimedByAgent(database, taskID, runmode.LocalDefaultAgentID); err != nil {
+		t.Fatalf("stamp agent claim: %v", err)
 	}
 
 	ws := websocket.NewHub()
 	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, noopScorer{}, ws)
 	router.ReDeriveAfterScoring([]string{taskID})
 
-	// Should still be delegated — re-derive skipped it
+	// Task still bot-claimed, no second firing enqueued.
 	task, _ := db.GetTask(database, taskID)
-	if task.Status != "delegated" {
-		t.Errorf("expected delegated (untouched), got %s", task.Status)
+	if task.ClaimedByAgentID != runmode.LocalDefaultAgentID {
+		t.Errorf("ClaimedByAgentID = %q, want %q (re-derive must not clear claim)", task.ClaimedByAgentID, runmode.LocalDefaultAgentID)
+	}
+	if task.Status != "queued" {
+		t.Errorf("Status = %q, want queued", task.Status)
+	}
+	firings, err := db.ListPendingFiringsForEntity(database, task.EntityID)
+	if err != nil {
+		t.Fatalf("list firings: %v", err)
+	}
+	if len(firings) != 0 {
+		t.Errorf("re-derive enqueued %d firing(s) on bot-claimed task; want 0", len(firings))
+	}
+}
+
+// TestReDeriveAfterScoring_UserClaimed_Skips is the human-side guard:
+// when a user has claimed a task ("I'll take this myself") the
+// re-derive must not promote it to a bot run, which would also trip
+// the XOR CHECK at the DB level (stamping agent claim on top of a
+// user claim). The skip happens BEFORE the would-be DB write so the
+// XOR is never tested; this test pins that earlier exit.
+func TestReDeriveAfterScoring_UserClaimed_Skips(t *testing.T) {
+	database := newTestDB(t)
+	taskID, _ := setupReDeriveScenario(t, database, 0.6)
+
+	err := updateScores(t, database, []domain.TaskScoreUpdate{{
+		ID:                  taskID,
+		PriorityScore:       0.5,
+		AutonomySuitability: 0.9,
+		Summary:             "test",
+	}})
+	if err != nil {
+		t.Fatalf("update scores: %v", err)
+	}
+
+	ok, err := db.ClaimQueuedTaskForUser(database, taskID, runmode.LocalDefaultUserID)
+	if err != nil || !ok {
+		t.Fatalf("stamp user claim: ok=%v err=%v", ok, err)
+	}
+
+	ws := websocket.NewHub()
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, noopScorer{}, ws)
+	router.ReDeriveAfterScoring([]string{taskID})
+
+	task, _ := db.GetTask(database, taskID)
+	if task.ClaimedByUserID != runmode.LocalDefaultUserID {
+		t.Errorf("ClaimedByUserID = %q; want %q (re-derive must not clear user claim)", task.ClaimedByUserID, runmode.LocalDefaultUserID)
+	}
+	if task.ClaimedByAgentID != "" {
+		t.Errorf("ClaimedByAgentID = %q; want empty (re-derive must not steal a user-claimed task)", task.ClaimedByAgentID)
+	}
+	firings, err := db.ListPendingFiringsForEntity(database, task.EntityID)
+	if err != nil {
+		t.Fatalf("list firings: %v", err)
+	}
+	if len(firings) != 0 {
+		t.Errorf("re-derive enqueued %d firing(s) on user-claimed task; want 0", len(firings))
+	}
+}
+
+// TestReDeriveAfterScoring_Snoozed_Skips guards the lifecycle axis:
+// status='snoozed' is a "do not act" signal. A snoozed task should
+// not be promoted to a bot run by re-derive, even if its score
+// crosses the threshold — the wake-on-bump path is the correct path
+// to revive the task, not a deferred re-derive.
+func TestReDeriveAfterScoring_Snoozed_Skips(t *testing.T) {
+	database := newTestDB(t)
+	taskID, _ := setupReDeriveScenario(t, database, 0.6)
+
+	err := updateScores(t, database, []domain.TaskScoreUpdate{{
+		ID:                  taskID,
+		PriorityScore:       0.5,
+		AutonomySuitability: 0.9,
+		Summary:             "test",
+	}})
+	if err != nil {
+		t.Fatalf("update scores: %v", err)
+	}
+
+	if _, err := database.Exec(
+		`UPDATE tasks SET status='snoozed', snooze_until='2099-01-01 00:00:00' WHERE id = ?`,
+		taskID,
+	); err != nil {
+		t.Fatalf("snooze task: %v", err)
+	}
+
+	ws := websocket.NewHub()
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, noopScorer{}, ws)
+	router.ReDeriveAfterScoring([]string{taskID})
+
+	task, _ := db.GetTask(database, taskID)
+	if task.Status != "snoozed" {
+		t.Errorf("Status = %q; want snoozed (re-derive must not touch snoozed task)", task.Status)
+	}
+	if task.ClaimedByAgentID != "" {
+		t.Errorf("ClaimedByAgentID = %q; want empty", task.ClaimedByAgentID)
+	}
+	firings, err := db.ListPendingFiringsForEntity(database, task.EntityID)
+	if err != nil {
+		t.Fatalf("list firings: %v", err)
+	}
+	if len(firings) != 0 {
+		t.Errorf("re-derive enqueued %d firing(s) on snoozed task; want 0", len(firings))
 	}
 }
 
