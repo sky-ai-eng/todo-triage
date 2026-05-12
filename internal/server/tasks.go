@@ -168,6 +168,18 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "claim stamp failed: " + err.Error()})
 			return
 		}
+		// SKY-261 B+: broadcast on the claim axis (not the status
+		// axis). The Board listens for task_claimed to re-render the
+		// per-claim lanes; status didn't change so task_updated would
+		// be misleading.
+		s.ws.Broadcast(websocket.Event{
+			Type: "task_claimed",
+			Data: map[string]any{
+				"task_id":             id,
+				"claimed_by_agent_id": "",
+				"claimed_by_user_id":  runmode.LocalDefaultUserID,
+			},
+		})
 	case "delegate":
 		if s.agents == nil {
 			log.Printf("[swipe] agent claim skipped on task %s: AgentStore not configured", id)
@@ -190,6 +202,14 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "claim stamp failed: " + err.Error()})
 			return
 		}
+		s.ws.Broadcast(websocket.Event{
+			Type: "task_claimed",
+			Data: map[string]any{
+				"task_id":             id,
+				"claimed_by_agent_id": a.ID,
+				"claimed_by_user_id":  "",
+			},
+		})
 	}
 
 	// Dismiss is a terminal state — if the user swipes away a task mid-run

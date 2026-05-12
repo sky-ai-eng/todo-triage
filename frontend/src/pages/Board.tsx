@@ -171,6 +171,16 @@ export default function Board() {
         if (event.type === 'tasks_updated' || event.type === 'scoring_completed') {
           fetchTasks()
         }
+        // SKY-261 B+: task_claimed fires when claim columns change
+        // (delegate, user-claim, takeover, requeue). The Board's per-
+        // claim lanes are derived from claim cols, so any claim-axis
+        // change requires a refetch to re-bucket cards across lanes.
+        // task_updated stays for genuine status transitions (done,
+        // dismissed, snoozed) which also re-bucket but on a different
+        // axis.
+        if (event.type === 'task_claimed' || event.type === 'task_updated') {
+          fetchTasks()
+        }
       },
       [fetchTasks],
     ),

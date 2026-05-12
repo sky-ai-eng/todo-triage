@@ -349,13 +349,14 @@ func (r *Router) tryAutoDelegate(task *domain.Task, trigger domain.EventHandler,
 }
 
 // stampAgentClaim writes claimed_by_agent_id on a task using the org's
-// agent row. SKY-261 D-Claims helper — called from the two commitment
-// points in tryAutoDelegate (post-fireDelegate success, post-
-// EnqueuePendingFiring success). Both paths converge on "the bot has
-// committed to this task." Nil-safe on r.agents and on GetForOrg
-// returning (nil, nil) — both leave the claim unstamped rather than
-// crashing, which matches the "transient seam between db init and
-// agent bootstrap" case noted in §4 of the spec.
+// agent row AND broadcasts the SKY-261 B+ task_claimed event so
+// listeners (Board) can re-render the per-claim lanes. Called from
+// the two commitment points in tryAutoDelegate (post-fireDelegate
+// success, post-EnqueuePendingFiring success). Both paths converge
+// on "the bot has committed to this task." Nil-safe on r.agents and
+// on GetForOrg returning (nil, nil) — both leave the claim
+// unstamped rather than crashing, which matches the "transient seam
+// between db init and agent bootstrap" case noted in §4 of the spec.
 func (r *Router) stampAgentClaim(task *domain.Task) {
 	if r.agents == nil {
 		return
@@ -373,6 +374,14 @@ func (r *Router) stampAgentClaim(task *domain.Task) {
 		return
 	}
 	task.ClaimedByAgentID = a.ID
+	r.ws.Broadcast(websocket.Event{
+		Type: "task_claimed",
+		Data: map[string]any{
+			"task_id":             task.ID,
+			"claimed_by_agent_id": a.ID,
+			"claimed_by_user_id":  "",
+		},
+	})
 }
 
 // fireDelegate transitions the task to delegated status, broadcasts the
@@ -383,32 +392,33 @@ func (r *Router) fireDelegate(task *domain.Task, trigger domain.EventHandler) (s
 		return "", fmt.Errorf("spawner not configured")
 	}
 
-	// Transition task queued → delegated BEFORE spawning so the frontend
-	// reflects the state change immediately and dedup logic sees it.
-	if err := dbpkg.SetTaskStatus(r.db, task.ID, "delegated"); err != nil {
-		return "", fmt.Errorf("set task delegated: %w", err)
-	}
-	r.ws.Broadcast(websocket.Event{
-		Type: "task_updated",
-		Data: map[string]any{"task_id": task.ID, "status": "delegated"},
-	})
-
+	// SKY-261 B+: no status flip here. Pre-SKY-261 we transitioned to
+	// status='delegated' for UI feedback + dedup. Post-B+ the
+	// responsibility axis is the claim columns: stampAgentClaim
+	// (called by the caller on fireDelegate success) writes
+	// claimed_by_agent_id and broadcasts task_claimed, which is what
+	// the Board now listens for. Status stays 'queued' until a
+	// genuine lifecycle move (done / dismissed / snoozed). Dedup is
+	// unaffected — the partial unique index gates on status NOT IN
+	// ('done', 'dismissed'), so a queued+claimed task still matches.
 	log.Printf("[router] auto-delegating task %s (trigger %s, prompt %s)",
 		task.ID, trigger.ID, trigger.PromptID)
 
 	// Re-read task to get entity-joined display fields the spawner needs.
 	fresh, err := dbpkg.GetTask(r.db, task.ID)
 	if err != nil || fresh == nil {
-		r.revertTaskStatus(task.ID, "queued")
 		if err != nil {
 			return "", fmt.Errorf("re-read task: %w", err)
 		}
-		return "", fmt.Errorf("task %s disappeared between status flip and re-read", task.ID)
+		return "", fmt.Errorf("task %s disappeared before spawn", task.ID)
 	}
 
 	runID, err := r.spawner.Delegate(*fresh, trigger.PromptID, "event", trigger.ID)
 	if err != nil {
-		r.revertTaskStatus(task.ID, "queued")
+		// Post-B+: nothing to revert status-wise (status stayed 'queued').
+		// stampAgentClaim hasn't run yet either — the caller only calls
+		// it after fireDelegate returns nil. So this failure leaves the
+		// task in a clean unclaimed-queued state, which is correct.
 		return "", err
 	}
 	log.Printf("[router] started run %s for task %s", runID, task.ID)
@@ -575,6 +585,16 @@ func (r *Router) attemptDrainOne(firing *domain.PendingFiring) (runID, skipReaso
 		return "", domain.PendingFiringSkipTaskClosed, nil
 	}
 
+	// SKY-261 B+: drain only fires if the bot's claim still holds.
+	// User-claim (claimed_by_user_id set) or requeue (both cleared)
+	// invalidates the original commitment. Without this check, a
+	// pending firing would fire even after the user explicitly took
+	// the task over, producing a phantom bot run on a now-user-
+	// claimed task.
+	if task.ClaimedByAgentID == "" {
+		return "", domain.PendingFiringSkipClaimChanged, nil
+	}
+
 	trigger, err := r.handlers.Get(context.Background(), runmode.LocalDefaultOrg, firing.TriggerID)
 	if err != nil {
 		return "", "", fmt.Errorf("trigger lookup: %w", err)
@@ -600,13 +620,33 @@ func (r *Router) attemptDrainOne(firing *domain.PendingFiring) (runID, skipReaso
 }
 
 // revertTaskStatus sets a task back to the given status and broadcasts the
-// change so the frontend doesn't get stuck showing a stale state (e.g.,
-// "delegated" after a delegation failure).
+// change so the frontend doesn't get stuck showing a stale state. After
+// SKY-261 B+ this also clears the bot's claim — drain failure means the
+// firing's commitment didn't materialize, so the task should go back to
+// the team's triage queue (status='queued' + claim cols NULL), not stay
+// bot-claimed without a run.
 func (r *Router) revertTaskStatus(taskID, status string) {
 	if err := dbpkg.SetTaskStatus(r.db, taskID, status); err != nil {
 		log.Printf("[router] failed to revert task %s to %s: %v", taskID, status, err)
 		return
 	}
+	// Clear claim cols too — the SKY-261 B+ semantic of "revert" is
+	// "this task is back in the queue, unclaimed." Idempotent on
+	// already-unclaimed rows.
+	if _, err := r.db.Exec(
+		`UPDATE tasks SET claimed_by_agent_id = NULL, claimed_by_user_id = NULL WHERE id = ?`,
+		taskID,
+	); err != nil {
+		log.Printf("[router] failed to clear claim on revert for task %s: %v", taskID, err)
+	}
+	r.ws.Broadcast(websocket.Event{
+		Type: "task_claimed",
+		Data: map[string]any{
+			"task_id":             taskID,
+			"claimed_by_agent_id": "",
+			"claimed_by_user_id":  "",
+		},
+	})
 	r.ws.Broadcast(websocket.Event{
 		Type: "task_updated",
 		Data: map[string]any{"task_id": taskID, "status": status},

@@ -396,6 +396,25 @@ export type WSEvent =
   | { type: 'curator_reset'; project_id: string; data: null }
   | { type: 'event'; data: DomainEvent }
   | { type: 'tasks_updated'; data: Record<string, never> }
+  | {
+      // SKY-261 B+: claim-axis change. Exactly one of the two ID fields
+      // is populated when claim landed; both empty when claim was
+      // cleared (Requeue, revert). Status is NOT in the payload —
+      // status changes fire as task_updated. The two channels stay
+      // orthogonal, matching the three-axis design.
+      type: 'task_claimed'
+      data: {
+        task_id: string
+        claimed_by_agent_id: string
+        claimed_by_user_id: string
+      }
+    }
+  | {
+      // Genuine status transitions (done, dismissed, snoozed) — NOT
+      // responsibility changes. Responsibility lives on task_claimed.
+      type: 'task_updated'
+      data: { task_id: string; status: string }
+    }
   | { type: 'scoring_started'; data: { task_ids: string[] } }
   | { type: 'scoring_completed'; data: { task_ids: string[] } }
   | {

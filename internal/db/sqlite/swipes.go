@@ -25,19 +25,21 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 	if err := assertLocalOrg(orgID); err != nil {
 		return "", err
 	}
-	// Action → status mapping. Unknown action defaults to "queued" so
-	// a typo or unknown future value doesn't strand the task in an
-	// invalid status (existing pre-D2 behavior; preserved verbatim).
+	// Action → status mapping. SKY-261 B+ split the responsibility axis
+	// (who owns this) off the lifecycle axis (where in its life the
+	// task is). claim + delegate are responsibility-only now — the
+	// handler stamps claim columns; the status stays 'queued' here.
+	// Only dismiss/snooze/complete (genuine lifecycle moves) transition
+	// status. Unknown action defaults to 'queued' so a typo doesn't
+	// strand the task; same fallback as pre-SKY-261.
 	var newStatus string
 	switch action {
-	case "claim":
-		newStatus = "claimed"
+	case "claim", "delegate":
+		newStatus = "queued"
 	case "dismiss":
 		newStatus = "dismissed"
 	case "snooze":
 		newStatus = "snoozed"
-	case "delegate":
-		newStatus = "delegated"
 	case "complete":
 		newStatus = "done"
 	default:
@@ -51,9 +53,9 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 			return err
 		}
 		// snooze_until is cleared on EVERY transition out of the
-		// pre-swipe state. None of the swipe target statuses (claimed,
-		// dismissed, delegated, done, or the queued fallback for
-		// unknown actions) are semantically compatible with a future
+		// pre-swipe state. None of the swipe target statuses (queued
+		// for claim/delegate/unknown, dismissed, snoozed-by-SnoozeTask,
+		// done) are semantically compatible with a leftover future
 		// snooze_until — and the queue listing filter hides any
 		// 'queued' row whose snooze_until is in the future, so a
 		// snoozed→claimed→requeued path would otherwise leave the
@@ -96,8 +98,17 @@ func (s *swipeStore) RequeueTask(ctx context.Context, orgID string, taskID strin
 	}
 	var ok bool
 	err := inTx(ctx, s.q, func(q queryer) error {
+		// SKY-261 B+: Requeue clears both claim cols too — putting a
+		// task back in the team's triage queue means it's no longer
+		// claimed by anyone (the derived queue filter requires both
+		// claim cols NULL).
 		res, err := q.ExecContext(ctx,
-			`UPDATE tasks SET status = 'queued', snooze_until = NULL WHERE id = ?`,
+			`UPDATE tasks
+			    SET status = 'queued',
+			        snooze_until = NULL,
+			        claimed_by_agent_id = NULL,
+			        claimed_by_user_id  = NULL
+			  WHERE id = ?`,
 			taskID,
 		)
 		if err != nil {

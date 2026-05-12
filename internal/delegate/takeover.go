@@ -20,6 +20,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
+	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
 // TakeoverResult is what Takeover returns to the HTTP handler.
@@ -228,6 +229,19 @@ func (s *Spawner) Takeover(runID, baseDir string) (*TakeoverResult, error) {
 		// orphan the user's takeover dir. Log and continue; the Board
 		// will show stale claim attribution but the takeover is real.
 		log.Printf("[takeover] failed to flip task claim for run %s task %s: %v", runID, run.TaskID, err)
+	} else {
+		// SKY-261 B+: broadcast on the claim axis so the Board can
+		// move the card out of the bot's lane into the user's lane.
+		// The run status update (broadcastRunUpdate below) is separate
+		// — that's run lifecycle, not task responsibility.
+		s.wsHub.Broadcast(websocket.Event{
+			Type: "task_claimed",
+			Data: map[string]any{
+				"task_id":             run.TaskID,
+				"claimed_by_agent_id": "",
+				"claimed_by_user_id":  runmode.LocalDefaultUserID,
+			},
+		})
 	}
 
 	s.broadcastRunUpdate(runID, "taken_over")

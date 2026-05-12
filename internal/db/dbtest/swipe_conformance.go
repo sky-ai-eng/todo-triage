@@ -54,7 +54,13 @@ type SwipeAuditReader func(t *testing.T, taskID string) []string
 func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 	t.Helper()
 
-	t.Run("RecordSwipe_ClaimMapsToClaimed", func(t *testing.T) {
+	t.Run("RecordSwipe_ClaimLeavesStatusQueued", func(t *testing.T) {
+		// SKY-261 B+: claim is a responsibility-axis action, not a
+		// lifecycle one. RecordSwipe records the audit row but leaves
+		// status at 'queued' — the swipe handler stamps the claim
+		// column separately, and the Board's derived filter (claim
+		// cols + status) is what reflects "user has this." See spec
+		// §2 three-axes framing.
 		store, orgID, seedTask, readTask, readAudit := factory(t)
 		ctx := context.Background()
 		taskID := seedTask(t)
@@ -62,15 +68,17 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 		if err != nil {
 			t.Fatalf("RecordSwipe: %v", err)
 		}
-		if newStatus != "claimed" {
-			t.Fatalf("newStatus=%q want claimed", newStatus)
+		if newStatus != "queued" {
+			t.Fatalf("newStatus=%q want queued (claim no longer changes status)", newStatus)
 		}
 		status, _ := readTask(t, taskID)
-		if status != "claimed" {
-			t.Fatalf("task.status=%q want claimed (DB not updated)", status)
+		if status != "queued" {
+			t.Fatalf("task.status=%q want queued", status)
 		}
 		// Audit row invariant: RecordSwipe writes exactly one
-		// swipe_events row whose action matches the call.
+		// swipe_events row whose action matches the call. Claim col
+		// stamping happens at the handler layer; conformance tests
+		// here only pin the SwipeStore contract.
 		if got := readAudit(t, taskID); !equalActions(got, []string{"claim"}) {
 			t.Fatalf("swipe_events actions=%v want [claim]", got)
 		}
@@ -117,6 +125,11 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 		// snooze_until stamped would silently drop the task off the
 		// Board. RecordSwipe must clear snooze_until on every
 		// transition; only SnoozeTask sets it.
+		//
+		// SKY-261 B+: claim no longer changes status (it's now a
+		// responsibility-axis action), so post-claim status reads as
+		// 'queued'. The snooze-cleared invariant still holds — that's
+		// what this test pins.
 		store, orgID, seedTask, readTask, _ := factory(t)
 		taskID := seedTask(t)
 		until := time.Now().Add(2 * time.Hour).UTC()
@@ -127,8 +140,8 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 			t.Fatalf("RecordSwipe: %v", err)
 		}
 		status, snoozeUntil := readTask(t, taskID)
-		if status != "claimed" {
-			t.Fatalf("status=%q want claimed", status)
+		if status != "queued" {
+			t.Fatalf("status=%q want queued (snoozed→claim transitions to queued, not claimed)", status)
 		}
 		if !snoozeUntil.IsZero() {
 			t.Fatalf("snooze_until=%v want zero after RecordSwipe transition (stale snooze hides queued tasks)", snoozeUntil)

@@ -11,6 +11,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -72,6 +73,21 @@ func setupDrainScenario(t *testing.T, database *sql.DB) (entityID, taskID, trigg
 		t.Fatalf("create task: %v", err)
 	}
 	taskID = task.ID
+
+	// SKY-261 B+: drain checks task.ClaimedByAgentID before firing.
+	// In production the enqueue path (tryAutoDelegate) stamps the
+	// claim when a firing lands in pending_firings; the test setup
+	// here bypasses that by inserting the firing directly, so stamp
+	// the claim explicitly with the local agent sentinel.
+	if _, err := database.Exec(
+		`INSERT OR IGNORE INTO agents (id, org_id, display_name) VALUES (?, ?, 'Test Bot')`,
+		runmode.LocalDefaultAgentID, runmode.LocalDefaultOrgID,
+	); err != nil {
+		t.Fatalf("seed agent: %v", err)
+	}
+	if err := db.SetTaskClaimedByAgent(database, taskID, runmode.LocalDefaultAgentID); err != nil {
+		t.Fatalf("stamp claim: %v", err)
+	}
 
 	trig := domain.EventHandler{
 		ID:                     "t-drain",

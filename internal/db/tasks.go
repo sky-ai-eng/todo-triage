@@ -382,6 +382,11 @@ func GetTask(db *sql.DB, id string) (*domain.Task, error) {
 // rules in one org can't influence task ordering in another (latent at
 // N=1 in local mode today, load-bearing once multi-mode shares a DB).
 func QueuedTasks(db *sql.DB) ([]domain.Task, error) {
+	// SKY-261 B+ derived filter: queue = status='queued' + both claim
+	// cols NULL + not future-snoozed. The claim-col exclusion is what
+	// makes the queue genuinely "unclaimed work" rather than "anything
+	// with status=queued" (post-B+ a user- or bot-claimed task also
+	// reads status='queued', but it's owned, not in the triage queue).
 	return queryTasks(db, `
 		SELECT `+taskColumnsWithEntity+`
 		FROM tasks t
@@ -393,13 +398,49 @@ func QueuedTasks(db *sql.DB) ([]domain.Task, error) {
 			GROUP BY org_id, event_type
 		) tr ON t.event_type = tr.event_type AND t.org_id = tr.org_id
 		WHERE t.status = 'queued'
+			AND t.claimed_by_agent_id IS NULL
+			AND t.claimed_by_user_id  IS NULL
 			AND (t.snooze_until IS NULL OR t.snooze_until <= datetime('now'))
 		ORDER BY COALESCE(tr.sort_order, 999) ASC, COALESCE(t.priority_score, 0.5) DESC
 	`)
 }
 
 // TasksByStatus returns tasks with the given status, ordered by priority.
+//
+// SKY-261 B+: 'claimed' and 'delegated' are no longer real status values
+// — they're derived filters on the claim columns. This helper preserves
+// the API surface (callers can still query "?status=claimed") by
+// interpreting those two values as their claim-axis equivalents:
+//
+//   - status="claimed"   → claimed_by_user_id IS NOT NULL + active
+//   - status="delegated" → claimed_by_agent_id IS NOT NULL + active
+//
+// "Active" here means status NOT IN ('done', 'dismissed') so the
+// per-claim views show both the in-flight and the awaiting-action
+// rows; closed rows fall under status='done' via the regular path.
+// The 'queued' / 'snoozed' / 'done' / 'dismissed' paths stay literal
+// — those are genuine status values.
 func TasksByStatus(db *sql.DB, status string) ([]domain.Task, error) {
+	switch status {
+	case "claimed":
+		return queryTasks(db, `
+			SELECT `+taskColumnsWithEntity+`
+			FROM tasks t
+			JOIN entities e ON t.entity_id = e.id
+			WHERE t.claimed_by_user_id IS NOT NULL
+				AND t.status NOT IN ('done', 'dismissed')
+			ORDER BY COALESCE(t.priority_score, 0.5) DESC
+		`)
+	case "delegated":
+		return queryTasks(db, `
+			SELECT `+taskColumnsWithEntity+`
+			FROM tasks t
+			JOIN entities e ON t.entity_id = e.id
+			WHERE t.claimed_by_agent_id IS NOT NULL
+				AND t.status NOT IN ('done', 'dismissed')
+			ORDER BY COALESCE(t.priority_score, 0.5) DESC
+		`)
+	}
 	return queryTasks(db, `
 		SELECT `+taskColumnsWithEntity+`
 		FROM tasks t

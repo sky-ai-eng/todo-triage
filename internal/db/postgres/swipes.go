@@ -31,16 +31,18 @@ func newSwipeStore(q queryer) db.SwipeStore { return &swipeStore{q: q} }
 var _ db.SwipeStore = (*swipeStore)(nil)
 
 func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, action string, hesitationMs int) (string, error) {
+	// SKY-261 B+ split the responsibility axis off the lifecycle axis.
+	// claim + delegate are responsibility-only — the handler stamps
+	// claim columns; this UPDATE leaves status at 'queued'. Only
+	// dismiss/snooze/complete are genuine lifecycle moves.
 	var newStatus string
 	switch action {
-	case "claim":
-		newStatus = "claimed"
+	case "claim", "delegate":
+		newStatus = "queued"
 	case "dismiss":
 		newStatus = "dismissed"
 	case "snooze":
 		newStatus = "snoozed"
-	case "delegate":
-		newStatus = "delegated"
 	case "complete":
 		newStatus = "done"
 	default:
@@ -50,13 +52,13 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 		if err := insertSwipeEvent(ctx, tx, orgID, taskID, action, &hesitationMs); err != nil {
 			return err
 		}
-		// clearSnooze=true: none of the target statuses (claimed,
-		// dismissed, delegated, done, or the queued fallback for
-		// unknown actions) are semantically compatible with a
-		// future snooze_until — and the queue listing filter hides
-		// any 'queued' row with a future snooze_until. Mirrors the
-		// SQLite impl; SnoozeTask is the only method that sets
-		// snooze_until, every other path clears it.
+		// clearSnooze=true: none of the target statuses (queued for
+		// claim/delegate/unknown, dismissed, done) are semantically
+		// compatible with a leftover future snooze_until — and the
+		// queue listing filter hides any 'queued' row with a future
+		// snooze_until. Mirrors the SQLite impl; SnoozeTask is the
+		// only method that sets snooze_until, every other path clears
+		// it.
 		return updateTaskStatus(ctx, tx, orgID, taskID, newStatus, nil, true)
 	}); err != nil {
 		return "", err
@@ -76,8 +78,19 @@ func (s *swipeStore) SnoozeTask(ctx context.Context, orgID string, taskID string
 func (s *swipeStore) RequeueTask(ctx context.Context, orgID string, taskID string) (bool, error) {
 	var ok bool
 	err := s.runInTx(ctx, func(tx *sql.Tx) error {
+		// SKY-261 B+: Requeue puts a task back in the team's triage
+		// queue, which means it's no longer claimed by anyone. Clear
+		// both claim cols in the same UPDATE so the derived queue
+		// filter (claim cols all NULL + status 'queued') picks the
+		// row up immediately. Status reset to 'queued' covers the
+		// snoozed-back-to-queue path too.
 		res, err := tx.ExecContext(ctx,
-			`UPDATE tasks SET status = 'queued', snooze_until = NULL WHERE org_id = $1 AND id = $2`,
+			`UPDATE tasks
+			    SET status = 'queued',
+			        snooze_until = NULL,
+			        claimed_by_agent_id = NULL,
+			        claimed_by_user_id  = NULL
+			  WHERE org_id = $1 AND id = $2`,
 			orgID, taskID,
 		)
 		if err != nil {

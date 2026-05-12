@@ -297,8 +297,23 @@ func TestHandleSwipe_ClaimCleansUpPendingApprovalRun(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
+	// SKY-261 B+: claim no longer transitions status; the task stays
+	// 'queued' and claimed_by_user_id is set instead. The
+	// pending-approval cleanup invariants (run cancelled, review row
+	// removed, human_content marker) are unchanged.
 	assertPendingApprovalCleanedUp(t, s.db, taskID, runID, reviewID,
-		"claimed", "claimed the task to handle it themselves")
+		"queued", "claimed the task to handle it themselves")
+	// Pin the claim col too — it's the actual responsibility signal
+	// post-B+.
+	var claimedByUserID sql.NullString
+	if err := s.db.QueryRow(
+		`SELECT claimed_by_user_id FROM tasks WHERE id = ?`, taskID,
+	).Scan(&claimedByUserID); err != nil {
+		t.Fatalf("scan claim: %v", err)
+	}
+	if !claimedByUserID.Valid || claimedByUserID.String == "" {
+		t.Errorf("task.claimed_by_user_id empty after claim swipe; want stamped")
+	}
 }
 
 // TestHandleSwipe_ClaimWithoutPendingApprovalIsNoOp pins the
@@ -330,12 +345,20 @@ func TestHandleSwipe_ClaimWithoutPendingApprovalIsNoOp(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
+	// SKY-261 B+: claim is a responsibility-axis action; status stays
+	// 'queued', claim col gets stamped.
 	var status string
-	if err := s.db.QueryRow(`SELECT status FROM tasks WHERE id = 'task-noruns'`).Scan(&status); err != nil {
+	var claimedByUserID sql.NullString
+	if err := s.db.QueryRow(
+		`SELECT status, claimed_by_user_id FROM tasks WHERE id = 'task-noruns'`,
+	).Scan(&status, &claimedByUserID); err != nil {
 		t.Fatalf("scan task: %v", err)
 	}
-	if status != "claimed" {
-		t.Errorf("task.status = %q, want %q", status, "claimed")
+	if status != "queued" {
+		t.Errorf("task.status = %q, want %q (claim no longer changes status)", status, "queued")
+	}
+	if !claimedByUserID.Valid || claimedByUserID.String == "" {
+		t.Errorf("task.claimed_by_user_id empty after claim swipe; want stamped")
 	}
 }
 
