@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 import type { AgentMessage, AgentRun, Task, ToolCall } from '../types'
 import SourceBadge from './SourceBadge'
 import { toast } from './Toast/toastStore'
 import { readError } from '../lib/api'
+import { formatDurationMs, formatElapsed, isActiveRun, statusDisplay } from '../lib/runStatus'
 import TakeoverModal, { type TakeoverInfo } from './TakeoverModal'
 import YieldModal, { type YieldRequest } from './YieldModal'
 
@@ -26,14 +28,7 @@ export default function AgentCard({ task, run, messages, onRequeue, onReview }: 
   // bleed into the next attempt.
   const [pendingOverlayDismissed, setPendingOverlayDismissed] = useState(false)
 
-  const isActive = [
-    'initializing',
-    'cloning',
-    'fetching',
-    'worktree_created',
-    'agent_starting',
-    'running',
-  ].includes(run.Status)
+  const isActive = isActiveRun(run)
   const isAwaiting = run.Status === 'awaiting_input'
 
   // Locate the open yield_request (latest one) so the attention row +
@@ -105,29 +100,7 @@ export default function AgentCard({ task, run, messages, onRequeue, onReview }: 
   const isHeldTakeover = run.Status === 'taken_over' && !!run.WorktreePath
   const [releasePending, setReleasePending] = useState(false)
 
-  const statusColor =
-    isFailed || isCancelled
-      ? 'text-dismiss'
-      : isUnsolvable || isPendingApproval || isAwaiting
-        ? 'text-snooze'
-        : isActive
-          ? 'text-delegate'
-          : 'text-claim'
-
-  const statusIcon = isFailed
-    ? '✗'
-    : isCancelled
-      ? '◼'
-      : isUnsolvable
-        ? '⊘'
-        : isPendingApproval
-          ? '◉'
-          : isAwaiting
-            ? '⏳'
-            : isActive
-              ? '●'
-              : '✓'
-  const statusLabel = formatStatus(run.Status)
+  const { color: statusColor, icon: statusIcon, label: statusLabel } = statusDisplay(run)
 
   const stats = computeStats(messages, run)
 
@@ -156,6 +129,22 @@ export default function AgentCard({ task, run, messages, onRequeue, onReview }: 
           </div>
           <div className="flex items-center gap-2">
             <span className="text-[11px] text-text-tertiary">{elapsed}</span>
+            <Link
+              to={`/board/runs/${run.ID}`}
+              aria-label="Expand run details"
+              title="Open full session view"
+              className="text-text-tertiary hover:text-text-primary transition-colors"
+            >
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
+                <path
+                  d="M9.5 2.5h4v4M6.5 13.5h-4v-4M13.5 2.5l-5.5 5.5M2.5 13.5l5.5-5.5"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </Link>
             {(canTakeOver || takeoverPending) && (
               <button
                 disabled={takeoverPending}
@@ -548,35 +537,6 @@ function basename(path: string): string {
   return parts[parts.length - 1] || path
 }
 
-function formatStatus(status: string): string {
-  const map: Record<string, string> = {
-    initializing: 'Initializing',
-    cloning: 'Pulling repo',
-    fetching: 'Fetching PR details',
-    worktree_created: 'Creating worktree',
-    agent_starting: 'Starting Claude Code',
-    running: 'Running',
-    awaiting_input: 'Waiting for response',
-    completed: 'Completed',
-    pending_approval: 'Pending Approval',
-    cancelled: 'Cancelled',
-    failed: 'Failed',
-    task_unsolvable: 'Unsolvable',
-    taken_over: 'Taken over',
-  }
-  return map[status] || status
-}
-
-function formatDurationMs(ms: number): string {
-  const seconds = Math.floor(ms / 1000)
-  if (seconds < 60) return `${seconds}s`
-  const minutes = Math.floor(seconds / 60)
-  const secs = seconds % 60
-  if (minutes < 60) return `${minutes}m ${secs}s`
-  const hours = Math.floor(minutes / 60)
-  return `${hours}h ${minutes % 60}m`
-}
-
 function formatToolResult(tc: ToolCall, result: AgentMessage): string {
   if (result.IsError) {
     const text = result.Content || 'Unknown error'
@@ -653,17 +613,6 @@ function formatToolResult(tc: ToolCall, result: AgentMessage): string {
   // Fallback — truncate
   const text = result.Content
   return text.length > 80 ? text.slice(0, 77) + '...' : text
-}
-
-function formatElapsed(dateStr: string, now: number = Date.now()): string {
-  const diff = now - new Date(dateStr).getTime()
-  const seconds = Math.floor(diff / 1000)
-  if (seconds < 60) return `${seconds}s`
-  const minutes = Math.floor(seconds / 60)
-  const secs = seconds % 60
-  if (minutes < 60) return `${minutes}m ${secs}s`
-  const hours = Math.floor(minutes / 60)
-  return `${hours}h ${minutes % 60}m`
 }
 
 function compactNum(n: number): string {

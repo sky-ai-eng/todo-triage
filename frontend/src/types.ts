@@ -73,6 +73,8 @@ export interface AgentMessage {
   Model: string
   InputTokens?: number
   OutputTokens?: number
+  CacheReadTokens?: number
+  CacheCreationTokens?: number
   CreatedAt: string
 }
 

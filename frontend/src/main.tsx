@@ -5,6 +5,7 @@ import './index.css'
 import Setup from './pages/Setup'
 import Cards from './pages/Cards'
 import Board from './pages/Board'
+import RunDetail from './pages/RunDetail'
 import PRDashboard from './pages/PRDashboard'
 import Brief from './pages/Brief'
 import Settings from './pages/Settings'
@@ -32,6 +33,7 @@ createRoot(document.getElementById('root')!).render(
           <Route path="/" element={<Factory />} />
           <Route path="/triage" element={<Cards />} />
           <Route path="/board" element={<Board />} />
+          <Route path="/board/runs/:runID" element={<RunDetail />} />
           <Route path="/prs" element={<PRDashboard />} />
           <Route path="/prompts" element={<Prompts />} />
           <Route path="/repos" element={<Repos />} />
