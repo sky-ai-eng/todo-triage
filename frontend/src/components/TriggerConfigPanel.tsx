@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'motion/react'
 import * as Switch from '@radix-ui/react-switch'
 import * as Tooltip from '@radix-ui/react-tooltip'
 import { Info } from 'lucide-react'
-import type { PromptTrigger } from '../types'
+import type { TriggerHandler } from '../types'
 import EventBadge from './EventBadge'
 import PredicateEditor from './PredicateEditor'
 import Slider from './Slider'
@@ -12,7 +12,7 @@ import { readError } from '../lib/api'
 
 interface TriggerConfigPanelProps {
   open: boolean
-  trigger: PromptTrigger | null
+  trigger: TriggerHandler | null
   onClose: () => void
   onSaved: () => void
   onDeleted: () => void
@@ -63,7 +63,7 @@ export default function TriggerConfigPanel({
     if (!trigger) return
     setEnabled(checked)
     try {
-      const res = await fetch(`/api/triggers/${encodeURIComponent(trigger.id)}/toggle`, {
+      const res = await fetch(`/api/event-handlers/${encodeURIComponent(trigger.id)}/toggle`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled: checked }),
@@ -89,7 +89,7 @@ export default function TriggerConfigPanel({
         breaker_threshold: breakerThreshold,
         min_autonomy_suitability: minAutonomy,
       }
-      const res = await fetch(`/api/triggers/${encodeURIComponent(trigger.id)}`, {
+      const res = await fetch(`/api/event-handlers/${encodeURIComponent(trigger.id)}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -109,7 +109,7 @@ export default function TriggerConfigPanel({
   const handleDelete = async () => {
     if (!trigger) return
     try {
-      const res = await fetch(`/api/triggers/${encodeURIComponent(trigger.id)}`, {
+      const res = await fetch(`/api/event-handlers/${encodeURIComponent(trigger.id)}`, {
         method: 'DELETE',
       })
       if (res.ok) {

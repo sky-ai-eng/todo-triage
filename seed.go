@@ -12,25 +12,25 @@ import (
 )
 
 // seedDefaultPrompts seeds the shipped system prompts via PromptStore
-// AND the shipped system triggers via TriggerStore per org. Local mode
-// iterates a single synthetic org (runmode.LocalDefaultOrg); multi
-// mode will iterate stores.Orgs.ListAll once Wave 4 lands OrgStore —
-// same loop shape, different source. Until then this is a one-element
-// slice with a TODO so the shape is right.
+// AND the shipped system rules + triggers via EventHandlerStore per org.
+// Post-SKY-259 rules and triggers are one table; Seed iterates both
+// kinds together. Local mode iterates a single synthetic org
+// (runmode.LocalDefaultOrg); multi mode will iterate stores.Orgs.ListAll
+// once Wave 4 lands OrgStore.
 //
 // Calls into:
 //   - PromptStore.SeedOrUpdate — SQLite: single conn; Postgres: admin
 //     pool internally (the system_prompt_versions sidecar is REVOKE'd
 //     from tf_app per D3).
-//   - TriggerStore.Seed — same admin-pool routing in Postgres because
-//     shipped triggers have NULL creator_user_id + visibility='org'
-//     and the modify policy gates org-visible writes on
-//     tf.user_is_org_admin() (migration 202605120001).
+//   - EventHandlerStore.Seed — admin-pool routing in Postgres because
+//     shipped rows have NULL creator_user_id + visibility='org' and
+//     the modify policies gate org-visible writes on
+//     tf.user_is_org_admin().
 //
 // Order matters: prompts seed first so the FK from
-// prompt_triggers.prompt_id → prompts.id is satisfied for the
-// shipped triggers Seed inserts.
-func seedDefaultPrompts(database *sql.DB, prompts db.PromptStore, triggers db.TriggerStore) {
+// event_handlers.prompt_id → prompts.id is satisfied for shipped
+// trigger rows.
+func seedDefaultPrompts(database *sql.DB, prompts db.PromptStore, handlers db.EventHandlerStore) {
 	ctx := context.Background()
 
 	// TODO(SKY-246 wave 4): when OrgStore lands, replace this hard-coded
@@ -78,15 +78,15 @@ func seedDefaultPrompts(database *sql.DB, prompts db.PromptStore, triggers db.Tr
 				log.Printf("[seed] warning: failed to seed %s in org %s: %v", p.ID, orgID, err)
 			}
 		}
-		// Triggers ship after prompts in the same orgID iteration so
-		// the FK from prompt_triggers.prompt_id → prompts.id resolves
-		// in Postgres (where the constraint is composite on
-		// (prompt_id, org_id)).
-		if err := triggers.Seed(ctx, orgID); err != nil {
-			log.Printf("[seed] warning: failed to seed prompt_triggers in org %s: %v", orgID, err)
+		// Event handlers (rules + triggers, post-SKY-259) ship after
+		// prompts in the same orgID iteration so the FK from
+		// event_handlers.prompt_id → prompts.id resolves in Postgres
+		// (the constraint is composite on (prompt_id, org_id)).
+		if err := handlers.Seed(ctx, orgID); err != nil {
+			log.Printf("[seed] warning: failed to seed event_handlers in org %s: %v", orgID, err)
 		}
 	}
-	// The old inline-each-trigger shape moved into db.ShippedPromptTriggers
-	// + TriggerStore.Seed when SKY-246 landed TriggerStore. If you want to
-	// add or modify a shipped trigger, edit that list — not this file.
+	// The shipped rule + trigger entries live in db.ShippedEventHandlers
+	// (post-SKY-259 successor to ShippedTaskRules + ShippedPromptTriggers).
+	// Edit that list to add or modify a shipped row.
 }

@@ -38,7 +38,8 @@ type Delegator interface {
 //  1. Records the event (durable audit log)
 //  2. Handles entity lifecycle (merged/closed → close entity + all tasks)
 //  3. Guards against closed entities (no task creation on dead PRs)
-//  4. Matches task_rules + prompt_triggers via typed predicates
+//  4. Matches event_handlers (rules + triggers, unified post-SKY-259) via
+//     typed predicates — one store query, kind-discriminated handling
 //  5. Dedup-creates or bumps tasks
 //  6. Enqueues AI scoring
 //  7. Auto-delegates on matching triggers — fires if the entity is idle,
@@ -46,13 +47,12 @@ type Delegator interface {
 //     auto run or earlier queued firings (SKY-189).
 //  8. Runs inline close checks for the event type
 type Router struct {
-	db        *sql.DB
-	prompts   dbpkg.PromptStore
-	taskRules dbpkg.TaskRuleStore
-	triggers  dbpkg.TriggerStore
-	spawner   Delegator
-	scorer    Scorer
-	ws        *websocket.Hub
+	db       *sql.DB
+	prompts  dbpkg.PromptStore
+	handlers dbpkg.EventHandlerStore
+	spawner  Delegator
+	scorer   Scorer
+	ws       *websocket.Hub
 
 	// drainLocks serializes DrainEntity calls per entity. Without this,
 	// the non-mutating PopPendingFiringForEntity creates a window between
@@ -71,12 +71,11 @@ type Router struct {
 }
 
 // NewRouter creates a Router.
-func NewRouter(db *sql.DB, prompts dbpkg.PromptStore, taskRules dbpkg.TaskRuleStore, triggers dbpkg.TriggerStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
+func NewRouter(db *sql.DB, prompts dbpkg.PromptStore, handlers dbpkg.EventHandlerStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
 	return &Router{
 		db:         db,
 		prompts:    prompts,
-		taskRules:  taskRules,
-		triggers:   triggers,
+		handlers:   handlers,
 		spawner:    spawner,
 		scorer:     scorer,
 		ws:         ws,
@@ -170,47 +169,37 @@ func (r *Router) HandleEvent(evt domain.Event) {
 		}
 	}
 
-	// Step 5: Match task_rules for this event type.
-	rules, err := r.taskRules.GetEnabledForEvent(context.Background(), runmode.LocalDefaultOrg, evt.EventType)
+	// Step 5: Match event_handlers (rules + triggers, unified) for this
+	// event type. One query, kind-discriminated locally — preserves the
+	// pre-SKY-259 rules-before-triggers order via the store's kind-ASC
+	// ORDER BY.
+	handlers, err := r.handlers.GetEnabledForEvent(context.Background(), runmode.LocalDefaultOrg, evt.EventType)
 	if err != nil {
-		log.Printf("[router] failed to query rules for %s: %v", evt.EventType, err)
+		log.Printf("[router] failed to query event_handlers for %s: %v", evt.EventType, err)
 	}
 
-	var matchedRules []domain.TaskRule
-	for _, rule := range rules {
+	var (
+		matchedRules    []domain.EventHandler
+		matchedTriggers []domain.EventHandler
+	)
+	for _, h := range handlers {
 		predJSON := ""
-		if rule.ScopePredicateJSON != nil {
-			predJSON = *rule.ScopePredicateJSON
+		if h.ScopePredicateJSON != nil {
+			predJSON = *h.ScopePredicateJSON
 		}
 		matched, err := matchPredicate(evt.EventType, predJSON, evt.MetadataJSON)
 		if err != nil {
-			log.Printf("[router] rule %s predicate error: %v", rule.ID, err)
+			log.Printf("[router] event_handler %s (%s) predicate error: %v", h.ID, h.Kind, err)
 			continue
 		}
-		if matched {
-			matchedRules = append(matchedRules, rule)
-		}
-	}
-
-	// Step 6: Match prompt_triggers for this event type.
-	triggers, err := r.triggers.GetActiveForEvent(context.Background(), runmode.LocalDefaultOrg, evt.EventType)
-	if err != nil {
-		log.Printf("[router] failed to query triggers for %s: %v", evt.EventType, err)
-	}
-
-	var matchedTriggers []domain.PromptTrigger
-	for _, trigger := range triggers {
-		predJSON := ""
-		if trigger.ScopePredicateJSON != nil {
-			predJSON = *trigger.ScopePredicateJSON
-		}
-		matched, err := matchPredicate(evt.EventType, predJSON, evt.MetadataJSON)
-		if err != nil {
-			log.Printf("[router] trigger %s predicate error: %v", trigger.ID, err)
+		if !matched {
 			continue
 		}
-		if matched {
-			matchedTriggers = append(matchedTriggers, trigger)
+		switch h.Kind {
+		case domain.EventHandlerKindRule:
+			matchedRules = append(matchedRules, h)
+		case domain.EventHandlerKindTrigger:
+			matchedTriggers = append(matchedTriggers, h)
 		}
 	}
 
@@ -224,8 +213,8 @@ func (r *Router) HandleEvent(evt domain.Event) {
 	// only triggers matched (forgiving path).
 	defaultPriority := 0.5
 	for _, rule := range matchedRules {
-		if rule.DefaultPriority > defaultPriority {
-			defaultPriority = rule.DefaultPriority
+		if rule.DefaultPriority != nil && *rule.DefaultPriority > defaultPriority {
+			defaultPriority = *rule.DefaultPriority
 		}
 	}
 
@@ -264,7 +253,7 @@ func (r *Router) HandleEvent(evt domain.Event) {
 	// min_autonomy_suitability > 0 still defer to post-scoring re-derive.
 	if cfg, err := config.Load(); err == nil && cfg.AI.AutoDelegateEnabled {
 		for _, trigger := range matchedTriggers {
-			if trigger.MinAutonomySuitability > 0 {
+			if trigger.MinAutonomySuitability != nil && *trigger.MinAutonomySuitability > 0 {
 				continue // deferred to post-scoring handler
 			}
 			r.tryAutoDelegate(task, trigger, entityID, evt.ID)
@@ -286,16 +275,19 @@ func (r *Router) HandleEvent(evt domain.Event) {
 // the gate is closed (active auto run, or older firings already queued
 // for FIFO fairness), the firing enqueues onto pending_firings instead of
 // being dropped silently.
-func (r *Router) tryAutoDelegate(task *domain.Task, trigger domain.PromptTrigger, entityID string, triggeringEventID string) {
-	// Breaker gate.
+func (r *Router) tryAutoDelegate(task *domain.Task, trigger domain.EventHandler, entityID string, triggeringEventID string) {
+	// Breaker gate. trigger.BreakerThreshold is *int because the column
+	// is nullable at the schema level (rule rows have NULL); kind='trigger'
+	// rows are guaranteed non-nil by the per-kind CHECK constraint.
+	breakerThreshold := derefIntDefault(trigger.BreakerThreshold, 0)
 	failures, err := dbpkg.CountConsecutiveFailedRuns(r.db, entityID, trigger.PromptID)
 	if err != nil {
 		log.Printf("[router] breaker query error for entity %s prompt %s: %v", entityID, trigger.PromptID, err)
 		return
 	}
-	if failures >= trigger.BreakerThreshold {
+	if failures >= breakerThreshold {
 		log.Printf("[router] breaker tripped for entity %s prompt %s (%d >= %d)",
-			entityID, trigger.PromptID, failures, trigger.BreakerThreshold)
+			entityID, trigger.PromptID, failures, breakerThreshold)
 		// Look up prompt name for the toast — opportunistic, falls back to a
 		// generic message if the lookup fails since the breaker trip itself
 		// is the load-bearing signal. One toast per trip (happens rarely).
@@ -342,7 +334,7 @@ func (r *Router) tryAutoDelegate(task *domain.Task, trigger domain.PromptTrigger
 // fireDelegate transitions the task to delegated status, broadcasts the
 // change, then fires the spawner. Returns the run ID on success — used by
 // DrainEntity to record which run a queued firing materialized into.
-func (r *Router) fireDelegate(task *domain.Task, trigger domain.PromptTrigger) (string, error) {
+func (r *Router) fireDelegate(task *domain.Task, trigger domain.EventHandler) (string, error) {
 	if r.spawner == nil {
 		return "", fmt.Errorf("spawner not configured")
 	}
@@ -539,19 +531,20 @@ func (r *Router) attemptDrainOne(firing *domain.PendingFiring) (runID, skipReaso
 		return "", domain.PendingFiringSkipTaskClosed, nil
 	}
 
-	trigger, err := r.triggers.Get(context.Background(), runmode.LocalDefaultOrg, firing.TriggerID)
+	trigger, err := r.handlers.Get(context.Background(), runmode.LocalDefaultOrg, firing.TriggerID)
 	if err != nil {
 		return "", "", fmt.Errorf("trigger lookup: %w", err)
 	}
-	if trigger == nil || !trigger.Enabled {
+	if trigger == nil || trigger.Kind != domain.EventHandlerKindTrigger || !trigger.Enabled {
 		return "", domain.PendingFiringSkipTriggerDisabled, nil
 	}
 
+	breakerThreshold := derefIntDefault(trigger.BreakerThreshold, 0)
 	failures, err := dbpkg.CountConsecutiveFailedRuns(r.db, firing.EntityID, trigger.PromptID)
 	if err != nil {
 		return "", "", fmt.Errorf("breaker query: %w", err)
 	}
-	if failures >= trigger.BreakerThreshold {
+	if failures >= breakerThreshold {
 		return "", domain.PendingFiringSkipBreakerTripped, nil
 	}
 
@@ -610,10 +603,11 @@ func (r *Router) reDeriveTask(taskID string) {
 		return
 	}
 
-	// Fetch triggers for this event type.
-	triggers, err := r.triggers.GetActiveForEvent(context.Background(), runmode.LocalDefaultOrg, task.EventType)
+	// Fetch handlers for this event type — same call HandleEvent uses,
+	// kind-discriminated here.
+	handlers, err := r.handlers.GetEnabledForEvent(context.Background(), runmode.LocalDefaultOrg, task.EventType)
 	if err != nil {
-		log.Printf("[router] re-derive: failed to query triggers for %s: %v", task.EventType, err)
+		log.Printf("[router] re-derive: failed to query event_handlers for %s: %v", task.EventType, err)
 		return
 	}
 
@@ -624,20 +618,24 @@ func (r *Router) reDeriveTask(taskID string) {
 		return
 	}
 
-	for _, trigger := range triggers {
+	for _, trigger := range handlers {
+		if trigger.Kind != domain.EventHandlerKindTrigger {
+			continue
+		}
+		minAutonomy := derefFloatDefault(trigger.MinAutonomySuitability, 0)
 		// Only process deferred triggers — immediate ones already fired in HandleEvent.
-		if trigger.MinAutonomySuitability <= 0 {
+		if minAutonomy <= 0 {
 			continue
 		}
 
 		// Autonomy gate.
-		if *task.AutonomySuitability < trigger.MinAutonomySuitability {
+		if *task.AutonomySuitability < minAutonomy {
 			log.Printf("[router] re-derive: task %s suitability %.2f < trigger %s threshold %.2f, skipping",
-				taskID, *task.AutonomySuitability, trigger.ID, trigger.MinAutonomySuitability)
+				taskID, *task.AutonomySuitability, trigger.ID, minAutonomy)
 			continue
 		}
 
-		// Predicate match — same logic as HandleEvent step 6.
+		// Predicate match — same logic as HandleEvent.
 		predJSON := ""
 		if trigger.ScopePredicateJSON != nil {
 			predJSON = *trigger.ScopePredicateJSON
@@ -652,13 +650,31 @@ func (r *Router) reDeriveTask(taskID string) {
 		}
 
 		log.Printf("[router] re-derive: task %s suitability %.2f >= trigger %s threshold %.2f, firing",
-			taskID, *task.AutonomySuitability, trigger.ID, trigger.MinAutonomySuitability)
+			taskID, *task.AutonomySuitability, trigger.ID, minAutonomy)
 		// Triggering event for the queued firing is the task's primary
 		// event — that's the one whose match scored autonomously above
 		// threshold. Real-event provenance keeps the audit trail honest
 		// when a re-derived firing ends up enqueued.
 		r.tryAutoDelegate(task, trigger, task.EntityID, task.PrimaryEventID)
 	}
+}
+
+// derefIntDefault unwraps a *int with a default if nil. Used on
+// trigger-only fields that are nullable on the column level but
+// guaranteed non-nil by the per-kind CHECK constraint for kind='trigger'
+// rows; the default is the defensive value for the impossible nil case.
+func derefIntDefault(p *int, def int) int {
+	if p == nil {
+		return def
+	}
+	return *p
+}
+
+func derefFloatDefault(p *float64, def float64) float64 {
+	if p == nil {
+		return def
+	}
+	return *p
 }
 
 // --- Inline close checks --------------------------------------------------

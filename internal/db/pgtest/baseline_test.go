@@ -24,7 +24,7 @@ func TestBaseline_AppliesCleanly(t *testing.T) {
 		"orgs", "teams", "users", "memberships", "org_memberships", "sessions", "project_knowledge",
 		"org_settings", "team_settings", "user_settings", "jira_project_status_rules",
 		"prompts", "projects", "events_catalog", "entities", "entity_links", "events",
-		"task_rules", "prompt_triggers", "tasks", "task_events", "runs", "run_artifacts",
+		"event_handlers", "tasks", "task_events", "runs", "run_artifacts",
 		"run_messages", "run_memory", "pending_firings", "run_worktrees", "pending_prs",
 		"swipe_events", "poller_state", "repo_profiles", "pending_reviews",
 		"pending_review_comments", "preferences", "system_prompt_versions",
@@ -824,7 +824,7 @@ func TestProjectKnowledge_RunValidation(t *testing.T) {
 // TestRLS_TeamVisibilityIsTeamScoped — a row with visibility='team'
 // must only be visible to members of that specific team_id, not to
 // every org member. Covers all four tables that use this pattern:
-// prompts, projects, task_rules, prompt_triggers.
+// prompts, projects, event_handlers (rule + trigger kinds).
 //
 // Subtle bug this guards against: in the EXISTS subquery,
 // `m.team_id = team_id` is ambiguous — SQL name resolution binds the
@@ -863,14 +863,14 @@ func TestRLS_TeamVisibilityIsTeamScoped(t *testing.T) {
 		t.Fatalf("seed team project: %v", err)
 	}
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO task_rules (org_id, creator_user_id, team_id, visibility, event_type, name)
-		VALUES ($1, $2, $3, 'team', 'github:pr:opened', 'team-rule') RETURNING id
+		INSERT INTO event_handlers (org_id, creator_user_id, team_id, visibility, kind, event_type, name, default_priority, sort_order)
+		VALUES ($1, $2, $3, 'team', 'rule', 'github:pr:opened', 'team-rule', 0.5, 0) RETURNING id
 	`, orgA, alice, teamA).Scan(&teamRuleID); err != nil {
 		t.Fatalf("seed team rule: %v", err)
 	}
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO prompt_triggers (org_id, creator_user_id, team_id, visibility, prompt_id, event_type)
-		VALUES ($1, $2, $3, 'team', $4, 'github:pr:opened') RETURNING id
+		INSERT INTO event_handlers (org_id, creator_user_id, team_id, visibility, kind, prompt_id, event_type, breaker_threshold, min_autonomy_suitability)
+		VALUES ($1, $2, $3, 'team', 'trigger', $4, 'github:pr:opened', 4, 0.0) RETURNING id
 	`, orgA, alice, teamA, prompt).Scan(&teamTriggerID); err != nil {
 		t.Fatalf("seed team trigger: %v", err)
 	}
@@ -882,8 +882,8 @@ func TestRLS_TeamVisibilityIsTeamScoped(t *testing.T) {
 		}{
 			{"prompts", `SELECT 1 FROM prompts WHERE id = $1`, teamPromptID},
 			{"projects", `SELECT 1 FROM projects WHERE id = $1`, teamProjectID},
-			{"task_rules", `SELECT 1 FROM task_rules WHERE id = $1`, teamRuleID},
-			{"prompt_triggers", `SELECT 1 FROM prompt_triggers WHERE id = $1`, teamTriggerID},
+			{"event_handlers/rule", `SELECT 1 FROM event_handlers WHERE id = $1`, teamRuleID},
+			{"event_handlers/trigger", `SELECT 1 FROM event_handlers WHERE id = $1`, teamTriggerID},
 		} {
 			var n int
 			if err := tx.QueryRow(c.query, c.id).Scan(&n); err != nil {
@@ -905,8 +905,8 @@ func TestRLS_TeamVisibilityIsTeamScoped(t *testing.T) {
 		}{
 			{"prompts", `SELECT COUNT(*) FROM prompts WHERE id = $1`, teamPromptID},
 			{"projects", `SELECT COUNT(*) FROM projects WHERE id = $1`, teamProjectID},
-			{"task_rules", `SELECT COUNT(*) FROM task_rules WHERE id = $1`, teamRuleID},
-			{"prompt_triggers", `SELECT COUNT(*) FROM prompt_triggers WHERE id = $1`, teamTriggerID},
+			{"event_handlers/rule", `SELECT COUNT(*) FROM event_handlers WHERE id = $1`, teamRuleID},
+			{"event_handlers/trigger", `SELECT COUNT(*) FROM event_handlers WHERE id = $1`, teamTriggerID},
 		} {
 			var n int
 			if err := tx.QueryRow(c.query, c.id).Scan(&n); err != nil {

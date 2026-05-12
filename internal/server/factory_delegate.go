@@ -8,6 +8,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -110,12 +111,16 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	// the events package contract.
 	defaultPriority := 0.5
 	schema, schemaOK := events.Get(req.EventType)
-	rules, err := s.taskRules.GetEnabledForEvent(r.Context(), runmode.LocalDefaultOrg, req.EventType)
+	handlers, err := s.eventHandlers.GetEnabledForEvent(r.Context(), runmode.LocalDefaultOrg, req.EventType)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	for _, rule := range rules {
+	for _, h := range handlers {
+		if h.Kind != domain.EventHandlerKindRule || h.DefaultPriority == nil {
+			// Trigger rows have no DefaultPriority; skip.
+			continue
+		}
 		if !schemaOK {
 			// No registered schema → predicate can't be evaluated.
 			// Mirrors matchPredicate's quietly-permissive behavior:
@@ -123,16 +128,16 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		predJSON := ""
-		if rule.ScopePredicateJSON != nil {
-			predJSON = *rule.ScopePredicateJSON
+		if h.ScopePredicateJSON != nil {
+			predJSON = *h.ScopePredicateJSON
 		}
 		matched, err := schema.Match(predJSON, primaryEvent.MetadataJSON)
 		if err != nil {
-			log.Printf("[factory] rule %s predicate error: %v", rule.ID, err)
+			log.Printf("[factory] event_handler %s predicate error: %v", h.ID, err)
 			continue
 		}
-		if matched && rule.DefaultPriority > defaultPriority {
-			defaultPriority = rule.DefaultPriority
+		if matched && *h.DefaultPriority > defaultPriority {
+			defaultPriority = *h.DefaultPriority
 		}
 	}
 

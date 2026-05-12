@@ -390,10 +390,14 @@ func findVisibleImportedPromptByContent(ctx context.Context, database *sql.DB, n
 }
 
 func hideDuplicateImportedPrompts(ctx context.Context, database *sql.DB, prompts db.PromptStore) (int, error) {
+	// Post-SKY-259: prompt_triggers folded into event_handlers with
+	// kind='trigger'. The LEFT JOIN filter pins to that kind so rules
+	// don't count toward the "is this prompt actively used by a trigger"
+	// signal — rules never carry a prompt_id.
 	rows, err := database.QueryContext(ctx, `
 		SELECT p.id, p.name, p.body, p.allowed_tools, COUNT(t.id) AS trigger_count
 		FROM prompts p
-		LEFT JOIN prompt_triggers t ON t.prompt_id = p.id
+		LEFT JOIN event_handlers t ON t.prompt_id = p.id AND t.kind = 'trigger'
 		WHERE p.source = 'imported' AND p.hidden = 0
 		GROUP BY p.id, p.name, p.body, p.allowed_tools, p.updated_at, p.created_at
 		ORDER BY trigger_count DESC, p.updated_at DESC, p.created_at DESC, p.id ASC

@@ -24,9 +24,9 @@ func TestEnqueuePendingFiring_Insert(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
-	createTriggerForTest(t, database, domain.PromptTrigger{
+	createTriggerForTest(t, database, domain.EventHandler{Kind: domain.EventHandlerKindTrigger,
 		ID: "t1", PromptID: "p1", TriggerType: domain.TriggerTypeEvent,
-		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: 4, Enabled: true,
+		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: intPtr(4), MinAutonomySuitability: floatPtr(0), Enabled: true,
 	})
 
 	inserted, err := EnqueuePendingFiring(database, entity.ID, task.ID, "t1", eventID)
@@ -69,13 +69,13 @@ func TestPopPendingFiring_FIFO(t *testing.T) {
 	createPromptForTest(t, database, domain.Prompt{ID: "p2", Name: "P2", Body: "y", Source: "user"})
 	taskA, _, _ := FindOrCreateTask(database, entity.ID, domain.EventGitHubPRCICheckFailed, "buildA", eventID, 0.5)
 	taskB, _, _ := FindOrCreateTask(database, entity.ID, domain.EventGitHubPRCICheckFailed, "buildB", eventID, 0.5)
-	createTriggerForTest(t, database, domain.PromptTrigger{
+	createTriggerForTest(t, database, domain.EventHandler{Kind: domain.EventHandlerKindTrigger,
 		ID: "tA", PromptID: "p1", TriggerType: domain.TriggerTypeEvent,
-		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: 4, Enabled: true,
+		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: intPtr(4), MinAutonomySuitability: floatPtr(0), Enabled: true,
 	})
-	createTriggerForTest(t, database, domain.PromptTrigger{
+	createTriggerForTest(t, database, domain.EventHandler{Kind: domain.EventHandlerKindTrigger,
 		ID: "tB", PromptID: "p2", TriggerType: domain.TriggerTypeEvent,
-		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: 4, Enabled: true,
+		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: intPtr(4), MinAutonomySuitability: floatPtr(0), Enabled: true,
 	})
 
 	if _, err := EnqueuePendingFiring(database, entity.ID, taskA.ID, "tA", eventID); err != nil {
@@ -133,9 +133,9 @@ func TestEntityCanFireImmediately_GateLogic(t *testing.T) {
 		EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entity.ID, MetadataJSON: `{"check_name":"build"}`,
 	})
 	task, _, _ := FindOrCreateTask(database, entity.ID, domain.EventGitHubPRCICheckFailed, "build", eventID, 0.5)
-	createTriggerForTest(t, database, domain.PromptTrigger{
+	createTriggerForTest(t, database, domain.EventHandler{Kind: domain.EventHandlerKindTrigger,
 		ID: "t1", PromptID: "p1", TriggerType: domain.TriggerTypeEvent,
-		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: 4, Enabled: true,
+		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: intPtr(4), MinAutonomySuitability: floatPtr(0), Enabled: true,
 	})
 
 	// Empty: gate open.
@@ -218,9 +218,9 @@ func TestEnqueueAfterFired(t *testing.T) {
 		EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entity.ID, MetadataJSON: `{"check_name":"build"}`,
 	})
 	task, _, _ := FindOrCreateTask(database, entity.ID, domain.EventGitHubPRCICheckFailed, "build", eventID, 0.5)
-	createTriggerForTest(t, database, domain.PromptTrigger{
+	createTriggerForTest(t, database, domain.EventHandler{Kind: domain.EventHandlerKindTrigger,
 		ID: "t1", PromptID: "p1", TriggerType: domain.TriggerTypeEvent,
-		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: 4, Enabled: true,
+		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: intPtr(4), MinAutonomySuitability: floatPtr(0), Enabled: true,
 	})
 
 	// Initial enqueue.
@@ -277,9 +277,9 @@ func TestPendingFirings_CrossEntityIsolation(t *testing.T) {
 	taskA, _, _ := FindOrCreateTask(database, entA.ID, domain.EventGitHubPRCICheckFailed, "build", evtA, 0.5)
 	taskB, _, _ := FindOrCreateTask(database, entB.ID, domain.EventGitHubPRCICheckFailed, "build", evtB, 0.5)
 
-	createTriggerForTest(t, database, domain.PromptTrigger{
+	createTriggerForTest(t, database, domain.EventHandler{Kind: domain.EventHandlerKindTrigger,
 		ID: "t1", PromptID: "p1", TriggerType: domain.TriggerTypeEvent,
-		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: 4, Enabled: true,
+		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: intPtr(4), MinAutonomySuitability: floatPtr(0), Enabled: true,
 	})
 
 	// Queue a firing on A only.
@@ -333,13 +333,13 @@ func TestEnqueue_SameTaskDifferentTrigger(t *testing.T) {
 		EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entity.ID, MetadataJSON: `{"check_name":"build"}`,
 	})
 	task, _, _ := FindOrCreateTask(database, entity.ID, domain.EventGitHubPRCICheckFailed, "build", eventID, 0.5)
-	createTriggerForTest(t, database, domain.PromptTrigger{
+	createTriggerForTest(t, database, domain.EventHandler{Kind: domain.EventHandlerKindTrigger,
 		ID: "tA", PromptID: "p1", TriggerType: domain.TriggerTypeEvent,
-		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: 4, Enabled: true,
+		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: intPtr(4), MinAutonomySuitability: floatPtr(0), Enabled: true,
 	})
-	createTriggerForTest(t, database, domain.PromptTrigger{
+	createTriggerForTest(t, database, domain.EventHandler{Kind: domain.EventHandlerKindTrigger,
 		ID: "tB", PromptID: "p2", TriggerType: domain.TriggerTypeEvent,
-		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: 4, Enabled: true,
+		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: intPtr(4), MinAutonomySuitability: floatPtr(0), Enabled: true,
 	})
 
 	insA, err := EnqueuePendingFiring(database, entity.ID, task.ID, "tA", eventID)
@@ -374,9 +374,9 @@ func TestMarkTransitions_Idempotent(t *testing.T) {
 		EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entity.ID, MetadataJSON: `{"check_name":"build"}`,
 	})
 	task, _, _ := FindOrCreateTask(database, entity.ID, domain.EventGitHubPRCICheckFailed, "build", eventID, 0.5)
-	createTriggerForTest(t, database, domain.PromptTrigger{
+	createTriggerForTest(t, database, domain.EventHandler{Kind: domain.EventHandlerKindTrigger,
 		ID: "t1", PromptID: "p1", TriggerType: domain.TriggerTypeEvent,
-		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: 4, Enabled: true,
+		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: intPtr(4), MinAutonomySuitability: floatPtr(0), Enabled: true,
 	})
 	if err := CreateAgentRun(database, domain.AgentRun{
 		ID: "r-orig", TaskID: task.ID, PromptID: "p1", Status: "completed",

@@ -170,30 +170,45 @@ export interface EventType {
   sort_order: number
 }
 
-export interface PromptTrigger {
+// Event handlers (SKY-259) — unified successor to the former TaskRule
+// + PromptTrigger types. The backend stores both in one event_handlers
+// table; the FE keeps split UI pages but consumes the discriminated
+// union below. Each member is fully typed: TS catches cross-kind
+// access at compile time, no nullable per-kind fields leak out of the
+// discriminator.
+
+interface EventHandlerBase {
   id: string
-  prompt_id: string
-  trigger_type: string
   event_type: string
   scope_predicate_json: string | null
-  breaker_threshold: number
-  min_autonomy_suitability: number
   enabled: boolean
+  source: 'system' | 'user'
   created_at: string
   updated_at: string
 }
 
-export interface TaskRule {
-  id: string
-  event_type: string
-  scope_predicate_json: string | null
-  enabled: boolean
+export interface RuleHandler extends EventHandlerBase {
+  kind: 'rule'
   name: string
   default_priority: number
   sort_order: number
-  source: 'system' | 'user'
-  created_at: string
-  updated_at: string
+}
+
+export interface TriggerHandler extends EventHandlerBase {
+  kind: 'trigger'
+  prompt_id: string
+  trigger_type: string
+  breaker_threshold: number
+  min_autonomy_suitability: number
+}
+
+export type EventHandler = RuleHandler | TriggerHandler
+
+export function isRule(h: EventHandler): h is RuleHandler {
+  return h.kind === 'rule'
+}
+export function isTrigger(h: EventHandler): h is TriggerHandler {
+  return h.kind === 'trigger'
 }
 
 export interface FieldSchema {

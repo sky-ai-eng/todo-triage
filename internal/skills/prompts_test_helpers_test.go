@@ -21,31 +21,37 @@ func testPromptStore(database *sql.DB) db.PromptStore {
 	return sqlitestore.New(database).Prompts
 }
 
-// testTriggerStore mirrors testPromptStore for the trigger-touching
-// tests after the db.SavePromptTrigger / db.GetPromptTrigger free-
-// functions moved into TriggerStore (SKY-246 wave 1).
-func testTriggerStore(database *sql.DB) db.TriggerStore {
+// testEventHandlerStore mirrors testPromptStore for trigger-touching
+// tests. Post-SKY-259 rules + triggers are unified into event_handlers;
+// trigger-shaped fixtures use kind='trigger' rows on this store.
+func testEventHandlerStore(database *sql.DB) db.EventHandlerStore {
 	if database == nil {
 		return nil
 	}
-	return sqlitestore.New(database).Triggers
+	return sqlitestore.New(database).EventHandlers
 }
 
-// createTriggerForTestSkills + getTriggerForTestSkills are the
-// raw-SQL replacements for the deleted db.SavePromptTrigger +
-// db.GetPromptTrigger free-functions used by importer_test.go.
-func createTriggerForTestSkills(t *testing.T, database *sql.DB, trig domain.PromptTrigger) {
+// createTriggerForTestSkills + getTriggerForTestSkills exercise the
+// trigger-shaped CRUD on EventHandlerStore. Used by importer_test.go.
+func createTriggerForTestSkills(t *testing.T, database *sql.DB, trig domain.EventHandler) {
 	t.Helper()
-	if err := testTriggerStore(database).Create(context.Background(), runmode.LocalDefaultOrg, trig); err != nil {
+	trig.Kind = domain.EventHandlerKindTrigger
+	if trig.TriggerType == "" {
+		trig.TriggerType = domain.TriggerTypeEvent
+	}
+	if err := testEventHandlerStore(database).Create(context.Background(), runmode.LocalDefaultOrg, trig); err != nil {
 		t.Fatalf("createTriggerForTestSkills %s: %v", trig.ID, err)
 	}
 }
 
-func getTriggerForTestSkills(t *testing.T, database *sql.DB, id string) *domain.PromptTrigger {
+func getTriggerForTestSkills(t *testing.T, database *sql.DB, id string) *domain.EventHandler {
 	t.Helper()
-	got, err := testTriggerStore(database).Get(context.Background(), runmode.LocalDefaultOrg, id)
+	got, err := testEventHandlerStore(database).Get(context.Background(), runmode.LocalDefaultOrg, id)
 	if err != nil {
 		t.Fatalf("getTriggerForTestSkills %s: %v", id, err)
 	}
 	return got
 }
+
+func intPtr(v int) *int           { return &v }
+func floatPtr(v float64) *float64 { return &v }

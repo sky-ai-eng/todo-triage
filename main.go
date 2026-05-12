@@ -265,7 +265,7 @@ func main() {
 		openBrowser(fmt.Sprintf("http://localhost%s", addr))
 	}
 
-	srv := server.New(database, stores.Prompts, stores.Swipes, stores.Dashboard, stores.TaskRules, stores.Triggers)
+	srv := server.New(database, stores.Prompts, stores.Swipes, stores.Dashboard, stores.EventHandlers)
 
 	distFS, err := frontendDist()
 	if err != nil {
@@ -295,16 +295,16 @@ func main() {
 		worktree.CleanupWithOptions(worktree.CleanupOptions{PreserveClaudeProjectFor: preserveSet})
 	}
 
-	// Seed event type catalog, task_rules defaults, and default prompts.
-	// Order matters: task_rules FK to events_catalog(id), so catalog must be
-	// seeded first.
+	// Seed event type catalog, event_handlers defaults (rules + triggers,
+	// post-SKY-259), and default prompts. Order matters: event_handlers FK
+	// to events_catalog(id), so catalog must be seeded first. Prompts are
+	// seeded inside seedDefaultPrompts before EventHandlers.Seed runs so
+	// the FK from event_handlers.prompt_id → prompts.id resolves on the
+	// trigger rows.
 	if err := db.SeedEventTypes(database); err != nil {
 		log.Fatalf("failed to seed event types: %v", err)
 	}
-	if err := stores.TaskRules.Seed(context.Background(), runmode.LocalDefaultOrg); err != nil {
-		log.Fatalf("failed to seed task rules: %v", err)
-	}
-	seedDefaultPrompts(database, stores.Prompts, stores.Triggers)
+	seedDefaultPrompts(database, stores.Prompts, stores.EventHandlers)
 
 	// Bootstrap the local-mode agent identity (SKY-260 D-Agent). One
 	// agents row + one team_agents row for the synthetic LocalDefaultOrg
@@ -558,7 +558,7 @@ func main() {
 	// Event router — records events, creates/bumps tasks, auto-delegates on
 	// matching triggers, runs inline close checks. Also handles post-scoring
 	// re-derive via the scorer callback wired above.
-	eventRouter = routing.NewRouter(database, stores.Prompts, stores.TaskRules, stores.Triggers, spawner, scorer, wsHub)
+	eventRouter = routing.NewRouter(database, stores.Prompts, stores.EventHandlers, spawner, scorer, wsHub)
 	bus.Subscribe(eventbus.Subscriber{
 		Name:   "router",
 		Filter: []string{"github:", "jira:"},

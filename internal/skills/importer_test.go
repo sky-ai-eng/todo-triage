@@ -267,13 +267,14 @@ func TestImportAll_DoesNotHideDuplicatePromptReferencedByTrigger(t *testing.T) {
 		t.Fatalf("create unreferenced duplicate prompt: %v", err)
 	}
 
-	trigger := domain.PromptTrigger{
+	trigger := domain.EventHandler{
 		ID:                     "trigger-keep-imported-prompt",
+		Kind:                   domain.EventHandlerKindTrigger,
 		PromptID:               keepID,
 		TriggerType:            domain.TriggerTypeEvent,
 		EventType:              domain.EventGitHubPRReviewRequested,
-		BreakerThreshold:       4,
-		MinAutonomySuitability: 0,
+		BreakerThreshold:       intPtr(4),
+		MinAutonomySuitability: floatPtr(0),
 		Enabled:                true,
 	}
 	createTriggerForTestSkills(t, database, trigger)

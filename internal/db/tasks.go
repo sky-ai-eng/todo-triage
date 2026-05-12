@@ -284,15 +284,19 @@ func GetTask(db *sql.DB, id string) (*domain.Task, error) {
 	return &t, nil
 }
 
-// QueuedTasks returns queued tasks ordered by task_rules.sort_order (category
-// ordering) then priority_score DESC within each tier. JOINs entities for
-// display and task_rules for ordering.
+// QueuedTasks returns queued tasks ordered by the matching rule's
+// sort_order (category ordering) then priority_score DESC within each tier.
+// JOINs entities for display and event_handlers (kind='rule') for ordering.
+// Post-SKY-259 rules live in event_handlers; the JOIN filters on
+// kind='rule' so trigger rows (NULL sort_order) don't show up.
 func QueuedTasks(db *sql.DB) ([]domain.Task, error) {
 	return queryTasks(db, `
 		SELECT `+taskColumnsWithEntity+`
 		FROM tasks t
 		JOIN entities e ON t.entity_id = e.id
-		LEFT JOIN task_rules tr ON t.event_type = tr.event_type AND tr.enabled = 1
+		LEFT JOIN event_handlers tr ON t.event_type = tr.event_type
+		                            AND tr.enabled = 1
+		                            AND tr.kind = 'rule'
 		WHERE t.status = 'queued'
 			AND (t.snooze_until IS NULL OR t.snooze_until <= datetime('now'))
 		ORDER BY COALESCE(tr.sort_order, 999) ASC, COALESCE(t.priority_score, 0.5) DESC

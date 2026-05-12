@@ -21,42 +21,34 @@ func testPromptStore(database *sql.DB) db.PromptStore {
 	return sqlitestore.New(database).Prompts
 }
 
-// testTaskRuleStore returns a SQLite-backed TaskRuleStore for routing
-// tests. Mirrors testPromptStore — the router takes a TaskRuleStore
-// argument now that GetEnabledRulesForEvent moved off raw db.* and
-// onto the store interface.
-func testTaskRuleStore(database *sql.DB) db.TaskRuleStore {
+// testEventHandlerStore returns a SQLite-backed EventHandlerStore for
+// routing tests. Post-SKY-259 the router takes one store covering both
+// rules and triggers; tests construct it the same way as production.
+func testEventHandlerStore(database *sql.DB) db.EventHandlerStore {
 	if database == nil {
 		return nil
 	}
-	return sqlitestore.New(database).TaskRules
-}
-
-// testTriggerStore returns a SQLite-backed TriggerStore for routing
-// tests. Same pattern — the router now reads triggers through the
-// store interface, so tests construct it the same way.
-func testTriggerStore(database *sql.DB) db.TriggerStore {
-	if database == nil {
-		return nil
-	}
-	return sqlitestore.New(database).Triggers
+	return sqlitestore.New(database).EventHandlers
 }
 
 // createTriggerForTestRouting + setTriggerEnabledForTestRouting are
-// the raw-SQL replacements for db.SavePromptTrigger /
-// db.SetTriggerEnabled used by drain_test + rederive_test. They use
-// the store interface to keep the seed path consistent with what
-// production uses.
-func createTriggerForTestRouting(t *testing.T, database *sql.DB, trig domain.PromptTrigger) {
+// trigger-shape helpers used by drain_test + rederive_test. Post-
+// SKY-259 they wrap EventHandlerStore.Create / SetEnabled, building a
+// kind='trigger' EventHandler from the legacy-shaped fields.
+func createTriggerForTestRouting(t *testing.T, database *sql.DB, trig domain.EventHandler) {
 	t.Helper()
-	if err := testTriggerStore(database).Create(context.Background(), runmode.LocalDefaultOrg, trig); err != nil {
+	trig.Kind = domain.EventHandlerKindTrigger
+	if trig.TriggerType == "" {
+		trig.TriggerType = domain.TriggerTypeEvent
+	}
+	if err := testEventHandlerStore(database).Create(context.Background(), runmode.LocalDefaultOrg, trig); err != nil {
 		t.Fatalf("createTriggerForTestRouting %s: %v", trig.ID, err)
 	}
 }
 
 func setTriggerEnabledForTestRouting(t *testing.T, database *sql.DB, id string, enabled bool) {
 	t.Helper()
-	if err := testTriggerStore(database).SetEnabled(context.Background(), runmode.LocalDefaultOrg, id, enabled); err != nil {
+	if err := testEventHandlerStore(database).SetEnabled(context.Background(), runmode.LocalDefaultOrg, id, enabled); err != nil {
 		t.Fatalf("setTriggerEnabledForTestRouting %s: %v", id, err)
 	}
 }
@@ -69,5 +61,33 @@ func createTestPrompt(t *testing.T, database *sql.DB, p domain.Prompt) {
 	store := testPromptStore(database)
 	if err := store.Create(context.Background(), runmode.LocalDefaultOrg, p); err != nil {
 		t.Fatalf("createTestPrompt %s: %v", p.ID, err)
+	}
+}
+
+// intPtr / floatPtr are convenience wrappers for the pointer-shaped
+// per-kind fields on domain.EventHandler. Trigger rows carry
+// BreakerThreshold (*int) and MinAutonomySuitability (*float64); test
+// fixtures with literal values pass them through these helpers.
+func intPtr(v int) *int           { return &v }
+func floatPtr(v float64) *float64 { return &v }
+
+// seedHandlerFKTargets seeds the prompts that shipped triggers reference
+// so EventHandlerStore.Seed's trigger rows resolve their FK to prompts.
+// Production calls seedDefaultPrompts which seeds prompts THEN handlers in
+// the same loop; tests that call Seed directly need to replicate that
+// ordering manually.
+func seedHandlerFKTargets(t *testing.T, database *sql.DB) {
+	t.Helper()
+	store := testPromptStore(database)
+	for _, p := range []domain.Prompt{
+		{ID: "system-pr-review", Name: "PR Review", Body: "x", Source: "system"},
+		{ID: "system-conflict-resolution", Name: "Conflicts", Body: "x", Source: "system"},
+		{ID: "system-ci-fix", Name: "CI Fix", Body: "x", Source: "system"},
+		{ID: "system-jira-implement", Name: "Jira Implement", Body: "x", Source: "system"},
+		{ID: "system-fix-review-feedback", Name: "Fix Review", Body: "x", Source: "system"},
+	} {
+		if err := store.SeedOrUpdate(context.Background(), runmode.LocalDefaultOrg, p); err != nil {
+			t.Fatalf("seed prompt %s: %v", p.ID, err)
+		}
 	}
 }

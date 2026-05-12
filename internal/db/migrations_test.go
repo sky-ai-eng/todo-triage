@@ -154,14 +154,64 @@ func seedFullLegacyState(t *testing.T, database *sql.DB) {
 		CREATE TABLE projects (id TEXT PRIMARY KEY);
 		CREATE TABLE entity_links (id INTEGER PRIMARY KEY);
 		CREATE TABLE events (id TEXT PRIMARY KEY);
-		CREATE TABLE task_rules (id TEXT PRIMARY KEY);
+		-- task_rules carries its full post-baseline column shape because
+		-- 202605120008_event_handlers_unification.sql backfills from
+		-- task_rules.{event_type, scope_predicate_json, enabled, name,
+		-- default_priority, sort_order, source, created_at, updated_at}
+		-- in addition to the SKY-269-added columns. INSERT...SELECT
+		-- requires those columns to exist even if no rows are present.
+		CREATE TABLE task_rules (
+			id TEXT PRIMARY KEY,
+			event_type TEXT NOT NULL,
+			scope_predicate_json TEXT,
+			enabled BOOLEAN NOT NULL DEFAULT 1,
+			name TEXT NOT NULL,
+			default_priority REAL NOT NULL DEFAULT 0.5,
+			sort_order INTEGER NOT NULL DEFAULT 0,
+			source TEXT NOT NULL DEFAULT 'user',
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);
 		CREATE TABLE tasks (id TEXT PRIMARY KEY);
 		CREATE TABLE task_events (id INTEGER PRIMARY KEY);
-		CREATE TABLE runs (id TEXT PRIMARY KEY);
+		-- runs + pending_firings carry their full column shape because
+		-- 202605120008_event_handlers_unification.sql rebuilds both
+		-- (table-rebuild dance to swap trigger_id's FK from
+		-- prompt_triggers to event_handlers). INSERT...SELECT requires
+		-- the columns to exist on the source even if no rows are present.
+		CREATE TABLE runs (
+			id TEXT PRIMARY KEY,
+			task_id TEXT,
+			prompt_id TEXT,
+			trigger_id TEXT,
+			trigger_type TEXT NOT NULL DEFAULT 'manual',
+			status TEXT NOT NULL DEFAULT 'cloning',
+			model TEXT,
+			session_id TEXT,
+			worktree_path TEXT,
+			result_summary TEXT,
+			stop_reason TEXT,
+			started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			completed_at DATETIME,
+			duration_ms INTEGER,
+			num_turns INTEGER,
+			total_cost_usd REAL
+		);
 		CREATE TABLE run_artifacts (id INTEGER PRIMARY KEY);
 		CREATE TABLE run_messages (id INTEGER PRIMARY KEY);
 		CREATE TABLE run_memory (id INTEGER PRIMARY KEY);
-		CREATE TABLE pending_firings (id INTEGER PRIMARY KEY);
+		CREATE TABLE pending_firings (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			entity_id TEXT,
+			task_id TEXT,
+			trigger_id TEXT,
+			triggering_event_id TEXT,
+			status TEXT NOT NULL DEFAULT 'pending',
+			skip_reason TEXT,
+			queued_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			drained_at DATETIME,
+			fired_run_id TEXT
+		);
 		CREATE TABLE run_worktrees (id INTEGER PRIMARY KEY);
 		CREATE TABLE pending_prs (id INTEGER PRIMARY KEY);
 		CREATE TABLE swipe_events (id INTEGER PRIMARY KEY);
