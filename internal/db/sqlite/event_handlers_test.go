@@ -19,16 +19,22 @@ func TestEventHandlerStore_SQLite(t *testing.T) {
 		t.Helper()
 		conn := openSQLiteForTest(t)
 		stores := sqlitestore.New(conn)
+		orgID := runmode.LocalDefaultOrgID
+		// Closure captures orgID rather than referring to
+		// runmode.LocalDefaultOrgID directly — same shape as the
+		// Postgres factory (which gets a per-test UUID) and keeps the
+		// harness wiring consistent: whatever org the store is exercised
+		// against is the org prompts get seeded into.
 		seed := func(t *testing.T, ids ...string) {
 			t.Helper()
 			for _, id := range ids {
-				if err := stores.Prompts.SeedOrUpdate(t.Context(), runmode.LocalDefaultOrgID, domain.Prompt{
+				if err := stores.Prompts.SeedOrUpdate(t.Context(), orgID, domain.Prompt{
 					ID: id, Name: id, Body: "test body", Source: "system",
 				}); err != nil {
 					t.Fatalf("seed prompt %s: %v", id, err)
 				}
 			}
 		}
-		return stores.EventHandlers, runmode.LocalDefaultOrgID, seed
+		return stores.EventHandlers, orgID, seed
 	})
 }

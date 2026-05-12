@@ -287,24 +287,29 @@ func GetTask(db *sql.DB, id string) (*domain.Task, error) {
 // QueuedTasks returns queued tasks ordered by the matching rule's
 // sort_order (category ordering) then priority_score DESC within each tier.
 // JOINs entities for display; the rule_order derived table picks the
-// MIN(sort_order) per event_type so the outer query stays one-row-per-task.
+// MIN(sort_order) per (org_id, event_type) so the outer query stays
+// one-row-per-task and stays tenant-correct.
 //
 // A direct LEFT JOIN on event_handlers would multiply each task row by the
 // number of enabled kind='rule' handlers for its event_type — two rules on
 // the same event_type would surface every matching task twice with
 // nondeterministic ordering. The derived table collapses that to one row
-// per event_type before the join.
+// per (org_id, event_type) before the join.
+//
+// org_id is part of the derived-table GROUP BY + the outer ON clause so
+// rules in one org can't influence task ordering in another (latent at
+// N=1 in local mode today, load-bearing once multi-mode shares a DB).
 func QueuedTasks(db *sql.DB) ([]domain.Task, error) {
 	return queryTasks(db, `
 		SELECT `+taskColumnsWithEntity+`
 		FROM tasks t
 		JOIN entities e ON t.entity_id = e.id
 		LEFT JOIN (
-			SELECT event_type, MIN(sort_order) AS sort_order
+			SELECT org_id, event_type, MIN(sort_order) AS sort_order
 			FROM event_handlers
 			WHERE enabled = 1 AND kind = 'rule'
-			GROUP BY event_type
-		) tr ON t.event_type = tr.event_type
+			GROUP BY org_id, event_type
+		) tr ON t.event_type = tr.event_type AND t.org_id = tr.org_id
 		WHERE t.status = 'queued'
 			AND (t.snooze_until IS NULL OR t.snooze_until <= datetime('now'))
 		ORDER BY COALESCE(tr.sort_order, 999) ASC, COALESCE(t.priority_score, 0.5) DESC
