@@ -228,14 +228,16 @@ func (s *Spawner) Takeover(runID, baseDir string) (*TakeoverResult, error) {
 	// of the bot's lane into the user's lane. The run status update
 	// (broadcastRunUpdate below) is separate — that's run lifecycle,
 	// not task responsibility. The two channels stay split (SKY-261 B+).
-	s.wsHub.Broadcast(websocket.Event{
-		Type: "task_claimed",
-		Data: map[string]any{
-			"task_id":             run.TaskID,
-			"claimed_by_agent_id": "",
-			"claimed_by_user_id":  runmode.LocalDefaultUserID,
-		},
-	})
+	if s.wsHub != nil {
+		s.wsHub.Broadcast(websocket.Event{
+			Type: "task_claimed",
+			Data: map[string]any{
+				"task_id":             run.TaskID,
+				"claimed_by_agent_id": "",
+				"claimed_by_user_id":  runmode.LocalDefaultUserID,
+			},
+		})
+	}
 
 	s.broadcastRunUpdate(runID, "taken_over")
 	toast.Info(s.wsHub, fmt.Sprintf("Taken over: run %s — resume in your terminal", shortRunID(runID)))
