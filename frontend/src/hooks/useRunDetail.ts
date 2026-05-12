@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { AgentMessage, AgentRun, Task, WSEvent } from '../types'
+import { readError } from '../lib/api'
 import { useWebSocket } from './useWebSocket'
 
 export interface RunDetailState {
@@ -60,7 +61,8 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
           return
         }
         if (!runRes.ok) {
-          throw new Error(`run fetch failed: ${runRes.status}`)
+          if (!cancelled) setError(await readError(runRes, 'Failed to load run'))
+          return
         }
         const runData = (await runRes.json()) as AgentRun
         if (cancelled) return
@@ -88,10 +90,14 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
               return Array.from(byID.values()).sort((a, b) => a.ID - b.ID)
             })
           }
+        } else if (!cancelled) {
+          setError(await readError(msgsRes, 'Failed to load messages'))
         }
         if (taskRes && taskRes.ok) {
           const t = (await taskRes.json()) as Task
           if (!cancelled) setTask(t)
+        } else if (taskRes && !cancelled) {
+          setError(await readError(taskRes, 'Failed to load task'))
         }
       } catch (err) {
         if (!cancelled) setError((err as Error).message)

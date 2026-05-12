@@ -421,11 +421,8 @@ function SidePanel({
     for (const m of messages) {
       inT += m.InputTokens ?? 0
       outT += m.OutputTokens ?? 0
-      // CacheRead/Creation not in the frontend AgentMessage type today;
-      // skip rather than fake a number.
-      const anyM = m as unknown as { CacheReadTokens?: number; CacheCreationTokens?: number }
-      cacheR += anyM.CacheReadTokens ?? 0
-      cacheW += anyM.CacheCreationTokens ?? 0
+      cacheR += m.CacheReadTokens ?? 0
+      cacheW += m.CacheCreationTokens ?? 0
     }
     return { inT, outT, cacheR, cacheW }
   }, [messages])
