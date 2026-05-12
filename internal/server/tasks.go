@@ -152,7 +152,7 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 	// dismiss / snooze / complete leave the claim alone: their state
 	// transition doesn't change "who's responsible," it changes
 	// lifecycle (status). Sticky claims past close preserve the
-	// audit shape: status='closed' + claim populated = "this person
+	// audit shape: status='done' + claim populated = "this person
 	// or bot was on it when it finished."
 	switch req.Action {
 	case "claim":
