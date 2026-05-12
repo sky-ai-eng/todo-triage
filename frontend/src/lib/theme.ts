@@ -8,7 +8,15 @@ export type ThemeMode = 'light' | 'dark' | 'auto'
 const STORAGE_KEY = 'tf-theme'
 
 export function getStoredTheme(): ThemeMode {
-  const v = localStorage.getItem(STORAGE_KEY)
+  // localStorage access can throw in privacy-restricted or sandboxed
+  // contexts. Fall back to 'auto' rather than crashing the caller —
+  // this runs from Settings' useState initializer.
+  let v: string | null = null
+  try {
+    v = localStorage.getItem(STORAGE_KEY)
+  } catch {
+    /* storage unavailable */
+  }
   return v === 'light' || v === 'dark' || v === 'auto' ? v : 'auto'
 }
 
@@ -26,7 +34,11 @@ export function applyTheme(mode: ThemeMode) {
 }
 
 export function setTheme(mode: ThemeMode) {
-  localStorage.setItem(STORAGE_KEY, mode)
+  try {
+    localStorage.setItem(STORAGE_KEY, mode)
+  } catch {
+    /* storage unavailable — apply for this session only */
+  }
   applyTheme(mode)
 }
 
@@ -36,9 +48,18 @@ export function watchSystemTheme() {
   if (mediaListenerAttached) return
   mediaListenerAttached = true
   const mql = window.matchMedia('(prefers-color-scheme: dark)')
-  mql.addEventListener('change', () => {
+  const onChange = () => {
     if (getStoredTheme() === 'auto') applyTheme('auto')
-  })
+  }
+  // Safari <14 only implements the legacy addListener API. Feature-
+  // detect rather than assume the modern EventTarget interface.
+  if (typeof mql.addEventListener === 'function') {
+    mql.addEventListener('change', onChange)
+  } else if (
+    typeof (mql as MediaQueryList & { addListener?: typeof onChange }).addListener === 'function'
+  ) {
+    ;(mql as MediaQueryList & { addListener: (cb: typeof onChange) => void }).addListener(onChange)
+  }
 }
 
 // React hook: subscribe to the effective theme. Components that need to
