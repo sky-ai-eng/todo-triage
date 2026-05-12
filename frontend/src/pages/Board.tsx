@@ -55,6 +55,13 @@ export default function Board() {
   // Delegate flow
   const [showPromptPicker, setShowPromptPicker] = useState(false)
   const pendingDelegateTask = useRef<Task | null>(null)
+  // SKY-261 B+: tracks bot-claimed tasks where the delegate run
+  // failed to fire. Keyed by task.id; cleared when a run for the
+  // task lands (handled in fetchTasks / WS update). Drives the
+  // "delegate didn't fire — retry" badge + button on the agent-
+  // lane TaskCard. claim is commitment, runs are execution; this
+  // map captures the divergence so the user can act on it.
+  const [delegateFailures, setDelegateFailures] = useState<Record<string, string>>({})
 
   // Approval overlay — review or PR depending on which side table the
   // run's pending_approval came from. The run's pending_kind field
@@ -473,8 +480,11 @@ export default function Board() {
       })
       if (res.ok) {
         try {
-          const { run_id: runID } = (await res.json()) as { run_id?: string }
+          const body = (await res.json()) as { run_id?: string; delegate_error?: string }
+          const runID = body.run_id
           if (runID) {
+            // Spawn succeeded — seed the AgentCard immediately,
+            // clear any prior failure marker for this task.
             setAgentRuns((prev) => ({
               ...prev,
               [task.id]: {
@@ -485,6 +495,22 @@ export default function Board() {
                 StartedAt: new Date().toISOString(),
                 ResultSummary: '',
               },
+            }))
+            setDelegateFailures((prev) => {
+              if (!(task.id in prev)) return prev
+              const next = { ...prev }
+              delete next[task.id]
+              return next
+            })
+          } else if (body.delegate_error) {
+            // SKY-261 B+: spawn failed but the claim was stamped
+            // (the user's commitment is recorded; the run just
+            // didn't fire on this attempt). Surface it on the
+            // agent-lane card via the "delegate didn't fire" badge
+            // + Retry button.
+            setDelegateFailures((prev) => ({
+              ...prev,
+              [task.id]: body.delegate_error || 'spawn failed',
             }))
           }
         } catch {
@@ -737,6 +763,24 @@ export default function Board() {
                       key={task.id}
                       task={task}
                       onRequeue={() => handleRequeue(task.id)}
+                      // SKY-261 B+: bot is claimed but no run exists.
+                      // delegateFailures captures known failures from
+                      // a prior swipe response; if absent we still show
+                      // the badge (the task is in the agent lane with
+                      // no run — either spawn failed silently or hasn't
+                      // landed yet, both surface the same retry
+                      // affordance). The Retry button re-opens the
+                      // prompt picker, identical to the original
+                      // queue→agent gesture.
+                      delegateFailed={{
+                        message:
+                          delegateFailures[task.id] ||
+                          'no run materialized for this bot-claimed task',
+                      }}
+                      onRetry={() => {
+                        pendingDelegateTask.current = task
+                        setShowPromptPicker(true)
+                      }}
                     />
                   ),
                 )
@@ -862,7 +906,17 @@ function SidebarTaskCard({ task }: { task: Task }) {
   )
 }
 
-function SortableTaskCard({ task, onRequeue }: { task: Task; onRequeue?: () => void }) {
+function SortableTaskCard({
+  task,
+  onRequeue,
+  delegateFailed,
+  onRetry,
+}: {
+  task: Task
+  onRequeue?: () => void
+  delegateFailed?: { message: string }
+  onRetry?: () => void
+}) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: task.id,
   })
@@ -880,6 +934,8 @@ function SortableTaskCard({ task, onRequeue }: { task: Task; onRequeue?: () => v
       style={style}
       isDragging={false}
       onRequeue={onRequeue}
+      delegateFailed={delegateFailed}
+      onRetry={onRetry}
       {...attributes}
       {...listeners}
     />

@@ -13,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // newTestServer spins up an in-memory SQLite with the full schema +
@@ -42,6 +43,17 @@ func newTestServer(t *testing.T) *Server {
 	// so tests don't read or delete the developer's real config.yaml.
 	if err := config.Init(database); err != nil {
 		t.Fatalf("config init: %v", err)
+	}
+	// SKY-261 B+: swipe-delegate and factory_delegate both call
+	// Agents.GetForOrg to stamp claim. Without an agents row, those
+	// paths return 500 with "no agent bootstrapped." Seed the local
+	// sentinel agent row so handler tests reach the actual logic
+	// under test rather than short-circuiting on agent bootstrap.
+	if _, err := database.Exec(
+		`INSERT OR IGNORE INTO agents (id, org_id, display_name) VALUES (?, ?, 'Test Bot')`,
+		runmode.LocalDefaultAgentID, runmode.LocalDefaultOrgID,
+	); err != nil {
+		t.Fatalf("seed local agent: %v", err)
 	}
 	stores := sqlitestore.New(database)
 	return New(database, stores.Prompts, stores.Swipes, stores.Dashboard, stores.EventHandlers, stores.Agents)

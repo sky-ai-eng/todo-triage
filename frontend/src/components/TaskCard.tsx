@@ -8,10 +8,18 @@ interface Props {
   style?: React.CSSProperties
   isDragging?: boolean
   onRequeue?: () => void
+  // SKY-261 B+: when a task is bot-claimed but the delegate run failed
+  // to spawn (or no run materialized yet for the bot-claimed task),
+  // the agent-lane card surfaces the failure here. delegateFailed
+  // carries the error message (e.g. "prompt not found"); onRetry fires
+  // the same delegate gesture again. Claim is commitment, runs are
+  // execution; this prop is how the Board reflects that divergence.
+  delegateFailed?: { message: string }
+  onRetry?: () => void
 }
 
 const TaskCard = forwardRef<HTMLDivElement, Props & React.HTMLAttributes<HTMLDivElement>>(
-  ({ task, style, isDragging, onRequeue, ...props }, ref) => {
+  ({ task, style, isDragging, onRequeue, delegateFailed, onRetry, ...props }, ref) => {
     const age = formatAge(task.created_at)
     // Normalize once so the condition and the prop share the same non-nullable
     // value — avoids the non-null assertion on a field typed as optional.
@@ -21,7 +29,9 @@ const TaskCard = forwardRef<HTMLDivElement, Props & React.HTMLAttributes<HTMLDiv
       <div
         ref={ref}
         style={style}
-        className={`bg-surface-raised backdrop-blur-xl border border-border-glass rounded-2xl p-4 shadow-sm shadow-black/[0.02] transition-shadow cursor-grab active:cursor-grabbing ${
+        className={`bg-surface-raised backdrop-blur-xl border ${
+          delegateFailed ? 'border-snooze/40' : 'border-border-glass'
+        } rounded-2xl p-4 shadow-sm shadow-black/[0.02] transition-shadow cursor-grab active:cursor-grabbing ${
           isDragging ? 'shadow-lg shadow-black/[0.08] border-accent/30 z-50' : ''
         }`}
         {...props}
@@ -30,6 +40,7 @@ const TaskCard = forwardRef<HTMLDivElement, Props & React.HTMLAttributes<HTMLDiv
           <SourceBadge task={task} />
           <EventBadge eventType={task.event_type} compact />
           {subtaskCount > 0 && <SubtaskHint count={subtaskCount} />}
+          {delegateFailed && <DelegateFailedBadge message={delegateFailed.message} />}
         </div>
 
         <h3 className="text-[13px] font-semibold text-text-primary leading-snug line-clamp-2 mb-1">
@@ -46,6 +57,19 @@ const TaskCard = forwardRef<HTMLDivElement, Props & React.HTMLAttributes<HTMLDiv
           </div>
 
           <div className="flex items-center gap-3">
+            {delegateFailed && onRetry && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onRetry()
+                }}
+                onPointerDown={(e) => e.stopPropagation()}
+                className="text-[12px] text-snooze hover:text-snooze/70 font-medium transition-colors"
+                title="Re-attempt the delegate run"
+              >
+                Retry
+              </button>
+            )}
             {onRequeue && (
               <button
                 onClick={(e) => {
@@ -101,6 +125,23 @@ function SubtaskHint({ count }: { count: number }) {
     >
       <span aria-hidden>⋮</span>
       {label}
+    </span>
+  )
+}
+
+// DelegateFailedBadge surfaces "the bot is claimed but the run didn't
+// fire" — the SKY-261 B+ failure state. claim is commitment, runs are
+// execution; when they diverge, this is how the Board tells the user.
+// Uses the snooze amber to read "needs your attention" without
+// escalating to red (the task isn't broken, just stuck).
+function DelegateFailedBadge({ message }: { message: string }) {
+  return (
+    <span
+      title={`The bot took this task but the run didn't fire: ${message}. Click Retry to re-attempt.`}
+      className="inline-flex items-center gap-1 rounded-full border border-snooze/30 bg-snooze/[0.10] px-1.5 py-0.5 text-[10px] font-medium text-snooze"
+    >
+      <span aria-hidden>⚠</span>
+      delegate didn't fire
     </span>
   )
 }
