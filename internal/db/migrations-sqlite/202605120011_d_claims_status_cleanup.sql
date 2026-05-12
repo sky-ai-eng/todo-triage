@@ -20,19 +20,29 @@ UPDATE tasks
        )
  WHERE status = 'delegated';
 
--- (3) Backfill claim for tasks with pending pending_firings rows.
+-- (3) Backfill claim for drain-eligible tasks with pending firings.
 -- Drain (router.attemptDrainOne) now requires claimed_by_agent_id to
 -- be set or it skips the firing as stale. Pre-upgrade firings are
 -- legitimate commitments queued behind a busy entity; preserve them
 -- by stamping the org's agent claim on the referenced task. NULL
 -- claim cols on both sides means "no human took it either" — safe
 -- to stamp.
+--
+-- Status guard: only stamp when the task is currently drain-eligible
+-- (status='queued'). A task that landed in done/dismissed/snoozed
+-- since the firing was enqueued is no longer a valid target — the
+-- drainer would skip it via the task_closed branch anyway, and
+-- stamping a bot claim on a closed/snoozed row pollutes the audit
+-- ("who was responsible when this finished?" answer would lie about
+-- the bot taking ownership). Leaving claim NULL on those rows keeps
+-- the firing's eventual skipped_stale verdict honest.
 UPDATE tasks
    SET claimed_by_agent_id = (
          SELECT a.id FROM agents a WHERE a.org_id = tasks.org_id LIMIT 1
        )
  WHERE claimed_by_agent_id IS NULL
    AND claimed_by_user_id  IS NULL
+   AND status = 'queued'
    AND EXISTS (
        SELECT 1 FROM pending_firings pf
         WHERE pf.task_id = tasks.id

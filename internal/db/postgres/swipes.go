@@ -111,7 +111,26 @@ func (s *swipeStore) UndoLastSwipe(ctx context.Context, orgID string, taskID str
 		if err := insertSwipeEvent(ctx, tx, orgID, taskID, "undo", nil); err != nil {
 			return err
 		}
-		return updateTaskStatus(ctx, tx, orgID, taskID, "queued", nil, true)
+		// SKY-261 B+: undo mirrors requeue's full reset — claim cols
+		// also clear. A claim/delegate swipe stamps the relevant
+		// claim col; leaving it on the row would keep the task in
+		// the owner's lane even after status returns to 'queued'.
+		// Clear both cols so the task lands back in the team's
+		// unclaimed triage queue, matching RequeueTask's shape. The
+		// inline UPDATE bypasses updateTaskStatus because that
+		// helper only handles the (status, snooze_until) axis pair —
+		// growing it to take claim cols too would proliferate
+		// boolean flags across every callsite for one path's needs.
+		_, err := tx.ExecContext(ctx,
+			`UPDATE tasks
+			    SET status = $1,
+			        snooze_until = NULL,
+			        claimed_by_agent_id = NULL,
+			        claimed_by_user_id  = NULL
+			  WHERE org_id = $2 AND id = $3`,
+			"queued", orgID, taskID,
+		)
+		return err
 	})
 }
 

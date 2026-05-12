@@ -561,11 +561,13 @@ func (r *Router) RunDrainSweeper(ctx context.Context, interval time.Duration) {
 //
 //   - (runID, "", nil)         — fire succeeded; caller marks 'fired'.
 //   - ("", skipReason, nil)    — definitive "no longer relevant"; caller
-//     marks 'skipped_stale'. Reserved for: task_closed, trigger_disabled,
-//     breaker_tripped, claim_changed (SKY-261 B+: a user took the task
-//     over or requeued it after the firing was enqueued, so the bot's
-//     original commitment is no longer current; drainer must not fire
-//     a phantom bot run against a now-user-claimed task).
+//     marks 'skipped_stale'. Reserved for: task_closed (done /
+//     dismissed / snoozed — task isn't drain-eligible on the
+//     lifecycle axis), trigger_disabled, breaker_tripped,
+//     claim_changed (SKY-261 B+: a user took the task over or
+//     requeued it after the firing was enqueued, so the bot's
+//     original commitment is no longer current; drainer must not
+//     fire a phantom bot run against a now-user-claimed task).
 //   - ("", "", err)            — transient failure (DB read, fire-time);
 //     caller leaves the firing in 'pending' state and bails the drain
 //     loop. The periodic sweeper or next run-terminal will retry.
@@ -584,7 +586,16 @@ func (r *Router) attemptDrainOne(firing *domain.PendingFiring) (runID, skipReaso
 	if err != nil {
 		return "", "", fmt.Errorf("task lookup: %w", err)
 	}
-	if task == nil || task.Status == "done" || task.Status == "dismissed" {
+	// SKY-261 B+: status='snoozed' belongs on the lifecycle-skip axis,
+	// not the claim axis. A bot-claimed task that gets snoozed (e.g.,
+	// the user said "wait until Tuesday") shouldn't fire a queued
+	// drain when the entity slot opens — the snooze itself is a "do
+	// not act" signal on the lifecycle axis. Grouped with
+	// done/dismissed under task_closed because all three mean "the
+	// task is not currently drain-eligible." A snooze wake-on-bump
+	// will create a NEW event → new firing if the trigger still
+	// matches; the deferred firing is the wrong path to wake it.
+	if task == nil || task.Status == "done" || task.Status == "dismissed" || task.Status == "snoozed" {
 		return "", domain.PendingFiringSkipTaskClosed, nil
 	}
 

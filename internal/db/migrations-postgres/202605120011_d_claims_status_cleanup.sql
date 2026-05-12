@@ -46,7 +46,7 @@ UPDATE tasks t
  WHERE t.status = 'delegated';
 
 -- ============================================================================
--- (3) Backfill claim for tasks with pending pending_firings rows
+-- (3) Backfill claim for drain-eligible tasks with pending firings
 -- ============================================================================
 -- attemptDrainOne (internal/routing/router.go) now refuses to fire a
 -- pending firing unless the task carries a bot claim — that's the
@@ -66,11 +66,21 @@ UPDATE tasks t
 -- guard on the firing side, falls back gracefully when the agents
 -- table is empty (claim stays NULL → drainer still skips, same as
 -- before — no regression).
+--
+-- Status guard: only stamp when the task is currently drain-eligible
+-- (status='queued'). A task that landed in done/dismissed/snoozed
+-- since the firing was enqueued is no longer a valid target — the
+-- drainer would skip it via the task_closed branch anyway, and
+-- stamping a bot claim on a non-active row would pollute the
+-- audit ("who was responsible when this finished?" would falsely
+-- name the bot). Leaving claim NULL on those rows keeps the firing's
+-- eventual skipped_stale verdict honest.
 
 UPDATE tasks t
    SET claimed_by_agent_id = (SELECT a.id FROM agents a WHERE a.org_id = t.org_id LIMIT 1)
  WHERE t.claimed_by_agent_id IS NULL
    AND t.claimed_by_user_id  IS NULL
+   AND t.status = 'queued'
    AND EXISTS (
        SELECT 1 FROM pending_firings pf
         WHERE pf.task_id = t.id

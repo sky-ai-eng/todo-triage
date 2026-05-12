@@ -135,8 +135,22 @@ func (s *swipeStore) UndoLastSwipe(ctx context.Context, orgID string, taskID str
 		); err != nil {
 			return err
 		}
+		// SKY-261 B+: undo mirrors requeue's full reset — claim cols
+		// also clear. A claim/delegate swipe stamps the relevant
+		// claim col; the post-swipe-handler teardown
+		// (cleanupPendingApprovalRun + spawner.Cancel for the
+		// dismiss/complete/claim paths) is the side-effect, but the
+		// claim col left on the row would keep the task in the
+		// owner's lane even after status returns to 'queued'. Clear
+		// both cols so the task lands back in the team's unclaimed
+		// triage queue, the same shape /requeue produces.
 		_, err := q.ExecContext(ctx,
-			`UPDATE tasks SET status = 'queued', snooze_until = NULL WHERE id = ?`,
+			`UPDATE tasks
+			    SET status = 'queued',
+			        snooze_until = NULL,
+			        claimed_by_agent_id = NULL,
+			        claimed_by_user_id  = NULL
+			  WHERE id = ?`,
 			taskID,
 		)
 		return err

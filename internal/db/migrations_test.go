@@ -617,6 +617,35 @@ func TestMigrate_DClaimsCleanupBackfillsClaimFromPendingFirings(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed naked task: %v", err)
 	}
+	// Non-queued tasks (snoozed / done / dismissed) must NOT be
+	// stamped even though they carry a pending firing — the firing
+	// is effectively dead because the drainer's task_closed branch
+	// will skip it on first attempt. Backfilling a bot claim onto a
+	// non-active row would pollute the responsibility audit.
+	// Distinct dedup_key per row to side-step the partial unique index
+	// on tasks(entity_id, event_type, dedup_key) WHERE status NOT IN
+	// ('done','dismissed') — the 'snoozed' row would otherwise collide
+	// with 'task-legacy' (same triple).
+	if _, err := database.Exec(
+		`INSERT INTO tasks (id, entity_id, event_type, dedup_key, primary_event_id, status, org_id, creator_user_id, visibility)
+		 VALUES ('task-snoozed', 'entity-x', 'pr_review_requested', 'snz',  'event-x', 'snoozed',   ?, ?, 'team'),
+		        ('task-done',    'entity-x', 'pr_review_requested', 'done', 'event-x', 'done',      ?, ?, 'team'),
+		        ('task-dism',    'entity-x', 'pr_review_requested', 'dism', 'event-x', 'dismissed', ?, ?, 'team')`,
+		orgID, runmode.LocalDefaultUserID,
+		orgID, runmode.LocalDefaultUserID,
+		orgID, runmode.LocalDefaultUserID,
+	); err != nil {
+		t.Fatalf("seed non-active tasks: %v", err)
+	}
+	if _, err := database.Exec(
+		`INSERT INTO pending_firings (org_id, entity_id, task_id, trigger_id, triggering_event_id, status)
+		 VALUES (?, 'entity-x', 'task-snoozed', 'trigger-x', 'event-x', 'pending'),
+		        (?, 'entity-x', 'task-done',    'trigger-x', 'event-x', 'pending'),
+		        (?, 'entity-x', 'task-dism',    'trigger-x', 'event-x', 'pending')`,
+		orgID, orgID, orgID,
+	); err != nil {
+		t.Fatalf("seed pending firings on non-active tasks: %v", err)
+	}
 	if _, err := database.Exec(`PRAGMA foreign_keys=ON`); err != nil {
 		t.Fatalf("re-enable FKs: %v", err)
 	}
@@ -651,6 +680,23 @@ func TestMigrate_DClaimsCleanupBackfillsClaimFromPendingFirings(t *testing.T) {
 	}
 	if nakedClaim.Valid {
 		t.Errorf("naked task picked up a claim (%q) — backfill EXISTS clause is too permissive", nakedClaim.String)
+	}
+
+	// Non-active tasks (snoozed, done, dismissed) with pending
+	// firings must NOT be stamped — the firing will skip via
+	// task_closed anyway, and stamping the bot claim on a closed
+	// row would lie about responsibility in the audit. The status
+	// guard in step (3) is the gate; this pins it.
+	for _, id := range []string{"task-snoozed", "task-done", "task-dism"} {
+		var c sql.NullString
+		if err := database.QueryRow(
+			`SELECT claimed_by_agent_id FROM tasks WHERE id = ?`, id,
+		).Scan(&c); err != nil {
+			t.Fatalf("read %s: %v", id, err)
+		}
+		if c.Valid {
+			t.Errorf("%s picked up a backfill claim (%q) — status guard missing or wrong", id, c.String)
+		}
 	}
 }
 

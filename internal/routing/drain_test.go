@@ -139,6 +139,54 @@ func TestDrainEntity_ClosedTask(t *testing.T) {
 	}
 }
 
+// TestDrainEntity_SnoozedTask pins the SKY-261 B+ semantic: snooze is
+// a lifecycle-axis "do not act" signal that's orthogonal to claim. A
+// pending firing for a bot-claimed task that gets snoozed (e.g., user
+// said "wait until Tuesday" while the firing was queued behind a busy
+// entity) must not fire when the entity slot opens. The drain
+// classifies snoozed alongside done/dismissed under task_closed —
+// all three mean "task is not currently drain-eligible." A snooze
+// wake-on-bump creates a fresh event → new firing if the trigger
+// still matches; the deferred firing is the wrong wake path.
+func TestDrainEntity_SnoozedTask(t *testing.T) {
+	database := newTestDB(t)
+	entityID, taskID, triggerID, eventID := setupDrainScenario(t, database)
+
+	if _, err := db.EnqueuePendingFiring(database, entityID, taskID, triggerID, eventID); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	// Bot-claim the task (drain would otherwise short-circuit on
+	// claim_changed before the lifecycle check) AND snooze it.
+	if err := db.SetTaskClaimedByAgent(database, taskID, runmode.LocalDefaultAgentID); err != nil {
+		t.Fatalf("stamp claim: %v", err)
+	}
+	if _, err := database.Exec(
+		`UPDATE tasks SET status = 'snoozed', snooze_until = '2099-01-01 00:00:00' WHERE id = ?`,
+		taskID,
+	); err != nil {
+		t.Fatalf("snooze task: %v", err)
+	}
+
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, noopScorer{}, websocket.NewHub())
+	router.DrainEntity(entityID)
+
+	rows, err := db.ListPendingFiringsForEntity(database, entityID)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 firing row, got %d", len(rows))
+	}
+	if rows[0].Status != domain.PendingFiringStatusSkippedStale {
+		t.Errorf("status = %q, want %q (snoozed task should skip drain, not fire)", rows[0].Status, domain.PendingFiringStatusSkippedStale)
+	}
+	if rows[0].SkipReason != domain.PendingFiringSkipTaskClosed {
+		t.Errorf("skip_reason = %q, want %q (snoozed grouped under task_closed on the lifecycle-skip axis)",
+			rows[0].SkipReason, domain.PendingFiringSkipTaskClosed)
+	}
+}
+
 // TestDrainEntity_DisabledTrigger verifies the drain respects current
 // trigger state. A trigger disabled mid-pause must not fire its queued
 // firings on resume.

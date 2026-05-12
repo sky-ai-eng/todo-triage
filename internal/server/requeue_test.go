@@ -445,6 +445,60 @@ func TestHandleUndo_NoPendingApprovalIsNoOp(t *testing.T) {
 	}
 }
 
+// TestHandleUndo_ClearsClaimColumns pins the SKY-261 B+ semantic:
+// /undo returns the task to the team's unclaimed queue, which means
+// both claim_by_* cols are cleared — not just status reset. Without
+// this, a claim/delegate swipe followed by Undo would leave the task
+// status='queued' but still in the owner's lane (queue-view filter
+// requires both claim cols NULL), so the user would think they
+// undid the action while the Board kept rendering the task as
+// claimed.
+func TestHandleUndo_ClearsClaimColumns(t *testing.T) {
+	s := newTestServer(t)
+
+	// Seed a task carrying both a status that /undo will revert and
+	// a user claim (simulates the post-swipe state for action='claim').
+	// snooze_until is also set so the regression covers the "claim
+	// during a snoozed window" path — both cols + snooze_until must
+	// reset.
+	if _, err := s.db.Exec(`
+		INSERT INTO entities (id, source, source_id, kind, state)
+		VALUES ('e_undo_claim', 'github', 'owner/repo#u1', 'pr', 'active');
+		INSERT INTO events (id, entity_id, event_type, dedup_key)
+		VALUES ('ev_undo_claim', 'e_undo_claim', 'github:pr:opened', '');
+		INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id, snooze_until)
+		VALUES ('t_undo_claim', 'e_undo_claim', 'github:pr:opened', 'ev_undo_claim', 'snoozed', ?, '2099-01-01 00:00:00');
+	`, runmode.LocalDefaultUserID); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_undo_claim/undo", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	var status, claimedAgent, claimedUser sql.NullString
+	var snoozeUntil sql.NullTime
+	if err := s.db.QueryRow(
+		`SELECT status, claimed_by_agent_id, claimed_by_user_id, snooze_until
+		 FROM tasks WHERE id = ?`, "t_undo_claim",
+	).Scan(&status, &claimedAgent, &claimedUser, &snoozeUntil); err != nil {
+		t.Fatalf("scan task: %v", err)
+	}
+	if status.String != "queued" {
+		t.Errorf("status = %q, want %q", status.String, "queued")
+	}
+	if claimedAgent.Valid {
+		t.Errorf("claimed_by_agent_id = %q; want NULL (undo must clear claim)", claimedAgent.String)
+	}
+	if claimedUser.Valid {
+		t.Errorf("claimed_by_user_id = %q; want NULL (undo must clear claim)", claimedUser.String)
+	}
+	if snoozeUntil.Valid {
+		t.Errorf("snooze_until = %v; want NULL", snoozeUntil.Time)
+	}
+}
+
 // TestCleanupPendingApprovalRun_Idempotent calls the cleanup twice
 // against the same task with a different outcome the second time.
 // The second call must find the run already cancelled (the
