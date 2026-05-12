@@ -139,6 +139,48 @@ func TestDrainEntity_ClosedTask(t *testing.T) {
 	}
 }
 
+// TestRevertTaskStatus_PreservesClaim pins the contract that
+// revertTaskStatus only touches the lifecycle axis. Its sole caller
+// (the mark-fired-failure rollback in DrainEntity) leaves the
+// pending_firings row in 'pending' so the next drain retries; after
+// SKY-261 B+, the retry's attemptDrainOne gate requires the bot
+// claim to still be set or it skips with claim_changed. Clearing
+// the claim cols here would silently drop the queued intent — the
+// guard would fire and the retry never would. This test pins that
+// the bot claim survives the revert.
+func TestRevertTaskStatus_PreservesClaim(t *testing.T) {
+	database := newTestDB(t)
+	_, taskID, _, _ := setupDrainScenario(t, database)
+
+	// Move the task off 'queued' to simulate mid-flight state the
+	// rollback path would observe. (Pre-B+ fireDelegate flipped to
+	// 'delegated'; post-B+ the status stays 'queued' on commit, but
+	// we're testing revert independently of the caller path, so set
+	// status to something visibly distinct so the assertion catches
+	// a regression where SetTaskStatus isn't called either.)
+	if err := db.SetTaskStatus(database, taskID, "snoozed"); err != nil {
+		t.Fatalf("pre-stage status: %v", err)
+	}
+
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, noopScorer{}, websocket.NewHub())
+	router.revertTaskStatus(taskID, "queued")
+
+	task, err := db.GetTask(database, taskID)
+	if err != nil || task == nil {
+		t.Fatalf("read task: task=%v err=%v", task, err)
+	}
+	if task.Status != "queued" {
+		t.Errorf("Status = %q, want queued (lifecycle revert must fire)", task.Status)
+	}
+	if task.ClaimedByAgentID != runmode.LocalDefaultAgentID {
+		t.Errorf("ClaimedByAgentID = %q, want %q (revert must NOT clear claim — retry needs it)",
+			task.ClaimedByAgentID, runmode.LocalDefaultAgentID)
+	}
+	if task.ClaimedByUserID != "" {
+		t.Errorf("ClaimedByUserID = %q, want empty", task.ClaimedByUserID)
+	}
+}
+
 // TestDrainEntity_SnoozedTask pins the SKY-261 B+ semantic: snooze is
 // a lifecycle-axis "do not act" signal that's orthogonal to claim. A
 // pending firing for a bot-claimed task that gets snoozed (e.g., user

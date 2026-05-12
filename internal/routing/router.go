@@ -633,52 +633,30 @@ func (r *Router) attemptDrainOne(firing *domain.PendingFiring) (runID, skipReaso
 	return id, "", nil
 }
 
-// revertTaskStatus sets a task back to the given status and broadcasts the
-// change so the frontend doesn't get stuck showing a stale state. After
-// SKY-261 B+ this also clears the bot's claim — drain failure means the
-// firing's commitment didn't materialize, so the task should go back to
-// the team's triage queue (status='queued' + claim cols NULL), not stay
-// bot-claimed without a run.
+// revertTaskStatus moves a task's lifecycle axis back to the given
+// status and broadcasts the change so the frontend doesn't get stuck
+// showing a stale state. Claim cols are intentionally left alone —
+// after SKY-261 B+ the three axes (lifecycle / claim / runs) are
+// orthogonal, and this helper only touches lifecycle.
+//
+// The only caller today is the mark-fired-failure rollback path in
+// DrainEntity: a run was successfully spawned but the UPDATE that
+// records the firing→run association failed. The recovery flow
+// cancels the run, leaves the firing in 'pending' so the next drain
+// retries it, and reverts the task lifecycle for FE consistency.
+// Critically, the firing's *commitment* (the bot has taken this task)
+// is unchanged — the next drain pass needs the bot claim to remain
+// set or attemptDrainOne's ClaimedByAgentID guard would skip the
+// retry as claim_changed, silently dropping the queued intent. So
+// the claim col stays with the bot here; only status moves.
+//
+// Code paths that DO want to release the claim (user requeue, task
+// completion, swipe-undo) clear the claim cols on their own — they
+// don't go through this helper.
 func (r *Router) revertTaskStatus(taskID, status string) {
 	if err := dbpkg.SetTaskStatus(r.db, taskID, status); err != nil {
 		log.Printf("[router] failed to revert task %s to %s: %v", taskID, status, err)
 		return
-	}
-	// Clear claim cols too — the SKY-261 B+ semantic of "revert" is
-	// "this task is back in the queue, unclaimed." Idempotent on
-	// already-unclaimed rows. Only broadcast the claim-cleared event
-	// if the UPDATE actually succeeded — otherwise the DB still shows
-	// the old claim and a broadcast would push the FE into an
-	// inconsistent view. On UPDATE failure we still broadcast
-	// task_updated so the status revert is visible; the FE will
-	// re-fetch the task on its next refresh to reconcile the claim
-	// axis. tasks_updated is the generic "go look again" signal that
-	// existing FE refresh paths already listen for.
-	claimCleared := true
-	if _, err := r.db.Exec(
-		`UPDATE tasks SET claimed_by_agent_id = NULL, claimed_by_user_id = NULL WHERE id = ?`,
-		taskID,
-	); err != nil {
-		log.Printf("[router] failed to clear claim on revert for task %s: %v", taskID, err)
-		claimCleared = false
-	}
-	if claimCleared {
-		r.ws.Broadcast(websocket.Event{
-			Type: "task_claimed",
-			Data: map[string]any{
-				"task_id":             taskID,
-				"claimed_by_agent_id": "",
-				"claimed_by_user_id":  "",
-			},
-		})
-	} else {
-		// Fallback: nudge listeners to re-fetch so they don't sit on
-		// a stale claim view. tasks_updated is the existing "refresh"
-		// signal the Board already wires up.
-		r.ws.Broadcast(websocket.Event{
-			Type: "tasks_updated",
-			Data: map[string]any{},
-		})
 	}
 	r.ws.Broadcast(websocket.Event{
 		Type: "task_updated",
