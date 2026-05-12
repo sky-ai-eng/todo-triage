@@ -562,7 +562,10 @@ func (r *Router) RunDrainSweeper(ctx context.Context, interval time.Duration) {
 //   - (runID, "", nil)         — fire succeeded; caller marks 'fired'.
 //   - ("", skipReason, nil)    — definitive "no longer relevant"; caller
 //     marks 'skipped_stale'. Reserved for: task_closed, trigger_disabled,
-//     breaker_tripped.
+//     breaker_tripped, claim_changed (SKY-261 B+: a user took the task
+//     over or requeued it after the firing was enqueued, so the bot's
+//     original commitment is no longer current; drainer must not fire
+//     a phantom bot run against a now-user-claimed task).
 //   - ("", "", err)            — transient failure (DB read, fire-time);
 //     caller leaves the firing in 'pending' state and bails the drain
 //     loop. The periodic sweeper or next run-terminal will retry.
@@ -632,21 +635,40 @@ func (r *Router) revertTaskStatus(taskID, status string) {
 	}
 	// Clear claim cols too — the SKY-261 B+ semantic of "revert" is
 	// "this task is back in the queue, unclaimed." Idempotent on
-	// already-unclaimed rows.
+	// already-unclaimed rows. Only broadcast the claim-cleared event
+	// if the UPDATE actually succeeded — otherwise the DB still shows
+	// the old claim and a broadcast would push the FE into an
+	// inconsistent view. On UPDATE failure we still broadcast
+	// task_updated so the status revert is visible; the FE will
+	// re-fetch the task on its next refresh to reconcile the claim
+	// axis. tasks_updated is the generic "go look again" signal that
+	// existing FE refresh paths already listen for.
+	claimCleared := true
 	if _, err := r.db.Exec(
 		`UPDATE tasks SET claimed_by_agent_id = NULL, claimed_by_user_id = NULL WHERE id = ?`,
 		taskID,
 	); err != nil {
 		log.Printf("[router] failed to clear claim on revert for task %s: %v", taskID, err)
+		claimCleared = false
 	}
-	r.ws.Broadcast(websocket.Event{
-		Type: "task_claimed",
-		Data: map[string]any{
-			"task_id":             taskID,
-			"claimed_by_agent_id": "",
-			"claimed_by_user_id":  "",
-		},
-	})
+	if claimCleared {
+		r.ws.Broadcast(websocket.Event{
+			Type: "task_claimed",
+			Data: map[string]any{
+				"task_id":             taskID,
+				"claimed_by_agent_id": "",
+				"claimed_by_user_id":  "",
+			},
+		})
+	} else {
+		// Fallback: nudge listeners to re-fetch so they don't sit on
+		// a stale claim view. tasks_updated is the existing "refresh"
+		// signal the Board already wires up.
+		r.ws.Broadcast(websocket.Event{
+			Type: "tasks_updated",
+			Data: map[string]any{},
+		})
+	}
 	r.ws.Broadcast(websocket.Event{
 		Type: "task_updated",
 		Data: map[string]any{"task_id": taskID, "status": status},

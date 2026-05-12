@@ -142,13 +142,20 @@ func TestHandleFactoryDelegate_400OnMalformedJSON(t *testing.T) {
 	}
 }
 
-// TestHandleFactoryDelegate_400OnMissingPrompt is the regression for the
-// previous blanket-500 error mapping: a Delegate failure caused by a
-// race-deleted or invalid prompt id is client-correctable, so the
-// handler should classify it as 400 rather than 500. Wire a real
-// Spawner so the request reaches Delegate; pass a prompt_id that
-// doesn't resolve. errors.Is on the sentinel routes the response.
-func TestHandleFactoryDelegate_400OnMissingPrompt(t *testing.T) {
+// TestHandleFactoryDelegate_DelegateErrorPreservesClaim pins the SKY-261
+// B+ semantic: when the user's drag-to-delegate gesture commits at the
+// claim axis but the spawner.Delegate call fails (e.g. ErrPromptNotFound
+// from a race-deleted prompt), the handler returns 200 OK with
+// delegate_error populated and claim_stamped=true. Mirrors the swipe-
+// delegate response shape exactly. The claim must survive in the DB so
+// the Board renders the bot-claimed-but-no-run card with a Retry
+// affordance.
+//
+// Replaces the previous "TestHandleFactoryDelegate_400OnMissingPrompt"
+// which asserted a 400 — that contract changed when factory_delegate
+// adopted the swipe convention of 200 + delegate_error for partial
+// success (claim committed, run didn't fire).
+func TestHandleFactoryDelegate_DelegateErrorPreservesClaim(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, s.prompts, nil, nil, websocket.NewHub(), "haiku"))
 
@@ -169,8 +176,39 @@ func TestHandleFactoryDelegate_400OnMissingPrompt(t *testing.T) {
 		"event_type": domain.EventGitHubPRCICheckPassed,
 		"prompt_id":  "no-such-prompt",
 	})
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want 400 (prompt-not-found is client-correctable)", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (partial-success convention: claim stamped, run didn't fire)", rec.Code)
+	}
+	var resp struct {
+		TaskID        string `json:"task_id"`
+		RunID         string `json:"run_id"`
+		DelegateError string `json:"delegate_error"`
+		ClaimStamped  bool   `json:"claim_stamped"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if resp.DelegateError == "" {
+		t.Errorf("delegate_error empty; expected spawner failure message")
+	}
+	if resp.RunID != "" {
+		t.Errorf("run_id = %q; want empty (spawn failed)", resp.RunID)
+	}
+	if !resp.ClaimStamped {
+		t.Errorf("claim_stamped = false; want true (claim committed before spawn attempt)")
+	}
+	if resp.TaskID == "" {
+		t.Fatal("task_id empty; can't verify claim persistence")
+	}
+
+	// Verify the claim survives in the DB — the FE relies on this to
+	// surface the bot-claimed-with-failed-run state.
+	task, err := db.GetTask(s.db, resp.TaskID)
+	if err != nil || task == nil {
+		t.Fatalf("read task back: task=%v err=%v", task, err)
+	}
+	if task.ClaimedByAgentID == "" {
+		t.Errorf("task.ClaimedByAgentID empty; claim should be stamped despite spawn failure")
 	}
 }
 

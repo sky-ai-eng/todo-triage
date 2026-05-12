@@ -198,13 +198,20 @@ export default function Factory() {
       const pd = pendingDelegate
       setPendingDelegate(null)
       if (!pd) return
-      // Two failure modes to surface, both as a toast:
+      // Three failure modes to surface:
       //   - Network error (fetch throws) — caught below.
-      //   - Non-2xx HTTP — checked via res.ok. The handler returns
-      //     400/404/503 + `{error: "..."}`, which we forward verbatim.
-      // Refetch only fires on success so a 503 doesn't visually
-      // "succeed" by triggering an unrelated snapshot refresh.
+      //   - Non-2xx HTTP — input/state validation failures (entity
+      //     not found, no matching event, spawner missing). The
+      //     handler returns 400/404/409/503 + `{error: "..."}`.
+      //   - 200 OK + delegate_error — SKY-261 B+ partial success: the
+      //     claim stamped (`claim_stamped: true`) but the spawn
+      //     itself didn't fire (prompt deleted between request and
+      //     execution, DB hiccup creating the run row). We still
+      //     refetch so the new claim col + bot-claimed card surface
+      //     immediately, then surface the spawn failure as a toast
+      //     so the user knows to retry.
       const label = entityLabel(pd.entity)
+      let partialFailure = ''
       try {
         const res = await fetch('/api/factory/delegate', {
           method: 'POST',
@@ -227,6 +234,14 @@ export default function Factory() {
           toast.error(`Delegate ${label}: ${detail}`, 'Delegation failed')
           return
         }
+        try {
+          const body = (await res.json()) as { delegate_error?: string }
+          if (body.delegate_error) {
+            partialFailure = body.delegate_error
+          }
+        } catch {
+          // Body wasn't JSON; ignore — treat as full success.
+        }
       } catch (err) {
         const detail = err instanceof Error ? err.message : String(err)
         toast.error(`Delegate ${label}: ${detail}`, 'Delegation failed')
@@ -234,6 +249,12 @@ export default function Factory() {
       }
       const refetch = (window as unknown as { __factoryRefetch?: () => void }).__factoryRefetch
       refetch?.()
+      if (partialFailure) {
+        toast.error(
+          `${label} is bot-claimed but the run didn't start: ${partialFailure}. Retry from the Board.`,
+          'Delegate run failed',
+        )
+      }
     },
     [pendingDelegate],
   )

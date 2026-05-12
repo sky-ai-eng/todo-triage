@@ -2,12 +2,10 @@ package server
 
 import (
 	"encoding/json"
-	"errors"
 	"log"
 	"net/http"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
-	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -24,9 +22,19 @@ type factoryDelegateRequest struct {
 	PromptID  string `json:"prompt_id"`
 }
 
+// factoryDelegateResponse mirrors the /api/tasks/{id}/swipe delegate
+// response: on partial success (claim stamped, run didn't fire),
+// DelegateError carries the spawner error and RunID stays empty. The
+// FE renders the "delegate failed — retry" affordance on the bot-
+// claimed card regardless of whether the failure was a 400-class
+// (ErrPromptNotFound) or 500-class (DB / spawner internal) error.
+// ClaimStamped is always true on a 200 response — the user's gesture
+// committed at the claim axis even when the run didn't materialize.
 type factoryDelegateResponse struct {
-	TaskID string `json:"task_id"`
-	RunID  string `json:"run_id"`
+	TaskID        string `json:"task_id"`
+	RunID         string `json:"run_id"`
+	DelegateError string `json:"delegate_error,omitempty"`
+	ClaimStamped  bool   `json:"claim_stamped"`
 }
 
 // handleFactoryDelegate is the drag-to-delegate endpoint behind the
@@ -214,18 +222,21 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	task.ClaimedByAgentID = a.ID
 	runID, err := s.spawner.Delegate(*task, req.PromptID, "manual", "")
 	if err != nil {
-		// Client-correctable prompt errors → 400 (with claim already
-		// stamped — the Board shows the card as bot-claimed with no
-		// run, the FE renders the retry affordance). Other errors
-		// stay 500 for the same reason. The claim col survives both.
-		status := http.StatusInternalServerError
-		if errors.Is(err, delegate.ErrPromptNotFound) || errors.Is(err, delegate.ErrPromptUnspecified) {
-			status = http.StatusBadRequest
-		}
-		writeJSON(w, status, map[string]any{
-			"error":         err.Error(),
-			"task_id":       task.ID,
-			"claim_stamped": true,
+		// Claim is already stamped (and broadcast). The run didn't
+		// fire — mirror the swipe-delegate convention: 200 OK with
+		// delegate_error populated and run_id empty. The FE reads
+		// delegate_error to render the "delegate didn't fire, retry"
+		// affordance on the now-bot-claimed card; refetch still fires
+		// so the Board picks up the new claim col + the task surfaces
+		// in the Agent lane immediately. Whether the underlying error
+		// was a 400-class (ErrPromptNotFound, ErrPromptUnspecified) or
+		// 500-class (DB, spawner internal) is irrelevant to the
+		// caller — the response shape is the same.
+		writeJSON(w, http.StatusOK, factoryDelegateResponse{
+			TaskID:        task.ID,
+			RunID:         "",
+			DelegateError: err.Error(),
+			ClaimStamped:  true,
 		})
 		return
 	}
@@ -240,7 +251,8 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, factoryDelegateResponse{
-		TaskID: task.ID,
-		RunID:  runID,
+		TaskID:       task.ID,
+		RunID:        runID,
+		ClaimStamped: true,
 	})
 }
