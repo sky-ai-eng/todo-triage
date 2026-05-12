@@ -233,7 +233,7 @@ func TestClaimQueuedTaskForUser_GuardsStatusQueued(t *testing.T) {
 }
 
 // TestTaskClaim_StickyPastClose pins the SKY-261 audit invariant:
-// claim columns are NOT cleared when a task closes. status='closed' +
+// claim columns are NOT cleared when a task closes. status='done' +
 // non-empty claim is the answer to "who was responsible when this
 // finished." The runs.actor_agent_id audit pointer is its execution
 // sibling — together they tell the full story.
