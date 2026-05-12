@@ -207,15 +207,26 @@ func SetTaskClaimedByUser(db *sql.DB, taskID, userID string) error {
 }
 
 // ClaimQueuedTaskForUser is the user-claim handler's atomic
-// "take this task" — succeeds only if the task is currently
-// unclaimed by anyone (both claim cols NULL). Returns true if the
-// claim landed, false if the task was already claimed by someone
-// (race lost — the caller should refetch and surface the current
-// claimant). Used for the "I'll handle this" gesture on a queued task.
+// "take this task off the queue" — succeeds only if the task is
+// (a) status='queued' AND (b) currently unclaimed by anyone (both
+// claim cols NULL). Returns true if the claim landed, false on any
+// guard violation: the task is already claimed (race lost), or the
+// task is no longer queued (snoozed / closed mid-gesture). The
+// caller refetches on false and surfaces the current state.
+//
+// The status='queued' guard is load-bearing: without it, the
+// optimistic claim could land on a snoozed (deferred) task or a
+// terminal (done/dismissed) row, which is surprising — "I'll handle
+// this" against a snoozed task should require requeuing it first,
+// and claiming a finished task makes no semantic sense. Other claim
+// transitions (swipe-delegate, takeover) operate on active-but-
+// not-necessarily-queued tasks via SetTaskClaimedByUser /
+// SetTaskClaimedByAgent, which don't carry this restriction.
 //
 // userID="" is rejected outright (returns false, error) — an empty
-// claim is the same as no claim, and persisting "" would violate the
-// users(id) FK on the next read. Caller must supply a real user id.
+// claim is the same as no claim, and persisting "" would violate
+// the users(id) FK on the next read. Caller must supply a real
+// user id.
 func ClaimQueuedTaskForUser(db *sql.DB, taskID, userID string) (bool, error) {
 	if userID == "" {
 		return false, fmt.Errorf("ClaimQueuedTaskForUser: empty userID is not a valid claimant")
@@ -224,6 +235,7 @@ func ClaimQueuedTaskForUser(db *sql.DB, taskID, userID string) (bool, error) {
 		UPDATE tasks
 		   SET claimed_by_user_id = ?
 		 WHERE id = ?
+		   AND status = 'queued'
 		   AND claimed_by_user_id  IS NULL
 		   AND claimed_by_agent_id IS NULL
 	`, userID, taskID)

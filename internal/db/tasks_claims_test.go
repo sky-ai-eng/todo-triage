@@ -160,6 +160,78 @@ func TestClaimQueuedTaskForUser_GuardsAgainstStealing(t *testing.T) {
 	}
 }
 
+// TestClaimQueuedTaskForUser_GuardsStatusQueued pins the status='queued'
+// half of the guard: even if both claim cols are NULL (an unclaimed
+// task), ClaimQueuedTaskForUser must reject the claim if the task is
+// in any non-queued state. Snoozed and terminal states both fall under
+// this rule — the function's name promises "queued task," and
+// claiming a snoozed/closed task is a surprising state that the
+// caller should resolve via Requeue or a different gesture instead.
+func TestClaimQueuedTaskForUser_GuardsStatusQueued(t *testing.T) {
+	database := newTestDB(t)
+	seedLocalAgentForClaimTests(t, database)
+
+	cases := []struct {
+		name          string
+		setStatus     string // "" to skip (leave 'queued')
+		closeReason   string // for done/dismissed; uses CloseTask
+		wantOK        bool
+		wantClaimUser string // populated user id when claim should land; "" if shouldn't
+	}{
+		{name: "queued_unclaimed_lands", setStatus: "", wantOK: true, wantClaimUser: runmode.LocalDefaultUserID},
+		{name: "snoozed_rejected", setStatus: "snoozed", wantOK: false, wantClaimUser: ""},
+		{name: "done_rejected", closeReason: "run_completed", wantOK: false, wantClaimUser: ""},
+		{name: "dismissed_rejected", closeReason: "user_dismissed", wantOK: false, wantClaimUser: ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Each subtest gets its own task via a unique source_id —
+			// the dedup index would otherwise collapse them.
+			sourceID := "octo/repo#queue-guard-" + tc.name
+			entity, _, err := FindOrCreateEntity(database, "github", sourceID, "pr", "Queue Guard "+tc.name, "https://example.com/"+tc.name)
+			if err != nil {
+				t.Fatalf("seed entity: %v", err)
+			}
+			eventID, err := RecordEvent(database, domain.Event{
+				EventType: domain.EventGitHubPROpened, EntityID: &entity.ID, MetadataJSON: `{}`,
+			})
+			if err != nil {
+				t.Fatalf("record event: %v", err)
+			}
+			task, _, err := FindOrCreateTask(database, entity.ID, domain.EventGitHubPROpened, "", eventID, 0.5)
+			if err != nil {
+				t.Fatalf("create task: %v", err)
+			}
+
+			// Move into the target state.
+			switch {
+			case tc.closeReason != "":
+				if err := CloseTask(database, task.ID, tc.closeReason, ""); err != nil {
+					t.Fatalf("close task: %v", err)
+				}
+			case tc.setStatus != "":
+				if err := SetTaskStatus(database, task.ID, tc.setStatus); err != nil {
+					t.Fatalf("set status: %v", err)
+				}
+			}
+
+			ok, err := ClaimQueuedTaskForUser(database, task.ID, runmode.LocalDefaultUserID)
+			if err != nil {
+				t.Fatalf("claim: %v", err)
+			}
+			if ok != tc.wantOK {
+				t.Errorf("ok = %v, want %v (status guard mismatch)", ok, tc.wantOK)
+			}
+
+			got, _ := GetTask(database, task.ID)
+			if got.ClaimedByUserID != tc.wantClaimUser {
+				t.Errorf("ClaimedByUserID = %q, want %q", got.ClaimedByUserID, tc.wantClaimUser)
+			}
+		})
+	}
+}
+
 // TestTaskClaim_StickyPastClose pins the SKY-261 audit invariant:
 // claim columns are NOT cleared when a task closes. status='closed' +
 // non-empty claim is the answer to "who was responsible when this
