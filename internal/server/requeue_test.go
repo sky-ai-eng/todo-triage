@@ -23,18 +23,42 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, runID, revi
 	t.Helper()
 
 	const eventType = "github:pr:ci_check_passed"
-	if _, err := database.Exec(`
-		INSERT INTO entities (id, source, source_id, kind, state)
-		VALUES ('e_pa', 'github', 'owner/repo#pa', 'pr', 'active');
-		INSERT INTO events (id, entity_id, event_type, dedup_key)
-		VALUES ('ev_pa', 'e_pa', ?, '');
-		INSERT INTO prompts (id, name, body) VALUES ('p_pa', 'Review', 'body');
-		INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status)
-		VALUES ('t_pa', 'e_pa', ?, 'ev_pa', 'delegated');
-		INSERT INTO runs (id, task_id, prompt_id, status, trigger_type)
-		VALUES ('r_pa', 't_pa', 'p_pa', 'pending_approval', 'manual');
-	`, eventType, eventType); err != nil {
-		t.Fatalf("seed FK chain: %v", err)
+	// SKY-261 B+: pre-B+ this fixture used status='delegated' to mean
+	// "the bot owns this task and has a pending review." Post-B+ that
+	// shape is status='queued' + claimed_by_agent_id stamped — status
+	// is lifecycle-only, claim is responsibility. Statements split
+	// (modernc.org/sqlite multi-statement Exec is unreliable on FK
+	// chains).
+	if _, err := database.Exec(
+		`INSERT INTO entities (id, source, source_id, kind, state)
+		 VALUES ('e_pa', 'github', 'owner/repo#pa', 'pr', 'active')`,
+	); err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	if _, err := database.Exec(
+		`INSERT INTO events (id, entity_id, event_type, dedup_key)
+		 VALUES ('ev_pa', 'e_pa', ?, '')`,
+		eventType,
+	); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	if _, err := database.Exec(
+		`INSERT INTO prompts (id, name, body) VALUES ('p_pa', 'Review', 'body')`,
+	); err != nil {
+		t.Fatalf("seed prompt: %v", err)
+	}
+	if _, err := database.Exec(
+		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_agent_id)
+		 VALUES ('t_pa', 'e_pa', ?, 'ev_pa', 'queued', ?)`,
+		eventType, runmode.LocalDefaultAgentID,
+	); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+	if _, err := database.Exec(
+		`INSERT INTO runs (id, task_id, prompt_id, status, trigger_type)
+		 VALUES ('r_pa', 't_pa', 'p_pa', 'pending_approval', 'manual')`,
+	); err != nil {
+		t.Fatalf("seed run: %v", err)
 	}
 
 	// run_memory: agent finished and wrote its self-report (the
@@ -603,18 +627,29 @@ func TestRequeueTask_OkFalseOnMissingID(t *testing.T) {
 func TestHandleUndo_NoPendingApprovalIsNoOp(t *testing.T) {
 	s := newTestServer(t)
 
-	// Seed a plain claimed task with no run at all — the simplest
-	// shape that exercises handleUndo's other half (status flip +
-	// Jira reversal skipped because EntitySource isn't 'jira').
-	if _, err := s.db.Exec(`
-		INSERT INTO entities (id, source, source_id, kind, state)
-		VALUES ('e_plain', 'github', 'owner/repo#plain', 'pr', 'active');
-		INSERT INTO events (id, entity_id, event_type, dedup_key)
-		VALUES ('ev_plain', 'e_plain', 'github:pr:opened', '');
-		INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status)
-		VALUES ('t_plain', 'e_plain', 'github:pr:opened', 'ev_plain', 'claimed');
-	`); err != nil {
-		t.Fatalf("seed: %v", err)
+	// Seed a plain user-claimed task with no run at all — the simplest
+	// shape that exercises handleUndo's other half (claim clear +
+	// Jira reversal skipped because EntitySource isn't 'jira'). Post-
+	// SKY-261 B+ this is status='queued' + claimed_by_user_id; pre-B+
+	// it was status='claimed'.
+	if _, err := s.db.Exec(
+		`INSERT INTO entities (id, source, source_id, kind, state)
+		 VALUES ('e_plain', 'github', 'owner/repo#plain', 'pr', 'active')`,
+	); err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO events (id, entity_id, event_type, dedup_key)
+		 VALUES ('ev_plain', 'e_plain', 'github:pr:opened', '')`,
+	); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
+		 VALUES ('t_plain', 'e_plain', 'github:pr:opened', 'ev_plain', 'queued', ?)`,
+		runmode.LocalDefaultUserID,
+	); err != nil {
+		t.Fatalf("seed task: %v", err)
 	}
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_plain/undo", nil)

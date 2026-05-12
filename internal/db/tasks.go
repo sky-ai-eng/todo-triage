@@ -156,8 +156,15 @@ func CloseAllEntityTasks(db *sql.DB, entityID, closeReason string) (int, error) 
 	return int(n), nil
 }
 
-// SetTaskStatus updates a task's status. Used by the router (queued→delegated)
-// and the swipe handler (queued→claimed, etc.).
+// SetTaskStatus updates a task's status on the lifecycle axis only.
+// Claim cols are unaffected — callers that want to change
+// responsibility use the dedicated claim helpers
+// (StampAgentClaimIfUnclaimed, HandoffAgentClaim, etc.). Post-SKY-261 B+
+// the only production caller is revertTaskStatus in DrainEntity's
+// mark-fired-failure rollback; swipe + close paths route through
+// SwipeStore.RecordSwipe + CloseTask. The pre-B+ "queued→delegated /
+// queued→claimed" doc was retired when status='delegated' and
+// status='claimed' were dropped from the lifecycle enum.
 func SetTaskStatus(db *sql.DB, taskID, status string) error {
 	_, err := db.Exec(`UPDATE tasks SET status = ? WHERE id = ?`, status, taskID)
 	return err

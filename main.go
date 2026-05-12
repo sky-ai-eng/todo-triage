@@ -310,10 +310,17 @@ func main() {
 	// agents row + one team_agents row for the synthetic LocalDefaultOrg
 	// / LocalDefaultTeamID pair. Idempotent — re-runs across boots
 	// (including v1.10.1 → current upgrades) leave existing rows intact,
-	// preserving any user-disable on team_agents.enabled. Logged as a
-	// warning on failure rather than fatal because the rows aren't yet
-	// load-bearing for routing/spawner; D-Claims (SKY-261) will flip
-	// this to fatal once tasks.claimed_by_agent_id is wired.
+	// preserving any user-disable on team_agents.enabled.
+	//
+	// SKY-261 wired claimed_by_agent_id, so the bootstrap is now
+	// load-bearing: a missing agents row means stampAgentClaim's
+	// GetForOrg returns nil, the auto-trigger silently doesn't stamp,
+	// and the drain path's claim_changed guard skips every firing.
+	// Kept as a warning rather than fatal in this PR to avoid widening
+	// scope into "first-boot retry/fatal policy"; the seam where the
+	// agent isn't yet bootstrapped is transient on a healthy install.
+	// Flipping to fatal (or adding a single-shot reseed-on-startup
+	// loop) is a clean follow-up.
 	if err := db.BootstrapLocalAgent(context.Background(), stores); err != nil {
 		log.Printf("[bootstrap] warning: local agent: %v", err)
 	}
