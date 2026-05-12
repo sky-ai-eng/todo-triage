@@ -50,6 +50,7 @@ type Router struct {
 	db       *sql.DB
 	prompts  dbpkg.PromptStore
 	handlers dbpkg.EventHandlerStore
+	agents   dbpkg.AgentStore
 	spawner  Delegator
 	scorer   Scorer
 	ws       *websocket.Hub
@@ -71,11 +72,12 @@ type Router struct {
 }
 
 // NewRouter creates a Router.
-func NewRouter(db *sql.DB, prompts dbpkg.PromptStore, handlers dbpkg.EventHandlerStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
+func NewRouter(db *sql.DB, prompts dbpkg.PromptStore, handlers dbpkg.EventHandlerStore, agents dbpkg.AgentStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
 	return &Router{
 		db:         db,
 		prompts:    prompts,
 		handlers:   handlers,
+		agents:     agents,
 		spawner:    spawner,
 		scorer:     scorer,
 		ws:         ws,
@@ -229,6 +231,21 @@ func (r *Router) HandleEvent(evt domain.Event) {
 			log.Printf("[router] failed to record spawned task_event: %v", err)
 		}
 		log.Printf("[router] created task %s (%s) on entity %s", task.ID, evt.EventType, entityID)
+
+		// SKY-261 D-Claims: if a trigger matched at task-creation, commit
+		// the task to the org's agent. Subsequent edits to the trigger's
+		// claim config don't retroactively change the task — claim is
+		// frozen at creation time. Bumping an existing task doesn't
+		// re-stamp the claim (the original commitment stands).
+		if len(matchedTriggers) > 0 && r.agents != nil {
+			if a, err := r.agents.GetForOrg(context.Background(), runmode.LocalDefaultOrg); err == nil && a != nil {
+				if err := dbpkg.SetTaskClaimedByAgent(r.db, task.ID, a.ID); err != nil {
+					log.Printf("[router] failed to stamp agent claim on task %s: %v", task.ID, err)
+				} else {
+					task.ClaimedByAgentID = a.ID
+				}
+			}
+		}
 	} else {
 		if err := dbpkg.BumpTask(r.db, task.ID, evt.ID); err != nil {
 			log.Printf("[router] failed to bump task %s: %v", task.ID, err)

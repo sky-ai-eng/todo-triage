@@ -276,7 +276,7 @@ footer {
     </div>
     <div class="topbar__meta">
       <span class="pill pill--size">SIZE · M</span>
-      <span class="pill pill--draft">DRAFT v0.4</span>
+      <span class="pill pill--draft">DRAFT v0.5</span>
     </div>
   </div>
 </div>
@@ -722,7 +722,8 @@ actorAgentID := task.ClaimedByAgentID
     <li><strong><code>event_handlers.claimed_by_agent_id</code></strong> — deliberately deferred to v2. In v1, <code>kind='trigger'</code> + <code>UNIQUE(org_id)</code> on agents encodes the entire claim configuration. Adding a per-handler claim column now bets on one of three plausible v2 shapes (per-handler explicit / per-team derived via <code>team_agents</code> / per-prompt) before we have multi-agent requirements.</li>
     <li><strong>Spawner credential routing through <code>agents</code>.</strong> Today the spawner reads the keychain; after this PR it still does. Threading <code>agent.github_app_installation_id</code> / <code>agent.github_pat_user_id</code> into credential resolution is the natural follow-up but a behavior change worth its own ticket.</li>
     <li><strong>Multi-agent-per-org.</strong> v1 has <code>UNIQUE(org_id)</code> on agents — one bot per org.</li>
-    <li><strong>Team-scoping the queue view in the Board.</strong> The schema is already compatible — <code>tasks.team_id</code> exists, the Board's queue filter could just JOIN on team membership. Whether to flip the default Board view from per-user to per-team is its own UX call (see arch doc decision <code>task-state-axes</code>). D-Claims doesn't bake in either assumption.</li>
+    <li><strong>Per-member Board filter UI + JOIN-resolved claim display names.</strong> The schema + handlers in this PR write claim columns + actor pointers; the chip UX and the agent/user-name lookup that lights up the Board's Agent column are a follow-up FE PR. Scope cut deliberate — this PR is the load-bearing schema + state-machine work, the UX layer comes next.</li>
+    <li><strong>Cross-team filter / multi-team Board.</strong> SKY-262 (D-TeamDefault) shipped the team-scoped queue: every task now has <code>team_id</code> NOT NULL and the Board's queue view is a team-scoped derived filter. Rendering work from teams the caller doesn't belong to (cross-team admin overviews) is a separate UX call.</li>
     <li><strong>Denormalized <code>agent_display_name</code> on runs</strong> — if an agent is deleted, the display name disappears too. Add later if audit retention becomes a hard requirement.</li>
     <li><strong>Filter chips + sorting controls themselves.</strong> The Board query in §7 is the load-bearing part; chip UX (which chips show, ordering, persistence) is a cosmetic follow-up.</li>
   </ul>
@@ -854,7 +855,7 @@ actorAgentID := task.ClaimedByAgentID
 </main>
 
 <footer>
-  SKY-261 · D-Claims · v0.4 · 2026-05-11
+  SKY-261 · D-Claims · v0.5 · 2026-05-12
 </footer>
 </body>
 </html>

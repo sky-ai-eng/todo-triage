@@ -23,10 +23,16 @@ func CreateAgentRun(database *sql.DB, run domain.AgentRun) error {
 	// sentinel from SKY-269. Postgres enforces team_id NOT NULL on runs;
 	// SQLite tolerates NULL but the canonical path passes the sentinel
 	// for parity.
+	//
+	// actor_agent_id is the SKY-261 D-Claims audit pointer — who actually
+	// ran this. Empty string maps to NULL (the spawner falls back to
+	// agents.GetForOrg() when the task's claim is empty, so this is
+	// typically populated; NULL is reserved for "no agents row exists
+	// yet" — transient between db init and agent bootstrap).
 	_, err := database.Exec(`
-		INSERT INTO runs (id, task_id, prompt_id, status, model, worktree_path, trigger_type, trigger_id, team_id, visibility)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'team')
-	`, run.ID, run.TaskID, nullIfEmpty(run.PromptID), run.Status, run.Model, run.WorktreePath, triggerType, nullIfEmpty(run.TriggerID), runmode.LocalDefaultTeamID)
+		INSERT INTO runs (id, task_id, prompt_id, status, model, worktree_path, trigger_type, trigger_id, team_id, visibility, actor_agent_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'team', ?)
+	`, run.ID, run.TaskID, nullIfEmpty(run.PromptID), run.Status, run.Model, run.WorktreePath, triggerType, nullIfEmpty(run.TriggerID), runmode.LocalDefaultTeamID, nullIfEmpty(run.ActorAgentID))
 	return err
 }
 

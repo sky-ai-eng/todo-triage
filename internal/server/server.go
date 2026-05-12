@@ -25,6 +25,7 @@ type Server struct {
 	swipes             db.SwipeStore
 	dashboard          db.DashboardStore
 	eventHandlers      db.EventHandlerStore
+	agents             db.AgentStore // SKY-261 D-Claims: resolves the org's agent for claim stamps
 	mux                *http.ServeMux
 	static             fs.FS
 	ws                 *websocket.Hub
@@ -76,13 +77,14 @@ func (s *Server) projectMutex(id string) *sync.Mutex {
 // argument list grows one store at a time as their callers migrate;
 // raw *sql.DB stays available for handlers that haven't been ported
 // to a store yet.
-func New(database *sql.DB, prompts db.PromptStore, swipes db.SwipeStore, dashboard db.DashboardStore, eventHandlers db.EventHandlerStore) *Server {
+func New(database *sql.DB, prompts db.PromptStore, swipes db.SwipeStore, dashboard db.DashboardStore, eventHandlers db.EventHandlerStore, agents db.AgentStore) *Server {
 	s := &Server{
 		db:            database,
 		prompts:       prompts,
 		swipes:        swipes,
 		dashboard:     dashboard,
 		eventHandlers: eventHandlers,
+		agents:        agents,
 		mux:           http.NewServeMux(),
 		ws:            websocket.NewHub(),
 	}

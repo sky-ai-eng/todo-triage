@@ -33,6 +33,13 @@ type Task struct {
 	RelevanceReason string `json:"relevance_reason"` // "review_requested" | "authored" | "mentioned" | "assigned"
 	SourceStatus    string `json:"source_status"`    // captured for undo (e.g., Jira ticket's prior status)
 
+	// Claim columns (SKY-261 D-Claims). XOR via tasks_claim_xor CHECK:
+	// at most one is set at a time. Both NULL = unclaimed (in the
+	// team queue). Sticky past close — status='closed' + non-empty
+	// claim is the audit "who finished this." Empty string = NULL.
+	ClaimedByAgentID string `json:"claimed_by_agent_id,omitempty"`
+	ClaimedByUserID  string `json:"claimed_by_user_id,omitempty"`
+
 	CreatedAt time.Time `json:"created_at"`
 
 	// Join-populated display fields — from entities, NOT stored on tasks row.

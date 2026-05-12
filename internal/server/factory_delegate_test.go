@@ -150,7 +150,7 @@ func TestHandleFactoryDelegate_400OnMalformedJSON(t *testing.T) {
 // doesn't resolve. errors.Is on the sentinel routes the response.
 func TestHandleFactoryDelegate_400OnMissingPrompt(t *testing.T) {
 	s := newTestServer(t)
-	s.SetSpawner(delegate.NewSpawner(s.db, s.prompts, nil, websocket.NewHub(), "haiku"))
+	s.SetSpawner(delegate.NewSpawner(s.db, s.prompts, nil, nil, websocket.NewHub(), "haiku"))
 
 	entity, _, err := db.FindOrCreateEntity(s.db, "github", "owner/repo#400p", "pr", "", "")
 	if err != nil {

@@ -143,6 +143,32 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// SKY-261 D-Claims: stamp the claim column matching the swipe action.
+	//   claim    → user takes responsibility; clears any agent claim
+	//              (user-takes-back path; the per-Board "claim a queued
+	//              task" gesture lands here too).
+	//   delegate → bot takes responsibility; clears any user claim
+	//              (paired with the status flip + run spawn just below).
+	// dismiss / snooze / complete leave the claim alone: their state
+	// transition doesn't change "who's responsible," it changes
+	// lifecycle (status). Sticky claims past close preserve the
+	// audit shape: status='closed' + claim populated = "this person
+	// or bot was on it when it finished."
+	switch req.Action {
+	case "claim":
+		if err := db.SetTaskClaimedByUser(s.db, id, runmode.LocalDefaultUserID); err != nil {
+			log.Printf("[swipe] failed to stamp user claim on task %s: %v", id, err)
+		}
+	case "delegate":
+		if s.agents != nil {
+			if a, err := s.agents.GetForOrg(r.Context(), runmode.LocalDefaultOrg); err == nil && a != nil {
+				if err := db.SetTaskClaimedByAgent(s.db, id, a.ID); err != nil {
+					log.Printf("[swipe] failed to stamp agent claim on task %s: %v", id, err)
+				}
+			}
+		}
+	}
+
 	// Dismiss is a terminal state — if the user swipes away a task mid-run
 	// (rare, but possible on a delegated card via the Board gesture rather
 	// than the AgentCard cancel button), the run must stop. Mirrors the

@@ -21,6 +21,7 @@ const taskColumnsWithEntity = `
 	t.priority_reasoning, t.scoring_status, t.severity, t.relevance_reason,
 	t.source_status, t.snooze_until, t.close_reason, t.close_event_type,
 	t.closed_at, t.created_at,
+	t.claimed_by_agent_id, t.claimed_by_user_id,
 	COALESCE(e.title, ''), COALESCE(e.url, ''), e.source_id, e.source, e.kind,
 	-- Guard json_extract so malformed or empty legacy snapshots do not fail
 	-- the entire task query. Missing paths and null values still fall back
@@ -159,6 +160,60 @@ func CloseAllEntityTasks(db *sql.DB, entityID, closeReason string) (int, error) 
 func SetTaskStatus(db *sql.DB, taskID, status string) error {
 	_, err := db.Exec(`UPDATE tasks SET status = ? WHERE id = ?`, status, taskID)
 	return err
+}
+
+// SetTaskClaimedByAgent stamps the agent claim on a task (SKY-261
+// D-Claims). Called by the router on trigger match at task-creation and
+// by the user-delegate handler when a queued task is dragged to the
+// bot. Clears any existing user claim in the same UPDATE so the
+// XOR CHECK invariant holds throughout.
+func SetTaskClaimedByAgent(db *sql.DB, taskID, agentID string) error {
+	_, err := db.Exec(`
+		UPDATE tasks
+		   SET claimed_by_agent_id = ?,
+		       claimed_by_user_id  = NULL
+		 WHERE id = ?
+	`, agentID, taskID)
+	return err
+}
+
+// SetTaskClaimedByUser stamps the user claim on a task (SKY-261
+// D-Claims). Called by the user-claim handler when a user takes a
+// queued task themselves AND by the takeover handler when a user
+// reclaims a bot-running task. Clears any existing agent claim in the
+// same UPDATE so XOR holds.
+func SetTaskClaimedByUser(db *sql.DB, taskID, userID string) error {
+	_, err := db.Exec(`
+		UPDATE tasks
+		   SET claimed_by_user_id  = ?,
+		       claimed_by_agent_id = NULL
+		 WHERE id = ?
+	`, userID, taskID)
+	return err
+}
+
+// ClaimQueuedTaskForUser is the user-claim handler's atomic
+// "take this task" — succeeds only if the task is currently
+// unclaimed by anyone (both claim cols NULL). Returns true if the
+// claim landed, false if the task was already claimed by someone
+// (race lost — the caller should refetch and surface the current
+// claimant). Used for the "I'll handle this" gesture on a queued task.
+func ClaimQueuedTaskForUser(db *sql.DB, taskID, userID string) (bool, error) {
+	res, err := db.Exec(`
+		UPDATE tasks
+		   SET claimed_by_user_id = ?
+		 WHERE id = ?
+		   AND claimed_by_user_id  IS NULL
+		   AND claimed_by_agent_id IS NULL
+	`, userID, taskID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // RecordTaskEvent inserts into the task_events junction table.
@@ -399,6 +454,7 @@ type taskScanState struct {
 	sourceStatus, scoringStatus        sql.NullString
 	closeReason, closeEventType        sql.NullString
 	snoozeUntil, closedAt              sql.NullTime
+	claimedByAgentID, claimedByUserID  sql.NullString
 }
 
 func (s *taskScanState) targets(t *domain.Task) []any {
@@ -408,6 +464,7 @@ func (s *taskScanState) targets(t *domain.Task) []any {
 		&s.priorityReasoning, &s.scoringStatus, &s.severity, &s.relevanceReason,
 		&s.sourceStatus, &s.snoozeUntil, &s.closeReason, &s.closeEventType,
 		&s.closedAt, &t.CreatedAt,
+		&s.claimedByAgentID, &s.claimedByUserID,
 		// Entity JOIN columns:
 		&t.Title, &t.SourceURL, &t.EntitySourceID, &t.EntitySource, &t.EntityKind,
 		&t.OpenSubtaskCount,
@@ -435,6 +492,8 @@ func (s *taskScanState) finalize(t *domain.Task) {
 	if s.closedAt.Valid {
 		t.ClosedAt = &s.closedAt.Time
 	}
+	t.ClaimedByAgentID = s.claimedByAgentID.String
+	t.ClaimedByUserID = s.claimedByUserID.String
 }
 
 // scanFields works for both *sql.Row and *sql.Rows via the Scanner interface.

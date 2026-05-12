@@ -265,7 +265,7 @@ func main() {
 		openBrowser(fmt.Sprintf("http://localhost%s", addr))
 	}
 
-	srv := server.New(database, stores.Prompts, stores.Swipes, stores.Dashboard, stores.EventHandlers)
+	srv := server.New(database, stores.Prompts, stores.Swipes, stores.Dashboard, stores.EventHandlers, stores.Agents)
 
 	distFS, err := frontendDist()
 	if err != nil {
@@ -513,7 +513,7 @@ func main() {
 	}
 
 	// Create spawner once — credentials are hot-swapped in place
-	spawner := delegate.NewSpawner(database, stores.Prompts, nil, wsHub, "")
+	spawner := delegate.NewSpawner(database, stores.Prompts, stores.Agents, nil, wsHub, "")
 	srv.SetSpawner(spawner)
 
 	// SKY-220: wire the classifier wait into the spawner's setup path.
@@ -558,7 +558,7 @@ func main() {
 	// Event router — records events, creates/bumps tasks, auto-delegates on
 	// matching triggers, runs inline close checks. Also handles post-scoring
 	// re-derive via the scorer callback wired above.
-	eventRouter = routing.NewRouter(database, stores.Prompts, stores.EventHandlers, spawner, scorer, wsHub)
+	eventRouter = routing.NewRouter(database, stores.Prompts, stores.EventHandlers, stores.Agents, spawner, scorer, wsHub)
 	bus.Subscribe(eventbus.Subscriber{
 		Name:   "router",
 		Filter: []string{"github:", "jira:"},

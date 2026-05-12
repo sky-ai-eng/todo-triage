@@ -172,7 +172,35 @@ func seedFullLegacyState(t *testing.T, database *sql.DB) {
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);
-		CREATE TABLE tasks (id TEXT PRIMARY KEY);
+		-- tasks carries its full pre-tenancy column shape because
+		-- 202605120010_d_claims.sql rebuilds the table (table-rebuild
+		-- dance to fold in the claim_xor CHECK). INSERT...SELECT in
+		-- the rebuild requires every selected column to exist on the
+		-- source, even if no rows are present. SKY-269 adds org_id /
+		-- team_id / creator_user_id via ALTER TABLE ADD COLUMN; SKY-262
+		-- adds visibility — those are NOT in this fixture because the
+		-- legacy snapshot pre-dates both migrations.
+		CREATE TABLE tasks (
+			id                   TEXT PRIMARY KEY,
+			entity_id            TEXT,
+			event_type           TEXT,
+			dedup_key            TEXT NOT NULL DEFAULT '',
+			primary_event_id     TEXT,
+			status               TEXT NOT NULL DEFAULT 'queued',
+			priority_score       REAL,
+			ai_summary           TEXT,
+			autonomy_suitability REAL,
+			priority_reasoning   TEXT,
+			scoring_status       TEXT NOT NULL DEFAULT 'pending',
+			severity             TEXT,
+			relevance_reason     TEXT,
+			source_status        TEXT,
+			snooze_until         DATETIME,
+			close_reason         TEXT,
+			close_event_type     TEXT,
+			closed_at            DATETIME,
+			created_at           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);
 		CREATE TABLE task_events (id INTEGER PRIMARY KEY);
 		-- runs + pending_firings carry their full column shape because
 		-- 202605120008_event_handlers_unification.sql rebuilds both

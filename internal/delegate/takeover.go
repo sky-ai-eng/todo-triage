@@ -17,6 +17,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/config"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
@@ -212,6 +213,21 @@ func (s *Spawner) Takeover(runID, baseDir string) (*TakeoverResult, error) {
 		// already terminal, so the agent's actual outcome is preserved.
 		s.abortTakeover(runID, run.WorktreePath, destPath)
 		return nil, fmt.Errorf("%w: run %s", ErrTakeoverRaceLost, runID)
+	}
+
+	// SKY-261 D-Claims: flip the task's claim from the bot to the user
+	// in the same UPDATE (SetTaskClaimedByUser clears the agent claim
+	// in the same statement, so the XOR CHECK is never temporarily
+	// violated). The run's actor_agent_id stays stamped at the bot —
+	// the run was executed by the bot up until takeover, and that
+	// audit truth is immutable. In local mode the user is the
+	// LocalDefaultUserID sentinel.
+	if err := db.SetTaskClaimedByUser(s.database, run.TaskID, runmode.LocalDefaultUserID); err != nil {
+		// Don't fail the takeover for a claim-flip error — the worktree
+		// move + run flip have already succeeded, and rolling back would
+		// orphan the user's takeover dir. Log and continue; the Board
+		// will show stale claim attribution but the takeover is real.
+		log.Printf("[takeover] failed to flip task claim for run %s task %s: %v", runID, run.TaskID, err)
 	}
 
 	s.broadcastRunUpdate(runID, "taken_over")
