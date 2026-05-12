@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { AgentMessage, AgentRun, Task, WSEvent } from '../types'
 import { useWebSocket } from './useWebSocket'
 
@@ -28,8 +28,23 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
 
   const refetch = useCallback(() => setRefetchTick((n) => n + 1), [])
 
+  // Track the runID the current state belongs to so we can distinguish a
+  // same-run refetch (merge messages) from a navigation to a different
+  // run (reset, otherwise message IDs from two runs would interleave).
+  const lastRunIDRef = useRef<string | undefined>(runID)
+
   useEffect(() => {
-    if (!runID) return
+    if (lastRunIDRef.current !== runID) {
+      lastRunIDRef.current = runID
+      setRun(null)
+      setTask(null)
+      setMessages([])
+    }
+    if (!runID) {
+      setLoading(false)
+      setNotFound(true)
+      return
+    }
     let cancelled = false
     setLoading(true)
     setNotFound(false)

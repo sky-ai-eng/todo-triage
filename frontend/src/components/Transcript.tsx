@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import Markdown from 'react-markdown'
 import type { AgentMessage, AgentRun, ToolCall } from '../types'
+import { isActiveRun } from '../lib/runStatus'
 
 export type ViewMode = 'conversation' | 'commands'
 
@@ -104,7 +105,7 @@ export default function Transcript({ messages, run, mode }: Props) {
     }
   }
 
-  if (run.ResultSummary && run.Status !== 'running') {
+  if (run.ResultSummary && !isActiveRun(run)) {
     const isFailed = run.Status === 'failed' || run.Status === 'cancelled'
     const isUnsolvable = run.Status === 'task_unsolvable'
     rows.push(
@@ -263,7 +264,10 @@ function headlineForToolCall(call: ToolCall): string {
 
 function safeJsonStringify(v: unknown): string {
   try {
-    return JSON.stringify(v, null, 2)
+    // JSON.stringify(undefined) returns undefined, not a string — fall
+    // back to String() so callers always get something renderable.
+    const s = JSON.stringify(v, null, 2)
+    return s ?? String(v)
   } catch {
     return String(v)
   }
