@@ -387,17 +387,8 @@ function SwipeCard({
       dragElastic={0.7}
       onDragEnd={interactive ? handleDragEnd : undefined}
     >
-      {/* Glass card */}
-      <motion.div
-        className="absolute inset-0 rounded-3xl backdrop-blur-2xl bg-white/60 border border-white/80 shadow-xl shadow-black/[0.04]"
-        style={{
-          background: useTransform(
-            x,
-            [-150, 0, 150],
-            ['rgba(255,255,255,0.55)', 'rgba(255,255,255,0.6)', 'rgba(255,255,255,0.55)'],
-          ),
-        }}
-      />
+      {/* Card surface — flat fill, themed via CSS variables. */}
+      <div className="absolute inset-0 rounded-3xl bg-surface-raised border border-border-glass shadow-sm shadow-black/[0.04]" />
 
       {/* Directional tint overlays */}
       <motion.div className="absolute inset-0 rounded-3xl" style={{ background: dismissBg }} />

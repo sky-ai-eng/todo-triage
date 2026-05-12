@@ -2,6 +2,9 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import './index.css'
+import { watchSystemTheme } from './lib/theme'
+
+watchSystemTheme()
 import Setup from './pages/Setup'
 import Cards from './pages/Cards'
 import Board from './pages/Board'
