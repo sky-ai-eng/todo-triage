@@ -231,21 +231,6 @@ func (r *Router) HandleEvent(evt domain.Event) {
 			log.Printf("[router] failed to record spawned task_event: %v", err)
 		}
 		log.Printf("[router] created task %s (%s) on entity %s", task.ID, evt.EventType, entityID)
-
-		// SKY-261 D-Claims: if a trigger matched at task-creation, commit
-		// the task to the org's agent. Subsequent edits to the trigger's
-		// claim config don't retroactively change the task — claim is
-		// frozen at creation time. Bumping an existing task doesn't
-		// re-stamp the claim (the original commitment stands).
-		if len(matchedTriggers) > 0 && r.agents != nil {
-			if a, err := r.agents.GetForOrg(context.Background(), runmode.LocalDefaultOrg); err == nil && a != nil {
-				if err := dbpkg.SetTaskClaimedByAgent(r.db, task.ID, a.ID); err != nil {
-					log.Printf("[router] failed to stamp agent claim on task %s: %v", task.ID, err)
-				} else {
-					task.ClaimedByAgentID = a.ID
-				}
-			}
-		}
 	} else {
 		if err := dbpkg.BumpTask(r.db, task.ID, evt.ID); err != nil {
 			log.Printf("[router] failed to bump task %s: %v", task.ID, err)
@@ -317,6 +302,30 @@ func (r *Router) tryAutoDelegate(task *domain.Task, trigger domain.EventHandler,
 		}
 		toast.Warning(r.ws, fmt.Sprintf("Auto-delegation paused: %s tripped the breaker (%d consecutive failures on this entity)", promptName, failures))
 		return
+	}
+
+	// SKY-261 D-Claims: stamp agent claim now, after the breaker gate
+	// passed and BEFORE the entity gate decision. Both downstream
+	// branches (immediate fire AND queued via pending_firings) are
+	// committed-to-the-bot paths from this point — entity-busy just
+	// delays the fire, it doesn't cancel the commitment. The earlier
+	// gates (config.AI.AutoDelegateEnabled kill switch upstream,
+	// min_autonomy_suitability > 0 deferral, breaker trip just above)
+	// all return BEFORE this point, so a task whose run won't fire
+	// stays unclaimed — the Board correctly shows it as queue-for-
+	// human until autonomy is suitable / breaker clears / kill switch
+	// flips back on.
+	//
+	// The post-scoring re-derive path (ReDeriveAfterScoring) also lands
+	// here for deferred triggers — same stamp semantics apply.
+	if r.agents != nil {
+		if a, aerr := r.agents.GetForOrg(context.Background(), runmode.LocalDefaultOrg); aerr == nil && a != nil {
+			if serr := dbpkg.SetTaskClaimedByAgent(r.db, task.ID, a.ID); serr != nil {
+				log.Printf("[router] failed to stamp agent claim on task %s: %v", task.ID, serr)
+			} else {
+				task.ClaimedByAgentID = a.ID
+			}
+		}
 	}
 
 	// Per-entity gate. Closed if any auto run is active on the entity OR

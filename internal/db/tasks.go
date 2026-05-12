@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"fmt"
 	"strings"
 	"time"
 
@@ -188,12 +189,20 @@ func SetTaskClaimedByAgent(db *sql.DB, taskID, agentID string) error {
 // reclaims a bot-running task. Clears any existing agent claim in the
 // same UPDATE so XOR holds.
 func SetTaskClaimedByUser(db *sql.DB, taskID, userID string) error {
+	var claimedByUserID any = userID
+	if userID == "" {
+		// Empty string is the domain's NULL convention. Passing it raw
+		// would persist "" into the column, which would violate the
+		// users(id) FK on the next read and silently mis-render in any
+		// JOIN. Map to nil so the column is actually NULL.
+		claimedByUserID = nil
+	}
 	_, err := db.Exec(`
 		UPDATE tasks
 		   SET claimed_by_user_id  = ?,
 		       claimed_by_agent_id = NULL
 		 WHERE id = ?
-	`, userID, taskID)
+	`, claimedByUserID, taskID)
 	return err
 }
 
@@ -203,7 +212,14 @@ func SetTaskClaimedByUser(db *sql.DB, taskID, userID string) error {
 // claim landed, false if the task was already claimed by someone
 // (race lost — the caller should refetch and surface the current
 // claimant). Used for the "I'll handle this" gesture on a queued task.
+//
+// userID="" is rejected outright (returns false, error) — an empty
+// claim is the same as no claim, and persisting "" would violate the
+// users(id) FK on the next read. Caller must supply a real user id.
 func ClaimQueuedTaskForUser(db *sql.DB, taskID, userID string) (bool, error) {
+	if userID == "" {
+		return false, fmt.Errorf("ClaimQueuedTaskForUser: empty userID is not a valid claimant")
+	}
 	res, err := db.Exec(`
 		UPDATE tasks
 		   SET claimed_by_user_id = ?

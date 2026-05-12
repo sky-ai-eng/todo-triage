@@ -90,12 +90,20 @@ DROP TABLE tasks;
 
 ALTER TABLE tasks_new RENAME TO tasks;
 
--- Recreate the indexes that lived on the original table (per baseline).
+-- Recreate the indexes that lived on the original table. Baseline
+-- indexes (idx_tasks_*) AND the composite-uniqueness index
+-- tasks_id_org_unique that SKY-259 (202605120008_event_handlers_unification.sql:559)
+-- added — the table drop above nukes ALL of its indexes, including
+-- ones added after baseline by later migrations. Forgetting to
+-- recreate tasks_id_org_unique would silently drop the composite-
+-- uniqueness invariant the Postgres composite FKs rely on (and that
+-- future SQLite child FKs on (task_id, org_id) would need too).
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_active_entity_event_dedup
     ON tasks(entity_id, event_type, dedup_key) WHERE status NOT IN ('done', 'dismissed');
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_entity ON tasks(entity_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_status_priority ON tasks(status, priority_score DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS tasks_id_org_unique ON tasks (id, org_id);
 
 -- New partial indexes for the per-member Board filter.
 CREATE INDEX IF NOT EXISTS tasks_claimed_agent_idx ON tasks(claimed_by_agent_id)
