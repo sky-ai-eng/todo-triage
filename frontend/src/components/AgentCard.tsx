@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 import type { AgentMessage, AgentRun, Task, ToolCall } from '../types'
 import SourceBadge from './SourceBadge'
 import { toast } from './Toast/toastStore'
@@ -156,6 +157,22 @@ export default function AgentCard({ task, run, messages, onRequeue, onReview }: 
           </div>
           <div className="flex items-center gap-2">
             <span className="text-[11px] text-text-tertiary">{elapsed}</span>
+            <Link
+              to={`/board/runs/${run.ID}`}
+              aria-label="Expand run details"
+              title="Open full session view"
+              className="text-text-tertiary hover:text-text-primary transition-colors"
+            >
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
+                <path
+                  d="M9.5 2.5h4v4M6.5 13.5h-4v-4M13.5 2.5l-5.5 5.5M2.5 13.5l5.5-5.5"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </Link>
             {(canTakeOver || takeoverPending) && (
               <button
                 disabled={takeoverPending}

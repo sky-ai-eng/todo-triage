@@ -1,0 +1,110 @@
+import { useCallback, useEffect, useState } from 'react'
+import type { AgentMessage, AgentRun, Task, WSEvent } from '../types'
+import { useWebSocket } from './useWebSocket'
+
+export interface RunDetailState {
+  run: AgentRun | null
+  task: Task | null
+  messages: AgentMessage[]
+  loading: boolean
+  notFound: boolean
+  error: string | null
+  refetch: () => void
+}
+
+// useRunDetail loads a single agent run, its messages, and the parent
+// task, then subscribes to live websocket updates so the page stays
+// fresh while the agent works. We fetch the task separately because
+// AgentRun only carries TaskID, and the detail page wants the title +
+// source badge in its header.
+export function useRunDetail(runID: string | undefined): RunDetailState {
+  const [run, setRun] = useState<AgentRun | null>(null)
+  const [task, setTask] = useState<Task | null>(null)
+  const [messages, setMessages] = useState<AgentMessage[]>([])
+  const [loading, setLoading] = useState(true)
+  const [notFound, setNotFound] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [refetchTick, setRefetchTick] = useState(0)
+
+  const refetch = useCallback(() => setRefetchTick((n) => n + 1), [])
+
+  useEffect(() => {
+    if (!runID) return
+    let cancelled = false
+    setLoading(true)
+    setNotFound(false)
+    setError(null)
+    ;(async () => {
+      try {
+        const runRes = await fetch(`/api/agent/runs/${runID}`)
+        if (runRes.status === 404) {
+          if (!cancelled) {
+            setNotFound(true)
+            setLoading(false)
+          }
+          return
+        }
+        if (!runRes.ok) {
+          throw new Error(`run fetch failed: ${runRes.status}`)
+        }
+        const runData = (await runRes.json()) as AgentRun
+        if (cancelled) return
+        setRun(runData)
+
+        // Parallel: messages + task.
+        const [msgsRes, taskRes] = await Promise.all([
+          fetch(`/api/agent/runs/${runID}/messages`),
+          runData.TaskID ? fetch(`/api/tasks/${runData.TaskID}`) : Promise.resolve(null),
+        ])
+        if (cancelled) return
+
+        if (msgsRes.ok) {
+          const msgs = (await msgsRes.json()) as AgentMessage[]
+          if (!cancelled) setMessages(msgs)
+        }
+        if (taskRes && taskRes.ok) {
+          const t = (await taskRes.json()) as Task
+          if (!cancelled) setTask(t)
+        }
+      } catch (err) {
+        if (!cancelled) setError((err as Error).message)
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [runID, refetchTick])
+
+  // Live updates. agent_message appends; agent_run_update refetches the
+  // run row so status/duration/cost flip without a full reload.
+  useWebSocket(
+    useCallback(
+      (event: WSEvent) => {
+        if (!runID) return
+        if (event.type === 'agent_message' && event.run_id === runID) {
+          setMessages((prev) => {
+            // Dedup: a refetch + ws race can replay the same row. Match
+            // on ID, which is set server-side by the time the row hits
+            // the wire.
+            if (prev.some((m) => m.ID === event.data.ID)) return prev
+            return [...prev, event.data]
+          })
+        }
+        if (event.type === 'agent_run_update' && event.run_id === runID) {
+          fetch(`/api/agent/runs/${runID}`)
+            .then((r) => (r.ok ? r.json() : null))
+            .then((data: AgentRun | null) => {
+              if (data) setRun(data)
+            })
+            .catch(() => {})
+        }
+      },
+      [runID],
+    ),
+  )
+
+  return { run, task, messages, loading, notFound, error, refetch }
+}
