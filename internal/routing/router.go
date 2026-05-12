@@ -357,6 +357,16 @@ func (r *Router) tryAutoDelegate(task *domain.Task, trigger domain.EventHandler,
 // on GetForOrg returning (nil, nil) — both leave the claim
 // unstamped rather than crashing, which matches the "transient seam
 // between db init and agent bootstrap" case noted in §4 of the spec.
+//
+// Uses StampAgentClaimIfUnclaimed (race-safe variant) instead of the
+// unconditional setter: if a user claims the same task while the
+// trigger is mid-fire, the user-claim wins and the bot silently
+// loses the race. The drain path's claim_changed guard then skips
+// any pending firing for this task on the next pop — so the auto-
+// trigger commitment never lands, which is the right outcome when
+// the human said "I'll handle this." Same-agent rewrites also
+// short-circuit here, avoiding redundant task_claimed broadcasts on
+// flows that call stampAgentClaim twice in quick succession.
 func (r *Router) stampAgentClaim(task *domain.Task) {
 	if r.agents == nil {
 		return
@@ -369,8 +379,17 @@ func (r *Router) stampAgentClaim(task *domain.Task) {
 	if a == nil {
 		return
 	}
-	if err := dbpkg.SetTaskClaimedByAgent(r.db, task.ID, a.ID); err != nil {
+	ok, err := dbpkg.StampAgentClaimIfUnclaimed(r.db, task.ID, a.ID)
+	if err != nil {
 		log.Printf("[router] failed to stamp agent claim on task %s: %v", task.ID, err)
+		return
+	}
+	if !ok {
+		// Either a user beat us to the claim (don't steal) or the
+		// bot already owns it (no-op). Either way: no broadcast.
+		// Logged at debug-equivalent so the auto-trigger-loses-race
+		// case is visible without firing on every duplicate stamp.
+		log.Printf("[router] agent claim stamp on task %s was a no-op (user got there first, or claim already stamped)", task.ID)
 		return
 	}
 	task.ClaimedByAgentID = a.ID

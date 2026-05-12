@@ -362,6 +362,122 @@ func TestHandleSwipe_ClaimWithoutPendingApprovalIsNoOp(t *testing.T) {
 	}
 }
 
+// TestHandleSwipe_ClaimRejectsStealingFromBot pins the swipe-claim
+// race-safe handler: when the task is bot-claimed, the handler must
+// route through TakeoverClaimFromAgent's optimistic guard and
+// produce a clean takeover (bot claim → user claim, atomic). This
+// pins the legitimate takeover branch — the steal-from-bot is
+// allowed; what's not allowed is stealing from another user.
+func TestHandleSwipe_ClaimAgainstBotClaimedIsTakeover(t *testing.T) {
+	s := newTestServer(t)
+	const eventType = "github:pr:opened"
+	if _, err := s.db.Exec(
+		`INSERT INTO entities (id, source, source_id, kind, state)
+		 VALUES ('e_bot', 'github', 'sky/repo#bot', 'pr', 'active')`,
+	); err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO events (id, entity_id, event_type, dedup_key)
+		 VALUES ('ev_bot', 'e_bot', ?, '')`,
+		eventType,
+	); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_agent_id)
+		 VALUES ('task-bot', 'e_bot', ?, 'ev_bot', 'queued', ?)`,
+		eventType, runmode.LocalDefaultAgentID,
+	); err != nil {
+		t.Fatalf("seed task with bot claim: %v", err)
+	}
+
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/task-bot/swipe",
+		map[string]any{"action": "claim", "hesitation_ms": 0})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	var claimedAgent, claimedUser sql.NullString
+	if err := s.db.QueryRow(
+		`SELECT claimed_by_agent_id, claimed_by_user_id FROM tasks WHERE id = 'task-bot'`,
+	).Scan(&claimedAgent, &claimedUser); err != nil {
+		t.Fatalf("scan task: %v", err)
+	}
+	if claimedAgent.Valid {
+		t.Errorf("claimed_by_agent_id = %q after takeover; want NULL", claimedAgent.String)
+	}
+	if !claimedUser.Valid || claimedUser.String != runmode.LocalDefaultUserID {
+		t.Errorf("claimed_by_user_id = %v; want sentinel user", claimedUser)
+	}
+}
+
+// TestHandleSwipe_ClaimAgainstOtherUserClaimReturns409 pins the
+// anti-steal guarantee: if a different user already owns the task,
+// the swipe-claim handler must refuse with 409 rather than
+// overwriting the other user's claim. The previous unconditional
+// SetTaskClaimedByUser would have silently stolen the row.
+//
+// At N=1 local mode this can't happen via real user gestures, but
+// the helper-level race-safety is load-bearing for multi-mode and
+// the test pins the contract.
+func TestHandleSwipe_ClaimAgainstOtherUserClaimReturns409(t *testing.T) {
+	s := newTestServer(t)
+	const eventType = "github:pr:opened"
+	// Synthetic "other user" — distinct from LocalDefaultUserID so
+	// the swipe-claim's "is it me?" branch routes to the refuse-
+	// to-steal path. In local-mode SQLite the users table has no
+	// FK to auth.users (that's the Postgres path); we can seed any
+	// UUID with the local-shape columns. Statements split so a
+	// stray FK violation points at the offending row rather than
+	// the whole multi-statement Exec.
+	const otherUserID = "00000000-0000-0000-0000-000000000999"
+	if _, err := s.db.Exec(
+		`INSERT INTO users (id, display_name) VALUES (?, 'Other User')`,
+		otherUserID,
+	); err != nil {
+		t.Fatalf("seed other user: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO entities (id, source, source_id, kind, state)
+		 VALUES ('e_oth', 'github', 'sky/repo#oth', 'pr', 'active')`,
+	); err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO events (id, entity_id, event_type, dedup_key)
+		 VALUES ('ev_oth', 'e_oth', ?, '')`,
+		eventType,
+	); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
+		 VALUES ('task-oth', 'e_oth', ?, 'ev_oth', 'queued', ?)`,
+		eventType, otherUserID,
+	); err != nil {
+		t.Fatalf("seed task with other-user claim: %v", err)
+	}
+
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/task-oth/swipe",
+		map[string]any{"action": "claim", "hesitation_ms": 0})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Claim must be unchanged — the swipe refused to overwrite.
+	var claimedUser sql.NullString
+	if err := s.db.QueryRow(
+		`SELECT claimed_by_user_id FROM tasks WHERE id = 'task-oth'`,
+	).Scan(&claimedUser); err != nil {
+		t.Fatalf("scan task: %v", err)
+	}
+	if !claimedUser.Valid || claimedUser.String != otherUserID {
+		t.Errorf("claimed_by_user_id = %v; want preserved as %q (handler must not steal)",
+			claimedUser, otherUserID)
+	}
+}
+
 // TestHandleUndo_404OnMissingTask pins the missing-id behavior:
 // /undo against a bogus task ID must return 404 with a clean error
 // body, not the SQLite FK violation surfaced as a 500. The

@@ -206,6 +206,83 @@ func SetTaskClaimedByUser(db *sql.DB, taskID, userID string) error {
 	return err
 }
 
+// StampAgentClaimIfUnclaimed is the race-safe variant of
+// SetTaskClaimedByAgent. The unconditional version overwrites any
+// existing claim — including a user claim that landed during the
+// race window between trigger-match and stamp. That stole the user's
+// gesture; this helper refuses to.
+//
+// Two guards in one UPDATE:
+//
+//   - claimed_by_user_id IS NULL — won't steal a user claim. If the
+//     user beat the bot to it, the bot's auto-trigger silently
+//     loses the race (and the drain path's claim_changed guard
+//     will then skip any pending firing for this task too — the
+//     bot's commitment never lands at all).
+//
+//   - claimed_by_agent_id IS NULL OR != $1 — skip no-op rewrites
+//     when the same agent already holds the claim. Returns ok=false
+//     in that case so the caller can skip the broadcast — repeated
+//     stamps shouldn't churn the FE with redundant task_claimed
+//     events.
+//
+// Returns ok=true when the claim actually changed (caller should
+// broadcast). ok=false (no error) means either user-already-owns
+// or bot-already-owns; caller should not broadcast.
+func StampAgentClaimIfUnclaimed(db *sql.DB, taskID, agentID string) (bool, error) {
+	if agentID == "" {
+		return false, fmt.Errorf("StampAgentClaimIfUnclaimed: empty agentID")
+	}
+	res, err := db.Exec(`
+		UPDATE tasks
+		   SET claimed_by_agent_id = ?
+		 WHERE id = ?
+		   AND claimed_by_user_id IS NULL
+		   AND (claimed_by_agent_id IS NULL OR claimed_by_agent_id != ?)
+	`, agentID, taskID, agentID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// TakeoverClaimFromAgent atomically flips a bot-claimed task to a
+// user claim. Race-safe variant of SetTaskClaimedByUser for the
+// "user swipes claim on a bot-claimed task" path: guards on the
+// bot still holding the claim AND no other user owning it, so
+// concurrent takeovers don't trample each other.
+//
+// Returns ok=true when the flip landed (caller broadcasts +
+// proceeds). ok=false (no error) means the race was lost — either
+// another user took over first, or the bot's claim was cleared
+// (requeue) between the load and the UPDATE; caller surfaces 409
+// and the FE refetches.
+func TakeoverClaimFromAgent(db *sql.DB, taskID, userID string) (bool, error) {
+	if userID == "" {
+		return false, fmt.Errorf("TakeoverClaimFromAgent: empty userID")
+	}
+	res, err := db.Exec(`
+		UPDATE tasks
+		   SET claimed_by_user_id  = ?,
+		       claimed_by_agent_id = NULL
+		 WHERE id = ?
+		   AND claimed_by_agent_id IS NOT NULL
+		   AND claimed_by_user_id  IS NULL
+	`, userID, taskID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // ClaimQueuedTaskForUser is the user-claim handler's atomic
 // "take this task off the queue" — succeeds only if the task is
 // (a) status='queued' AND (b) currently unclaimed by anyone (both

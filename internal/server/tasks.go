@@ -175,23 +175,83 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 	// SwipeStore.RecordSwipe to accept claim params; deferred.
 	switch req.Action {
 	case "claim":
-		if err := db.SetTaskClaimedByUser(s.db, id, runmode.LocalDefaultUserID); err != nil {
-			log.Printf("[swipe] failed to stamp user claim on task %s: %v", id, err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "claim stamp failed: " + err.Error()})
+		// Race-safe claim: branch on the task's current claim state
+		// and use the guarded helpers so concurrent claimants can't
+		// steal from each other. Three legitimate transitions land
+		// here:
+		//   - unclaimed → user-claim (the common case; uses
+		//     ClaimQueuedTaskForUser's anti-steal SQL guard).
+		//   - bot-claim → user-claim ("I'll handle this" takeover;
+		//     uses TakeoverClaimFromAgent's guard so a concurrent
+		//     user takeover or requeue doesn't get stolen).
+		//   - same user already claims → idempotent no-op.
+		// A different user owning the task is a 409 — refuse rather
+		// than overwrite. The cleanupPendingApprovalRun + spawner.Cancel
+		// teardown below still runs in all success branches.
+		task, lerr := db.GetTask(s.db, id)
+		if lerr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": lerr.Error()})
 			return
+		}
+		if task == nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "task not found"})
+			return
+		}
+		userID := runmode.LocalDefaultUserID
+		claimChanged := false
+		switch {
+		case task.ClaimedByUserID == userID:
+			// Idempotent: same user already owns it.
+		case task.ClaimedByUserID != "":
+			writeJSON(w, http.StatusConflict, map[string]string{
+				"error": "task is already claimed by another user",
+			})
+			return
+		case task.ClaimedByAgentID != "":
+			ok, err := db.TakeoverClaimFromAgent(s.db, id, userID)
+			if err != nil {
+				log.Printf("[swipe] takeover claim flip failed on task %s: %v", id, err)
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "claim stamp failed: " + err.Error()})
+				return
+			}
+			if !ok {
+				writeJSON(w, http.StatusConflict, map[string]string{
+					"error": "claim race lost; refetch task and retry",
+				})
+				return
+			}
+			claimChanged = true
+		default:
+			ok, err := db.ClaimQueuedTaskForUser(s.db, id, userID)
+			if err != nil {
+				log.Printf("[swipe] user claim stamp failed on task %s: %v", id, err)
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "claim stamp failed: " + err.Error()})
+				return
+			}
+			if !ok {
+				writeJSON(w, http.StatusConflict, map[string]string{
+					"error": "claim race lost; refetch task and retry",
+				})
+				return
+			}
+			claimChanged = true
 		}
 		// SKY-261 B+: broadcast on the claim axis (not the status
 		// axis). The Board listens for task_claimed to re-render the
 		// per-claim lanes; status didn't change so task_updated would
-		// be misleading.
-		s.ws.Broadcast(websocket.Event{
-			Type: "task_claimed",
-			Data: map[string]any{
-				"task_id":             id,
-				"claimed_by_agent_id": "",
-				"claimed_by_user_id":  runmode.LocalDefaultUserID,
-			},
-		})
+		// be misleading. Only broadcast when the claim actually
+		// changed — the same-user idempotent path is a no-op and
+		// shouldn't churn listeners.
+		if claimChanged {
+			s.ws.Broadcast(websocket.Event{
+				Type: "task_claimed",
+				Data: map[string]any{
+					"task_id":             id,
+					"claimed_by_agent_id": "",
+					"claimed_by_user_id":  userID,
+				},
+			})
+		}
 	case "delegate":
 		if s.agents == nil {
 			log.Printf("[swipe] agent claim skipped on task %s: AgentStore not configured", id)
@@ -209,19 +269,48 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delegate failed: no agent bootstrapped — set up the bot first"})
 			return
 		}
-		if err := db.SetTaskClaimedByAgent(s.db, id, a.ID); err != nil {
+		// Race-safe stamp: refuses to steal a user claim that landed
+		// during the race window between swipe-up and this UPDATE.
+		// If a user claimed the task simultaneously, return 409 —
+		// the bot's commitment never lands, and the user's claim
+		// wins. Same-agent rewrites are skipped as no-ops (no
+		// redundant broadcast).
+		ok, err := db.StampAgentClaimIfUnclaimed(s.db, id, a.ID)
+		if err != nil {
 			log.Printf("[swipe] failed to stamp agent claim on task %s: %v", id, err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "claim stamp failed: " + err.Error()})
 			return
 		}
-		s.ws.Broadcast(websocket.Event{
-			Type: "task_claimed",
-			Data: map[string]any{
-				"task_id":             id,
-				"claimed_by_agent_id": a.ID,
-				"claimed_by_user_id":  "",
-			},
-		})
+		if !ok {
+			// Either a user beat us to it, or the bot already
+			// owns this task. Re-read to decide which.
+			cur, ferr := db.GetTask(s.db, id)
+			if ferr != nil || cur == nil {
+				// Refetch failed — treat as a race loss; let the FE
+				// reconcile via tasks_updated.
+				writeJSON(w, http.StatusConflict, map[string]string{
+					"error": "claim race lost; refetch task and retry",
+				})
+				return
+			}
+			if cur.ClaimedByUserID != "" {
+				writeJSON(w, http.StatusConflict, map[string]string{
+					"error": "task was claimed by a user during delegate; refusing to steal",
+				})
+				return
+			}
+			// Bot already owns it — idempotent no-op, fall through
+			// to the run-spawn step below without broadcasting.
+		} else {
+			s.ws.Broadcast(websocket.Event{
+				Type: "task_claimed",
+				Data: map[string]any{
+					"task_id":             id,
+					"claimed_by_agent_id": a.ID,
+					"claimed_by_user_id":  "",
+				},
+			})
+		}
 	}
 
 	// Dismiss is a terminal state — if the user swipes away a task mid-run

@@ -232,6 +232,144 @@ func TestClaimQueuedTaskForUser_GuardsStatusQueued(t *testing.T) {
 	}
 }
 
+// TestStampAgentClaimIfUnclaimed pins the race-safe variant's three
+// outcomes:
+//
+//   - unclaimed → claim lands, ok=true
+//   - bot-already-owns (same agent) → no-op, ok=false (skip broadcast)
+//   - user-already-owns → refuse to steal, ok=false; user claim survives
+//
+// The middle case is the load-bearing fix: stampAgentClaim no longer
+// churns task_claimed broadcasts on every duplicate stamp call, and
+// the user-claim case closes the auto-trigger-steals-user-claim race.
+func TestStampAgentClaimIfUnclaimed(t *testing.T) {
+	database := newTestDB(t)
+	seedLocalAgentForClaimTests(t, database)
+	entity, _, err := FindOrCreateEntity(database, "github", "octo/repo#stamp", "pr", "Stamp Test", "https://example.com/s")
+	if err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	eventID, err := RecordEvent(database, domain.Event{
+		EventType: domain.EventGitHubPROpened, EntityID: &entity.ID, MetadataJSON: `{}`,
+	})
+	if err != nil {
+		t.Fatalf("record event: %v", err)
+	}
+	task, _, err := FindOrCreateTask(database, entity.ID, domain.EventGitHubPROpened, "", eventID, 0.5)
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	// First stamp on unclaimed row → lands.
+	ok, err := StampAgentClaimIfUnclaimed(database, task.ID, runmode.LocalDefaultAgentID)
+	if err != nil {
+		t.Fatalf("first stamp: %v", err)
+	}
+	if !ok {
+		t.Fatal("ok=false on first stamp; expected the claim to land")
+	}
+
+	// Re-stamp same agent → no-op.
+	ok, err = StampAgentClaimIfUnclaimed(database, task.ID, runmode.LocalDefaultAgentID)
+	if err != nil {
+		t.Fatalf("re-stamp: %v", err)
+	}
+	if ok {
+		t.Error("ok=true on idempotent re-stamp; expected no-op so the caller skips the broadcast")
+	}
+
+	// Switch to user claim (simulates a takeover that landed
+	// before the next auto-trigger stamp). Then try to stamp again
+	// — must refuse to overwrite the user's claim.
+	if err := SetTaskClaimedByUser(database, task.ID, runmode.LocalDefaultUserID); err != nil {
+		t.Fatalf("set user claim: %v", err)
+	}
+	ok, err = StampAgentClaimIfUnclaimed(database, task.ID, runmode.LocalDefaultAgentID)
+	if err != nil {
+		t.Fatalf("stamp post-user-claim: %v", err)
+	}
+	if ok {
+		t.Fatal("ok=true; agent claim stole a user claim — race guard broken")
+	}
+	got, err := GetTask(database, task.ID)
+	if err != nil {
+		t.Fatalf("re-read task: %v", err)
+	}
+	if got.ClaimedByUserID != runmode.LocalDefaultUserID {
+		t.Errorf("user claim was overwritten: got %q want %q", got.ClaimedByUserID, runmode.LocalDefaultUserID)
+	}
+	if got.ClaimedByAgentID != "" {
+		t.Errorf("agent claim landed on top of user claim: got %q want empty", got.ClaimedByAgentID)
+	}
+}
+
+// TestTakeoverClaimFromAgent pins the swipe-claim race-safe takeover
+// helper's three branches: bot→user flip lands; race-lost cases
+// (already user-claimed by another user, or no bot claim to take
+// over) return ok=false without changing state.
+func TestTakeoverClaimFromAgent(t *testing.T) {
+	database := newTestDB(t)
+	seedLocalAgentForClaimTests(t, database)
+	entity, _, err := FindOrCreateEntity(database, "github", "octo/repo#takeover", "pr", "Takeover Test", "https://example.com/t")
+	if err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	eventID, err := RecordEvent(database, domain.Event{
+		EventType: domain.EventGitHubPROpened, EntityID: &entity.ID, MetadataJSON: `{}`,
+	})
+	if err != nil {
+		t.Fatalf("record event: %v", err)
+	}
+	task, _, err := FindOrCreateTask(database, entity.ID, domain.EventGitHubPROpened, "", eventID, 0.5)
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	// (1) No claim at all → takeover refuses (not a takeover; use
+	// ClaimQueuedTaskForUser for the unclaimed case).
+	ok, err := TakeoverClaimFromAgent(database, task.ID, runmode.LocalDefaultUserID)
+	if err != nil {
+		t.Fatalf("takeover-from-naked: %v", err)
+	}
+	if ok {
+		t.Error("ok=true taking over an unclaimed task; helper should refuse")
+	}
+
+	// (2) Stamp bot claim, then take it over → lands.
+	if err := SetTaskClaimedByAgent(database, task.ID, runmode.LocalDefaultAgentID); err != nil {
+		t.Fatalf("stamp agent claim: %v", err)
+	}
+	ok, err = TakeoverClaimFromAgent(database, task.ID, runmode.LocalDefaultUserID)
+	if err != nil {
+		t.Fatalf("takeover: %v", err)
+	}
+	if !ok {
+		t.Fatal("ok=false on legitimate bot→user takeover")
+	}
+	got, err := GetTask(database, task.ID)
+	if err != nil {
+		t.Fatalf("re-read post-takeover: %v", err)
+	}
+	if got.ClaimedByAgentID != "" {
+		t.Errorf("agent claim survived takeover: got %q", got.ClaimedByAgentID)
+	}
+	if got.ClaimedByUserID != runmode.LocalDefaultUserID {
+		t.Errorf("user claim didn't land: got %q want %q", got.ClaimedByUserID, runmode.LocalDefaultUserID)
+	}
+
+	// (3) Already user-claimed (by this user, no bot claim to take
+	// over from) → refuse. This guards the swipe-claim handler's
+	// idempotent same-user branch from accidentally going down the
+	// takeover path.
+	ok, err = TakeoverClaimFromAgent(database, task.ID, runmode.LocalDefaultUserID)
+	if err != nil {
+		t.Fatalf("takeover-from-user-claim: %v", err)
+	}
+	if ok {
+		t.Error("ok=true taking over a user-claimed task; helper should refuse")
+	}
+}
+
 // TestTaskClaim_StickyPastClose pins the SKY-261 audit invariant:
 // claim columns are NOT cleared when a task closes. status='done' +
 // non-empty claim is the answer to "who was responsible when this
