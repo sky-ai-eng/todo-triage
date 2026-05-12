@@ -209,17 +209,32 @@ func (s *eventHandlerStore) Create(ctx context.Context, orgID string, h domain.E
 		pred = *h.ScopePredicateJSON
 	}
 
+	// Post-SKY-262, user-source event_handlers default to visibility=
+	// 'team' and the team_visibility_requires_team CHECK forces team_id
+	// IS NOT NULL whenever visibility='team'. event_handlers.team_id
+	// itself stays nullable at the column level so shipped system rows
+	// (creator_user_id NULL + visibility='org' + team_id NULL) remain
+	// valid. team_id below is derived from the caller's primary team
+	// membership; admin/test fallback picks any team in the org.
 	switch h.Kind {
 	case domain.EventHandlerKindRule:
 		_, err := s.app.ExecContext(ctx, `
 			INSERT INTO event_handlers
-				(id, org_id, creator_user_id, kind, event_type,
+				(id, org_id, creator_user_id, team_id, visibility, kind, event_type,
 				 scope_predicate_json, enabled, source,
 				 name, default_priority, sort_order,
 				 created_at, updated_at)
 			VALUES (
 				$1, $2,
 				COALESCE(tf.current_user_id(), (SELECT owner_user_id FROM orgs WHERE id = $2)),
+				COALESCE(
+					(SELECT m.team_id FROM memberships m
+					   JOIN teams t ON t.id = m.team_id
+					  WHERE m.user_id = tf.current_user_id() AND t.org_id = $2
+					  ORDER BY m.created_at ASC LIMIT 1),
+					(SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1)
+				),
+				'team',
 				'rule', $3,
 				$4::jsonb, $5, 'user',
 				$6, $7, $8,
@@ -232,13 +247,21 @@ func (s *eventHandlerStore) Create(ctx context.Context, orgID string, h domain.E
 	case domain.EventHandlerKindTrigger:
 		_, err := s.app.ExecContext(ctx, `
 			INSERT INTO event_handlers
-				(id, org_id, creator_user_id, kind, event_type,
+				(id, org_id, creator_user_id, team_id, visibility, kind, event_type,
 				 scope_predicate_json, enabled, source,
 				 prompt_id, breaker_threshold, min_autonomy_suitability,
 				 created_at, updated_at)
 			VALUES (
 				$1, $2,
 				COALESCE(tf.current_user_id(), (SELECT owner_user_id FROM orgs WHERE id = $2)),
+				COALESCE(
+					(SELECT m.team_id FROM memberships m
+					   JOIN teams t ON t.id = m.team_id
+					  WHERE m.user_id = tf.current_user_id() AND t.org_id = $2
+					  ORDER BY m.created_at ASC LIMIT 1),
+					(SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1)
+				),
+				'team',
 				'trigger', $3,
 				$4::jsonb, $5, 'user',
 				$6, $7, $8,

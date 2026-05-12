@@ -144,6 +144,7 @@ func seedPgOrgAndUserForPrompts(t *testing.T, h *pgtest.Harness) (orgID, userID 
 	); err != nil {
 		t.Fatalf("seed org_membership: %v", err)
 	}
+	seedPgDefaultTeam(t, h, orgID, userID)
 	return orgID, userID
 }
 
@@ -172,10 +173,11 @@ func seedPgRunsForStats(t *testing.T, conn *sql.DB, orgID, userID, promptID stri
 	`, eventID, orgID, entityID, now); err != nil {
 		t.Fatalf("seed event: %v", err)
 	}
+	// team_id resolved inline from the org's first team (SKY-262).
 	if _, err := conn.Exec(`
-		INSERT INTO tasks (id, org_id, creator_user_id, entity_id, event_type, dedup_key, primary_event_id,
+		INSERT INTO tasks (id, org_id, creator_user_id, team_id, visibility, entity_id, event_type, dedup_key, primary_event_id,
 		                   status, scoring_status, created_at)
-		VALUES ($1, $2, $3, $4, 'github:pr:opened', '', $5, 'queued', 'pending', $6)
+		VALUES ($1, $2, $3, (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1), 'team', $4, 'github:pr:opened', '', $5, 'queued', 'pending', $6)
 	`, taskID, orgID, userID, entityID, eventID, now); err != nil {
 		t.Fatalf("seed task: %v", err)
 	}
@@ -185,8 +187,8 @@ func seedPgRunsForStats(t *testing.T, conn *sql.DB, orgID, userID, promptID stri
 		runID := uuid.New().String()
 		startedAt := now.AddDate(0, 0, -i)
 		if _, err := conn.Exec(`
-			INSERT INTO runs (id, org_id, creator_user_id, task_id, prompt_id, status, started_at, total_cost_usd, duration_ms)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, 0.01, 100)
+			INSERT INTO runs (id, org_id, creator_user_id, team_id, visibility, task_id, prompt_id, status, started_at, total_cost_usd, duration_ms)
+			VALUES ($1, $2, $3, (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1), 'team', $4, $5, $6, $7, 0.01, 100)
 		`, runID, orgID, userID, taskID, promptID, status, startedAt); err != nil {
 			t.Fatalf("seed run %d: %v", i, err)
 		}

@@ -796,8 +796,8 @@ func TestProjectKnowledge_RunValidation(t *testing.T) {
 	bobPrompt := seedPrompt(t, h, bobOrg, bob, "p1")
 	var bobRun string
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO runs (org_id, creator_user_id, task_id, prompt_id)
-		VALUES ($1, $2, $3, $4) RETURNING id
+		INSERT INTO runs (org_id, creator_user_id, team_id, task_id, prompt_id)
+		VALUES ($1, $2, (SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1), $3, $4) RETURNING id
 	`, bobOrg, bob, bobTask, bobPrompt).Scan(&bobRun); err != nil {
 		t.Fatalf("seed bob run: %v", err)
 	}
@@ -1374,9 +1374,11 @@ func TestFK_CrossOrgRejected(t *testing.T) {
 	// orgB). Composite FK (entity_id, org_id) → entities(id, org_id)
 	// rejects: there's no entities row with (entityB, orgA).
 	// AdminDB bypasses RLS but FKs are enforced regardless of role.
+	// team_id resolved inline so the test trips the entity FK violation
+	// (its intent), not the team_id NOT NULL added in SKY-262.
 	_, err := h.AdminDB.Exec(`
-		INSERT INTO tasks (org_id, creator_user_id, entity_id, event_type, primary_event_id)
-		VALUES ($1, $2, $3, 'github:pr:opened', gen_random_uuid())
+		INSERT INTO tasks (org_id, creator_user_id, team_id, entity_id, event_type, primary_event_id)
+		VALUES ($1, $2, (SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1), $3, 'github:pr:opened', gen_random_uuid())
 	`, orgA, alice, entityB)
 	if err == nil {
 		t.Fatalf("cross-org task INSERT succeeded — composite FK broken")
@@ -1417,14 +1419,32 @@ func TestRLS_ChildTablesInheritParentVisibility(t *testing.T) {
 	bob := seedUser(t, h, "bob")
 	addOrgMember(t, h, bob, orgA, teamA, "member", "member")
 
-	// Alice creates a task + a run + child rows. All in orgA.
+	// Alice creates a task + a run + child rows. All in orgA. Post-
+	// SKY-262 the team-default would make these rows visible to bob too
+	// (same team), which would hide the "child inherits parent
+	// visibility" property this test pins. Pin the parents at
+	// visibility='private' so the inheritance check is meaningful: alice
+	// sees her own private rows; bob (different creator) can't.
 	entityA := seedEntity(t, h, orgA, "github", "octo/repo#1")
-	taskID := seedTask(t, h, orgA, alice, entityA, "github:pr:opened")
 	prompt := seedPrompt(t, h, orgA, alice, "p1")
+	var evtID string
+	if err := h.AdminDB.QueryRow(`
+		INSERT INTO events (org_id, entity_id, event_type) VALUES ($1, $2, 'github:pr:opened') RETURNING id
+	`, orgA, entityA).Scan(&evtID); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	var taskID string
+	if err := h.AdminDB.QueryRow(`
+		INSERT INTO tasks (org_id, creator_user_id, team_id, visibility, entity_id, event_type, primary_event_id)
+		VALUES ($1, $2, $3, 'private', $4, 'github:pr:opened', $5) RETURNING id
+	`, orgA, alice, teamA, entityA, evtID).Scan(&taskID); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
 	var runID string
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO runs (org_id, creator_user_id, task_id, prompt_id) VALUES ($1, $2, $3, $4) RETURNING id
-	`, orgA, alice, taskID, prompt).Scan(&runID); err != nil {
+		INSERT INTO runs (org_id, creator_user_id, team_id, visibility, task_id, prompt_id)
+		VALUES ($1, $2, $3, 'private', $4, $5) RETURNING id
+	`, orgA, alice, teamA, taskID, prompt).Scan(&runID); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}
 	// Seed one child row per parent kind we care about.
@@ -1722,13 +1742,28 @@ func TestRLS_PendingReviewsInheritParentVisibility(t *testing.T) {
 	addOrgMember(t, h, bob, orgA, teamA, "member", "member")
 
 	// Alice creates a task + run + a pending review tied to that run.
+	// Forced visibility='private' on parents so the inheritance check is
+	// meaningful post-SKY-262 (default 'team' would let bob see them
+	// via team membership; this test pins child-inherits-private).
 	entityA := seedEntity(t, h, orgA, "github", "octo/repo#1")
-	taskID := seedTask(t, h, orgA, alice, entityA, "github:pr:opened")
 	prompt := seedPrompt(t, h, orgA, alice, "p1")
-	var runID, reviewID string
+	var evtID string
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO runs (org_id, creator_user_id, task_id, prompt_id) VALUES ($1, $2, $3, $4) RETURNING id
-	`, orgA, alice, taskID, prompt).Scan(&runID); err != nil {
+		INSERT INTO events (org_id, entity_id, event_type) VALUES ($1, $2, 'github:pr:opened') RETURNING id
+	`, orgA, entityA).Scan(&evtID); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	var taskID, runID, reviewID string
+	if err := h.AdminDB.QueryRow(`
+		INSERT INTO tasks (org_id, creator_user_id, team_id, visibility, entity_id, event_type, primary_event_id)
+		VALUES ($1, $2, $3, 'private', $4, 'github:pr:opened', $5) RETURNING id
+	`, orgA, alice, teamA, entityA, evtID).Scan(&taskID); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+	if err := h.AdminDB.QueryRow(`
+		INSERT INTO runs (org_id, creator_user_id, team_id, visibility, task_id, prompt_id)
+		VALUES ($1, $2, $3, 'private', $4, $5) RETURNING id
+	`, orgA, alice, teamA, taskID, prompt).Scan(&runID); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}
 	if err := h.AdminDB.QueryRow(`
@@ -1817,11 +1852,12 @@ func TestPrompts_SemanticIDsAccepted(t *testing.T) {
 		t.Fatalf("system_prompt_versions INSERT: %v", err)
 	}
 
-	// User prompt picks up the default (UUID-shaped string).
+	// User prompt picks up the default (UUID-shaped string). team_id
+	// resolved inline from the org's first team (SKY-262).
 	var userPromptID string
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO prompts (org_id, creator_user_id, name, body)
-		VALUES ($1, $2, 'My Prompt', 'hello') RETURNING id
+		INSERT INTO prompts (org_id, creator_user_id, team_id, name, body)
+		VALUES ($1, $2, (SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1), 'My Prompt', 'hello') RETURNING id
 	`, orgA, alice).Scan(&userPromptID); err != nil {
 		t.Fatalf("user prompt INSERT: %v", err)
 	}
@@ -2167,8 +2203,10 @@ func seedTeam(t *testing.T, h *Harness, orgID, slug string) string {
 func seedPrompt(t *testing.T, h *Harness, orgID, creatorID, name string) string {
 	t.Helper()
 	var id string
+	// team_id resolved inline from the org's first team (SKY-262 team-default).
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO prompts (org_id, creator_user_id, name, body) VALUES ($1, $2, $3, '') RETURNING id
+		INSERT INTO prompts (org_id, creator_user_id, team_id, name, body)
+		VALUES ($1, $2, (SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1), $3, '') RETURNING id
 	`, orgID, creatorID, name).Scan(&id); err != nil {
 		t.Fatalf("seed prompt: %v", err)
 	}
@@ -2178,8 +2216,10 @@ func seedPrompt(t *testing.T, h *Harness, orgID, creatorID, name string) string 
 func seedProject(t *testing.T, h *Harness, orgID, creatorID, name string) string {
 	t.Helper()
 	var id string
+	// team_id resolved inline from the org's first team (SKY-262 team-default).
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO projects (org_id, creator_user_id, name) VALUES ($1, $2, $3) RETURNING id
+		INSERT INTO projects (org_id, creator_user_id, team_id, name)
+		VALUES ($1, $2, (SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1), $3) RETURNING id
 	`, orgID, creatorID, name).Scan(&id); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
@@ -2208,9 +2248,11 @@ func seedTask(t *testing.T, h *Harness, orgID, creatorID, entityID, eventType st
 		t.Fatalf("seed event: %v", err)
 	}
 	var id string
+	// team_id resolved inline from the org's first team (SKY-262 made it
+	// NOT NULL on tasks). visibility defaults to 'team' from the column.
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO tasks (org_id, creator_user_id, entity_id, event_type, primary_event_id)
-		VALUES ($1, $2, $3, $4, $5) RETURNING id
+		INSERT INTO tasks (org_id, creator_user_id, team_id, entity_id, event_type, primary_event_id)
+		VALUES ($1, $2, (SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1), $3, $4, $5) RETURNING id
 	`, orgID, creatorID, entityID, eventType, evtID).Scan(&id); err != nil {
 		t.Fatalf("seed task: %v", err)
 	}
@@ -2473,6 +2515,257 @@ func TestRLS_OrgMembershipsBootstrapStillWorks(t *testing.T) {
 		return err
 	}); err != nil {
 		t.Fatalf("founder bootstrap (no-org-claim shape): %v", err)
+	}
+}
+
+// TestRLS_TeamMembershipWithoutOrgAccessDenied pins the defense-in-depth
+// guard added in SKY-262: tf.user_in_team(team_id) only checks the
+// memberships table, so a user with a memberships row pointing at a
+// team in orgA but NO org_memberships row in orgA must NOT be able to
+// SELECT/UPDATE/DELETE team-visible rows in orgA. The outer
+// tf.user_has_org_access(org_id) guard on every team-branch policy
+// catches this case.
+//
+// Realistic scenarios where this could matter:
+//   - Stale state: an org_memberships row was deleted but the
+//     corresponding memberships rows weren't cascaded.
+//   - Privilege confusion: code path that adds a memberships row
+//     without going through the canonical addOrgMember flow.
+//   - Attacker-controlled team_id: someone discovers a team_id in
+//     orgA and tries to use a memberships row to read it.
+//
+// In all cases the policies must deny. This test fabricates the state
+// directly via AdminDB (bypassing the addOrgMember helper that pairs
+// the two rows) and verifies the deny path on every swept table.
+func TestRLS_TeamMembershipWithoutOrgAccessDenied(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	orgA, alice, teamA := seedOrgWithUser(t, h, "alice")
+
+	// Mallory has a memberships row for teamA (orgA's team) but no
+	// org_memberships row in orgA. Constructed with raw INSERTs so we
+	// bypass the addOrgMember helper that pairs the two rows.
+	mallory := seedUser(t, h, "mallory")
+	mustExec(t, h.AdminDB,
+		`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'member')`, mallory, teamA)
+	// NB: intentionally NO INSERT INTO org_memberships for mallory in orgA.
+
+	// Alice creates team-visible rows in every swept table — these are
+	// the rows mallory's stolen team-membership might let her reach.
+	entityA := seedEntity(t, h, orgA, "github", "octo/repo#1")
+	taskID := seedTask(t, h, orgA, alice, entityA, "github:pr:opened")
+	promptID := seedPrompt(t, h, orgA, alice, "p1")
+	projectID := seedProject(t, h, orgA, alice, "proj-a")
+	var runID string
+	if err := h.AdminDB.QueryRow(`
+		INSERT INTO runs (org_id, creator_user_id, team_id, task_id, prompt_id)
+		VALUES ($1, $2, $3, $4, $5) RETURNING id
+	`, orgA, alice, teamA, taskID, promptID).Scan(&runID); err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+	var ehID string
+	if err := h.AdminDB.QueryRow(`
+		INSERT INTO event_handlers (org_id, creator_user_id, team_id, visibility, kind, event_type, name, default_priority, sort_order)
+		VALUES ($1, $2, $3, 'team', 'rule', 'github:pr:opened', 'r1', 0.5, 0) RETURNING id
+	`, orgA, alice, teamA).Scan(&ehID); err != nil {
+		t.Fatalf("seed event_handler: %v", err)
+	}
+
+	// Drive every read/write under mallory's claims pointing at orgA.
+	// Every policy must deny because tf.user_has_org_access(orgA) is
+	// FALSE — she has no org_memberships row. The team-branch's
+	// tf.user_in_team(teamA) WOULD return TRUE (memberships exists),
+	// but the outer guard short-circuits before that even matters.
+	err := h.WithUser(t, mallory, orgA, func(tx *sql.Tx) error {
+		// SELECT — mallory must see ZERO rows on every swept table.
+		for _, tbl := range []string{"tasks", "runs", "prompts", "projects", "event_handlers"} {
+			var n int
+			if err := tx.QueryRow(`SELECT COUNT(*) FROM ` + tbl).Scan(&n); err != nil {
+				return fmt.Errorf("count %s: %w", tbl, err)
+			}
+			if n != 0 {
+				t.Errorf("mallory saw %d %s rows despite no org membership", n, tbl)
+			}
+		}
+
+		// UPDATE — must affect zero rows. Targeting the specific row
+		// IDs we know exist; RLS makes the row invisible to mallory,
+		// so the UPDATE matches nothing.
+		updates := map[string]string{
+			"tasks":          `UPDATE tasks          SET status        = 'pwned' WHERE id = $1`,
+			"runs":           `UPDATE runs           SET stop_reason   = 'pwned' WHERE id = $1`,
+			"prompts":        `UPDATE prompts        SET body          = 'pwned' WHERE id = $1`,
+			"projects":       `UPDATE projects       SET description   = 'pwned' WHERE id = $1`,
+			"event_handlers": `UPDATE event_handlers SET name          = 'pwned' WHERE id = $1`,
+		}
+		ids := map[string]string{
+			"tasks":          taskID,
+			"runs":           runID,
+			"prompts":        promptID,
+			"projects":       projectID,
+			"event_handlers": ehID,
+		}
+		for tbl, stmt := range updates {
+			res, err := tx.Exec(stmt, ids[tbl])
+			if err != nil {
+				return fmt.Errorf("update %s: %w", tbl, err)
+			}
+			n, _ := res.RowsAffected()
+			if n != 0 {
+				t.Errorf("mallory updated %d %s rows despite no org membership", n, tbl)
+			}
+		}
+
+		// DELETE — same deny path.
+		for tbl, id := range ids {
+			res, err := tx.Exec(`DELETE FROM `+tbl+` WHERE id = $1`, id)
+			if err != nil {
+				return fmt.Errorf("delete %s: %w", tbl, err)
+			}
+			n, _ := res.RowsAffected()
+			if n != 0 {
+				t.Errorf("mallory deleted %d %s rows despite no org membership", n, tbl)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("mallory session: %v", err)
+	}
+
+	// Sanity: alice (real org owner + team admin) can still read all
+	// the rows we just protected from mallory. Pins that the defense
+	// doesn't over-deny.
+	err = h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
+		for _, tbl := range []string{"tasks", "runs", "prompts", "projects", "event_handlers"} {
+			var n int
+			if err := tx.QueryRow(`SELECT COUNT(*) FROM ` + tbl).Scan(&n); err != nil {
+				return fmt.Errorf("count %s: %w", tbl, err)
+			}
+			if n == 0 {
+				t.Errorf("alice (owner) saw 0 %s rows — defense over-denied", tbl)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("alice sanity: %v", err)
+	}
+}
+
+// TestRLS_NonAdminCannotInsertOrgVisible pins the second defense added
+// in SKY-262: non-admin org members must not be able to INSERT rows
+// with visibility='org' on any of the five swept tables. The system-
+// driven seed paths use the admin pool (BYPASSRLS) for shipped
+// visibility='org' rows; this policy guards user-path callsites.
+//
+// Without the per-visibility admin gate on the WITH CHECK, any org
+// member could fabricate org-visible rows that look like sanctioned
+// admin-managed defaults — e.g., a "shipped" prompt or rule that
+// claims org-wide authority but was actually inserted by a regular
+// user. The admin gate matches the post-SKY-246 UPDATE policy shape.
+func TestRLS_NonAdminCannotInsertOrgVisible(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	orgA, alice, teamA := seedOrgWithUser(t, h, "alice")
+	carol := seedUser(t, h, "carol")
+	addOrgMember(t, h, carol, orgA, teamA, "member", "member") // org member but not admin
+
+	// Seed an entity + event + parent task + prompt so the task/runs
+	// INSERTs below have parents to reference (created via AdminDB so
+	// the seeds themselves bypass the policy we're testing).
+	entityA := seedEntity(t, h, orgA, "github", "octo/repo#org-insert")
+	var evtID string
+	if err := h.AdminDB.QueryRow(`
+		INSERT INTO events (org_id, entity_id, event_type) VALUES ($1, $2, 'github:pr:opened') RETURNING id
+	`, orgA, entityA).Scan(&evtID); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	// Parent task + prompt for the runs INSERT case below.
+	parentTaskID := seedTask(t, h, orgA, alice, entityA, "github:pr:opened")
+	parentPromptID := seedPrompt(t, h, orgA, alice, "p-org-insert")
+
+	// Each INSERT below would succeed without the admin gate (carol IS
+	// an org member, IS on teamA). The gate adds:
+	//   (visibility <> 'org' OR tf.user_is_org_admin(org_id))
+	// so org-visible rows from a non-admin must be rejected.
+	//
+	// Postgres aborts the whole transaction on a CHECK violation, so
+	// each attempt runs in its own SAVEPOINT — rollback to the
+	// savepoint after a violation, then continue with the next
+	// attempt. Without this scaffolding the second attempt would
+	// fail with "current transaction is aborted" and mask the actual
+	// policy behavior.
+	cases := []struct {
+		label string
+		stmt  string
+		args  []any
+	}{
+		{
+			label: "tasks",
+			stmt: `INSERT INTO tasks (org_id, creator_user_id, team_id, visibility, entity_id, event_type, primary_event_id)
+				VALUES ($1, $2, $3, 'org', $4, 'github:pr:opened', $5)`,
+			args: []any{orgA, carol, teamA, entityA, evtID},
+		},
+		{
+			label: "runs",
+			stmt: `INSERT INTO runs (org_id, creator_user_id, team_id, visibility, task_id, prompt_id)
+				VALUES ($1, $2, $3, 'org', $4, $5)`,
+			args: []any{orgA, carol, teamA, parentTaskID, parentPromptID},
+		},
+		{
+			label: "prompts",
+			stmt: `INSERT INTO prompts (org_id, creator_user_id, visibility, name, body)
+				VALUES ($1, $2, 'org', 'evil-org-prompt', '')`,
+			args: []any{orgA, carol},
+		},
+		{
+			label: "projects",
+			stmt: `INSERT INTO projects (org_id, creator_user_id, visibility, name)
+				VALUES ($1, $2, 'org', 'evil-org-project')`,
+			args: []any{orgA, carol},
+		},
+		{
+			label: "event_handlers",
+			stmt: `INSERT INTO event_handlers (org_id, creator_user_id, visibility, kind, event_type, name, default_priority, sort_order)
+				VALUES ($1, $2, 'org', 'rule', 'github:pr:opened', 'evil-org-rule', 0.5, 0)`,
+			args: []any{orgA, carol},
+		},
+	}
+
+	err := h.WithUser(t, carol, orgA, func(tx *sql.Tx) error {
+		for _, c := range cases {
+			if _, err := tx.Exec(`SAVEPOINT sp_` + c.label); err != nil {
+				return fmt.Errorf("savepoint %s: %w", c.label, err)
+			}
+			_, err := tx.Exec(c.stmt, c.args...)
+			if err == nil {
+				t.Errorf("non-admin carol INSERT'd visibility='org' %s — admin gate missing", c.label)
+				if _, rbErr := tx.Exec(`RELEASE SAVEPOINT sp_` + c.label); rbErr != nil {
+					return fmt.Errorf("release savepoint %s: %w", c.label, rbErr)
+				}
+				continue
+			}
+			if _, rbErr := tx.Exec(`ROLLBACK TO SAVEPOINT sp_` + c.label); rbErr != nil {
+				return fmt.Errorf("rollback savepoint %s: %w", c.label, rbErr)
+			}
+		}
+
+		// Sanity: team-visibility INSERT still succeeds for carol
+		// (she's on the team) — defense doesn't over-deny the
+		// legitimate path.
+		if _, err := tx.Exec(`
+			INSERT INTO prompts (org_id, creator_user_id, team_id, visibility, name, body)
+			VALUES ($1, $2, $3, 'team', 'carol-team-prompt', '')
+		`, orgA, carol, teamA); err != nil {
+			t.Errorf("non-admin carol team INSERT denied — defense over-broad: %v", err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("carol session: %v", err)
 	}
 }
 

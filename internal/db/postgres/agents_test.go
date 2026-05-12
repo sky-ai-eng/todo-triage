@@ -306,5 +306,6 @@ func seedPgOrgForAgents(t *testing.T, h *pgtest.Harness) string {
 	); err != nil {
 		t.Fatalf("seed org_membership: %v", err)
 	}
+	seedPgDefaultTeam(t, h, orgID, userID)
 	return orgID
 }
