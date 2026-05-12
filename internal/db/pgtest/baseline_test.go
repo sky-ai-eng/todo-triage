@@ -796,8 +796,8 @@ func TestProjectKnowledge_RunValidation(t *testing.T) {
 	bobPrompt := seedPrompt(t, h, bobOrg, bob, "p1")
 	var bobRun string
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO runs (org_id, creator_user_id, task_id, prompt_id)
-		VALUES ($1, $2, $3, $4) RETURNING id
+		INSERT INTO runs (org_id, creator_user_id, team_id, task_id, prompt_id)
+		VALUES ($1, $2, (SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1), $3, $4) RETURNING id
 	`, bobOrg, bob, bobTask, bobPrompt).Scan(&bobRun); err != nil {
 		t.Fatalf("seed bob run: %v", err)
 	}
@@ -1374,9 +1374,11 @@ func TestFK_CrossOrgRejected(t *testing.T) {
 	// orgB). Composite FK (entity_id, org_id) → entities(id, org_id)
 	// rejects: there's no entities row with (entityB, orgA).
 	// AdminDB bypasses RLS but FKs are enforced regardless of role.
+	// team_id resolved inline so the test trips the entity FK violation
+	// (its intent), not the team_id NOT NULL added in SKY-262.
 	_, err := h.AdminDB.Exec(`
-		INSERT INTO tasks (org_id, creator_user_id, entity_id, event_type, primary_event_id)
-		VALUES ($1, $2, $3, 'github:pr:opened', gen_random_uuid())
+		INSERT INTO tasks (org_id, creator_user_id, team_id, entity_id, event_type, primary_event_id)
+		VALUES ($1, $2, (SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1), $3, 'github:pr:opened', gen_random_uuid())
 	`, orgA, alice, entityB)
 	if err == nil {
 		t.Fatalf("cross-org task INSERT succeeded — composite FK broken")
@@ -1417,14 +1419,32 @@ func TestRLS_ChildTablesInheritParentVisibility(t *testing.T) {
 	bob := seedUser(t, h, "bob")
 	addOrgMember(t, h, bob, orgA, teamA, "member", "member")
 
-	// Alice creates a task + a run + child rows. All in orgA.
+	// Alice creates a task + a run + child rows. All in orgA. Post-
+	// SKY-262 the team-default would make these rows visible to bob too
+	// (same team), which would hide the "child inherits parent
+	// visibility" property this test pins. Pin the parents at
+	// visibility='private' so the inheritance check is meaningful: alice
+	// sees her own private rows; bob (different creator) can't.
 	entityA := seedEntity(t, h, orgA, "github", "octo/repo#1")
-	taskID := seedTask(t, h, orgA, alice, entityA, "github:pr:opened")
 	prompt := seedPrompt(t, h, orgA, alice, "p1")
+	var evtID string
+	if err := h.AdminDB.QueryRow(`
+		INSERT INTO events (org_id, entity_id, event_type) VALUES ($1, $2, 'github:pr:opened') RETURNING id
+	`, orgA, entityA).Scan(&evtID); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	var taskID string
+	if err := h.AdminDB.QueryRow(`
+		INSERT INTO tasks (org_id, creator_user_id, team_id, visibility, entity_id, event_type, primary_event_id)
+		VALUES ($1, $2, $3, 'private', $4, 'github:pr:opened', $5) RETURNING id
+	`, orgA, alice, teamA, entityA, evtID).Scan(&taskID); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
 	var runID string
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO runs (org_id, creator_user_id, task_id, prompt_id) VALUES ($1, $2, $3, $4) RETURNING id
-	`, orgA, alice, taskID, prompt).Scan(&runID); err != nil {
+		INSERT INTO runs (org_id, creator_user_id, team_id, visibility, task_id, prompt_id)
+		VALUES ($1, $2, $3, 'private', $4, $5) RETURNING id
+	`, orgA, alice, teamA, taskID, prompt).Scan(&runID); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}
 	// Seed one child row per parent kind we care about.
@@ -1722,13 +1742,28 @@ func TestRLS_PendingReviewsInheritParentVisibility(t *testing.T) {
 	addOrgMember(t, h, bob, orgA, teamA, "member", "member")
 
 	// Alice creates a task + run + a pending review tied to that run.
+	// Forced visibility='private' on parents so the inheritance check is
+	// meaningful post-SKY-262 (default 'team' would let bob see them
+	// via team membership; this test pins child-inherits-private).
 	entityA := seedEntity(t, h, orgA, "github", "octo/repo#1")
-	taskID := seedTask(t, h, orgA, alice, entityA, "github:pr:opened")
 	prompt := seedPrompt(t, h, orgA, alice, "p1")
-	var runID, reviewID string
+	var evtID string
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO runs (org_id, creator_user_id, task_id, prompt_id) VALUES ($1, $2, $3, $4) RETURNING id
-	`, orgA, alice, taskID, prompt).Scan(&runID); err != nil {
+		INSERT INTO events (org_id, entity_id, event_type) VALUES ($1, $2, 'github:pr:opened') RETURNING id
+	`, orgA, entityA).Scan(&evtID); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	var taskID, runID, reviewID string
+	if err := h.AdminDB.QueryRow(`
+		INSERT INTO tasks (org_id, creator_user_id, team_id, visibility, entity_id, event_type, primary_event_id)
+		VALUES ($1, $2, $3, 'private', $4, 'github:pr:opened', $5) RETURNING id
+	`, orgA, alice, teamA, entityA, evtID).Scan(&taskID); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+	if err := h.AdminDB.QueryRow(`
+		INSERT INTO runs (org_id, creator_user_id, team_id, visibility, task_id, prompt_id)
+		VALUES ($1, $2, $3, 'private', $4, $5) RETURNING id
+	`, orgA, alice, teamA, taskID, prompt).Scan(&runID); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}
 	if err := h.AdminDB.QueryRow(`
@@ -1817,11 +1852,12 @@ func TestPrompts_SemanticIDsAccepted(t *testing.T) {
 		t.Fatalf("system_prompt_versions INSERT: %v", err)
 	}
 
-	// User prompt picks up the default (UUID-shaped string).
+	// User prompt picks up the default (UUID-shaped string). team_id
+	// resolved inline from the org's first team (SKY-262).
 	var userPromptID string
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO prompts (org_id, creator_user_id, name, body)
-		VALUES ($1, $2, 'My Prompt', 'hello') RETURNING id
+		INSERT INTO prompts (org_id, creator_user_id, team_id, name, body)
+		VALUES ($1, $2, (SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1), 'My Prompt', 'hello') RETURNING id
 	`, orgA, alice).Scan(&userPromptID); err != nil {
 		t.Fatalf("user prompt INSERT: %v", err)
 	}
@@ -2167,8 +2203,10 @@ func seedTeam(t *testing.T, h *Harness, orgID, slug string) string {
 func seedPrompt(t *testing.T, h *Harness, orgID, creatorID, name string) string {
 	t.Helper()
 	var id string
+	// team_id resolved inline from the org's first team (SKY-262 team-default).
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO prompts (org_id, creator_user_id, name, body) VALUES ($1, $2, $3, '') RETURNING id
+		INSERT INTO prompts (org_id, creator_user_id, team_id, name, body)
+		VALUES ($1, $2, (SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1), $3, '') RETURNING id
 	`, orgID, creatorID, name).Scan(&id); err != nil {
 		t.Fatalf("seed prompt: %v", err)
 	}
@@ -2178,8 +2216,10 @@ func seedPrompt(t *testing.T, h *Harness, orgID, creatorID, name string) string 
 func seedProject(t *testing.T, h *Harness, orgID, creatorID, name string) string {
 	t.Helper()
 	var id string
+	// team_id resolved inline from the org's first team (SKY-262 team-default).
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO projects (org_id, creator_user_id, name) VALUES ($1, $2, $3) RETURNING id
+		INSERT INTO projects (org_id, creator_user_id, team_id, name)
+		VALUES ($1, $2, (SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1), $3) RETURNING id
 	`, orgID, creatorID, name).Scan(&id); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
@@ -2208,9 +2248,11 @@ func seedTask(t *testing.T, h *Harness, orgID, creatorID, entityID, eventType st
 		t.Fatalf("seed event: %v", err)
 	}
 	var id string
+	// team_id resolved inline from the org's first team (SKY-262 made it
+	// NOT NULL on tasks). visibility defaults to 'team' from the column.
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO tasks (org_id, creator_user_id, entity_id, event_type, primary_event_id)
-		VALUES ($1, $2, $3, $4, $5) RETURNING id
+		INSERT INTO tasks (org_id, creator_user_id, team_id, entity_id, event_type, primary_event_id)
+		VALUES ($1, $2, (SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1), $3, $4, $5) RETURNING id
 	`, orgID, creatorID, entityID, eventType, evtID).Scan(&id); err != nil {
 		t.Fatalf("seed task: %v", err)
 	}

@@ -12,6 +12,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // promptStore is the SQLite impl of db.PromptStore. SQL bodies are
@@ -76,9 +77,11 @@ func (s *promptStore) SeedOrUpdate(ctx context.Context, orgID string, p domain.P
 		}
 
 		if !exists {
+			// System-shipped prompts ship visibility='org' (admin-managed,
+			// readable to every org member) so they don't need team_id.
 			if _, err := q.ExecContext(ctx, `
-				INSERT INTO prompts (id, name, body, source, usage_count, user_modified, created_at, updated_at)
-				VALUES (?, ?, ?, ?, 0, 0, ?, ?)
+				INSERT INTO prompts (id, name, body, source, visibility, usage_count, user_modified, created_at, updated_at)
+				VALUES (?, ?, ?, ?, 'org', 0, 0, ?, ?)
 			`, p.ID, p.Name, p.Body, p.Source, now, now); err != nil {
 				return err
 			}
@@ -195,10 +198,13 @@ func (s *promptStore) Create(ctx context.Context, orgID string, p domain.Prompt)
 		return err
 	}
 	now := time.Now().UTC()
+	// Post-SKY-262, user prompts are team-scoped with team_id =
+	// LocalDefaultTeamID + visibility='team'. SQLite has one team
+	// in local mode (sentinel from SKY-269).
 	_, err := s.q.ExecContext(ctx, `
-		INSERT INTO prompts (id, name, body, source, allowed_tools, model, usage_count, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)
-	`, p.ID, p.Name, p.Body, p.Source, p.AllowedTools, p.Model, now, now)
+		INSERT INTO prompts (id, name, body, source, allowed_tools, model, usage_count, team_id, visibility, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, 0, ?, 'team', ?, ?)
+	`, p.ID, p.Name, p.Body, p.Source, p.AllowedTools, p.Model, runmode.LocalDefaultTeamID, now, now)
 	return err
 }
 

@@ -10,6 +10,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // eventHandlerStore is the SQLite impl of db.EventHandlerStore. Post-
@@ -187,19 +188,22 @@ func (s *eventHandlerStore) Create(ctx context.Context, orgID string, h domain.E
 	}
 	now := time.Now().UTC()
 
+	// Post-SKY-262, user-source rows are team-scoped with team_id =
+	// LocalDefaultTeamID + visibility='team'. SQLite has one team in
+	// local mode (sentinel from SKY-269) so the lookup is trivial.
 	switch h.Kind {
 	case domain.EventHandlerKindRule:
 		_, err := s.q.ExecContext(ctx, `
 			INSERT INTO event_handlers
-				(id, org_id, kind, event_type,
+				(id, org_id, team_id, visibility, kind, event_type,
 				 scope_predicate_json, enabled, source,
 				 name, default_priority, sort_order,
 				 created_at, updated_at)
-			VALUES (?, ?, 'rule', ?,
+			VALUES (?, ?, ?, 'team', 'rule', ?,
 			        ?, ?, 'user',
 			        ?, ?, ?,
 			        ?, ?)
-		`, h.ID, orgID, h.EventType,
+		`, h.ID, orgID, runmode.LocalDefaultTeamID, h.EventType,
 			pred, h.Enabled,
 			h.Name, derefFloat(h.DefaultPriority), derefInt(h.SortOrder),
 			now, now)
@@ -208,15 +212,15 @@ func (s *eventHandlerStore) Create(ctx context.Context, orgID string, h domain.E
 	case domain.EventHandlerKindTrigger:
 		_, err := s.q.ExecContext(ctx, `
 			INSERT INTO event_handlers
-				(id, org_id, kind, event_type,
+				(id, org_id, team_id, visibility, kind, event_type,
 				 scope_predicate_json, enabled, source,
 				 prompt_id, breaker_threshold, min_autonomy_suitability,
 				 created_at, updated_at)
-			VALUES (?, ?, 'trigger', ?,
+			VALUES (?, ?, ?, 'team', 'trigger', ?,
 			        ?, ?, 'user',
 			        ?, ?, ?,
 			        ?, ?)
-		`, h.ID, orgID, h.EventType,
+		`, h.ID, orgID, runmode.LocalDefaultTeamID, h.EventType,
 			pred, h.Enabled,
 			h.PromptID, derefInt(h.BreakerThreshold), derefFloat(h.MinAutonomySuitability),
 			now, now)

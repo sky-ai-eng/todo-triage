@@ -234,12 +234,22 @@ func (s *promptStore) Create(ctx context.Context, orgID string, p domain.Prompt)
 	//     target. "Org founder created this" is the natural reading
 	//     for anything written outside a user request.
 	//
-	// COALESCE keeps the audit-when-possible behavior; the fallback
-	// only fires when no real user is on the call.
+	// team_id is derived from the caller's primary team membership;
+	// fallback to any team in the org for admin/system contexts. Post-
+	// SKY-262 the team_visibility_requires_team CHECK requires team_id
+	// whenever visibility='team' (the new default).
 	_, err := s.app.ExecContext(ctx, `
-		INSERT INTO prompts (id, org_id, creator_user_id, name, body, source, allowed_tools, model, usage_count, created_at, updated_at)
+		INSERT INTO prompts (id, org_id, creator_user_id, team_id, visibility, name, body, source, allowed_tools, model, usage_count, created_at, updated_at)
 		VALUES ($1, $2,
 			COALESCE(tf.current_user_id(), (SELECT owner_user_id FROM orgs WHERE id = $2)),
+			COALESCE(
+				(SELECT m.team_id FROM memberships m
+				   JOIN teams t ON t.id = m.team_id
+				  WHERE m.user_id = tf.current_user_id() AND t.org_id = $2
+				  ORDER BY m.created_at ASC LIMIT 1),
+				(SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1)
+			),
+			'team',
 			$3, $4, $5, $6, $7, 0, now(), now())
 	`, p.ID, orgID, p.Name, p.Body, p.Source, p.AllowedTools, p.Model)
 	return err
