@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // TestActiveRunIDsForTask verifies the terminal-state filter matches the one
@@ -160,6 +161,108 @@ func takeoverFixture(t *testing.T, database *sql.DB, runID, status, worktreePath
 	return task.ID
 }
 
+// TestMarkAgentRunTakenOver_AtomicWithClaim pins the SKY-261 B+
+// atomicity invariant: when claimUserID is supplied, the run flip and
+// the task claim flip both happen in one transaction. The contract:
+//
+//   - Successful call: run.status='taken_over' AND task is now
+//     user-claimed (agent claim cleared). Single observable moment.
+//   - Race-lost (run already terminal): tx rolls back; BOTH the run
+//     AND the task are unchanged. The bot's claim survives the
+//     attempted takeover.
+//
+// Pre-B+ implementations did two separate UPDATEs with the task
+// UPDATE allowed to fail — leaving the system in an incoherent state
+// where the run reads "taken over" but the task still shows bot
+// claim. This test catches that regression by exercising both arms.
+func TestMarkAgentRunTakenOver_AtomicWithClaim(t *testing.T) {
+	database := newTestDB(t)
+	taskID := takeoverFixture(t, database, "run-atomic-takeover", "running", "/tmp/triagefactory-runs/run-atomic-takeover")
+
+	// Pre-condition: bot claims the task (via the local agent
+	// sentinel). seedLocalAgentForClaimTests is in tasks_claims_test.go,
+	// but inlining the INSERT here keeps this test self-contained.
+	if _, err := database.Exec(
+		`INSERT OR IGNORE INTO agents (id, org_id, display_name) VALUES (?, ?, 'Test Bot')`,
+		runmode.LocalDefaultAgentID, runmode.LocalDefaultOrgID,
+	); err != nil {
+		t.Fatalf("seed agent: %v", err)
+	}
+	if err := SetTaskClaimedByAgent(database, taskID, runmode.LocalDefaultAgentID); err != nil {
+		t.Fatalf("seed agent claim: %v", err)
+	}
+
+	const userID = runmode.LocalDefaultUserID
+	dest := "/home/user/.triagefactory/takeovers/run-atomic"
+	ok, err := MarkAgentRunTakenOver(database, "run-atomic-takeover", dest, userID)
+	if err != nil {
+		t.Fatalf("MarkAgentRunTakenOver: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected ok=true for active run")
+	}
+
+	// Both writes must have landed: run.status='taken_over' AND
+	// task.claimed_by_user_id=userID with the agent claim cleared.
+	run, err := GetAgentRun(database, "run-atomic-takeover")
+	if err != nil {
+		t.Fatalf("GetAgentRun: %v", err)
+	}
+	if run.Status != "taken_over" {
+		t.Errorf("run.Status=%q want taken_over", run.Status)
+	}
+	gotTask, err := GetTask(database, taskID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if gotTask.ClaimedByAgentID != "" {
+		t.Errorf("task.ClaimedByAgentID=%q want empty (atomic flip should have cleared it)", gotTask.ClaimedByAgentID)
+	}
+	if gotTask.ClaimedByUserID != userID {
+		t.Errorf("task.ClaimedByUserID=%q want %q (atomic flip should have set it)", gotTask.ClaimedByUserID, userID)
+	}
+}
+
+// TestMarkAgentRunTakenOver_AtomicRollsBackOnRaceLoss pins the
+// rollback side of the atomicity contract: when the run is already
+// terminal (race-lost), the transaction must roll back. The task's
+// claim must NOT have been flipped — a fast-completing run shouldn't
+// trigger a claim transfer.
+func TestMarkAgentRunTakenOver_AtomicRollsBackOnRaceLoss(t *testing.T) {
+	database := newTestDB(t)
+	taskID := takeoverFixture(t, database, "run-race-loss", "completed", "/tmp/triagefactory-runs/run-race-loss")
+
+	if _, err := database.Exec(
+		`INSERT OR IGNORE INTO agents (id, org_id, display_name) VALUES (?, ?, 'Test Bot')`,
+		runmode.LocalDefaultAgentID, runmode.LocalDefaultOrgID,
+	); err != nil {
+		t.Fatalf("seed agent: %v", err)
+	}
+	if err := SetTaskClaimedByAgent(database, taskID, runmode.LocalDefaultAgentID); err != nil {
+		t.Fatalf("seed agent claim: %v", err)
+	}
+
+	ok, err := MarkAgentRunTakenOver(database, "run-race-loss", "/dest", runmode.LocalDefaultUserID)
+	if err != nil {
+		t.Fatalf("MarkAgentRunTakenOver: %v", err)
+	}
+	if ok {
+		t.Fatal("expected ok=false on race-loss (run already completed)")
+	}
+
+	gotTask, err := GetTask(database, taskID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if gotTask.ClaimedByAgentID != runmode.LocalDefaultAgentID {
+		t.Errorf("task.ClaimedByAgentID=%q want %q (race-loss must roll back the claim flip too)",
+			gotTask.ClaimedByAgentID, runmode.LocalDefaultAgentID)
+	}
+	if gotTask.ClaimedByUserID != "" {
+		t.Errorf("task.ClaimedByUserID=%q want empty (race-loss rolled back, no user claim)", gotTask.ClaimedByUserID)
+	}
+}
+
 // TestMarkAgentRunTakenOver_Active is the happy-path: an active run gets
 // marked taken_over with the right metadata and worktree_path is updated
 // to the takeover destination (so the row no longer points at the soon-
@@ -169,7 +272,7 @@ func TestMarkAgentRunTakenOver_Active(t *testing.T) {
 	takeoverFixture(t, database, "run-takeover-active", "running", "/tmp/triagefactory-runs/run-takeover-active")
 
 	dest := "/home/user/.triagefactory/takeovers/run-run-takeover-active"
-	ok, err := MarkAgentRunTakenOver(database, "run-takeover-active", dest)
+	ok, err := MarkAgentRunTakenOver(database, "run-takeover-active", dest, "")
 	if err != nil {
 		t.Fatalf("MarkAgentRunTakenOver: %v", err)
 	}
@@ -220,7 +323,7 @@ func TestMarkAgentRunTakenOver_RaceLoss(t *testing.T) {
 			origPath := "/tmp/triagefactory-runs/run-" + status
 			takeoverFixture(t, database, "run-"+status, status, origPath)
 
-			ok, err := MarkAgentRunTakenOver(database, "run-"+status, "/somewhere/new")
+			ok, err := MarkAgentRunTakenOver(database, "run-"+status, "/somewhere/new", "")
 			if err != nil {
 				t.Fatalf("MarkAgentRunTakenOver: %v", err)
 			}
@@ -246,7 +349,7 @@ func TestMarkAgentRunTakenOver_RaceLoss(t *testing.T) {
 // erroring. The takeover handler treats this the same as race-loss.
 func TestMarkAgentRunTakenOver_NonexistentRun(t *testing.T) {
 	database := newTestDB(t)
-	ok, err := MarkAgentRunTakenOver(database, "no-such-run", "/dest")
+	ok, err := MarkAgentRunTakenOver(database, "no-such-run", "/dest", "")
 	if err != nil {
 		t.Fatalf("MarkAgentRunTakenOver: %v", err)
 	}

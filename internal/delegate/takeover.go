@@ -198,51 +198,44 @@ func (s *Spawner) Takeover(runID, baseDir string) (*TakeoverResult, error) {
 		return nil, fmt.Errorf("copy session jsonl: %w", err)
 	}
 
-	ok, err := db.MarkAgentRunTakenOver(s.database, runID, destPath)
+	// SKY-261 B+: takeover is one semantic event — run.status='taken_over'
+	// AND the task's claim flips bot→user. MarkAgentRunTakenOver does
+	// both in a single transaction so a partial failure can't leave
+	// the system inconsistent (e.g., run reads taken_over but task
+	// still shows bot claim). Passing LocalDefaultUserID is what
+	// engages the claim-flip arm of the atomic UPDATE; the run's
+	// actor_agent_id stays stamped at the bot (immutable audit).
+	ok, err := db.MarkAgentRunTakenOver(s.database, runID, destPath, runmode.LocalDefaultUserID)
 	if err != nil {
-		// Same rollback as the copy-failure path. destPath needs
-		// removing too since the row never got marked.
+		// Transaction failed and rolled back — both run and task are
+		// unchanged. Same FS cleanup as the copy-failure path.
 		s.abortTakeover(runID, run.WorktreePath, destPath)
 		return nil, fmt.Errorf("mark taken_over: %w", err)
 	}
 	if !ok {
 		// Race-loss: the goroutine wrote a real terminal status before
-		// our flag was set. Its natural defers ran (the gates evaluated
-		// false at that point), but ours skipped because the flag was
-		// set by the time they fired — abortTakeover catches them up.
+		// our flag was set. The tx rolled back, leaving everything
+		// unchanged. Its natural defers ran (the gates evaluated false
+		// at that point), but ours skipped because the flag was set
+		// by the time they fired — abortTakeover catches them up.
 		// abortTakeover's guarded UPDATE will no-op since the row is
 		// already terminal, so the agent's actual outcome is preserved.
 		s.abortTakeover(runID, run.WorktreePath, destPath)
 		return nil, fmt.Errorf("%w: run %s", ErrTakeoverRaceLost, runID)
 	}
 
-	// SKY-261 D-Claims: flip the task's claim from the bot to the user
-	// in the same UPDATE (SetTaskClaimedByUser clears the agent claim
-	// in the same statement, so the XOR CHECK is never temporarily
-	// violated). The run's actor_agent_id stays stamped at the bot —
-	// the run was executed by the bot up until takeover, and that
-	// audit truth is immutable. In local mode the user is the
-	// LocalDefaultUserID sentinel.
-	if err := db.SetTaskClaimedByUser(s.database, run.TaskID, runmode.LocalDefaultUserID); err != nil {
-		// Don't fail the takeover for a claim-flip error — the worktree
-		// move + run flip have already succeeded, and rolling back would
-		// orphan the user's takeover dir. Log and continue; the Board
-		// will show stale claim attribution but the takeover is real.
-		log.Printf("[takeover] failed to flip task claim for run %s task %s: %v", runID, run.TaskID, err)
-	} else {
-		// SKY-261 B+: broadcast on the claim axis so the Board can
-		// move the card out of the bot's lane into the user's lane.
-		// The run status update (broadcastRunUpdate below) is separate
-		// — that's run lifecycle, not task responsibility.
-		s.wsHub.Broadcast(websocket.Event{
-			Type: "task_claimed",
-			Data: map[string]any{
-				"task_id":             run.TaskID,
-				"claimed_by_agent_id": "",
-				"claimed_by_user_id":  runmode.LocalDefaultUserID,
-			},
-		})
-	}
+	// Broadcast on the claim axis so the Board can move the card out
+	// of the bot's lane into the user's lane. The run status update
+	// (broadcastRunUpdate below) is separate — that's run lifecycle,
+	// not task responsibility. The two channels stay split (SKY-261 B+).
+	s.wsHub.Broadcast(websocket.Event{
+		Type: "task_claimed",
+		Data: map[string]any{
+			"task_id":             run.TaskID,
+			"claimed_by_agent_id": "",
+			"claimed_by_user_id":  runmode.LocalDefaultUserID,
+		},
+	})
 
 	s.broadcastRunUpdate(runID, "taken_over")
 	toast.Info(s.wsHub, fmt.Sprintf("Taken over: run %s — resume in your terminal", shortRunID(runID)))

@@ -285,9 +285,34 @@ func SetAgentRunSession(database *sql.DB, runID, sessionID string) error {
 // error) when the row already reached a terminal state — the caller
 // treats that as "the run finished on its own; takeover came too
 // late."
-func MarkAgentRunTakenOver(database *sql.DB, runID, takeoverPath string) (bool, error) {
+// MarkAgentRunTakenOver atomically flips runs.status to 'taken_over'
+// AND (when claimUserID != "") flips the parent task's claim from
+// the bot to the user, in a single transaction. Without the
+// transaction, a partial failure between the two UPDATEs would leave
+// run.status='taken_over' alongside a stale bot claim on the task
+// (or vice versa) — the Board would render the AgentCard as taken-
+// over but show the task in the bot's lane, which is incoherent.
+// SKY-261 B+ tightened this to atomic.
+//
+// claimUserID="" is the legacy / test path: only the run is flipped.
+// Tests that pin run-flip behavior in isolation pass "".
+//
+// Returns ok=true when both UPDATEs landed; ok=false (no error) when
+// the run row was already in a terminal status — the caller treats
+// that as "the run finished on its own; takeover came too late" and
+// rolls back the worktree move. The race-loss case rolls back the
+// transaction before returning, so the task's claim is unchanged.
+func MarkAgentRunTakenOver(database *sql.DB, runID, takeoverPath, claimUserID string) (bool, error) {
+	tx, err := database.Begin()
+	if err != nil {
+		return false, err
+	}
+	// Rollback is a no-op after a successful Commit; safe to defer
+	// unconditionally for the failure paths.
+	defer func() { _ = tx.Rollback() }()
+
 	now := time.Now()
-	res, err := database.Exec(`
+	res, err := tx.Exec(`
 		UPDATE runs
 		SET status = 'taken_over',
 		    completed_at = ?,
@@ -304,7 +329,32 @@ func MarkAgentRunTakenOver(database *sql.DB, runID, takeoverPath string) (bool, 
 	if err != nil {
 		return false, err
 	}
-	return n > 0, nil
+	if n == 0 {
+		// Race-lost. Returning here without commit triggers the
+		// deferred rollback, leaving both run and task unchanged.
+		return false, nil
+	}
+
+	if claimUserID != "" {
+		// Subquery resolves task_id from the run we just flipped —
+		// caller doesn't have to thread it separately, and the
+		// transaction guarantees the run's task_id is the one we
+		// just operated on (no race between the UPDATE and the
+		// subquery's SELECT).
+		if _, err := tx.Exec(`
+			UPDATE tasks
+			   SET claimed_by_user_id  = ?,
+			       claimed_by_agent_id = NULL
+			 WHERE id = (SELECT task_id FROM runs WHERE id = ?)
+		`, claimUserID, runID); err != nil {
+			return false, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // MarkAgentRunReleased flips a held takeover into the "released" sub-state:
