@@ -2,9 +2,11 @@
 -- SKY-262 D-TeamDefault: flip visibility default from 'private' to 'team'
 -- across the five team-scopable tables, backfill existing private rows to
 -- team-scoped with the creator's primary team, promote team_id to NOT NULL
--- on tasks/runs/event_handlers, and replace single-creator-only modify
--- policies with the canonical three-branch (private/team/org) shape that
--- lets team members modify team-visible rows + admin-only on org-visible.
+-- on tasks/runs (event_handlers/prompts/projects keep team_id nullable so
+-- shipped visibility='org' system rows can stay teamless), and replace
+-- single-creator-only modify policies with the canonical three-branch
+-- (private/team/org) shape that lets team members modify team-visible
+-- rows + admin-only on org-visible.
 --
 -- This is the schema foundation for the team-as-unit-of-work reframe
 -- (arch decision `resource-scoping`) and the team-scoped triage queue
@@ -229,11 +231,20 @@ CREATE POLICY tasks_select ON tasks FOR SELECT
            OR (visibility = 'org')
          ));
 
+-- INSERT gates per-visibility:
+--   private  → trivially OK (creator-only by definition)
+--   team     → must be a member of the target team
+--   org      → admin-only. Tasks aren't org-wide concepts; the
+--              system-driven creation path (router/poller) uses the
+--              admin pool with BYPASSRLS, so this branch only matters
+--              for user-path code that should not be landing org-visible
+--              task rows in the first place. Admin gate is the safety net.
 CREATE POLICY tasks_insert ON tasks FOR INSERT
   WITH CHECK (org_id = tf.current_org_id()
               AND tf.user_has_org_access(org_id)
               AND creator_user_id = tf.current_user_id()
-              AND (visibility <> 'team' OR tf.user_in_team(team_id)));
+              AND (visibility <> 'team' OR tf.user_in_team(team_id))
+              AND (visibility <> 'org'  OR tf.user_is_org_admin(org_id)));
 
 -- Defense in depth: `tf.user_in_team(team_id)` only checks the
 -- `memberships` table, not `org_memberships`. A memberships row can
@@ -282,11 +293,15 @@ CREATE POLICY runs_select ON runs FOR SELECT
            OR (visibility = 'org')
          ));
 
+-- Same per-visibility gates as tasks_insert. Runs are spawner-created
+-- via the admin pool (BYPASSRLS) in production; this policy guards the
+-- user-path / test-path callsites against landing org-visible runs.
 CREATE POLICY runs_insert ON runs FOR INSERT
   WITH CHECK (org_id = tf.current_org_id()
               AND tf.user_has_org_access(org_id)
               AND creator_user_id = tf.current_user_id()
-              AND (visibility <> 'team' OR tf.user_in_team(team_id)));
+              AND (visibility <> 'team' OR tf.user_in_team(team_id))
+              AND (visibility <> 'org'  OR tf.user_is_org_admin(org_id)));
 
 -- Same defense-in-depth pattern as tasks_update — outer org_access
 -- guard covers the team branch's missing-org-membership case.
@@ -326,11 +341,17 @@ DROP POLICY IF EXISTS prompts_insert ON prompts;
 DROP POLICY IF EXISTS prompts_update ON prompts;
 DROP POLICY IF EXISTS prompts_delete ON prompts;
 
+-- Prompts can legitimately be visibility='org' (shipped system rows,
+-- admin-curated org defaults), but the seed path uses the admin pool
+-- with BYPASSRLS. User-path INSERT of visibility='org' must be
+-- admin-only — otherwise any org member could fabricate org-visible
+-- prompts that look like sanctioned defaults.
 CREATE POLICY prompts_insert ON prompts FOR INSERT
   WITH CHECK (org_id = tf.current_org_id()
               AND tf.user_has_org_access(org_id)
               AND creator_user_id = tf.current_user_id()
-              AND (visibility <> 'team' OR (team_id IS NOT NULL AND tf.user_in_team(team_id))));
+              AND (visibility <> 'team' OR (team_id IS NOT NULL AND tf.user_in_team(team_id)))
+              AND (visibility <> 'org'  OR tf.user_is_org_admin(org_id)));
 
 -- Same defense-in-depth pattern as tasks_update. The
 -- team_id IS NOT NULL guard inside the team arm is kept (system rows
@@ -365,11 +386,15 @@ CREATE POLICY prompts_delete ON prompts FOR DELETE
 -- ---- projects -----------------------------------------------------------
 DROP POLICY IF EXISTS projects_modify ON projects;
 
+-- Same per-visibility gates as prompts_insert — org-visible projects
+-- are admin-curated; user-path INSERTs of visibility='org' require
+-- admin role.
 CREATE POLICY projects_insert ON projects FOR INSERT
   WITH CHECK (org_id = tf.current_org_id()
               AND tf.user_has_org_access(org_id)
               AND creator_user_id = tf.current_user_id()
-              AND (visibility <> 'team' OR (team_id IS NOT NULL AND tf.user_in_team(team_id))));
+              AND (visibility <> 'team' OR (team_id IS NOT NULL AND tf.user_in_team(team_id)))
+              AND (visibility <> 'org'  OR tf.user_is_org_admin(org_id)));
 
 -- Same defense-in-depth pattern as prompts_update.
 CREATE POLICY projects_update ON projects FOR UPDATE
@@ -401,6 +426,18 @@ CREATE POLICY projects_delete ON projects FOR DELETE
 -- migration. SELECT, INSERT, and DELETE are already correct (creator-only
 -- or three-branch read). UPDATE today is creator OR admin-on-org — we
 -- extend it to also allow team members on team-visible rows.
+
+-- event_handlers_insert from SKY-259 didn't gate visibility at all —
+-- predates the team-default flip + admin-only-on-org sweep. Replace
+-- with the same per-visibility gates as the other four tables.
+DROP POLICY IF EXISTS event_handlers_insert ON event_handlers;
+
+CREATE POLICY event_handlers_insert ON event_handlers FOR INSERT
+  WITH CHECK (org_id = tf.current_org_id()
+              AND tf.user_has_org_access(org_id)
+              AND creator_user_id = tf.current_user_id()
+              AND (visibility <> 'team' OR (team_id IS NOT NULL AND tf.user_in_team(team_id)))
+              AND (visibility <> 'org'  OR tf.user_is_org_admin(org_id)));
 
 DROP POLICY IF EXISTS event_handlers_update ON event_handlers;
 

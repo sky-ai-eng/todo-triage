@@ -209,10 +209,13 @@ func (s *eventHandlerStore) Create(ctx context.Context, orgID string, h domain.E
 		pred = *h.ScopePredicateJSON
 	}
 
-	// Post-SKY-262, user-source event_handlers are team-scoped:
-	// team_id NOT NULL + visibility='team'. Derived from caller's
-	// primary team membership; admin/test fallback picks any team in
-	// the org.
+	// Post-SKY-262, user-source event_handlers default to visibility=
+	// 'team' and the team_visibility_requires_team CHECK forces team_id
+	// IS NOT NULL whenever visibility='team'. event_handlers.team_id
+	// itself stays nullable at the column level so shipped system rows
+	// (creator_user_id NULL + visibility='org' + team_id NULL) remain
+	// valid. team_id below is derived from the caller's primary team
+	// membership; admin/test fallback picks any team in the org.
 	switch h.Kind {
 	case domain.EventHandlerKindRule:
 		_, err := s.app.ExecContext(ctx, `

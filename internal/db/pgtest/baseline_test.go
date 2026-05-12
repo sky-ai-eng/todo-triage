@@ -2654,6 +2654,112 @@ func TestRLS_TeamMembershipWithoutOrgAccessDenied(t *testing.T) {
 	}
 }
 
+// TestRLS_NonAdminCannotInsertOrgVisible pins the second defense added
+// in SKY-262: non-admin org members must not be able to INSERT rows
+// with visibility='org' on any of the five swept tables. The system-
+// driven seed paths use the admin pool (BYPASSRLS) for shipped
+// visibility='org' rows; this policy guards user-path callsites.
+//
+// Without the per-visibility admin gate on the WITH CHECK, any org
+// member could fabricate org-visible rows that look like sanctioned
+// admin-managed defaults — e.g., a "shipped" prompt or rule that
+// claims org-wide authority but was actually inserted by a regular
+// user. The admin gate matches the post-SKY-246 UPDATE policy shape.
+func TestRLS_NonAdminCannotInsertOrgVisible(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	orgA, _, teamA := seedOrgWithUser(t, h, "alice")
+	carol := seedUser(t, h, "carol")
+	addOrgMember(t, h, carol, orgA, teamA, "member", "member") // org member but not admin
+
+	// Seed an entity + event so the task INSERTs below have a parent
+	// to reference (created via AdminDB so the seed bypasses the policy
+	// we're testing).
+	entityA := seedEntity(t, h, orgA, "github", "octo/repo#org-insert")
+	var evtID string
+	if err := h.AdminDB.QueryRow(`
+		INSERT INTO events (org_id, entity_id, event_type) VALUES ($1, $2, 'github:pr:opened') RETURNING id
+	`, orgA, entityA).Scan(&evtID); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+
+	// Each INSERT below would succeed without the admin gate (carol IS
+	// an org member, IS on teamA). The gate adds:
+	//   (visibility <> 'org' OR tf.user_is_org_admin(org_id))
+	// so org-visible rows from a non-admin must be rejected.
+	//
+	// Postgres aborts the whole transaction on a CHECK violation, so
+	// each attempt runs in its own SAVEPOINT — rollback to the
+	// savepoint after a violation, then continue with the next
+	// attempt. Without this scaffolding the second attempt would
+	// fail with "current transaction is aborted" and mask the actual
+	// policy behavior.
+	cases := []struct {
+		label string
+		stmt  string
+		args  []any
+	}{
+		{
+			label: "tasks",
+			stmt: `INSERT INTO tasks (org_id, creator_user_id, team_id, visibility, entity_id, event_type, primary_event_id)
+				VALUES ($1, $2, $3, 'org', $4, 'github:pr:opened', $5)`,
+			args: []any{orgA, carol, teamA, entityA, evtID},
+		},
+		{
+			label: "prompts",
+			stmt: `INSERT INTO prompts (org_id, creator_user_id, visibility, name, body)
+				VALUES ($1, $2, 'org', 'evil-org-prompt', '')`,
+			args: []any{orgA, carol},
+		},
+		{
+			label: "projects",
+			stmt: `INSERT INTO projects (org_id, creator_user_id, visibility, name)
+				VALUES ($1, $2, 'org', 'evil-org-project')`,
+			args: []any{orgA, carol},
+		},
+		{
+			label: "event_handlers",
+			stmt: `INSERT INTO event_handlers (org_id, creator_user_id, visibility, kind, event_type, name, default_priority, sort_order)
+				VALUES ($1, $2, 'org', 'rule', 'github:pr:opened', 'evil-org-rule', 0.5, 0)`,
+			args: []any{orgA, carol},
+		},
+	}
+
+	err := h.WithUser(t, carol, orgA, func(tx *sql.Tx) error {
+		for _, c := range cases {
+			if _, err := tx.Exec(`SAVEPOINT sp_` + c.label); err != nil {
+				return fmt.Errorf("savepoint %s: %w", c.label, err)
+			}
+			_, err := tx.Exec(c.stmt, c.args...)
+			if err == nil {
+				t.Errorf("non-admin carol INSERT'd visibility='org' %s — admin gate missing", c.label)
+				if _, rbErr := tx.Exec(`RELEASE SAVEPOINT sp_` + c.label); rbErr != nil {
+					return fmt.Errorf("release savepoint %s: %w", c.label, rbErr)
+				}
+				continue
+			}
+			if _, rbErr := tx.Exec(`ROLLBACK TO SAVEPOINT sp_` + c.label); rbErr != nil {
+				return fmt.Errorf("rollback savepoint %s: %w", c.label, rbErr)
+			}
+		}
+
+		// Sanity: team-visibility INSERT still succeeds for carol
+		// (she's on the team) — defense doesn't over-deny the
+		// legitimate path.
+		if _, err := tx.Exec(`
+			INSERT INTO prompts (org_id, creator_user_id, team_id, visibility, name, body)
+			VALUES ($1, $2, $3, 'team', 'carol-team-prompt', '')
+		`, orgA, carol, teamA); err != nil {
+			t.Errorf("non-admin carol team INSERT denied — defense over-broad: %v", err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("carol session: %v", err)
+	}
+}
+
 // assertPgCode asserts that err is a *pgconn.PgError with the given
 // SQLSTATE. Postgres error message text drifts across versions, but
 // SQLSTATE codes are spec-stable — assert codes, not text. The
