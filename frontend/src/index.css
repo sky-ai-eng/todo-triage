@@ -1,10 +1,12 @@
 @import 'tailwindcss';
 @import 'react-diff-view/style/index.css';
 
+@custom-variant dark (&:where(.dark, .dark *));
+
 @theme {
   /* Warm neutral palette — Shanghai hotel lobby meets Her */
   --color-surface: #f7f5f2;
-  --color-surface-raised: rgba(255, 255, 255, 0.65);
+  --color-surface-raised: #ffffff;
   --color-surface-overlay: rgba(255, 255, 255, 0.45);
   --color-border-glass: rgba(255, 255, 255, 0.7);
   --color-border-subtle: rgba(0, 0, 0, 0.06);
@@ -17,6 +19,121 @@
   --color-claim: #3f6b4d;
   --color-delegate: #5e4f8f;
   --color-snooze: #8a6e1f;
+
+  /* Tint overlays — referenced as var(--tint-warm-*) in raw CSS
+     so component styling flips cleanly between light/dark. */
+  --tint-warm-soft: rgba(0, 0, 0, 0.015);
+  --tint-warm: rgba(0, 0, 0, 0.03);
+  --tint-warm-strong: rgba(0, 0, 0, 0.06);
+}
+
+/* Dark palette — same warm earthy register, inverted luminance. */
+:root.dark {
+  --color-surface: #161311;
+  --color-surface-raised: #221f1c;
+  --color-surface-overlay: rgba(20, 16, 14, 0.7);
+  --color-border-glass: rgba(255, 255, 255, 0.08);
+  --color-border-subtle: rgba(255, 255, 255, 0.08);
+  --color-text-primary: #ece7e0;
+  --color-text-secondary: #b8b0a8;
+  --color-text-tertiary: #8a827a;
+  --color-accent: #d18a64;
+  --color-accent-soft: rgba(209, 138, 100, 0.18);
+  --color-dismiss: #d97777;
+  --color-claim: #7fb194;
+  --color-delegate: #a294cf;
+  --color-snooze: #d4b566;
+
+  --tint-warm-soft: rgba(255, 255, 255, 0.03);
+  --tint-warm: rgba(255, 255, 255, 0.05);
+  --tint-warm-strong: rgba(255, 255, 255, 0.08);
+}
+
+/* Re-target Tailwind's hardcoded black/white tint utilities so
+   the existing component styling reads correctly in dark mode
+   without touching ~170 call sites. */
+.dark .bg-black\/\[0\.01\],
+.dark .bg-black\/\[0\.015\],
+.dark .bg-black\/\[0\.02\] {
+  background-color: rgba(255, 255, 255, 0.025);
+}
+.dark .bg-black\/\[0\.03\],
+.dark .bg-black\/\[0\.04\] {
+  background-color: rgba(255, 255, 255, 0.04);
+}
+.dark .bg-black\/\[0\.05\],
+.dark .bg-black\/\[0\.06\],
+.dark .bg-black\/5 {
+  background-color: rgba(255, 255, 255, 0.06);
+}
+.dark .bg-black\/\[0\.08\] {
+  background-color: rgba(255, 255, 255, 0.08);
+}
+.dark .bg-black\/10 {
+  background-color: rgba(255, 255, 255, 0.1);
+}
+.dark .bg-black\/15 {
+  background-color: rgba(255, 255, 255, 0.12);
+}
+.dark .bg-black\/20 {
+  background-color: rgba(255, 255, 255, 0.16);
+}
+.dark .bg-black\/30 {
+  background-color: rgba(255, 255, 255, 0.22);
+}
+
+.dark .bg-white\/30 {
+  background-color: rgba(255, 255, 255, 0.03);
+}
+.dark .bg-white\/40 {
+  background-color: rgba(255, 255, 255, 0.04);
+}
+.dark .bg-white\/45,
+.dark .bg-white\/50 {
+  background-color: rgba(255, 255, 255, 0.05);
+}
+.dark .bg-white\/60,
+.dark .bg-white\/65 {
+  background-color: rgba(255, 255, 255, 0.07);
+}
+.dark .bg-white\/70 {
+  background-color: rgba(255, 255, 255, 0.08);
+}
+.dark .bg-white\/80,
+.dark .bg-white\/90,
+.dark .bg-white\/92 {
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+/* The active "selected" toggle pill (Settings, Slider) uses bg-white.
+   In dark mode plain white is jarring; soften it. */
+.dark .bg-white {
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+.dark .border-white\/40 {
+  border-color: rgba(255, 255, 255, 0.08);
+}
+.dark .border-white\/80,
+.dark .border-white\/90 {
+  border-color: rgba(255, 255, 255, 0.12);
+}
+.dark .text-black\/\[0\.08\] {
+  color: rgba(255, 255, 255, 0.16);
+}
+.dark .text-white\/70 {
+  color: rgba(255, 255, 255, 0.85);
+}
+.dark .ring-black\/\[0\.04\] {
+  --tw-ring-color: rgba(255, 255, 255, 0.05);
+}
+
+/* Gradients are part of the light-mode glass treatment; in dark
+   mode they read as near-white rectangles. Drop every gradient and
+   fall back to the raised surface. */
+.dark [class*='bg-gradient'] {
+  background-image: none !important;
+  background-color: var(--color-surface-raised);
 }
 
 body {
@@ -84,7 +201,7 @@ body {
 
 /* Decoration / hunk headers */
 .diff .diff-decoration {
-  background: rgba(0, 0, 0, 0.015);
+  background: var(--tint-warm-soft);
 }
 .diff .diff-decoration-content {
   padding: 4px 12px;
@@ -147,6 +264,52 @@ body {
   color: #8a6e1f;
 }
 
+/* Dark-mode syntax highlighting — lift token brightness so they
+   read on the dark surface. */
+.dark .token.comment,
+.dark .token.prolog,
+.dark .token.doctype,
+.dark .token.cdata {
+  color: #8a827a;
+}
+.dark .token.punctuation {
+  color: #a8a09a;
+}
+.dark .token.property,
+.dark .token.tag,
+.dark .token.boolean,
+.dark .token.number,
+.dark .token.constant,
+.dark .token.symbol {
+  color: #d99a76;
+}
+.dark .token.selector,
+.dark .token.attr-name,
+.dark .token.string,
+.dark .token.char,
+.dark .token.builtin {
+  color: #7fb194;
+}
+.dark .token.operator,
+.dark .token.entity,
+.dark .token.url {
+  color: #c0a890;
+}
+.dark .token.atrule,
+.dark .token.attr-value,
+.dark .token.keyword {
+  color: #a294cf;
+}
+.dark .token.function,
+.dark .token.class-name {
+  color: #d18a64;
+}
+.dark .token.regex,
+.dark .token.important,
+.dark .token.variable {
+  color: #d4b566;
+}
+
 .token.important,
 .token.bold {
   font-weight: 600;
@@ -189,12 +352,12 @@ body {
 .review-markdown code {
   font-family: 'SF Mono', 'Fira Code', monospace;
   font-size: 0.9em;
-  background: rgba(0, 0, 0, 0.04);
+  background: var(--tint-warm);
   border-radius: 4px;
   padding: 0.15em 0.35em;
 }
 .review-markdown pre {
-  background: rgba(0, 0, 0, 0.03);
+  background: var(--tint-warm-soft);
   border: 1px solid var(--color-border-subtle);
   border-radius: 8px;
   padding: 0.75em 1em;

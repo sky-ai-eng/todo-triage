@@ -443,21 +443,15 @@ function RepoCard({
               {profile.profile_text}
             </p>
             {isClamped && !expanded && (
-              <>
-                <div
-                  aria-hidden
-                  className="pointer-events-none absolute inset-x-4 bottom-0 h-5 rounded-b-xl bg-gradient-to-t from-[rgba(247,245,242,0.9)] to-transparent"
-                />
-                <button
-                  type="button"
-                  onClick={() => setExpanded(true)}
-                  aria-label={`Show full profile for ${profile.id}`}
-                  aria-expanded={false}
-                  className="mt-1 text-[11px] font-medium text-accent/80 hover:text-accent transition-colors"
-                >
-                  Show more
-                </button>
-              </>
+              <button
+                type="button"
+                onClick={() => setExpanded(true)}
+                aria-label={`Show full profile for ${profile.id}`}
+                aria-expanded={false}
+                className="mt-1 text-[11px] font-medium text-accent/80 hover:text-accent transition-colors"
+              >
+                Show more
+              </button>
             )}
             {expanded && (
               <button

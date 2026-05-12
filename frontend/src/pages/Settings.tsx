@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import JiraStatusRule, { type JiraStatusRuleValue } from '../components/JiraStatusRule'
 import { toast } from '../components/Toast/toastStore'
 import { readError } from '../lib/api'
+import { getStoredTheme, setTheme, type ThemeMode } from '../lib/theme'
 
 interface JiraStatus {
   id: string
@@ -78,6 +79,7 @@ export default function Settings() {
   const [jiraConnected, setJiraConnected] = useState(false)
   const [jiraConnecting, setJiraConnecting] = useState(false)
   const [jiraConnectError, setJiraConnectError] = useState<string | null>(null)
+  const [theme, setThemeState] = useState<ThemeMode>(() => getStoredTheme())
   const [sshTestState, setSshTestState] = useState<
     { kind: 'idle' } | { kind: 'running' } | { kind: 'ok' } | { kind: 'fail'; stderr: string }
   >({ kind: 'idle' })
@@ -528,6 +530,35 @@ export default function Settings() {
               )}
             </div>
           )}
+        </Section>
+
+        {/* Appearance */}
+        <Section>
+          <h2 className="text-[13px] font-medium text-text-secondary mb-4">Appearance</h2>
+          <Field label="Theme">
+            <div className="inline-flex rounded-lg border border-border-glass bg-black/[0.02] p-0.5">
+              {(['light', 'dark', 'auto'] as const).map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => {
+                    setThemeState(m)
+                    setTheme(m)
+                  }}
+                  className={`px-3 py-1 text-[12px] font-medium rounded-md transition-colors capitalize ${
+                    theme === m
+                      ? 'bg-white text-text-primary shadow-sm'
+                      : 'text-text-tertiary hover:text-text-secondary'
+                  }`}
+                >
+                  {m}
+                </button>
+              ))}
+            </div>
+            <p className="text-[11px] text-text-tertiary mt-1.5">
+              Auto follows your system preference.
+            </p>
+          </Field>
         </Section>
 
         {/* AI */}
