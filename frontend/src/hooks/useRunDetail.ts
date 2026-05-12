@@ -60,7 +60,19 @@ export function useRunDetail(runID: string | undefined): RunDetailState {
 
         if (msgsRes.ok) {
           const msgs = (await msgsRes.json()) as AgentMessage[]
-          if (!cancelled) setMessages(msgs)
+          if (!cancelled) {
+            // Merge by ID rather than replacing. If a websocket
+            // agent_message arrived between the run fetch starting and
+            // the messages fetch resolving, a wholesale replace would
+            // erase that newer row until the next refetch.
+            setMessages((prev) => {
+              if (prev.length === 0) return msgs
+              const byID = new Map<number, AgentMessage>()
+              for (const m of msgs) byID.set(m.ID, m)
+              for (const m of prev) byID.set(m.ID, m)
+              return Array.from(byID.values()).sort((a, b) => a.ID - b.ID)
+            })
+          }
         }
         if (taskRes && taskRes.ok) {
           const t = (await taskRes.json()) as Task

@@ -91,48 +91,24 @@ export default function RunDetail() {
     return () => ro.disconnect()
   }, [])
 
-  // User scroll-up detection. Distinguishing user-initiated scrolls
-  // from programmatic ones is hard cross-browser; the pragmatic answer
-  // is to listen for the *input* events that imply intent (wheel,
-  // touch, keyboard nav) and only flip pinned then. We also re-arm pin
-  // when the user lands back at the bottom on their own.
+  // Scroll handler that covers every input modality (wheel, touch,
+  // keyboard, scrollbar drag) by reading position deltas instead of
+  // event sources. Any decrease in scrollTop means upward motion —
+  // programmatic auto-scrolls only push scrollTop *up* toward
+  // scrollHeight, so they never trip the unpin branch.
+  const lastScrollTopRef = useRef(0)
   const onScroll = useCallback(() => {
     const el = scrollRef.current
     if (!el) return
-    const atBottom = el.scrollHeight - (el.scrollTop + el.clientHeight) < 32
-    if (atBottom && !pinnedRef.current) setPinned(true)
-  }, [])
-
-  useEffect(() => {
-    const el = scrollRef.current
-    if (!el) return
-    const onUserScroll = (e: Event) => {
-      // Only treat as "user is scrolling up" if there's actual upward
-      // intent. For wheel, that's deltaY < 0. For touch/keyboard we
-      // can't easily tell direction, so we fall back to checking the
-      // post-scroll position on the next frame.
-      if (e.type === 'wheel') {
-        const we = e as WheelEvent
-        if (we.deltaY < 0) setPinned(false)
-        return
-      }
-      // touchmove / keydown / etc.: defer and check.
-      requestAnimationFrame(() => {
-        const atBottom = el.scrollHeight - (el.scrollTop + el.clientHeight) < 32
-        if (!atBottom) setPinned(false)
-      })
+    const top = el.scrollTop
+    const prev = lastScrollTopRef.current
+    lastScrollTopRef.current = top
+    const atBottom = el.scrollHeight - (top + el.clientHeight) < 32
+    if (atBottom) {
+      if (!pinnedRef.current) setPinned(true)
+      return
     }
-    el.addEventListener('wheel', onUserScroll, { passive: true })
-    el.addEventListener('touchmove', onUserScroll, { passive: true })
-    const onKey = (e: KeyboardEvent) => {
-      if (['ArrowUp', 'PageUp', 'Home'].includes(e.key)) onUserScroll(e)
-    }
-    el.addEventListener('keydown', onKey)
-    return () => {
-      el.removeEventListener('wheel', onUserScroll)
-      el.removeEventListener('touchmove', onUserScroll)
-      el.removeEventListener('keydown', onKey)
-    }
+    if (top < prev) setPinned(false)
   }, [])
 
   // Keyboard shortcuts: Esc → back, 1/2 → modes, t → take over.
@@ -210,10 +186,13 @@ export default function RunDetail() {
     )
   }
 
-  if (notFound || !run) {
+  // Order matters: a 5xx / network error leaves `run` null AND sets
+  // `error`. Checking notFound first would mask the real failure
+  // behind a misleading "Run not found".
+  if (error) {
     return (
       <div className="flex flex-col items-center justify-center min-h-[60vh] gap-3">
-        <p className="text-[13px] text-text-tertiary">Run not found.</p>
+        <p className="text-[13px] text-dismiss">Failed to load: {error}</p>
         <Link to="/board" className="text-[12px] text-accent hover:underline">
           ← Back to board
         </Link>
@@ -221,10 +200,10 @@ export default function RunDetail() {
     )
   }
 
-  if (error) {
+  if (notFound || !run) {
     return (
       <div className="flex flex-col items-center justify-center min-h-[60vh] gap-3">
-        <p className="text-[13px] text-dismiss">Failed to load: {error}</p>
+        <p className="text-[13px] text-text-tertiary">Run not found.</p>
         <Link to="/board" className="text-[12px] text-accent hover:underline">
           ← Back to board
         </Link>
