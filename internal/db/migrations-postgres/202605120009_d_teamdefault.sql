@@ -235,18 +235,28 @@ CREATE POLICY tasks_insert ON tasks FOR INSERT
               AND creator_user_id = tf.current_user_id()
               AND (visibility <> 'team' OR tf.user_in_team(team_id)));
 
+-- Defense in depth: `tf.user_in_team(team_id)` only checks the
+-- `memberships` table, not `org_memberships`. A memberships row can
+-- exist without a corresponding org membership (stale state, bug,
+-- attacker-controlled team_id), so the team-branch alone is NOT
+-- sufficient to authorize org-scoped writes. The outer
+-- `tf.user_has_org_access(org_id)` guard ensures the caller is a real
+-- member of THIS org before we even consider the team-membership
+-- check. tf.user_is_org_admin internally checks org_memberships, so
+-- the org branch is safe without an additional guard, but we keep the
+-- outer guard for uniformity.
 CREATE POLICY tasks_update ON tasks FOR UPDATE
   USING (org_id = tf.current_org_id()
+         AND tf.user_has_org_access(org_id)
          AND (
-              (visibility = 'private' AND creator_user_id = tf.current_user_id()
-               AND tf.user_has_org_access(org_id))
+              (visibility = 'private' AND creator_user_id = tf.current_user_id())
            OR (visibility = 'team'    AND tf.user_in_team(team_id))
            OR (visibility = 'org'     AND tf.user_is_org_admin(org_id))
          ))
   WITH CHECK (org_id = tf.current_org_id()
+              AND tf.user_has_org_access(org_id)
               AND (
-                   (visibility = 'private' AND creator_user_id = tf.current_user_id()
-                    AND tf.user_has_org_access(org_id))
+                   (visibility = 'private' AND creator_user_id = tf.current_user_id())
                 OR (visibility = 'team'    AND tf.user_in_team(team_id))
                 OR (visibility = 'org'     AND tf.user_is_org_admin(org_id))
               ));
@@ -278,18 +288,20 @@ CREATE POLICY runs_insert ON runs FOR INSERT
               AND creator_user_id = tf.current_user_id()
               AND (visibility <> 'team' OR tf.user_in_team(team_id)));
 
+-- Same defense-in-depth pattern as tasks_update — outer org_access
+-- guard covers the team branch's missing-org-membership case.
 CREATE POLICY runs_update ON runs FOR UPDATE
   USING (org_id = tf.current_org_id()
+         AND tf.user_has_org_access(org_id)
          AND (
-              (visibility = 'private' AND creator_user_id = tf.current_user_id()
-               AND tf.user_has_org_access(org_id))
+              (visibility = 'private' AND creator_user_id = tf.current_user_id())
            OR (visibility = 'team'    AND tf.user_in_team(team_id))
            OR (visibility = 'org'     AND tf.user_is_org_admin(org_id))
          ))
   WITH CHECK (org_id = tf.current_org_id()
+              AND tf.user_has_org_access(org_id)
               AND (
-                   (visibility = 'private' AND creator_user_id = tf.current_user_id()
-                    AND tf.user_has_org_access(org_id))
+                   (visibility = 'private' AND creator_user_id = tf.current_user_id())
                 OR (visibility = 'team'    AND tf.user_in_team(team_id))
                 OR (visibility = 'org'     AND tf.user_is_org_admin(org_id))
               ));
@@ -320,18 +332,21 @@ CREATE POLICY prompts_insert ON prompts FOR INSERT
               AND creator_user_id = tf.current_user_id()
               AND (visibility <> 'team' OR (team_id IS NOT NULL AND tf.user_in_team(team_id))));
 
+-- Same defense-in-depth pattern as tasks_update. The
+-- team_id IS NOT NULL guard inside the team arm is kept (system rows
+-- have team_id NULL + visibility='org', which the org arm catches).
 CREATE POLICY prompts_update ON prompts FOR UPDATE
   USING (org_id = tf.current_org_id()
+         AND tf.user_has_org_access(org_id)
          AND (
-              (visibility = 'private' AND creator_user_id = tf.current_user_id()
-               AND tf.user_has_org_access(org_id))
+              (visibility = 'private' AND creator_user_id = tf.current_user_id())
            OR (visibility = 'team'    AND team_id IS NOT NULL AND tf.user_in_team(team_id))
            OR (visibility = 'org'     AND tf.user_is_org_admin(org_id))
          ))
   WITH CHECK (org_id = tf.current_org_id()
+              AND tf.user_has_org_access(org_id)
               AND (
-                   (visibility = 'private' AND creator_user_id = tf.current_user_id()
-                    AND tf.user_has_org_access(org_id))
+                   (visibility = 'private' AND creator_user_id = tf.current_user_id())
                 OR (visibility = 'team'    AND team_id IS NOT NULL AND tf.user_in_team(team_id))
                 OR (visibility = 'org'     AND tf.user_is_org_admin(org_id))
               ));
@@ -356,18 +371,19 @@ CREATE POLICY projects_insert ON projects FOR INSERT
               AND creator_user_id = tf.current_user_id()
               AND (visibility <> 'team' OR (team_id IS NOT NULL AND tf.user_in_team(team_id))));
 
+-- Same defense-in-depth pattern as prompts_update.
 CREATE POLICY projects_update ON projects FOR UPDATE
   USING (org_id = tf.current_org_id()
+         AND tf.user_has_org_access(org_id)
          AND (
-              (visibility = 'private' AND creator_user_id = tf.current_user_id()
-               AND tf.user_has_org_access(org_id))
+              (visibility = 'private' AND creator_user_id = tf.current_user_id())
            OR (visibility = 'team'    AND team_id IS NOT NULL AND tf.user_in_team(team_id))
            OR (visibility = 'org'     AND tf.user_is_org_admin(org_id))
          ))
   WITH CHECK (org_id = tf.current_org_id()
+              AND tf.user_has_org_access(org_id)
               AND (
-                   (visibility = 'private' AND creator_user_id = tf.current_user_id()
-                    AND tf.user_has_org_access(org_id))
+                   (visibility = 'private' AND creator_user_id = tf.current_user_id())
                 OR (visibility = 'team'    AND team_id IS NOT NULL AND tf.user_in_team(team_id))
                 OR (visibility = 'org'     AND tf.user_is_org_admin(org_id))
               ));
@@ -388,18 +404,23 @@ CREATE POLICY projects_delete ON projects FOR DELETE
 
 DROP POLICY IF EXISTS event_handlers_update ON event_handlers;
 
+-- Same defense-in-depth pattern as tasks_update. Note that this policy
+-- accepts creator-on-any-visibility (not just private) — matching the
+-- post-SKY-259 shape from prompt_triggers/task_rules which allowed
+-- creators to edit their own team-visible rows directly. The team
+-- branch adds the parallel path for OTHER team members.
 CREATE POLICY event_handlers_update ON event_handlers FOR UPDATE
   USING (org_id = tf.current_org_id()
+         AND tf.user_has_org_access(org_id)
          AND (
-              (creator_user_id = tf.current_user_id()
-               AND tf.user_has_org_access(org_id))
+              (creator_user_id = tf.current_user_id())
            OR (visibility = 'team' AND tf.user_in_team(team_id))
            OR (visibility = 'org'  AND tf.user_is_org_admin(org_id))
          ))
   WITH CHECK (org_id = tf.current_org_id()
+              AND tf.user_has_org_access(org_id)
               AND (
-                   (creator_user_id = tf.current_user_id()
-                    AND tf.user_has_org_access(org_id))
+                   (creator_user_id = tf.current_user_id())
                 OR (visibility = 'team' AND tf.user_in_team(team_id))
                 OR (visibility = 'org'  AND tf.user_is_org_admin(org_id))
               ));

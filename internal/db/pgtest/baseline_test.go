@@ -2518,6 +2518,142 @@ func TestRLS_OrgMembershipsBootstrapStillWorks(t *testing.T) {
 	}
 }
 
+// TestRLS_TeamMembershipWithoutOrgAccessDenied pins the defense-in-depth
+// guard added in SKY-262: tf.user_in_team(team_id) only checks the
+// memberships table, so a user with a memberships row pointing at a
+// team in orgA but NO org_memberships row in orgA must NOT be able to
+// SELECT/UPDATE/DELETE team-visible rows in orgA. The outer
+// tf.user_has_org_access(org_id) guard on every team-branch policy
+// catches this case.
+//
+// Realistic scenarios where this could matter:
+//   - Stale state: an org_memberships row was deleted but the
+//     corresponding memberships rows weren't cascaded.
+//   - Privilege confusion: code path that adds a memberships row
+//     without going through the canonical addOrgMember flow.
+//   - Attacker-controlled team_id: someone discovers a team_id in
+//     orgA and tries to use a memberships row to read it.
+//
+// In all cases the policies must deny. This test fabricates the state
+// directly via AdminDB (bypassing the addOrgMember helper that pairs
+// the two rows) and verifies the deny path on every swept table.
+func TestRLS_TeamMembershipWithoutOrgAccessDenied(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	orgA, alice, teamA := seedOrgWithUser(t, h, "alice")
+
+	// Mallory has a memberships row for teamA (orgA's team) but no
+	// org_memberships row in orgA. Constructed with raw INSERTs so we
+	// bypass the addOrgMember helper that pairs the two rows.
+	mallory := seedUser(t, h, "mallory")
+	mustExec(t, h.AdminDB,
+		`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'member')`, mallory, teamA)
+	// NB: intentionally NO INSERT INTO org_memberships for mallory in orgA.
+
+	// Alice creates team-visible rows in every swept table — these are
+	// the rows mallory's stolen team-membership might let her reach.
+	entityA := seedEntity(t, h, orgA, "github", "octo/repo#1")
+	taskID := seedTask(t, h, orgA, alice, entityA, "github:pr:opened")
+	promptID := seedPrompt(t, h, orgA, alice, "p1")
+	projectID := seedProject(t, h, orgA, alice, "proj-a")
+	var runID string
+	if err := h.AdminDB.QueryRow(`
+		INSERT INTO runs (org_id, creator_user_id, team_id, task_id, prompt_id)
+		VALUES ($1, $2, $3, $4, $5) RETURNING id
+	`, orgA, alice, teamA, taskID, promptID).Scan(&runID); err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+	var ehID string
+	if err := h.AdminDB.QueryRow(`
+		INSERT INTO event_handlers (org_id, creator_user_id, team_id, visibility, kind, event_type, name, default_priority, sort_order)
+		VALUES ($1, $2, $3, 'team', 'rule', 'github:pr:opened', 'r1', 0.5, 0) RETURNING id
+	`, orgA, alice, teamA).Scan(&ehID); err != nil {
+		t.Fatalf("seed event_handler: %v", err)
+	}
+
+	// Drive every read/write under mallory's claims pointing at orgA.
+	// Every policy must deny because tf.user_has_org_access(orgA) is
+	// FALSE — she has no org_memberships row. The team-branch's
+	// tf.user_in_team(teamA) WOULD return TRUE (memberships exists),
+	// but the outer guard short-circuits before that even matters.
+	err := h.WithUser(t, mallory, orgA, func(tx *sql.Tx) error {
+		// SELECT — mallory must see ZERO rows on every swept table.
+		for _, tbl := range []string{"tasks", "runs", "prompts", "projects", "event_handlers"} {
+			var n int
+			if err := tx.QueryRow(`SELECT COUNT(*) FROM ` + tbl).Scan(&n); err != nil {
+				return fmt.Errorf("count %s: %w", tbl, err)
+			}
+			if n != 0 {
+				t.Errorf("mallory saw %d %s rows despite no org membership", n, tbl)
+			}
+		}
+
+		// UPDATE — must affect zero rows. Targeting the specific row
+		// IDs we know exist; RLS makes the row invisible to mallory,
+		// so the UPDATE matches nothing.
+		updates := map[string]string{
+			"tasks":          `UPDATE tasks          SET status        = 'pwned' WHERE id = $1`,
+			"runs":           `UPDATE runs           SET stop_reason   = 'pwned' WHERE id = $1`,
+			"prompts":        `UPDATE prompts        SET body          = 'pwned' WHERE id = $1`,
+			"projects":       `UPDATE projects       SET description   = 'pwned' WHERE id = $1`,
+			"event_handlers": `UPDATE event_handlers SET name          = 'pwned' WHERE id = $1`,
+		}
+		ids := map[string]string{
+			"tasks":          taskID,
+			"runs":           runID,
+			"prompts":        promptID,
+			"projects":       projectID,
+			"event_handlers": ehID,
+		}
+		for tbl, stmt := range updates {
+			res, err := tx.Exec(stmt, ids[tbl])
+			if err != nil {
+				return fmt.Errorf("update %s: %w", tbl, err)
+			}
+			n, _ := res.RowsAffected()
+			if n != 0 {
+				t.Errorf("mallory updated %d %s rows despite no org membership", n, tbl)
+			}
+		}
+
+		// DELETE — same deny path.
+		for tbl, id := range ids {
+			res, err := tx.Exec(`DELETE FROM `+tbl+` WHERE id = $1`, id)
+			if err != nil {
+				return fmt.Errorf("delete %s: %w", tbl, err)
+			}
+			n, _ := res.RowsAffected()
+			if n != 0 {
+				t.Errorf("mallory deleted %d %s rows despite no org membership", n, tbl)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("mallory session: %v", err)
+	}
+
+	// Sanity: alice (real org owner + team admin) can still read all
+	// the rows we just protected from mallory. Pins that the defense
+	// doesn't over-deny.
+	err = h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
+		for _, tbl := range []string{"tasks", "runs", "prompts", "projects", "event_handlers"} {
+			var n int
+			if err := tx.QueryRow(`SELECT COUNT(*) FROM ` + tbl).Scan(&n); err != nil {
+				return fmt.Errorf("count %s: %w", tbl, err)
+			}
+			if n == 0 {
+				t.Errorf("alice (owner) saw 0 %s rows — defense over-denied", tbl)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("alice sanity: %v", err)
+	}
+}
+
 // assertPgCode asserts that err is a *pgconn.PgError with the given
 // SQLSTATE. Postgres error message text drifts across versions, but
 // SQLSTATE codes are spec-stable — assert codes, not text. The

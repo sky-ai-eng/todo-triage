@@ -77,7 +77,8 @@ func seedPgDefaultTeam(t *testing.T, h *pgtest.Harness, orgID, userID string) st
 // firstTeamForOrg returns the first (by created_at) team id for an org.
 // Helper for tests that want to refer to "the org's default team" after
 // it's been created via seedPgDefaultTeam (or via the harness's
-// seedOrgWithUser path). Returns "" if no team exists.
+// seedOrgWithUser path). t.Fatal's on any query error — including
+// sql.ErrNoRows — so the caller doesn't need to nil-check.
 func firstTeamForOrg(t *testing.T, h *pgtest.Harness, orgID string) string {
 	t.Helper()
 	var teamID string
