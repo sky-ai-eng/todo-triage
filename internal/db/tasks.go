@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // --- Column lists for task queries ----------------------------------------
@@ -71,11 +72,16 @@ func FindOrCreateTaskAt(db *sql.DB, entityID, eventType, dedupKey, primaryEventI
 	// WHERE status NOT IN ('done','dismissed') will reject the INSERT. In
 	// that case, re-read the winner's row.
 	id := uuid.New().String()
+	// team_id + visibility populated explicitly per SKY-262: post-migration
+	// the team-scoped queue derived filter requires team_id on every task,
+	// and 'team' is the canonical visibility. In local mode the team is
+	// the LocalDefaultTeamID sentinel from SKY-269.
 	_, err = db.Exec(`
 		INSERT INTO tasks (id, entity_id, event_type, dedup_key, primary_event_id,
-		                   status, priority_score, scoring_status, created_at)
-		VALUES (?, ?, ?, ?, ?, 'queued', ?, 'pending', ?)
-	`, id, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt)
+		                   status, priority_score, scoring_status, created_at,
+		                   team_id, visibility)
+		VALUES (?, ?, ?, ?, ?, 'queued', ?, 'pending', ?, ?, 'team')
+	`, id, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt, runmode.LocalDefaultTeamID)
 	if err != nil {
 		// Race: another goroutine created the task between our SELECT and
 		// INSERT. Re-read to return the winner's row.

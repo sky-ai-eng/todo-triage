@@ -70,6 +70,7 @@ func seedPgOrgAndUserForSwipes(t *testing.T, h *pgtest.Harness) (orgID, userID s
 	); err != nil {
 		t.Fatalf("seed org_membership: %v", err)
 	}
+	seedPgDefaultTeam(t, h, orgID, userID)
 	return orgID, userID
 }
 
@@ -93,9 +94,12 @@ func seedPgTaskForSwipes(t *testing.T, conn *sql.DB, orgID, userID string) strin
 	`, eventID, orgID, entityID, now); err != nil {
 		t.Fatalf("seed event: %v", err)
 	}
+	// team_id resolved inline from the org's first team — keeps the
+	// helper signature stable (no need to thread teamID through tests
+	// that only care about orgID/userID).
 	if _, err := conn.Exec(`
-		INSERT INTO tasks (id, org_id, creator_user_id, entity_id, event_type, dedup_key, primary_event_id, status, scoring_status, created_at)
-		VALUES ($1, $2, $3, $4, 'github:pr:opened', '', $5, 'queued', 'pending', $6)
+		INSERT INTO tasks (id, org_id, creator_user_id, team_id, visibility, entity_id, event_type, dedup_key, primary_event_id, status, scoring_status, created_at)
+		VALUES ($1, $2, $3, (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1), 'team', $4, 'github:pr:opened', '', $5, 'queued', 'pending', $6)
 	`, taskID, orgID, userID, entityID, eventID, now); err != nil {
 		t.Fatalf("seed task: %v", err)
 	}

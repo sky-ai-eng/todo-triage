@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // CreateAgentRun inserts a new agent run.
@@ -16,10 +17,16 @@ func CreateAgentRun(database *sql.DB, run domain.AgentRun) error {
 	if triggerType == "" {
 		triggerType = "manual"
 	}
+	// team_id + visibility populated explicitly per SKY-262: runs inherit
+	// their task's team scope so the team-scoped queue / Board filter
+	// includes them. In local mode the team is the LocalDefaultTeamID
+	// sentinel from SKY-269. Postgres enforces team_id NOT NULL on runs;
+	// SQLite tolerates NULL but the canonical path passes the sentinel
+	// for parity.
 	_, err := database.Exec(`
-		INSERT INTO runs (id, task_id, prompt_id, status, model, worktree_path, trigger_type, trigger_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, run.ID, run.TaskID, nullIfEmpty(run.PromptID), run.Status, run.Model, run.WorktreePath, triggerType, nullIfEmpty(run.TriggerID))
+		INSERT INTO runs (id, task_id, prompt_id, status, model, worktree_path, trigger_type, trigger_id, team_id, visibility)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'team')
+	`, run.ID, run.TaskID, nullIfEmpty(run.PromptID), run.Status, run.Model, run.WorktreePath, triggerType, nullIfEmpty(run.TriggerID), runmode.LocalDefaultTeamID)
 	return err
 }
 

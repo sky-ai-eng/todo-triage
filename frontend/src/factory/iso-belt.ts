@@ -368,7 +368,7 @@ export function createBeltMaterial(scene: Scene): PBRMaterial {
   ctx.fillStyle = '#050506'
   ctx.fillRect(0, 0, 256, 64)
   // Muted terracotta — same hue family as the project accent
-  // (#c47a5a), pulled in saturation and value so the chevrons read
+  // (#a85a3a), pulled in saturation and value so the chevrons read
   // as background motion, not headline energy. Items riding the
   // belts and the cyan LED trim still own the eye; the belts are
   // ambient flow.
