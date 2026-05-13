@@ -89,8 +89,9 @@ func New(admin, app *sql.DB) db.Stores {
 		TeamAgents: newTeamAgentStore(app, admin),
 		// Users only mutates existing rows (SKY-264 github_username
 		// capture); row creation is an auth-flow concern owned by
-		// SKY-251. All methods on app — RLS gates by tf.user_can_read_-
-		// user() / tf.user_can_update_user() once those policies land.
+		// SKY-251. All methods on app — RLS gates by
+		// tf.user_can_read_user() / tf.user_can_update_user() once
+		// those policies land.
 		Users: newUsersStore(app),
 		Tx:    s,
 	}
