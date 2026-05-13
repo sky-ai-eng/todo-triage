@@ -578,6 +578,79 @@ func TestHandleSwipe_DelegateRefusedLeavesNoAuditRow(t *testing.T) {
 	}
 }
 
+// TestHandleSwipe_ClaimRefusedOnTerminalTask pins the handler-level
+// guard for the same-user-idempotent fall-through path. The data-
+// layer helpers refuse claim transitions on done/dismissed rows,
+// but the handler's same-user check is a no-op early-return that
+// doesn't call any helper — so without an explicit status check
+// in the handler, RecordSwipe's vestigial status='queued' write
+// would reopen a closed task as a side effect of recording the
+// audit row.
+//
+// Seeds a done task already claimed by the local user (the sticky-
+// past-close audit state), fires /swipe claim, asserts 409 +
+// status preserved + no swipe_events row written.
+func TestHandleSwipe_ClaimRefusedOnTerminalTask(t *testing.T) {
+	for _, terminalStatus := range []string{"done", "dismissed"} {
+		t.Run(terminalStatus, func(t *testing.T) {
+			s := newTestServer(t)
+			const eventType = "github:pr:opened"
+			if _, err := s.db.Exec(
+				`INSERT INTO entities (id, source, source_id, kind, state)
+				 VALUES ('e_term', 'github', 'sky/repo#term', 'pr', 'active')`,
+			); err != nil {
+				t.Fatalf("seed entity: %v", err)
+			}
+			if _, err := s.db.Exec(
+				`INSERT INTO events (id, entity_id, event_type, dedup_key)
+				 VALUES ('ev_term', 'e_term', ?, '')`,
+				eventType,
+			); err != nil {
+				t.Fatalf("seed event: %v", err)
+			}
+			// Sticky past close: terminal status with the user's
+			// claim retained as audit. This is the exact shape that
+			// would have triggered the reopen bug pre-guards.
+			if _, err := s.db.Exec(
+				`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
+				 VALUES ('t_term', 'e_term', ?, 'ev_term', ?, ?)`,
+				eventType, terminalStatus, runmode.LocalDefaultUserID,
+			); err != nil {
+				t.Fatalf("seed terminal task: %v", err)
+			}
+
+			rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_term/swipe",
+				map[string]any{"action": "claim", "hesitation_ms": 0})
+			if rec.Code != http.StatusConflict {
+				t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+			}
+
+			// Status must be preserved — the reopen bug would have
+			// flipped it to 'queued' via RecordSwipe's lifecycle write.
+			var status string
+			if err := s.db.QueryRow(
+				`SELECT status FROM tasks WHERE id = 't_term'`,
+			).Scan(&status); err != nil {
+				t.Fatalf("scan task: %v", err)
+			}
+			if status != terminalStatus {
+				t.Errorf("status = %q, want %q (refused claim reopened terminal task)", status, terminalStatus)
+			}
+
+			// Audit must be silent on the refusal.
+			var swipeCount int
+			if err := s.db.QueryRow(
+				`SELECT COUNT(*) FROM swipe_events WHERE task_id = 't_term'`,
+			).Scan(&swipeCount); err != nil {
+				t.Fatalf("scan swipe_events: %v", err)
+			}
+			if swipeCount != 0 {
+				t.Errorf("swipe_events count = %d, want 0 (refused gesture must leave no trace)", swipeCount)
+			}
+		})
+	}
+}
+
 // TestHandleSnooze_404OnMissingTask pins missing-task parity with
 // /undo and /requeue. Pre-fix, hitting /snooze on a bogus id would
 // trip the swipe_events→tasks FK constraint inside SnoozeTask and

@@ -185,6 +185,19 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "task not found"})
 			return
 		}
+		// Terminal-status refusal: claim transitions on done/
+		// dismissed rows are meaningless (sticky claim past close
+		// is audit-only) AND letting them fall through would tip
+		// RecordSwipe's vestigial status='queued' write — reopening
+		// a closed task as a side effect of the audit. Refuse here
+		// so neither the helper paths nor the same-user idempotent
+		// fall-through reach the lifecycle write.
+		if task.Status == "done" || task.Status == "dismissed" {
+			writeJSON(w, http.StatusConflict, map[string]string{
+				"error": "task is closed; claim transitions aren't allowed past close",
+			})
+			return
+		}
 		userID := runmode.LocalDefaultUserID
 		claimChanged := false
 		switch {

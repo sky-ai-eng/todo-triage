@@ -238,13 +238,20 @@ func SetTaskClaimedByUser(db *sql.DB, taskID, userID string) error {
 // matching event landed, which the snooze can't override. The
 // CASE-WHEN flips status='snoozed' → 'queued' and clears
 // snooze_until in the same UPDATE so the post-state is the canonical
-// "claimed, not snoozed." Non-snoozed rows keep their existing
-// status (queued stays queued; the rare sticky-claim-past-close case
-// leaves done/dismissed alone).
+// "claimed, not snoozed."
+//
+// Terminal-status refusal: the `status NOT IN ('done', 'dismissed')`
+// guard ensures claim transitions don't act on closed tasks. Sticky
+// claims past close are an audit signal ("who finished this") — they
+// shouldn't accept new claim mutations on top. Without this guard
+// the auto-trigger could land a claim on a terminal row, which the
+// downstream RecordSwipe's vestigial status='queued' write would
+// then reopen.
 //
 // Returns ok=true when the claim actually changed (caller should
-// broadcast). ok=false (no error) means either user-already-owns
-// or bot-already-owns; caller should not broadcast.
+// broadcast). ok=false (no error) means either user-already-owns,
+// bot-already-owns, or the task is terminal; caller should not
+// broadcast.
 func StampAgentClaimIfUnclaimed(db *sql.DB, taskID, agentID string) (bool, error) {
 	if agentID == "" {
 		return false, fmt.Errorf("StampAgentClaimIfUnclaimed: empty agentID")
@@ -257,6 +264,7 @@ func StampAgentClaimIfUnclaimed(db *sql.DB, taskID, agentID string) (bool, error
 		 WHERE id = ?
 		   AND claimed_by_user_id IS NULL
 		   AND (claimed_by_agent_id IS NULL OR claimed_by_agent_id != ?)
+		   AND status NOT IN ('done', 'dismissed')
 	`, agentID, taskID, agentID)
 	if err != nil {
 		return false, err
@@ -324,7 +332,9 @@ func HandoffAgentClaim(db *sql.DB, taskID, agentID, userID string) (HandoffResul
 	// the snoozed lifecycle state, so the stamp atomically wakes the
 	// task. The user-handoff path that lands here means the user
 	// explicitly chose to act now — overriding any deferral is
-	// correct.
+	// correct. Terminal rows (done/dismissed) are refused — sticky
+	// claims past close are audit-only and shouldn't accept new
+	// claim mutations.
 	res, err := db.Exec(`
 		UPDATE tasks
 		   SET claimed_by_agent_id = ?,
@@ -334,6 +344,7 @@ func HandoffAgentClaim(db *sql.DB, taskID, agentID, userID string) (HandoffResul
 		 WHERE id = ?
 		   AND (claimed_by_user_id  IS NULL OR claimed_by_user_id  = ?)
 		   AND (claimed_by_agent_id IS NULL OR claimed_by_agent_id != ?)
+		   AND status NOT IN ('done', 'dismissed')
 	`, agentID, taskID, userID, agentID)
 	if err != nil {
 		return HandoffRefused, err
@@ -386,7 +397,10 @@ func TakeoverClaimFromAgent(db *sql.DB, taskID, userID string) (bool, error) {
 	// unclaimed") a bot-claimed task can't be snoozed, but if a
 	// pre-invariant row somehow reaches us we coerce to the
 	// canonical shape on the way out rather than leaving an
-	// incoherent state.
+	// incoherent state. Terminal rows are refused — a takeover on
+	// a done/dismissed task would only churn the audit pointer
+	// without changing meaningful state, and the downstream
+	// RecordSwipe's status='queued' write would reopen the task.
 	res, err := db.Exec(`
 		UPDATE tasks
 		   SET claimed_by_user_id  = ?,
@@ -396,6 +410,7 @@ func TakeoverClaimFromAgent(db *sql.DB, taskID, userID string) (bool, error) {
 		 WHERE id = ?
 		   AND claimed_by_agent_id IS NOT NULL
 		   AND claimed_by_user_id  IS NULL
+		   AND status NOT IN ('done', 'dismissed')
 	`, userID, taskID)
 	if err != nil {
 		return false, err

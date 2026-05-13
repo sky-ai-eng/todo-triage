@@ -272,6 +272,140 @@ func TestClaimQueuedTaskForUser_GuardsStatusQueued(t *testing.T) {
 	}
 }
 
+// TestClaimHelpers_RefuseOnTerminalTask pins the data-layer rule
+// that claim transitions are not allowed on terminal (done /
+// dismissed) tasks. Sticky claims past close are an audit signal —
+// they shouldn't accept new claim mutations on top, and without
+// this guard the downstream RecordSwipe's vestigial status='queued'
+// write would reopen a closed task as a side effect of recording
+// the audit row.
+//
+// All four claim helpers are exercised against both terminal
+// statuses to keep the surface explicit. ClaimQueuedTaskForUser
+// already had this guard via its status IN ('queued', 'snoozed')
+// clause; the other three are the new additions.
+func TestClaimHelpers_RefuseOnTerminalTask(t *testing.T) {
+	database := newTestDB(t)
+	seedLocalAgentForClaimTests(t, database)
+
+	for _, terminalStatus := range []string{"done", "dismissed"} {
+		t.Run(terminalStatus, func(t *testing.T) {
+			// Helper: fresh task per subtest, force into the terminal
+			// status. Use a direct UPDATE rather than CloseTask so we
+			// can pin the 'dismissed' branch independently — CloseTask
+			// always writes status='done'.
+			mkTerminalTask := func(t *testing.T, suffix string, withBotClaim, withUserClaim bool) string {
+				t.Helper()
+				sid := "octo/repo#terminal-" + terminalStatus + "-" + suffix
+				entity, _, err := FindOrCreateEntity(database, "github", sid, "pr", "Terminal "+suffix, "https://example.com/t-"+suffix)
+				if err != nil {
+					t.Fatalf("seed entity: %v", err)
+				}
+				eventID, err := RecordEvent(database, domain.Event{
+					EventType: domain.EventGitHubPROpened, EntityID: &entity.ID, MetadataJSON: `{}`,
+				})
+				if err != nil {
+					t.Fatalf("record event: %v", err)
+				}
+				task, _, err := FindOrCreateTask(database, entity.ID, domain.EventGitHubPROpened, "", eventID, 0.5)
+				if err != nil {
+					t.Fatalf("create task: %v", err)
+				}
+				if withBotClaim {
+					if err := SetTaskClaimedByAgent(database, task.ID, runmode.LocalDefaultAgentID); err != nil {
+						t.Fatalf("stage bot claim: %v", err)
+					}
+				}
+				if withUserClaim {
+					if err := SetTaskClaimedByUser(database, task.ID, runmode.LocalDefaultUserID); err != nil {
+						t.Fatalf("stage user claim: %v", err)
+					}
+				}
+				if _, err := database.Exec(
+					`UPDATE tasks SET status = ? WHERE id = ?`, terminalStatus, task.ID,
+				); err != nil {
+					t.Fatalf("force terminal status: %v", err)
+				}
+				return task.ID
+			}
+
+			t.Run("StampAgentClaimIfUnclaimed refuses", func(t *testing.T) {
+				taskID := mkTerminalTask(t, "stamp", false, false)
+				ok, err := StampAgentClaimIfUnclaimed(database, taskID, runmode.LocalDefaultAgentID)
+				if err != nil {
+					t.Fatalf("StampAgentClaimIfUnclaimed: %v", err)
+				}
+				if ok {
+					t.Error("ok=true on terminal task; data-layer guard didn't refuse")
+				}
+				// Audit: the row should be untouched by the failed
+				// stamp — status preserved, no claim landed.
+				got, _ := GetTask(database, taskID)
+				if got.Status != terminalStatus {
+					t.Errorf("status mutated by refused stamp: got %q want %q", got.Status, terminalStatus)
+				}
+				if got.ClaimedByAgentID != "" {
+					t.Errorf("claim landed despite refusal: got %q", got.ClaimedByAgentID)
+				}
+			})
+
+			t.Run("HandoffAgentClaim refuses", func(t *testing.T) {
+				taskID := mkTerminalTask(t, "handoff", false, false)
+				result, err := HandoffAgentClaim(database, taskID, runmode.LocalDefaultAgentID, runmode.LocalDefaultUserID)
+				if err != nil {
+					t.Fatalf("HandoffAgentClaim: %v", err)
+				}
+				if result == HandoffChanged {
+					t.Error("HandoffChanged on terminal task; data-layer guard didn't refuse")
+				}
+				got, _ := GetTask(database, taskID)
+				if got.Status != terminalStatus {
+					t.Errorf("status mutated: got %q want %q", got.Status, terminalStatus)
+				}
+				if got.ClaimedByAgentID != "" {
+					t.Errorf("claim landed: got %q", got.ClaimedByAgentID)
+				}
+			})
+
+			t.Run("TakeoverClaimFromAgent refuses", func(t *testing.T) {
+				// Seed the bot claim BEFORE forcing terminal — sticky
+				// past close means a closed task could realistically
+				// carry the bot's audit pointer. The guard refuses
+				// the takeover anyway.
+				taskID := mkTerminalTask(t, "takeover", true, false)
+				ok, err := TakeoverClaimFromAgent(database, taskID, runmode.LocalDefaultUserID)
+				if err != nil {
+					t.Fatalf("TakeoverClaimFromAgent: %v", err)
+				}
+				if ok {
+					t.Error("ok=true on terminal bot-claimed task; data-layer guard didn't refuse")
+				}
+				got, _ := GetTask(database, taskID)
+				if got.Status != terminalStatus {
+					t.Errorf("status mutated: got %q want %q", got.Status, terminalStatus)
+				}
+				if got.ClaimedByAgentID != runmode.LocalDefaultAgentID {
+					t.Errorf("bot claim disturbed: got %q (sticky-past-close audit broken)", got.ClaimedByAgentID)
+				}
+				if got.ClaimedByUserID != "" {
+					t.Errorf("user claim landed despite refusal: got %q", got.ClaimedByUserID)
+				}
+			})
+
+			t.Run("ClaimQueuedTaskForUser refuses (existing guard)", func(t *testing.T) {
+				taskID := mkTerminalTask(t, "userclaim", false, false)
+				ok, err := ClaimQueuedTaskForUser(database, taskID, runmode.LocalDefaultUserID)
+				if err != nil {
+					t.Fatalf("ClaimQueuedTaskForUser: %v", err)
+				}
+				if ok {
+					t.Error("ok=true on terminal task; status guard regressed")
+				}
+			})
+		})
+	}
+}
+
 // TestStampAgentClaimIfUnclaimed_WakesSnoozed pins the "snoozed ↔
 // unclaimed" invariant from the auto-trigger angle: when a snoozed
 // task receives a new matching event and the trigger fires, the
