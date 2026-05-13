@@ -227,6 +227,34 @@ export interface EventSchema {
   fields: FieldSchema[]
 }
 
+/** GET /api/config response (SKY-264). One-shot read at FE boot. Tells
+ *  the predicate editor which variant of the identity-allowlist field
+ *  to render — toggle (team_size===1) vs multi-select (team_size>1) vs
+ *  disabled (current_user.github_username===null). */
+export interface DeploymentConfig {
+  deployment_mode: 'local' | 'multi'
+  team_size: number
+  current_user: {
+    id: string
+    github_username: string | null
+  }
+}
+
+/** GET /api/team/members row. Backs Variant B's searchable multi-select.
+ *  Local mode returns a single-entry array containing the synthetic
+ *  LocalDefaultUserID; multi mode (post-SKY-251) returns the active
+ *  user's team roster. */
+export interface TeamMember {
+  user_id: string
+  display_name: string
+  github_username: string | null
+  is_current_user: boolean
+}
+
+export interface TeamMembersResponse {
+  members: TeamMember[]
+}
+
 export interface Project {
   id: string
   name: string

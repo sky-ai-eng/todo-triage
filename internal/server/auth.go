@@ -11,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/config"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
@@ -94,20 +95,28 @@ func (s *Server) handleAuthSetup(w http.ResponseWriter, r *http.Request) {
 		resp.Jira = jiraUser
 	}
 
-	// Store credentials in keychain (include username if we validated GitHub)
-	ghUsername := ""
-	if resp.GitHub != nil {
-		ghUsername = resp.GitHub.Login
-	}
+	// Store credentials in keychain (PATs only — github_username lives on
+	// the users row per SKY-264, written separately below).
 	if err := auth.Store(auth.Credentials{
-		GitHubURL:      req.GitHubURL,
-		GitHubPAT:      req.GitHubPAT,
-		GitHubUsername: ghUsername,
-		JiraURL:        req.JiraURL,
-		JiraPAT:        req.JiraPAT,
+		GitHubURL: req.GitHubURL,
+		GitHubPAT: req.GitHubPAT,
+		JiraURL:   req.JiraURL,
+		JiraPAT:   req.JiraPAT,
 	}); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to store credentials: " + err.Error()})
 		return
+	}
+
+	// Capture the GitHub login on the users row when we validated GitHub.
+	// Skip when GitHub wasn't validated (Jira-only setup) — the dashboard /
+	// poller short-circuit on empty username and Settings can re-capture
+	// later. This write is local-mode-only because it targets the
+	// LocalDefaultUserID row; multi-user modes must use a session-derived
+	// user ID instead.
+	if resp.GitHub != nil && resp.GitHub.Login != "" && runmode.Current() == runmode.ModeLocal {
+		if err := s.users.SetGitHubUsername(r.Context(), runmode.LocalDefaultUserID, resp.GitHub.Login); err != nil {
+			log.Printf("[setup] failed to persist users.github_username: %v", err)
+		}
 	}
 
 	// Persist base URLs in config so they survive without keychain access

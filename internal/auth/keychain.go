@@ -16,7 +16,6 @@ const service = "triagefactory"
 const (
 	keyGitHubURL       = "github_url"
 	keyGitHubPAT       = "github_pat"
-	keyGitHubUsername  = "github_username"
 	keyJiraURL         = "jira_url"
 	keyJiraPAT         = "jira_pat"
 	keyJiraDisplayName = "jira_display_name"
@@ -26,17 +25,17 @@ const (
 var envKeys = map[string]string{
 	keyGitHubURL:       "TRIAGE_FACTORY_GITHUB_URL",
 	keyGitHubPAT:       "TRIAGE_FACTORY_GITHUB_PAT",
-	keyGitHubUsername:  "TRIAGE_FACTORY_GITHUB_USERNAME",
 	keyJiraURL:         "TRIAGE_FACTORY_JIRA_URL",
 	keyJiraPAT:         "TRIAGE_FACTORY_JIRA_PAT",
 	keyJiraDisplayName: "TRIAGE_FACTORY_JIRA_DISPLAY_NAME",
 }
 
-// Credentials holds the stored auth configuration.
+// Credentials holds the stored auth configuration. The GitHub login is
+// not held here — it lives on users.github_username, derived from the PAT
+// at startup via auth.ValidateGitHub.
 type Credentials struct {
 	GitHubURL       string
 	GitHubPAT       string
-	GitHubUsername  string
 	JiraURL         string
 	JiraPAT         string
 	JiraDisplayName string
@@ -56,7 +55,6 @@ func Store(creds Credentials) error {
 	pairs := []struct{ key, val string }{
 		{keyGitHubURL, creds.GitHubURL},
 		{keyGitHubPAT, creds.GitHubPAT},
-		{keyGitHubUsername, creds.GitHubUsername},
 		{keyJiraURL, creds.JiraURL},
 		{keyJiraPAT, creds.JiraPAT},
 		{keyJiraDisplayName, creds.JiraDisplayName},
@@ -88,7 +86,6 @@ func Load() (Credentials, error) {
 	}
 	overlay(keyGitHubURL, &creds.GitHubURL)
 	overlay(keyGitHubPAT, &creds.GitHubPAT)
-	overlay(keyGitHubUsername, &creds.GitHubUsername)
 	overlay(keyJiraURL, &creds.JiraURL)
 	overlay(keyJiraPAT, &creds.JiraPAT)
 	overlay(keyJiraDisplayName, &creds.JiraDisplayName)
@@ -112,10 +109,6 @@ func loadFromKeychain() (Credentials, error) {
 		return creds, err
 	}
 	creds.GitHubPAT, err = get(keyGitHubPAT)
-	if err != nil {
-		return creds, err
-	}
-	creds.GitHubUsername, err = get(keyGitHubUsername)
 	if err != nil {
 		return creds, err
 	}
@@ -149,12 +142,12 @@ func deleteKeys(keys ...string) error {
 
 // Clear removes all credentials from the OS keychain.
 func Clear() error {
-	return deleteKeys(keyGitHubURL, keyGitHubPAT, keyGitHubUsername, keyJiraURL, keyJiraPAT, keyJiraDisplayName)
+	return deleteKeys(keyGitHubURL, keyGitHubPAT, keyJiraURL, keyJiraPAT, keyJiraDisplayName)
 }
 
 // ClearGitHub removes GitHub credentials from the OS keychain.
 func ClearGitHub() error {
-	return deleteKeys(keyGitHubURL, keyGitHubPAT, keyGitHubUsername)
+	return deleteKeys(keyGitHubURL, keyGitHubPAT)
 }
 
 // ClearJira removes Jira credentials from the OS keychain.

@@ -13,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/config"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
@@ -214,12 +215,16 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 	prevJiraPollInterval := cfg.Jira.PollInterval
 
 	// --- Handle GitHub ---
+	//
+	// The GitHub login lives on users.github_username (not the keychain).
+	// This handler writes the column directly when we validate a new PAT
+	// or backfill an empty row.
 	if req.GitHubEnabled {
 		if req.GitHubURL != "" {
 			cfg.GitHub.BaseURL = req.GitHubURL
 			creds.GitHubURL = req.GitHubURL
 		}
-		// New token provided — validate it
+		// New token provided — validate it.
 		if req.GitHubPAT != "" {
 			url := req.GitHubURL
 			if url == "" {
@@ -238,17 +243,36 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			creds.GitHubPAT = req.GitHubPAT
-			creds.GitHubUsername = ghUser.Login
-		}
-		// Backfill username if we have a PAT but no stored username (e.g. upgrade)
-		if creds.GitHubPAT != "" && creds.GitHubUsername == "" {
-			url := creds.GitHubURL
-			if url == "" {
-				url = cfg.GitHub.BaseURL
+			// Username persistence targets the LocalDefaultUserID row —
+			// only safe in local mode. Multi mode must derive the
+			// authenticated user ID from the session (SKY-251).
+			if runmode.Current() == runmode.ModeLocal {
+				if err := s.users.SetGitHubUsername(r.Context(), runmode.LocalDefaultUserID, ghUser.Login); err != nil {
+					log.Printf("[settings] failed to persist users.github_username: %v", err)
+				}
 			}
-			if url != "" {
-				if ghUser, err := auth.ValidateGitHub(url, creds.GitHubPAT); err == nil {
-					creds.GitHubUsername = ghUser.Login
+		}
+		// Backfill username on the users row when we have a PAT but the row
+		// is empty (e.g. user saves a PAT for the first time without changing
+		// it through the validation branch above). Skip on DB error — a
+		// transient read failure shouldn't fan out into a GitHub API call;
+		// the next Settings save retries naturally. Local mode only — same
+		// reasoning as the validation-branch write above.
+		if creds.GitHubPAT != "" && runmode.Current() == runmode.ModeLocal {
+			stored, err := s.users.GetGitHubUsername(r.Context(), runmode.LocalDefaultUserID)
+			if err != nil {
+				log.Printf("[settings] failed to read users.github_username for backfill: %v (skipping backfill this save)", err)
+			} else if stored == "" {
+				url := creds.GitHubURL
+				if url == "" {
+					url = cfg.GitHub.BaseURL
+				}
+				if url != "" {
+					if ghUser, err := auth.ValidateGitHub(url, creds.GitHubPAT); err == nil {
+						if err := s.users.SetGitHubUsername(r.Context(), runmode.LocalDefaultUserID, ghUser.Login); err != nil {
+							log.Printf("[settings] failed to backfill users.github_username: %v", err)
+						}
+					}
 				}
 			}
 		}
@@ -260,10 +284,18 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 		// destructive action (not implemented in v1).
 		creds.GitHubURL = ""
 		creds.GitHubPAT = ""
-		creds.GitHubUsername = ""
 		cfg.GitHub.BaseURL = ""
 		if err := auth.ClearGitHub(); err != nil {
 			log.Printf("[settings] failed to clear GitHub keychain entry: %v", err)
+		}
+		// Also clear the captured login on the users row so a downstream
+		// "are we connected to GitHub" check via DB stays in sync with the
+		// keychain reality (PAT gone → username should be gone too).
+		// Local mode only — multi mode must clear the session user's row.
+		if runmode.Current() == runmode.ModeLocal {
+			if err := s.users.SetGitHubUsername(r.Context(), runmode.LocalDefaultUserID, ""); err != nil {
+				log.Printf("[settings] failed to clear users.github_username: %v", err)
+			}
 		}
 	}
 

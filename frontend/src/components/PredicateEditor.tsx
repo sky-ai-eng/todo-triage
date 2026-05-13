@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import * as Tooltip from '@radix-ui/react-tooltip'
 import { Info } from 'lucide-react'
 import type { FieldSchema } from '../types'
+import IdentityListField from './IdentityListField'
 
 interface PredicateEditorProps {
   eventType: string
@@ -149,15 +150,16 @@ function FieldRow({ field, value, onChange }: FieldRowProps) {
         <StringField value={value as string | undefined} onChange={onChange} />
       )}
       {field.type === 'int' && <IntField value={value as number | undefined} onChange={onChange} />}
-      {/* TODO: No predicate struct currently uses []string, so this path
-          is unreachable in v1. If a string_list predicate is added, this
-          needs to split on commas and send a JSON array (["a","b"]) instead
-          of a plain string — the backend validates against []string. */}
+      {/* SKY-264: every string_list field today is an identity allowlist
+          (author_in / reviewer_in / commenter_in). IdentityListField
+          handles both variants — toggle for solo / local mode, multi-
+          select for teams. If a non-identity string_list lands later
+          (e.g. labels_any_of), branch on field.name. */}
       {field.type === 'string_list' && (
-        <StringField
-          value={value as string | undefined}
-          onChange={onChange}
-          placeholder="comma-separated values"
+        <IdentityListField
+          fieldName={field.name}
+          value={Array.isArray(value) ? (value as string[]) : undefined}
+          onChange={(v) => onChange(v)}
         />
       )}
     </div>

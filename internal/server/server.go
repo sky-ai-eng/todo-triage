@@ -31,6 +31,7 @@ type Server struct {
 	eventHandlers      db.EventHandlerStore
 	agents             db.AgentStore     // SKY-261 D-Claims: resolves the org's agent for claim stamps
 	teamAgents         db.TeamAgentStore // SKY-261 D-Claims: re-checks team_agents.enabled on swipe-delegate / factory-delegate
+	users              db.UsersStore     // SKY-264: github_username + display_name on the synthetic local user row
 	mux                *http.ServeMux
 	static             fs.FS
 	ws                 *websocket.Hub
@@ -128,7 +129,7 @@ func (s *Server) agentEnabledForLocalTeam(ctx context.Context) (*domain.Agent, b
 // argument list grows one store at a time as their callers migrate;
 // raw *sql.DB stays available for handlers that haven't been ported
 // to a store yet.
-func New(database *sql.DB, prompts db.PromptStore, swipes db.SwipeStore, dashboard db.DashboardStore, eventHandlers db.EventHandlerStore, agents db.AgentStore, teamAgents db.TeamAgentStore) *Server {
+func New(database *sql.DB, prompts db.PromptStore, swipes db.SwipeStore, dashboard db.DashboardStore, eventHandlers db.EventHandlerStore, agents db.AgentStore, teamAgents db.TeamAgentStore, users db.UsersStore) *Server {
 	s := &Server{
 		db:            database,
 		prompts:       prompts,
@@ -137,6 +138,7 @@ func New(database *sql.DB, prompts db.PromptStore, swipes db.SwipeStore, dashboa
 		eventHandlers: eventHandlers,
 		agents:        agents,
 		teamAgents:    teamAgents,
+		users:         users,
 		mux:           http.NewServeMux(),
 		ws:            websocket.NewHub(),
 	}
@@ -215,6 +217,15 @@ func (s *Server) routes() {
 
 	s.mux.HandleFunc("GET /api/settings", s.handleSettingsGet)
 	s.mux.HandleFunc("POST /api/settings", s.handleSettingsPost)
+
+	// SKY-264: deployment shape + team roster for the predicate editor.
+	// Both endpoints are fetched fresh on every consumer mount (the FE
+	// hooks dedup concurrent in-flight calls within a render but don't
+	// hold a persistent cache — current_user.github_username and the
+	// roster are both mutable mid-session). Endpoint costs are a single
+	// SELECT each, so re-fetching per editor mount is cheap and correct.
+	s.mux.HandleFunc("GET /api/config", s.handleConfig)
+	s.mux.HandleFunc("GET /api/team/members", s.handleTeamMembers)
 	s.mux.HandleFunc("POST /api/skills/import", s.handleSkillsImport)
 	s.mux.HandleFunc("GET /api/github/repos", s.handleGitHubRepos)
 	s.mux.HandleFunc("POST /api/github/preflight-ssh", s.handleGitHubPreflightSSH)

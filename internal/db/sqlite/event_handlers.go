@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -23,10 +24,16 @@ import (
 // pair at the DB level; this store branches on Kind where the SQL
 // diverges (Create / Update / Seed write different column sets per
 // kind).
-type eventHandlerStore struct{ q queryer }
+// users is plumbed in so Seed can read users.github_username through the
+// canonical store (gets any forward-compat behavior added there for
+// free) rather than duplicating the SELECT here.
+type eventHandlerStore struct {
+	q     queryer
+	users db.UsersStore
+}
 
-func newEventHandlerStore(q queryer) db.EventHandlerStore {
-	return &eventHandlerStore{q: q}
+func newEventHandlerStore(q queryer, users db.UsersStore) db.EventHandlerStore {
+	return &eventHandlerStore{q: q, users: users}
 }
 
 var _ db.EventHandlerStore = (*eventHandlerStore)(nil)
@@ -42,10 +49,28 @@ const sqliteEventHandlerColumns = `id, kind, event_type, scope_predicate_json, e
 func (s *eventHandlerStore) Seed(ctx context.Context, orgID string) error {
 	now := time.Now().UTC()
 	var inserted int64
+
+	// SKY-264: ShippedEventHandlers carry `author_in: []` as a placeholder
+	// where the rule scopes to "my events." In local mode we know exactly
+	// who "me" is — the synthetic user's github_username — so substitute
+	// it into the empty allowlist at seed time. INSERT OR IGNORE below
+	// means this only takes effect on first install / clean-slate;
+	// existing installs preserve whatever the user has saved via the
+	// Settings UI.
+	//
+	// Empty username (user hasn't connected GitHub yet) leaves the
+	// allowlist empty — the rule fires for everyone, which is the
+	// match-all default. User can edit the rule once they connect.
+	// Best-effort: a missing row (fresh install pre-bootstrap) returns
+	// empty and substituteLocalGitHubIdentity degrades to leaving the
+	// placeholder allowlist empty.
+	localGitHubUsername, _ := s.users.GetGitHubUsername(ctx, runmode.LocalDefaultUserID)
+
 	for _, h := range db.ShippedEventHandlers {
+		predStr := substituteLocalGitHubIdentity(h.Predicate, localGitHubUsername)
 		var pred any
-		if h.Predicate != "" {
-			pred = h.Predicate
+		if predStr != "" {
+			pred = predStr
 		}
 
 		switch h.Kind {
@@ -448,4 +473,56 @@ func derefInt(p *int) int {
 		return 0
 	}
 	return *p
+}
+
+// substituteLocalGitHubIdentity rewrites a seed-time predicate so empty
+// allowlist fields (`author_in: []`, `reviewer_in: []`, `commenter_in: []`)
+// become single-entry allowlists scoped to the local user. Local-mode
+// callers pass `localUser` = users.github_username for the synthetic
+// LocalDefaultUserID; multi-mode never calls this (Postgres Seed inserts
+// the shipped predicates verbatim).
+//
+// Pre-filled allowlists (non-empty arrays) are left untouched — that's
+// the user's customization and Seed's INSERT OR IGNORE shouldn't
+// stomp it. Malformed predicate JSON falls through unchanged; the
+// downstream matcher already fails-closed on undecodable predicates.
+func substituteLocalGitHubIdentity(predJSON, localUser string) string {
+	if predJSON == "" || localUser == "" {
+		return predJSON
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(predJSON), &fields); err != nil {
+		return predJSON
+	}
+	changed := false
+	for _, key := range []string{"author_in", "reviewer_in", "commenter_in"} {
+		raw, ok := fields[key]
+		if !ok {
+			continue
+		}
+		var arr []string
+		if err := json.Unmarshal(raw, &arr); err != nil {
+			// Field exists but isn't a string slice — leave it alone,
+			// the validator will reject the row anyway.
+			continue
+		}
+		if len(arr) != 0 {
+			// User-customized; preserve.
+			continue
+		}
+		substituted, err := json.Marshal([]string{localUser})
+		if err != nil {
+			continue
+		}
+		fields[key] = substituted
+		changed = true
+	}
+	if !changed {
+		return predJSON
+	}
+	out, err := json.Marshal(fields)
+	if err != nil {
+		return predJSON
+	}
+	return string(out)
 }

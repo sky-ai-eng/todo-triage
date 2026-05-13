@@ -20,12 +20,17 @@ import (
 // handleDashboardStats returns aggregated PR statistics from entity snapshots.
 func (s *Server) handleDashboardStats(w http.ResponseWriter, r *http.Request) {
 	creds, err := auth.Load()
-	if err != nil || creds.GitHubPAT == "" || creds.GitHubUsername == "" {
+	if err != nil || creds.GitHubPAT == "" {
+		writeJSON(w, http.StatusOK, map[string]any{})
+		return
+	}
+	username, _ := s.users.GetGitHubUsername(r.Context(), runmode.LocalDefaultUserID)
+	if username == "" {
 		writeJSON(w, http.StatusOK, map[string]any{})
 		return
 	}
 
-	stats, err := s.dashboard.Stats(r.Context(), runmode.LocalDefaultOrg, creds.GitHubUsername, 30)
+	stats, err := s.dashboard.Stats(r.Context(), runmode.LocalDefaultOrg, username, 30)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -37,12 +42,17 @@ func (s *Server) handleDashboardStats(w http.ResponseWriter, r *http.Request) {
 // handleDashboardPRs returns open PRs from entity snapshots.
 func (s *Server) handleDashboardPRs(w http.ResponseWriter, r *http.Request) {
 	creds, err := auth.Load()
-	if err != nil || creds.GitHubPAT == "" || creds.GitHubUsername == "" {
+	if err != nil || creds.GitHubPAT == "" {
+		writeJSON(w, http.StatusOK, []domain.PRSummaryRow{})
+		return
+	}
+	username, _ := s.users.GetGitHubUsername(r.Context(), runmode.LocalDefaultUserID)
+	if username == "" {
 		writeJSON(w, http.StatusOK, []domain.PRSummaryRow{})
 		return
 	}
 
-	prs, err := s.dashboard.PRs(r.Context(), runmode.LocalDefaultOrg, creds.GitHubUsername)
+	prs, err := s.dashboard.PRs(r.Context(), runmode.LocalDefaultOrg, username)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
