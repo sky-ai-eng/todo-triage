@@ -172,9 +172,6 @@ export interface EventType {
   category: string
   label: string
   description: string
-  default_priority: number
-  enabled: boolean
-  sort_order: number
 }
 
 // Event handlers (SKY-259) — unified successor to the former TaskRule

@@ -247,15 +247,16 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 				log.Printf("[settings] failed to persist users.github_username: %v", err)
 			}
 		}
-		// Backfill username on the users row if we have a PAT but the row
-		// is still NULL (e.g. upgrade from a build that only stored the
-		// login in the keychain and the migration didn't pick it up).
+		// Backfill username on the users row when we have a PAT but the row
+		// is empty (e.g. user saves a PAT for the first time without changing
+		// it through the validation branch above). Skip on DB error — a
+		// transient read failure shouldn't fan out into a GitHub API call;
+		// the next Settings save retries naturally.
 		if creds.GitHubPAT != "" {
 			stored, err := s.users.GetGitHubUsername(r.Context(), runmode.LocalDefaultUserID)
 			if err != nil {
-				log.Printf("[settings] failed to read users.github_username for backfill: %v", err)
-			}
-			if err != nil || stored == "" {
+				log.Printf("[settings] failed to read users.github_username for backfill: %v (skipping backfill this save)", err)
+			} else if stored == "" {
 				url := creds.GitHubURL
 				if url == "" {
 					url = cfg.GitHub.BaseURL
