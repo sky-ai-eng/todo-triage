@@ -438,6 +438,146 @@ func TestHandleSwipe_ClaimAgainstBotClaimedIsTakeover(t *testing.T) {
 	}
 }
 
+// TestHandleSwipe_ClaimRefusedLeavesNoAuditRow pins the SKY-261 v0.7
+// audit contract: swipe_events records state CHANGES, not gesture
+// ATTEMPTS. A claim swipe that's refused (different user owns the
+// task) returns 409 with no audit row, no status flip, no snooze
+// clear. The reviewer flagged this earlier as "RecordSwipe at the
+// top mutates state for refused gestures" — the post-restructure
+// handler runs claim mutation first and only records the audit
+// after accept.
+func TestHandleSwipe_ClaimRefusedLeavesNoAuditRow(t *testing.T) {
+	s := newTestServer(t)
+	const eventType = "github:pr:opened"
+	const otherUserID = "00000000-0000-0000-0000-0000000004cc"
+
+	if _, err := s.db.Exec(
+		`INSERT INTO users (id, display_name) VALUES (?, 'Other User')`,
+		otherUserID,
+	); err != nil {
+		t.Fatalf("seed other user: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO entities (id, source, source_id, kind, state)
+		 VALUES ('e_refuse', 'github', 'sky/repo#refuse', 'pr', 'active')`,
+	); err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO events (id, entity_id, event_type, dedup_key)
+		 VALUES ('ev_refuse', 'e_refuse', ?, '')`,
+		eventType,
+	); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
+		 VALUES ('t_refuse', 'e_refuse', ?, 'ev_refuse', 'queued', ?)`,
+		eventType, otherUserID,
+	); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_refuse/swipe",
+		map[string]any{"action": "claim", "hesitation_ms": 0})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// No swipe_events row written — refused gesture leaves no trace.
+	var swipeCount int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM swipe_events WHERE task_id = 't_refuse'`,
+	).Scan(&swipeCount); err != nil {
+		t.Fatalf("scan swipe_events: %v", err)
+	}
+	if swipeCount != 0 {
+		t.Errorf("swipe_events count = %d, want 0 (refused claim must not audit)", swipeCount)
+	}
+
+	// State unchanged — other user still owns it, status unchanged.
+	var status string
+	var claim sql.NullString
+	if err := s.db.QueryRow(
+		`SELECT status, claimed_by_user_id FROM tasks WHERE id = 't_refuse'`,
+	).Scan(&status, &claim); err != nil {
+		t.Fatalf("scan task: %v", err)
+	}
+	if status != "queued" {
+		t.Errorf("status = %q; refused gesture changed lifecycle", status)
+	}
+	if !claim.Valid || claim.String != otherUserID {
+		t.Errorf("claim = %v; refused gesture disturbed claim", claim)
+	}
+}
+
+// TestHandleSwipe_DelegateRefusedLeavesNoAuditRow is the delegate
+// half of the audit-contract guarantee. Pre-condition: task is
+// user-claimed by ANOTHER user (the only delegate refuse path).
+// Post: 409, no swipe_events, no state change.
+func TestHandleSwipe_DelegateRefusedLeavesNoAuditRow(t *testing.T) {
+	s := newTestServer(t)
+	s.SetSpawner(delegate.NewSpawner(s.db, s.prompts, nil, nil, websocket.NewHub(), "haiku"))
+	const eventType = "github:pr:opened"
+	const otherUserID = "00000000-0000-0000-0000-0000000004dd"
+
+	if _, err := s.db.Exec(
+		`INSERT INTO users (id, display_name) VALUES (?, 'Other User')`,
+		otherUserID,
+	); err != nil {
+		t.Fatalf("seed other user: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO entities (id, source, source_id, kind, state)
+		 VALUES ('e_drefuse', 'github', 'sky/repo#drefuse', 'pr', 'active')`,
+	); err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO events (id, entity_id, event_type, dedup_key)
+		 VALUES ('ev_drefuse', 'e_drefuse', ?, '')`,
+		eventType,
+	); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
+		 VALUES ('t_drefuse', 'e_drefuse', ?, 'ev_drefuse', 'queued', ?)`,
+		eventType, otherUserID,
+	); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_drefuse/swipe",
+		map[string]any{"action": "delegate", "hesitation_ms": 0, "prompt_id": "any"})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+
+	var swipeCount int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM swipe_events WHERE task_id = 't_drefuse'`,
+	).Scan(&swipeCount); err != nil {
+		t.Fatalf("scan swipe_events: %v", err)
+	}
+	if swipeCount != 0 {
+		t.Errorf("swipe_events count = %d, want 0 (refused delegate must not audit)", swipeCount)
+	}
+	var claimUser sql.NullString
+	var claimAgent sql.NullString
+	if err := s.db.QueryRow(
+		`SELECT claimed_by_user_id, claimed_by_agent_id FROM tasks WHERE id = 't_drefuse'`,
+	).Scan(&claimUser, &claimAgent); err != nil {
+		t.Fatalf("scan task: %v", err)
+	}
+	if !claimUser.Valid || claimUser.String != otherUserID {
+		t.Errorf("claim_by_user = %v; refused delegate disturbed claim", claimUser)
+	}
+	if claimAgent.Valid {
+		t.Errorf("claim_by_agent = %v; refused delegate stamped bot anyway", claimAgent)
+	}
+}
+
 // TestHandleSnooze_RefusesOnClaimedTask pins the SKY-261 B+
 // "snoozed ↔ unclaimed" invariant from the snooze side: the
 // SnoozeTask store-level atomic UPDATE refuses on a claimed task,

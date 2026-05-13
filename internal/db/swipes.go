@@ -21,11 +21,22 @@ import (
 // break the Board's undo flow and the analytics views.
 type SwipeStore interface {
 	// RecordSwipe inserts a swipe_events row and transitions the
-	// task's status based on the action ("claim" → claimed,
-	// "dismiss" → dismissed, "delegate" → delegated, "complete" →
-	// done; unknown action defaults to queued so a misuse doesn't
-	// silently strand the task). Returns the new task status the
-	// handler echoes back in the JSON response.
+	// task's lifecycle (status + snooze_until) in one tx. Action
+	// → status mapping: "dismiss" → dismissed, "complete" → done,
+	// "snooze" → snoozed (timestamp comes from SnoozeTask though,
+	// not this method); "claim" and "delegate" map to status='queued'
+	// — those are responsibility-axis actions and don't move
+	// lifecycle, but the no-op coercion is kept for defensive
+	// idempotency. Unknown action defaults to 'queued' so a
+	// misuse doesn't silently strand the task. Returns the new
+	// task status the handler echoes back in the JSON response.
+	//
+	// SKY-261 v0.7 audit contract: the handler calls this AFTER
+	// any responsibility-axis mutation has accepted (for claim/
+	// delegate), so swipe_events only records completed gestures.
+	// A refused claim/delegate is never audited. For dismiss/
+	// snooze/complete the action IS the state change, so this
+	// method is the audit + lifecycle write in one step.
 	RecordSwipe(ctx context.Context, orgID string, taskID, action string, hesitationMs int) (string, error)
 
 	// SnoozeTask is the snooze-specific swipe: writes a 'snooze'

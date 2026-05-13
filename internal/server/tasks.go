@@ -37,11 +37,14 @@ type taskJSON struct {
 	PriorityReasoning   string   `json:"priority_reasoning,omitempty"`
 	CloseReason         string   `json:"close_reason,omitempty"`
 	// SnoozeUntil — populated when the task is in a snoozed state.
-	// SKY-261 B+: snooze is orthogonal to claim, so a claimed task
-	// can be snoozed (e.g., "bot owns this but wait until Tuesday").
-	// The Board renders snoozed cards with a "wakes at X" badge so
-	// the user sees them in their owner's lane (You / Agent) without
-	// needing a separate Snoozed column.
+	// Under the SKY-261 v0.7 invariant ("snoozed ↔ unclaimed"),
+	// this is only ever set on queue-lane tasks. Any claim-axis
+	// transition wakes the task atomically (clears snooze_until +
+	// flips status='snoozed' → 'queued'), so claimed cards on the
+	// Board never carry a snooze. The Cards triage view renders
+	// future-snoozed entries hidden via the QueuedTasks filter;
+	// the Board's Queue lane could optionally render them at the
+	// tail with a "wakes Mar 5" badge (deferred UI follow-up).
 	SnoozeUntil string `json:"snooze_until,omitempty"`
 	// OpenSubtaskCount lets the UI flag a task whose Jira entity has open
 	// subtasks — the "consider decomposing" signal (SKY-173). Zero for
@@ -149,45 +152,30 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	newStatus, err := s.swipes.RecordSwipe(r.Context(), runmode.LocalDefaultOrg, id, req.Action, req.HesitationMs)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-
-	// SKY-261 D-Claims: stamp the claim column matching the swipe action.
-	//   claim    → user takes responsibility; clears any agent claim
-	//              (user-takes-back path; the per-Board "claim a queued
-	//              task" gesture lands here too).
-	//   delegate → bot takes responsibility; clears any user claim
-	//              (paired with the status flip + run spawn just below).
-	// dismiss / snooze / complete leave the claim alone: their state
-	// transition doesn't change "who's responsible," it changes
-	// lifecycle (status). Sticky claims past close preserve the
-	// audit shape: status='done' + claim populated = "this person
-	// or bot was on it when it finished."
+	// SKY-261 v0.7 audit contract: swipe_events = "state-change log,"
+	// not "user-gesture log." For lifecycle actions (dismiss/snooze/
+	// complete) the swipe IS the state change, so RecordSwipe at the
+	// top is correct — audit + lifecycle UPDATE land in one tx. For
+	// responsibility-axis actions (claim/delegate) the actual state
+	// change lives in a separate guarded UPDATE that can refuse the
+	// gesture (different user owns it, race lost); audit must only
+	// land after that UPDATE accepts. A refused gesture leaves no
+	// trace — no swipe_events row, no status flip, no snooze clear.
 	//
-	// Errors here are surfaced as 500 so the client retries rather than
-	// silently diverging — RecordSwipe already updated status, so a
-	// silent claim-stamp failure would leave status+claim out of sync.
-	// Both UPDATEs are idempotent on retry. Full atomicity (single
-	// transaction across status + claim) would require extending
-	// SwipeStore.RecordSwipe to accept claim params; deferred.
+	// The audit insert is best-effort once the claim mutation has
+	// committed: if RecordSwipe fails after a successful claim flip,
+	// the state change stands and we log the audit miss. Better an
+	// audit gap than a refused-into-mutated state where the user gets
+	// 500 on a state change that already happened.
+	var newStatus string
+
 	switch req.Action {
 	case "claim":
 		// Race-safe claim: branch on the task's current claim state
-		// and use the guarded helpers so concurrent claimants can't
-		// steal from each other. Three legitimate transitions land
-		// here:
-		//   - unclaimed → user-claim (the common case; uses
-		//     ClaimQueuedTaskForUser's anti-steal SQL guard).
-		//   - bot-claim → user-claim ("I'll handle this" takeover;
-		//     uses TakeoverClaimFromAgent's guard so a concurrent
-		//     user takeover or requeue doesn't get stolen).
-		//   - same user already claims → idempotent no-op.
-		// A different user owning the task is a 409 — refuse rather
-		// than overwrite. The cleanupPendingApprovalRun + spawner.Cancel
-		// teardown below still runs in all success branches.
+		// and use the guarded helpers. Three accept paths
+		// (idempotent same-user, takeover from bot, claim from
+		// unclaimed) and one refuse path (different user owns it).
+		// Refused → 409 with NO state mutation and NO audit row.
 		task, lerr := db.GetTask(s.db, id)
 		if lerr != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": lerr.Error()})
@@ -236,12 +224,22 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 			}
 			claimChanged = true
 		}
-		// SKY-261 B+: broadcast on the claim axis (not the status
-		// axis). The Board listens for task_claimed to re-render the
-		// per-claim lanes; status didn't change so task_updated would
-		// be misleading. Only broadcast when the claim actually
-		// changed — the same-user idempotent path is a no-op and
-		// shouldn't churn listeners.
+		// Audit post-mutation. Under the v0.7 invariant the claim
+		// helpers (TakeoverClaimFromAgent / ClaimQueuedTaskForUser)
+		// already cleared snooze_until and flipped status →
+		// 'queued' atomically if the pre-state was snoozed, so
+		// RecordSwipe's UPDATE is a no-op on lifecycle and the
+		// load-bearing effect at this point is the swipe_events
+		// row. Best-effort: if the insert fails, the claim still
+		// landed; log and continue rather than 500-ing on a
+		// committed state change.
+		ns, swipeErr := s.swipes.RecordSwipe(r.Context(), runmode.LocalDefaultOrg, id, req.Action, req.HesitationMs)
+		if swipeErr != nil {
+			log.Printf("[swipe] audit write failed for task %s claim: %v (claim mutation already landed)", id, swipeErr)
+			newStatus = "queued"
+		} else {
+			newStatus = ns
+		}
 		if claimChanged {
 			s.ws.Broadcast(websocket.Event{
 				Type: "task_claimed",
@@ -269,24 +267,33 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delegate failed: no agent bootstrapped — set up the bot first"})
 			return
 		}
-		// HandoffAgentClaim covers all three legitimate user→bot
-		// transitions:
-		//   - unclaimed → bot (queue → Agent drag, swipe-up on an
-		//     unclaimed card)
-		//   - user-claimed-by-me → bot (the SKY-133 "You → Agent"
-		//     drag; user is explicitly transferring their own claim
-		//     to the bot)
-		//   - bot-already-claimed → no-op (idempotent)
-		// And one refusal: a DIFFERENT user owns it — the bot
-		// shouldn't steal what a teammate took on.
+		// HandoffAgentClaim covers three legitimate user→bot
+		// transitions (unclaimed → bot; user-claimed-by-me → bot
+		// transfer; bot-already-owns idempotent no-op) and one
+		// refusal (different user owns it). Refused → 409, no
+		// audit row, no state change.
 		result, err := db.HandoffAgentClaim(s.db, id, a.ID, runmode.LocalDefaultUserID)
 		if err != nil {
 			log.Printf("[swipe] failed to stamp agent claim on task %s: %v", id, err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "claim stamp failed: " + err.Error()})
 			return
 		}
-		switch result {
-		case db.HandoffChanged:
+		if result == db.HandoffRefused {
+			writeJSON(w, http.StatusConflict, map[string]string{
+				"error": "task is claimed by another user; refusing to steal",
+			})
+			return
+		}
+		// Accepted path (Changed or NoOp). Audit post-mutation,
+		// best-effort.
+		ns, swipeErr := s.swipes.RecordSwipe(r.Context(), runmode.LocalDefaultOrg, id, req.Action, req.HesitationMs)
+		if swipeErr != nil {
+			log.Printf("[swipe] audit write failed for task %s delegate: %v (claim mutation already landed)", id, swipeErr)
+			newStatus = "queued"
+		} else {
+			newStatus = ns
+		}
+		if result == db.HandoffChanged {
 			s.ws.Broadcast(websocket.Event{
 				Type: "task_claimed",
 				Data: map[string]any{
@@ -295,15 +302,21 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 					"claimed_by_user_id":  "",
 				},
 			})
-		case db.HandoffNoOp:
-			// Bot already owns it — fall through to the run-spawn
-			// step below without broadcasting.
-		case db.HandoffRefused:
-			writeJSON(w, http.StatusConflict, map[string]string{
-				"error": "task is claimed by another user; refusing to steal",
-			})
+		}
+	case "dismiss", "snooze", "complete":
+		// Lifecycle actions: the swipe IS the state change. Audit
+		// + UPDATE in one tx via RecordSwipe. No refuse path.
+		// ('snooze' here is defensive — the FE routes snoozing
+		// through /api/tasks/{id}/snooze; if it ever lands here
+		// the status would flip to 'snoozed' without snooze_until,
+		// which the FE doesn't produce and we don't bother
+		// guarding against beyond defaulting newStatus.)
+		ns, swipeErr := s.swipes.RecordSwipe(r.Context(), runmode.LocalDefaultOrg, id, req.Action, req.HesitationMs)
+		if swipeErr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": swipeErr.Error()})
 			return
 		}
+		newStatus = ns
 	}
 
 	// Dismiss is a terminal state — if the user swipes away a task mid-run

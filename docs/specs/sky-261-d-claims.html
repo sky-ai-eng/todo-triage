@@ -276,7 +276,7 @@ footer {
     </div>
     <div class="topbar__meta">
       <span class="pill pill--size">SIZE · M</span>
-      <span class="pill pill--draft">DRAFT v0.7</span>
+      <span class="pill pill--draft">DRAFT v0.8</span>
     </div>
   </div>
 </div>
@@ -382,6 +382,10 @@ footer {
 
   <div class="callout callout--good">
     <strong>The queue view is a derived filter, not a status value.</strong> "What's in the queue" = <code>WHERE claimed_by_agent_id IS NULL AND claimed_by_user_id IS NULL AND status NOT IN ('done', 'dismissed', 'snoozed')</code>. Team-scoped via the existing <code>team_id</code> + visibility/RLS. A user claiming a queued task is a claim-column transition, not a status change. This is what makes the "user claims without involving the bot" case clean — no new status enum value needed.
+  </div>
+
+  <div class="callout callout--good">
+    <strong>Audit log = state-change log, not gesture log.</strong> v0.8 audit contract: <code>swipe_events</code> records completed state changes, not attempted gestures. For responsibility-axis actions (claim, delegate) the handler runs the guarded claim mutation FIRST; the audit row only writes if the mutation accepts. A refused gesture (different user owns it, claim race lost) returns 409 with no audit row, no status flip, no snooze clear. For lifecycle-axis actions (dismiss, snooze, complete) the action IS the state change, so <code>RecordSwipe</code> writes audit + lifecycle in one tx as before. If the audit insert fails AFTER a successful claim mutation, the state change holds and we log the audit miss — better an audit gap than a 500 on a committed state change. This contract resolves the long-standing "RecordSwipe at the top mutates state for refused gestures" reviewer flag.
   </div>
 
   <div class="callout callout--good">
@@ -858,7 +862,7 @@ actorAgentID := task.ClaimedByAgentID
 </main>
 
 <footer>
-  SKY-261 · D-Claims · v0.7 · 2026-05-12
+  SKY-261 · D-Claims · v0.8 · 2026-05-12
 </footer>
 </body>
 </html>
