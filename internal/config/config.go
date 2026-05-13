@@ -40,7 +40,8 @@ type GitHubConfig struct {
 	// CloneProtocol controls how bare clones in ~/.triagefactory/repos/
 	// are created. "ssh" uses git@github.com:owner/repo.git, "https"
 	// uses GitHub's clone_url (depends on a credential helper holding
-	// a PAT). Empty string is treated as "https" by callers.
+	// a PAT). Empty string means the default clone protocol is used,
+	// which is "ssh".
 	CloneProtocol string `json:"clone_protocol,omitempty"`
 }
 
