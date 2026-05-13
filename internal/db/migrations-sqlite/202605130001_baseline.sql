@@ -761,5 +761,13 @@ INSERT OR IGNORE INTO events_catalog (id, source, category, label, description) 
   ('system:prompt:auto_suspended',       'system', 'delegation', 'Prompt Auto-suspended', 'Per-(entity, prompt) breaker tripped after repeated failures'),
   ('system:task:delegation_blocked_by_subtasks', 'system', 'delegation', 'Delegation Blocked: Subtasks', 'Auto-delegation skipped because parent has open subtasks');
 
+-- NOTE: This baseline seed is for fresh installs only. After the removal of
+-- the runtime event-type seeding/upsert path, edits here do not propagate to
+-- existing installs once an event id has already been seeded.
+--   * New event types must ship in a new forward migration.
+--   * Label/description fixes for an existing event id must also ship in a
+--     forward migration using `INSERT ... ON CONFLICT(id) DO UPDATE`, because
+--     this baseline uses `INSERT OR IGNORE` and will otherwise no-op.
+
 -- +goose Down
 SELECT 'down not supported';
