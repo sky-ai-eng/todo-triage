@@ -16,10 +16,22 @@ import (
 func createPromptForTest(t *testing.T, database *sql.DB, p domain.Prompt) {
 	t.Helper()
 	now := time.Now().UTC()
+	// source defaults to 'user' upstream — pin creator_user_id +
+	// team_id so the prompts_system_has_no_creator and
+	// prompts_team_visibility_requires_team CHECKs pass.
+	source := p.Source
+	if source == "" {
+		source = "user"
+	}
+	var creatorUserID any = "00000000-0000-0000-0000-000000000100"
+	if source == "system" {
+		creatorUserID = nil
+	}
 	if _, err := database.Exec(`
-		INSERT INTO prompts (id, name, body, source, allowed_tools, usage_count, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, 0, ?, ?)
-	`, p.ID, p.Name, p.Body, p.Source, p.AllowedTools, now, now); err != nil {
+		INSERT INTO prompts (id, name, body, source, allowed_tools, usage_count, team_id, creator_user_id, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
+	`, p.ID, p.Name, p.Body, source, p.AllowedTools,
+		"00000000-0000-0000-0000-000000000010", creatorUserID, now, now); err != nil {
 		t.Fatalf("createPromptForTest %s: %v", p.ID, err)
 	}
 }

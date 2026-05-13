@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // CreateProject inserts a new project and returns its id. PinnedRepos
@@ -37,14 +38,18 @@ func CreateProject(database *sql.DB, p domain.Project) (string, error) {
 		return "", fmt.Errorf("marshal pinned_repos: %w", err)
 	}
 	now := time.Now().UTC()
+	// team_id pinned to LocalDefaultTeamID so the
+	// projects_team_visibility_requires_team CHECK passes for the
+	// default visibility='team'.
 	_, err = database.Exec(`
-		INSERT INTO projects (id, name, description, curator_session_id, pinned_repos, jira_project_key, linear_project_key, spec_authorship_prompt_id, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO projects (id, name, description, curator_session_id, pinned_repos, jira_project_key, linear_project_key, spec_authorship_prompt_id, team_id, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		id, p.Name, p.Description,
 		nullIfEmpty(p.CuratorSessionID), string(pinnedJSON),
 		nullIfEmpty(p.JiraProjectKey), nullIfEmpty(p.LinearProjectKey),
 		nullIfEmpty(p.SpecAuthorshipPromptID),
+		runmode.LocalDefaultTeamID,
 		now, now,
 	)
 	if err != nil {

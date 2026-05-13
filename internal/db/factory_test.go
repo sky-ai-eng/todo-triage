@@ -34,7 +34,7 @@ func TestListFactoryActiveRuns_MemoryMissingDerivedFromJoin(t *testing.T) {
 	entity := makeEntity(t, database, 200)
 	eventID := recordEvent(t, database, entity.ID, domain.EventGitHubPROpened)
 	if _, err := database.Exec(
-		`INSERT INTO prompts (id, name, body) VALUES ('p_factory', 'Test', 'body')`,
+		`INSERT INTO prompts (id, name, body, creator_user_id, team_id) VALUES ('p_factory', 'Test', 'body', '00000000-0000-0000-0000-000000000100', '00000000-0000-0000-0000-000000000010')`,
 	); err != nil {
 		t.Fatalf("seed prompt: %v", err)
 	}

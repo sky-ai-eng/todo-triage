@@ -2,44 +2,10 @@ package db
 
 import (
 	"database/sql"
-	"log"
 
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
-
-// SeedEventTypes inserts the canonical event type catalog into events_catalog.
-// The events_catalog table is read-only system registry — only id/source/
-// category/label/description are persisted (no enabled, default_priority,
-// sort_order — those concerns moved to task_rules).
-//
-// Uses ON CONFLICT DO UPDATE (true upsert) rather than INSERT OR REPLACE so
-// that updated labels/descriptions propagate without a DELETE+INSERT cycle.
-// REPLACE would trip ON DELETE RESTRICT against task_rules / prompt_triggers /
-// tasks rows that reference the event_type on every reseed after the first.
-func SeedEventTypes(db *sql.DB) error {
-	stmt, err := db.Prepare(`
-		INSERT INTO events_catalog (id, source, category, label, description)
-		VALUES (?, ?, ?, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET
-			source = excluded.source,
-			category = excluded.category,
-			label = excluded.label,
-			description = excluded.description
-	`)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
-
-	for _, et := range domain.AllEventTypes() {
-		if _, err := stmt.Exec(et.ID, et.Source, et.Category, et.Label, et.Description); err != nil {
-			return err
-		}
-	}
-	log.Printf("[db] seeded %d event types into events_catalog", len(domain.AllEventTypes()))
-	return nil
-}
 
 // onEventRecorded fires after every successful INSERT into the events
 // table. Used by LifetimeDistinctCounter so the in-memory cache stays

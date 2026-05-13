@@ -35,9 +35,18 @@ CREATE TABLE prompts (
     model           TEXT NOT NULL DEFAULT '',
     org_id          TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
     team_id         TEXT,
-    creator_user_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000100',
+    -- creator_user_id is nullable: source='system' rows have NULL (no human author),
+    -- source='user' rows must have a value. Enforced by prompts_system_has_no_creator.
+    creator_user_id TEXT,
     visibility      TEXT NOT NULL DEFAULT 'team'
-        CHECK (visibility IN ('private','team','org'))
+        CHECK (visibility IN ('private','team','org')),
+    CONSTRAINT prompts_system_has_no_creator CHECK (
+        (source = 'system' AND creator_user_id IS NULL)
+        OR (source <> 'system' AND creator_user_id IS NOT NULL)
+    ),
+    CONSTRAINT prompts_team_visibility_requires_team CHECK (
+        visibility <> 'team' OR team_id IS NOT NULL
+    )
 );
 
 CREATE TABLE system_prompt_versions (
@@ -62,10 +71,15 @@ CREATE TABLE preferences (
     updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE settings (
-    id         INTEGER PRIMARY KEY CHECK (id = 1),
-    data       TEXT NOT NULL,
-    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+-- Host-level config: SQLite-only. PG has no analog because in multi mode
+-- the port comes from container env and there is no takeover concept.
+-- Single-row table (CHECK id=1) so config.Load/Save can upsert
+-- without a WHERE-search.
+CREATE TABLE instance_config (
+    id                  INTEGER PRIMARY KEY CHECK (id = 1),
+    server_port         INTEGER NOT NULL DEFAULT 3000,
+    server_takeover_dir TEXT NOT NULL DEFAULT '',
+    updated_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 -- === Tenancy (orgs / teams / users) ======================================
@@ -90,6 +104,10 @@ CREATE TABLE teams (
 CREATE TABLE users (
     id              TEXT PRIMARY KEY,
     display_name    TEXT,
+    avatar_url      TEXT,
+    timezone        TEXT NOT NULL DEFAULT 'UTC',
+    default_org_id  TEXT,
+    external_id     TEXT,
     github_username TEXT,
     created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -111,6 +129,54 @@ CREATE TABLE memberships (
                   CHECK (role IN ('admin', 'member', 'viewer')),
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (user_id, team_id)
+);
+
+-- === Tenant-scoped settings ==============================================
+-- Shapes mirror the Postgres baseline so local=multi at N=1. Each table
+-- holds at most one row per tenant; first config.Save() upserts the row.
+-- Intervals stored as TEXT in Go time.Duration string form (e.g. "5m0s")
+-- — there is no SQLite interval type, and storing as TEXT keeps the
+-- parse logic in the application layer the same in both backends.
+CREATE TABLE org_settings (
+    org_id                TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
+    github_base_url       TEXT,
+    github_poll_interval  TEXT NOT NULL DEFAULT '5m0s',
+    github_clone_protocol TEXT NOT NULL DEFAULT 'ssh'
+                              CHECK (github_clone_protocol IN ('https', 'ssh')),
+    jira_base_url         TEXT,
+    jira_poll_interval    TEXT NOT NULL DEFAULT '5m0s',
+    updated_at            TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE team_settings (
+    team_id                       TEXT PRIMARY KEY REFERENCES teams(id) ON DELETE CASCADE,
+    -- JSON array of project keys. Stored as JSON text since SQLite has no array type.
+    jira_projects                 TEXT NOT NULL DEFAULT '[]',
+    ai_reprioritize_threshold     INTEGER,
+    ai_preference_update_interval INTEGER,
+    updated_at                    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE user_settings (
+    user_id                  TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    ai_model                 TEXT NOT NULL DEFAULT 'sonnet',
+    ai_auto_delegate_enabled INTEGER NOT NULL DEFAULT 1,
+    updated_at               TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- One row per (org, jira_project). Mirrors the PG table. Local mode
+-- treats all projects uniformly — config.Save() writes one row per
+-- jira_projects entry with identical pickup/in_progress/done values.
+CREATE TABLE jira_project_status_rules (
+    org_id                TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    project_key           TEXT NOT NULL,
+    pickup_members        TEXT NOT NULL DEFAULT '[]',
+    in_progress_members   TEXT NOT NULL DEFAULT '[]',
+    in_progress_canonical TEXT,
+    done_members          TEXT NOT NULL DEFAULT '[]',
+    done_canonical        TEXT,
+    updated_at            TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (org_id, project_key)
 );
 
 -- === Agents ==============================================================
@@ -156,7 +222,10 @@ CREATE TABLE projects (
     team_id                   TEXT,
     creator_user_id           TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000100',
     visibility                TEXT NOT NULL DEFAULT 'team'
-        CHECK (visibility IN ('private','team','org'))
+        CHECK (visibility IN ('private','team','org')),
+    CONSTRAINT projects_team_visibility_requires_team CHECK (
+        visibility <> 'team' OR team_id IS NOT NULL
+    )
 );
 
 CREATE TABLE entities (
@@ -217,7 +286,7 @@ CREATE TABLE event_handlers (
     org_id          TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
     creator_user_id TEXT,
     team_id         TEXT,
-    visibility      TEXT NOT NULL DEFAULT 'private'
+    visibility      TEXT NOT NULL DEFAULT 'team'
                        CHECK (visibility IN ('private','team','org')),
 
     kind            TEXT NOT NULL CHECK (kind IN ('rule','trigger')),
@@ -257,7 +326,14 @@ CREATE TABLE event_handlers (
         AND default_priority IS NULL
         AND sort_order IS NULL
         AND name IS NULL
-    ))
+    )),
+    CONSTRAINT event_handlers_system_has_no_creator CHECK (
+        (source = 'system' AND creator_user_id IS NULL)
+        OR (source = 'user' AND creator_user_id IS NOT NULL)
+    ),
+    CONSTRAINT event_handlers_team_visibility_requires_team CHECK (
+        visibility <> 'team' OR team_id IS NOT NULL
+    )
 );
 CREATE UNIQUE INDEX event_handlers_id_org_unique          ON event_handlers (id, org_id);
 CREATE INDEX        idx_event_handlers_event_type_enabled ON event_handlers(org_id, event_type) WHERE enabled = 1;
@@ -286,14 +362,17 @@ CREATE TABLE tasks (
     closed_at            DATETIME,
     created_at           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     org_id               TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
-    team_id              TEXT,
+    team_id              TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000010',
     creator_user_id      TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000100',
     visibility           TEXT NOT NULL DEFAULT 'team'
                             CHECK (visibility IN ('private','team','org')),
     -- SKY-261 D-Claims: two claim cols + XOR.
     claimed_by_agent_id  TEXT REFERENCES agents(id) ON DELETE SET NULL,
     claimed_by_user_id   TEXT REFERENCES users(id)  ON DELETE SET NULL,
-    CHECK (claimed_by_agent_id IS NULL OR claimed_by_user_id IS NULL)
+    CONSTRAINT tasks_claim_xor CHECK (claimed_by_agent_id IS NULL OR claimed_by_user_id IS NULL),
+    CONSTRAINT tasks_team_visibility_requires_team CHECK (
+        visibility <> 'team' OR team_id IS NOT NULL
+    )
 );
 CREATE UNIQUE INDEX idx_tasks_active_entity_event_dedup
     ON tasks(entity_id, event_type, dedup_key)
@@ -323,7 +402,7 @@ CREATE TABLE runs (
     num_turns       INTEGER,
     total_cost_usd  REAL,
     org_id          TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
-    team_id         TEXT,
+    team_id         TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000010',
     -- creator_user_id is nullable for trigger_type='event' rows
     -- (system-fired runs have no human creator); the DEFAULT remains
     -- the synthetic local user so trigger_type='manual' rows whose
@@ -334,10 +413,13 @@ CREATE TABLE runs (
     actor_agent_id  TEXT REFERENCES agents(id) ON DELETE SET NULL,
     -- Pair trigger_type with creator_user_id nullability so the
     -- seeder can't drift back to lying.
-    CHECK (
+    CONSTRAINT runs_creator_matches_trigger_type CHECK (
         (trigger_type = 'manual' AND creator_user_id IS NOT NULL)
         OR
         (trigger_type = 'event'  AND creator_user_id IS NULL)
+    ),
+    CONSTRAINT runs_team_visibility_requires_team CHECK (
+        visibility <> 'team' OR team_id IS NOT NULL
     )
 );
 CREATE INDEX        idx_runs_task           ON runs(task_id);
@@ -627,6 +709,43 @@ INSERT OR IGNORE INTO memberships (user_id, team_id, role) VALUES
     ('00000000-0000-0000-0000-000000000100',
      '00000000-0000-0000-0000-000000000010',
      'admin');
+
+-- events_catalog seed (system-managed event type registry). Mirrors the
+-- equivalent INSERT block in the Postgres baseline; both must stay in
+-- sync with domain.AllEventTypes(). New event types ship as a new
+-- forward migration, never an in-place baseline edit.
+INSERT OR IGNORE INTO events_catalog (id, source, category, label, description) VALUES
+  ('github:pr:review_changes_requested', 'github', 'pr', 'Changes Requested',  'A reviewer requested changes on a PR'),
+  ('github:pr:review_approved',          'github', 'pr', 'Review: Approved',   'A reviewer approved a PR'),
+  ('github:pr:review_commented',         'github', 'pr', 'Review: Commented',  'A reviewer left non-blocking comments on a PR'),
+  ('github:pr:review_dismissed',         'github', 'pr', 'Review: Dismissed',  'A reviewer dismissed their previous review on a PR'),
+  ('github:pr:review_requested',         'github', 'pr', 'Review Requested',   'Someone requested your review on a PR'),
+  ('github:pr:review_submitted',         'github', 'pr', 'Review Submitted',   'I reviewed someone else''s PR (inverse of review_*)'),
+  ('github:pr:review_request_removed',   'github', 'pr', 'Review Request Removed', 'Your review request was removed from a PR (review completed or request rescinded)'),
+  ('github:pr:ci_check_failed',          'github', 'pr', 'CI Check Failed',    'A CI check failed on a PR'),
+  ('github:pr:ci_check_passed',          'github', 'pr', 'CI Check Passed',    'A CI check passed on a PR'),
+  ('github:pr:label_added',              'github', 'pr', 'Label Added',        'A label was added to a PR'),
+  ('github:pr:label_removed',            'github', 'pr', 'Label Removed',      'A label was removed from a PR'),
+  ('github:pr:new_commits',              'github', 'pr', 'New Commits',        'A tracked PR has new commits since the last poll'),
+  ('github:pr:conflicts',                'github', 'pr', 'Merge Conflicts',    'A PR has merge conflicts'),
+  ('github:pr:ready_for_review',         'github', 'pr', 'Ready for Review',   'A draft PR was marked ready for review'),
+  ('github:pr:mentioned',                'github', 'pr', 'Mentioned',          'You were @mentioned in a PR'),
+  ('github:pr:opened',                   'github', 'pr', 'PR Opened',          'A pull request was opened'),
+  ('github:pr:merged',                   'github', 'pr', 'PR Merged',          'A pull request was merged'),
+  ('github:pr:closed',                   'github', 'pr', 'PR Closed',          'A pull request was closed without merging'),
+  ('jira:issue:assigned',                'jira',   'issue', 'Issue Assigned',  'Issue was assigned to you'),
+  ('jira:issue:available',               'jira',   'issue', 'Issue Available', 'New unassigned issue in pickup queue'),
+  ('jira:issue:status_changed',          'jira',   'issue', 'Status Changed',  'Issue status changed (uses dedup_key=new_status)'),
+  ('jira:issue:priority_changed',        'jira',   'issue', 'Priority Changed','Issue priority was changed (uses dedup_key=new_priority)'),
+  ('jira:issue:commented',               'jira',   'issue', 'New Comment',     'A new comment was added to an issue'),
+  ('jira:issue:completed',               'jira',   'issue', 'Issue Completed', 'Issue was marked as done'),
+  ('jira:issue:became_atomic',           'jira',   'issue', 'Issue Became Atomic', 'Last open subtask closed — parent is now an atomic work unit'),
+  ('system:poll:completed',              'system', 'poll', 'Poll Complete',    'A poller finished a cycle'),
+  ('system:scoring:completed',           'system', 'scoring', 'Scoring Complete', 'AI scoring finished for a task'),
+  ('system:delegation:completed',        'system', 'delegation', 'Delegation Complete', 'Agent delegation run completed'),
+  ('system:delegation:failed',           'system', 'delegation', 'Delegation Failed',   'Agent delegation run failed'),
+  ('system:prompt:auto_suspended',       'system', 'delegation', 'Prompt Auto-suspended', 'Per-(entity, prompt) breaker tripped after repeated failures'),
+  ('system:task:delegation_blocked_by_subtasks', 'system', 'delegation', 'Delegation Blocked: Subtasks', 'Auto-delegation skipped because parent has open subtasks');
 
 -- +goose Down
 SELECT 'down not supported';

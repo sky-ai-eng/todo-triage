@@ -21,6 +21,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
@@ -324,8 +325,8 @@ func insertImportedProject(tx *sql.Tx, projectID, curatorSessionID string, manif
 		INSERT INTO projects (
 			id, name, description,
 			curator_session_id, pinned_repos, jira_project_key,
-			linear_project_key, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			linear_project_key, team_id, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		projectID,
 		strings.TrimSpace(manifestProject.Name),
@@ -334,6 +335,7 @@ func insertImportedProject(tx *sql.Tx, projectID, curatorSessionID string, manif
 		string(pinnedJSON),
 		nullIfEmptyString(manifestProject.JiraProjectKey),
 		nullIfEmptyString(manifestProject.LinearProjectKey),
+		runmode.LocalDefaultTeamID,
 		now,
 		now,
 	)

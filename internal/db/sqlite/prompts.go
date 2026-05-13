@@ -200,11 +200,21 @@ func (s *promptStore) Create(ctx context.Context, orgID string, p domain.Prompt)
 	now := time.Now().UTC()
 	// Post-SKY-262, user prompts are team-scoped with team_id =
 	// LocalDefaultTeamID + visibility='team'. SQLite has one team
-	// in local mode (sentinel from SKY-269).
+	// in local mode (sentinel from SKY-269). System rows (Source='system'
+	// — only the shipped defaults reach here via test fixtures that
+	// bypass SeedOrUpdate) must have creator_user_id NULL +
+	// visibility='org' to satisfy prompts_system_has_no_creator and
+	// prompts_team_visibility_requires_team.
+	var creatorUserID any = runmode.LocalDefaultUserID
+	visibility := "team"
+	if p.Source == "system" {
+		creatorUserID = nil
+		visibility = "org"
+	}
 	_, err := s.q.ExecContext(ctx, `
-		INSERT INTO prompts (id, name, body, source, allowed_tools, model, usage_count, team_id, visibility, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, 0, ?, 'team', ?, ?)
-	`, p.ID, p.Name, p.Body, p.Source, p.AllowedTools, p.Model, runmode.LocalDefaultTeamID, now, now)
+		INSERT INTO prompts (id, name, body, source, allowed_tools, model, usage_count, team_id, creator_user_id, visibility, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
+	`, p.ID, p.Name, p.Body, p.Source, p.AllowedTools, p.Model, runmode.LocalDefaultTeamID, creatorUserID, visibility, now, now)
 	return err
 }
 

@@ -738,11 +738,9 @@ CREATE TABLE public.org_settings (
     org_id uuid NOT NULL,
     github_base_url text,
     github_poll_interval interval DEFAULT '00:05:00'::interval NOT NULL,
-    github_clone_protocol text DEFAULT 'https'::text NOT NULL,
+    github_clone_protocol text DEFAULT 'ssh'::text NOT NULL,
     jira_base_url text,
     jira_poll_interval interval DEFAULT '00:05:00'::interval NOT NULL,
-    ai_reprioritize_threshold_default integer,
-    ai_preference_update_interval_default interval,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT org_settings_github_clone_protocol_check CHECK ((github_clone_protocol = ANY (ARRAY['https'::text, 'ssh'::text])))
 );
@@ -1274,8 +1272,8 @@ CREATE TABLE public.teams (
 
 CREATE TABLE public.user_settings (
     user_id uuid NOT NULL,
-    ai_model text DEFAULT 'haiku'::text NOT NULL,
-    ai_auto_delegate_enabled boolean DEFAULT false NOT NULL,
+    ai_model text DEFAULT 'sonnet'::text NOT NULL,
+    ai_auto_delegate_enabled boolean DEFAULT true NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
 

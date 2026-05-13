@@ -10,15 +10,15 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// TestBootstrapSchemaForTest_MatchesMigrateAndSeed pins the cached
-// bootstrap path to the real Migrate + SeedEventTypes path. The cached
-// bundle only snapshots sqlite_master, goose_db_version, and
-// events_catalog — so a future migration that starts inserting required
-// rows into any other table (e.g. a defaults table, a settings row)
-// will silently diverge from the real bootstrap and most tests will
-// start from the wrong schema state. This test fails loudly in that
-// case by row-counting every user table on both paths.
-func TestBootstrapSchemaForTest_MatchesMigrateAndSeed(t *testing.T) {
+// TestBootstrapSchemaForTest_MatchesMigrate pins the cached bootstrap
+// path to the real Migrate path. The cached bundle only snapshots
+// sqlite_master, goose_db_version, and events_catalog — so a future
+// migration that starts inserting required rows into any other table
+// (e.g. a defaults table, a settings row) will silently diverge from
+// the real bootstrap and most tests will start from the wrong schema
+// state. This test fails loudly in that case by row-counting every
+// user table on both paths.
+func TestBootstrapSchemaForTest_MatchesMigrate(t *testing.T) {
 	cached := openMem(t)
 	if err := BootstrapSchemaForTest(cached); err != nil {
 		t.Fatalf("BootstrapSchemaForTest: %v", err)
@@ -27,9 +27,6 @@ func TestBootstrapSchemaForTest_MatchesMigrateAndSeed(t *testing.T) {
 	real := openMem(t)
 	if err := Migrate(real, "sqlite3"); err != nil {
 		t.Fatalf("Migrate: %v", err)
-	}
-	if err := SeedEventTypes(real); err != nil {
-		t.Fatalf("SeedEventTypes: %v", err)
 	}
 
 	// 1. sqlite_master must be identical: same DDL for every table,

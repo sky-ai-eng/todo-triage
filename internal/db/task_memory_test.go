@@ -29,7 +29,7 @@ func seedRunForMemoryTest(t *testing.T, db *sql.DB, runID, entityID string) {
 		t.Fatalf("seed event: %v", err)
 	}
 	if _, err := db.Exec(`
-		INSERT OR IGNORE INTO prompts (id, name, body) VALUES ('p_test', 'Test', 'body')
+		INSERT OR IGNORE INTO prompts (id, name, body, creator_user_id, team_id) VALUES ('p_test', 'Test', 'body', '00000000-0000-0000-0000-000000000100', '00000000-0000-0000-0000-000000000010')
 	`); err != nil {
 		t.Fatalf("seed prompt: %v", err)
 	}
