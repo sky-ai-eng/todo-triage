@@ -289,9 +289,13 @@ func (r *Router) tryAutoDelegate(task *domain.Task, trigger domain.EventHandler,
 	// upstream); a human will swipe-delegate later if they want a
 	// run. Skip silently rather than firing on a disabled team.
 	//
-	// Nil-safe on r.teamAgents for pre-D-Claims test wiring; the
-	// production server.New always passes a real store.
-	if r.teamAgents != nil {
+	// The gate requires BOTH stores (agents to resolve the org's
+	// agent, teamAgents to read the enabled flag). If either is nil
+	// — pre-D-Claims test wiring that didn't thread the new stores
+	// — the gate degrades to "bot enabled check unavailable, proceed
+	// with auto-fire," which preserves the pre-SKY-261 behavior.
+	// Production server.New / main.go always passes both.
+	if r.teamAgents != nil && r.agents != nil {
 		a, err := r.agents.GetForOrg(context.Background(), runmode.LocalDefaultOrg)
 		if err != nil {
 			log.Printf("[router] auto-trigger skipped: agent lookup: %v", err)
