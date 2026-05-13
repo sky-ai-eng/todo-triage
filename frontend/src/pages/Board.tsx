@@ -763,24 +763,38 @@ export default function Board() {
                       key={task.id}
                       task={task}
                       onRequeue={() => handleRequeue(task.id)}
-                      // SKY-261 B+: bot is claimed but no run exists.
-                      // delegateFailures captures known failures from
-                      // a prior swipe response; if absent we still show
-                      // the badge (the task is in the agent lane with
-                      // no run — either spawn failed silently or hasn't
-                      // landed yet, both surface the same retry
-                      // affordance). The Retry button re-opens the
-                      // prompt picker, identical to the original
-                      // queue→agent gesture.
-                      delegateFailed={{
-                        message:
-                          delegateFailures[task.id] ||
-                          'no run materialized for this bot-claimed task',
-                      }}
-                      onRetry={() => {
-                        pendingDelegateTask.current = task
-                        setShowPromptPicker(true)
-                      }}
+                      // SKY-261: bot-claimed cards without an
+                      // agentRuns entry land here. Three legitimate
+                      // shapes share this state:
+                      //   (a) explicit partial-success — delegate
+                      //       response returned delegate_error; we
+                      //       have an entry in delegateFailures.
+                      //   (b) trigger fired but the entity is busy
+                      //       and the firing is queued in
+                      //       pending_firings; no run row yet, will
+                      //       fire on the next drain.
+                      //   (c) transient race — the claim WS event
+                      //       arrived before the run WS event /
+                      //       fetchTasks refresh.
+                      // Only (a) deserves the "delegate didn't fire,
+                      // retry" badge. For (b) and (c) the neutral
+                      // card is right; the run will land via the WS
+                      // path. We gate the badge + Retry button on
+                      // explicit delegateFailures membership; absent
+                      // = render the neutral TaskCard.
+                      delegateFailed={
+                        delegateFailures[task.id]
+                          ? { message: delegateFailures[task.id] }
+                          : undefined
+                      }
+                      onRetry={
+                        delegateFailures[task.id]
+                          ? () => {
+                              pendingDelegateTask.current = task
+                              setShowPromptPicker(true)
+                            }
+                          : undefined
+                      }
                     />
                   ),
                 )
