@@ -110,8 +110,10 @@ func (s *Server) handleAuthSetup(w http.ResponseWriter, r *http.Request) {
 	// Capture the GitHub login on the users row when we validated GitHub.
 	// Skip when GitHub wasn't validated (Jira-only setup) — the dashboard /
 	// poller short-circuit on empty username and Settings can re-capture
-	// later.
-	if resp.GitHub != nil && resp.GitHub.Login != "" {
+	// later. This write is local-mode-only because it targets the
+	// LocalDefaultUserID row; multi-user modes must use a session-derived
+	// user ID instead.
+	if resp.GitHub != nil && resp.GitHub.Login != "" && runmode.Current() == runmode.ModeLocal {
 		if err := s.users.SetGitHubUsername(r.Context(), runmode.LocalDefaultUserID, resp.GitHub.Login); err != nil {
 			log.Printf("[setup] failed to persist users.github_username: %v", err)
 		}
