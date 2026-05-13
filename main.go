@@ -265,7 +265,7 @@ func main() {
 		openBrowser(fmt.Sprintf("http://localhost%s", addr))
 	}
 
-	srv := server.New(database, stores.Prompts, stores.Swipes, stores.Dashboard, stores.EventHandlers, stores.Agents)
+	srv := server.New(database, stores.Prompts, stores.Swipes, stores.Dashboard, stores.EventHandlers, stores.Agents, stores.TeamAgents)
 
 	distFS, err := frontendDist()
 	if err != nil {
@@ -308,21 +308,21 @@ func main() {
 
 	// Bootstrap the local-mode agent identity (SKY-260 D-Agent). One
 	// agents row + one team_agents row for the synthetic LocalDefaultOrg
-	// / LocalDefaultTeamID pair. Idempotent — re-runs across boots
-	// (including v1.10.1 → current upgrades) leave existing rows intact,
-	// preserving any user-disable on team_agents.enabled.
+	// / LocalDefaultTeamID pair. Idempotent (INSERT OR IGNORE) — re-runs
+	// across boots leave existing rows intact, preserving any user-
+	// disable on team_agents.enabled.
 	//
-	// SKY-261 wired claimed_by_agent_id, so the bootstrap is now
-	// load-bearing: a missing agents row means stampAgentClaim's
-	// GetForOrg returns nil, the auto-trigger silently doesn't stamp,
-	// and the drain path's claim_changed guard skips every firing.
-	// Kept as a warning rather than fatal in this PR to avoid widening
-	// scope into "first-boot retry/fatal policy"; the seam where the
-	// agent isn't yet bootstrapped is transient on a healthy install.
-	// Flipping to fatal (or adding a single-shot reseed-on-startup
-	// loop) is a clean follow-up.
+	// Fatal on failure: post-SKY-261 the agents row is load-bearing for
+	// the entire claim flow (stampAgentClaim's GetForOrg, the drain
+	// path's claim_changed guard, runs.actor_agent_id stamping). The
+	// idempotent INSERT means the only legitimate failure mode is a
+	// DB connection issue — and Migrate() above already fatals on
+	// that. Continuing past a bootstrap failure produces a silently-
+	// broken auto-delegation state where the user wouldn't see an
+	// error, just notice things never fire. Better to surface the
+	// failure at startup.
 	if err := db.BootstrapLocalAgent(context.Background(), stores); err != nil {
-		log.Printf("[bootstrap] warning: local agent: %v", err)
+		log.Fatalf("[bootstrap] local agent: %v (auto-delegation depends on this; refusing to start)", err)
 	}
 
 	// Auto-import Claude Code skill files as prompts. context.Background
@@ -565,7 +565,7 @@ func main() {
 	// Event router — records events, creates/bumps tasks, auto-delegates on
 	// matching triggers, runs inline close checks. Also handles post-scoring
 	// re-derive via the scorer callback wired above.
-	eventRouter = routing.NewRouter(database, stores.Prompts, stores.EventHandlers, stores.Agents, spawner, scorer, wsHub)
+	eventRouter = routing.NewRouter(database, stores.Prompts, stores.EventHandlers, stores.Agents, stores.TeamAgents, spawner, scorer, wsHub)
 	bus.Subscribe(eventbus.Subscriber{
 		Name:   "router",
 		Filter: []string{"github:", "jira:"},

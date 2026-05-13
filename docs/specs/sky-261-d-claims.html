@@ -276,7 +276,7 @@ footer {
     </div>
     <div class="topbar__meta">
       <span class="pill pill--size">SIZE · M</span>
-      <span class="pill pill--draft">DRAFT v0.8</span>
+      <span class="pill pill--draft">DRAFT v0.9</span>
     </div>
   </div>
 </div>
@@ -382,6 +382,18 @@ footer {
 
   <div class="callout callout--good">
     <strong>The queue view is a derived filter, not a status value.</strong> "What's in the queue" = <code>WHERE claimed_by_agent_id IS NULL AND claimed_by_user_id IS NULL AND status NOT IN ('done', 'dismissed', 'snoozed')</code>. Team-scoped via the existing <code>team_id</code> + visibility/RLS. A user claiming a queued task is a claim-column transition, not a status change. This is what makes the "user claims without involving the bot" case clean — no new status enum value needed.
+  </div>
+
+  <div class="callout callout--good">
+    <strong>Bot-disabled-team handling.</strong> v0.9 spec acceptance: <code>team_agents.enabled = false</code> turns off auto-delegation AND refuses explicit user-delegate gestures. Three call sites enforce this: <code>router.tryAutoDelegate</code> silently skips trigger auto-fire; <code>handleSwipe</code> delegate branch returns 409; <code>factory_delegate</code> returns 409. The auto-trigger-fire case keeps the task in the team queue unclaimed — a human can still swipe-claim it for themselves; only the bot is gated. Local-mode N=1 always has the flag on (BootstrapLocalAgent default); the data-layer guard is load-bearing for multi-tenant when an admin toggles the bot off.
+  </div>
+
+  <div class="callout callout--good">
+    <strong>Run creator/actor pairing.</strong> v0.9: <code>runs.creator_user_id</code> drops NOT NULL; trigger-spawned runs land NULL creator + <code>trigger_type='event'</code>, manual runs keep non-NULL creator + <code>trigger_type='manual'</code>. A CHECK pairs the two fields so the seeder can't lie. <code>runs.actor_agent_id</code> stays nullable (deliberate divergence from the spec's literal "NOT NULL"): the <code>ON DELETE SET NULL</code> policy for graceful degradation when an agent row is deleted in a future multi-agent world requires nullable, and the bootstrap-fatal startup (also new in v0.9) guarantees the agent row exists before any run is created on healthy installs.
+  </div>
+
+  <div class="callout callout--good">
+    <strong>Bootstrap is fatal at startup.</strong> v0.9: <code>BootstrapLocalAgent</code> failure flips from <code>log.Printf</code> to <code>log.Fatalf</code>. Pre-D-Claims the row wasn't load-bearing; post-D-Claims it is (stampAgentClaim, drain claim_changed guard, runs.actor_agent_id stamping all depend on a real agent). The INSERT is idempotent so re-runs are safe; the only legitimate failure mode is a DB connection issue, which <code>Migrate()</code> already fatals on. Continuing past a bootstrap failure produces a silently-broken auto-delegation state — fatal at startup is the loud failure mode you want.
   </div>
 
   <div class="callout callout--good">
@@ -862,7 +874,7 @@ actorAgentID := task.ClaimedByAgentID
 </main>
 
 <footer>
-  SKY-261 · D-Claims · v0.8 · 2026-05-12
+  SKY-261 · D-Claims · v0.9 · 2026-05-12
 </footer>
 </body>
 </html>

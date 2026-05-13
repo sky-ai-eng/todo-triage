@@ -95,16 +95,29 @@ func (s *Spawner) Delegate(task domain.Task, explicitPromptID string, triggerTyp
 		}
 	}
 
+	// SKY-261 D-Claims: pair creator_user_id with trigger_type per the
+	// audit-honesty invariant. Manual runs (swipe-delegate / drag-to-
+	// Agent / factory drop) carry the local user's id as the creator.
+	// Trigger-spawned runs ('event' type) carry NULL — there's no
+	// human delegator. The schema CHECK enforces this pairing so the
+	// seeder can't drift. In multi-mode (SKY-251) the manual branch
+	// will pull from the request's auth context instead of the
+	// LocalDefaultUserID sentinel.
+	creatorUserID := ""
+	if triggerType == "manual" {
+		creatorUserID = runmode.LocalDefaultUserID
+	}
 	runID := uuid.New().String()
 	if err := db.CreateAgentRun(s.database, domain.AgentRun{
-		ID:           runID,
-		TaskID:       task.ID,
-		PromptID:     promptID,
-		Status:       "initializing",
-		Model:        model,
-		TriggerType:  triggerType,
-		TriggerID:    triggerID,
-		ActorAgentID: actorAgentID,
+		ID:            runID,
+		TaskID:        task.ID,
+		PromptID:      promptID,
+		Status:        "initializing",
+		Model:         model,
+		TriggerType:   triggerType,
+		TriggerID:     triggerID,
+		ActorAgentID:  actorAgentID,
+		CreatorUserID: creatorUserID,
 	}); err != nil {
 		return "", fmt.Errorf("create agent run: %w", err)
 	}

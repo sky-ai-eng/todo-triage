@@ -121,7 +121,7 @@ func TestDrainEntity_ClosedTask(t *testing.T) {
 		t.Fatalf("close task: %v", err)
 	}
 
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, noopScorer{}, websocket.NewHub())
 	router.DrainEntity(entityID)
 
 	rows, err := db.ListPendingFiringsForEntity(database, entityID)
@@ -162,7 +162,7 @@ func TestRevertTaskStatus_PreservesClaim(t *testing.T) {
 		t.Fatalf("pre-stage status: %v", err)
 	}
 
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, noopScorer{}, websocket.NewHub())
 	router.revertTaskStatus(taskID, "queued")
 
 	task, err := db.GetTask(database, taskID)
@@ -210,7 +210,7 @@ func TestDrainEntity_SnoozedTask(t *testing.T) {
 		t.Fatalf("snooze task: %v", err)
 	}
 
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, noopScorer{}, websocket.NewHub())
 	router.DrainEntity(entityID)
 
 	rows, err := db.ListPendingFiringsForEntity(database, entityID)
@@ -242,7 +242,7 @@ func TestDrainEntity_DisabledTrigger(t *testing.T) {
 
 	setTriggerEnabledForTestRouting(t, database, triggerID, false)
 
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, noopScorer{}, websocket.NewHub())
 	router.DrainEntity(entityID)
 
 	rows, err := db.ListPendingFiringsForEntity(database, entityID)
@@ -305,7 +305,7 @@ func TestDrainEntity_MultipleStaleFirings(t *testing.T) {
 		}
 	}
 
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, noopScorer{}, websocket.NewHub())
 	router.DrainEntity(entityID)
 
 	rows, err := db.ListPendingFiringsForEntity(database, entityID)
@@ -332,7 +332,7 @@ func TestDrainEntity_EmptyQueue(t *testing.T) {
 	database := newTestDB(t)
 	entityID, _, _, _ := setupDrainScenario(t, database)
 
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, noopScorer{}, websocket.NewHub())
 	router.DrainEntity(entityID) // must not panic or error visibly
 
 	rows, err := db.ListPendingFiringsForEntity(database, entityID)
@@ -366,7 +366,7 @@ func TestDrainEntity_ConcurrentDrainsDoNotDoubleFire(t *testing.T) {
 	}
 
 	stub := &stubDelegator{db: database}
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, stub, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, stub, noopScorer{}, websocket.NewHub())
 
 	const drainers = 5
 	var wg sync.WaitGroup
@@ -419,7 +419,7 @@ func TestRunDrainSweeper_PicksUpStuckFiring(t *testing.T) {
 	}
 
 	stub := &stubDelegator{db: database}
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, stub, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, stub, noopScorer{}, websocket.NewHub())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -467,7 +467,7 @@ func TestRunDrainSweeper_NoOpWhenIdle(t *testing.T) {
 	_ = entityID
 
 	stub := &stubDelegator{db: database}
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, stub, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, stub, noopScorer{}, websocket.NewHub())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

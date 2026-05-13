@@ -47,13 +47,14 @@ type Delegator interface {
 //     auto run or earlier queued firings (SKY-189).
 //  8. Runs inline close checks for the event type
 type Router struct {
-	db       *sql.DB
-	prompts  dbpkg.PromptStore
-	handlers dbpkg.EventHandlerStore
-	agents   dbpkg.AgentStore
-	spawner  Delegator
-	scorer   Scorer
-	ws       *websocket.Hub
+	db         *sql.DB
+	prompts    dbpkg.PromptStore
+	handlers   dbpkg.EventHandlerStore
+	agents     dbpkg.AgentStore
+	teamAgents dbpkg.TeamAgentStore // SKY-261: read team_agents.enabled before auto-firing triggers
+	spawner    Delegator
+	scorer     Scorer
+	ws         *websocket.Hub
 
 	// drainLocks serializes DrainEntity calls per entity. Without this,
 	// the non-mutating PopPendingFiringForEntity creates a window between
@@ -71,13 +72,17 @@ type Router struct {
 	drainLocks  map[string]*sync.Mutex
 }
 
-// NewRouter creates a Router.
-func NewRouter(db *sql.DB, prompts dbpkg.PromptStore, handlers dbpkg.EventHandlerStore, agents dbpkg.AgentStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
+// NewRouter creates a Router. teamAgents is nil-safe — callers wired
+// before SKY-261 D-Claims can pass nil; the bot-disabled-team check
+// degrades to "always enabled" in that case (the pre-SKY-261
+// behavior).
+func NewRouter(db *sql.DB, prompts dbpkg.PromptStore, handlers dbpkg.EventHandlerStore, agents dbpkg.AgentStore, teamAgents dbpkg.TeamAgentStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
 	return &Router{
 		db:         db,
 		prompts:    prompts,
 		handlers:   handlers,
 		agents:     agents,
+		teamAgents: teamAgents,
 		spawner:    spawner,
 		scorer:     scorer,
 		ws:         ws,
@@ -278,6 +283,37 @@ func (r *Router) HandleEvent(evt domain.Event) {
 // for FIFO fairness), the firing enqueues onto pending_firings instead of
 // being dropped silently.
 func (r *Router) tryAutoDelegate(task *domain.Task, trigger domain.EventHandler, entityID string, triggeringEventID string) {
+	// SKY-261 bot-disabled-team gate. If the task's team has the bot
+	// turned off in team_agents.enabled, the auto-trigger is a no-op
+	// — the task is already in the team queue (created by HandleEvent
+	// upstream); a human will swipe-delegate later if they want a
+	// run. Skip silently rather than firing on a disabled team.
+	//
+	// Nil-safe on r.teamAgents for pre-D-Claims test wiring; the
+	// production server.New always passes a real store.
+	if r.teamAgents != nil {
+		a, err := r.agents.GetForOrg(context.Background(), runmode.LocalDefaultOrg)
+		if err != nil {
+			log.Printf("[router] auto-trigger skipped: agent lookup: %v", err)
+			return
+		}
+		if a == nil {
+			// No bootstrapped agent — bootstrap is now fatal at
+			// startup, so this shouldn't reach us in practice.
+			// Log + bail rather than crashing the goroutine.
+			log.Printf("[router] auto-trigger skipped on task %s: no agent bootstrapped", task.ID)
+			return
+		}
+		ta, err := r.teamAgents.GetForTeam(context.Background(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, a.ID)
+		if err != nil {
+			log.Printf("[router] auto-trigger skipped on task %s: team_agents lookup: %v", task.ID, err)
+			return
+		}
+		if ta == nil || !ta.Enabled {
+			log.Printf("[router] auto-trigger skipped on task %s: bot disabled for team", task.ID)
+			return
+		}
+	}
 	// Breaker gate. trigger.BreakerThreshold is *int because the column
 	// is nullable at the schema level (rule rows have NULL); kind='trigger'
 	// rows are guaranteed non-nil by the per-kind CHECK constraint.

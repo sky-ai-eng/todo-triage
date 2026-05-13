@@ -10,6 +10,119 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
+// TestCreateAgentRun_CreatorUserIDPairsWithTriggerType pins the
+// SKY-261 v0.9 invariant: trigger-spawned runs (trigger_type='event')
+// have creator_user_id NULL; manual runs have it set. The CHECK
+// constraint enforces this at the schema level; CreateAgentRun has
+// a backward-compat default for manual runs that don't supply a
+// creator (test fixtures, legacy callers) so the constraint doesn't
+// trip them.
+func TestCreateAgentRun_CreatorUserIDPairsWithTriggerType(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		triggerType    string
+		creatorUserID  string
+		wantSQLCreator sql.NullString // null = empty/expected NULL
+	}{
+		{
+			name:           "event_with_empty_creator_lands_NULL",
+			triggerType:    "event",
+			creatorUserID:  "",
+			wantSQLCreator: sql.NullString{Valid: false},
+		},
+		{
+			name:           "manual_with_explicit_creator_lands_set",
+			triggerType:    "manual",
+			creatorUserID:  runmode.LocalDefaultUserID,
+			wantSQLCreator: sql.NullString{String: runmode.LocalDefaultUserID, Valid: true},
+		},
+		{
+			name:           "manual_without_creator_defaults_to_sentinel",
+			triggerType:    "manual",
+			creatorUserID:  "",
+			wantSQLCreator: sql.NullString{String: runmode.LocalDefaultUserID, Valid: true},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			database := newTestDB(t)
+			// Seed minimum FK graph.
+			entity, _, err := FindOrCreateEntity(database, "github", "octo/repo#run-"+tc.name, "pr", "T", "https://example.com/r")
+			if err != nil {
+				t.Fatalf("seed entity: %v", err)
+			}
+			eventID, err := RecordEvent(database, domain.Event{
+				EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entity.ID, MetadataJSON: `{}`,
+			})
+			if err != nil {
+				t.Fatalf("record event: %v", err)
+			}
+			task, _, err := FindOrCreateTask(database, entity.ID, domain.EventGitHubPRCICheckFailed, tc.name, eventID, 0.5)
+			if err != nil {
+				t.Fatalf("create task: %v", err)
+			}
+			if _, err := database.Exec(
+				`INSERT OR IGNORE INTO prompts (id, name, body) VALUES ('p-creator', 'P', 'x')`,
+			); err != nil {
+				t.Fatalf("seed prompt: %v", err)
+			}
+			runID := "r-creator-" + tc.name
+			if err := CreateAgentRun(database, domain.AgentRun{
+				ID:            runID,
+				TaskID:        task.ID,
+				PromptID:      "p-creator",
+				Status:        "initializing",
+				Model:         "m",
+				TriggerType:   tc.triggerType,
+				CreatorUserID: tc.creatorUserID,
+			}); err != nil {
+				t.Fatalf("CreateAgentRun: %v", err)
+			}
+			var gotCreator sql.NullString
+			if err := database.QueryRow(
+				`SELECT creator_user_id FROM runs WHERE id = ?`, runID,
+			).Scan(&gotCreator); err != nil {
+				t.Fatalf("scan creator: %v", err)
+			}
+			if gotCreator != tc.wantSQLCreator {
+				t.Errorf("creator_user_id = %v, want %v", gotCreator, tc.wantSQLCreator)
+			}
+		})
+	}
+
+	t.Run("event_with_explicit_creator_violates_CHECK", func(t *testing.T) {
+		// Negative case: 'event' + non-NULL creator must be rejected
+		// by the CHECK constraint at INSERT time. Confirms the
+		// schema-level invariant is real, not just an application-
+		// side convention.
+		database := newTestDB(t)
+		entity, _, _ := FindOrCreateEntity(database, "github", "octo/repo#run-neg", "pr", "T", "https://example.com/r")
+		eventID, _ := RecordEvent(database, domain.Event{
+			EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entity.ID, MetadataJSON: `{}`,
+		})
+		task, _, _ := FindOrCreateTask(database, entity.ID, domain.EventGitHubPRCICheckFailed, "neg", eventID, 0.5)
+		if _, err := database.Exec(
+			`INSERT OR IGNORE INTO prompts (id, name, body) VALUES ('p-neg', 'P', 'x')`,
+		); err != nil {
+			t.Fatalf("seed prompt: %v", err)
+		}
+		err := CreateAgentRun(database, domain.AgentRun{
+			ID:            "r-neg",
+			TaskID:        task.ID,
+			PromptID:      "p-neg",
+			Status:        "initializing",
+			Model:         "m",
+			TriggerType:   "event",
+			CreatorUserID: runmode.LocalDefaultUserID, // wrong combo
+		})
+		if err == nil {
+			t.Fatal("CreateAgentRun accepted 'event' + non-NULL creator; CHECK constraint missing")
+		}
+		if !strings.Contains(err.Error(), "CHECK") {
+			t.Errorf("error = %q; want CHECK-constraint violation", err.Error())
+		}
+	})
+}
+
 // TestActiveRunIDsForTask verifies the terminal-state filter matches the one
 // used by HasActiveRunForTask — the close cascade depends on this query
 // returning exactly the runs that should be cancelled when a task closes.

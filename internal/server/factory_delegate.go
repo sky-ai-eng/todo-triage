@@ -186,17 +186,19 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	// claim is the responsibility axis (commitment); runs are the
 	// execution axis. They're orthogonal; a failed run doesn't
 	// invalidate the assignment.
-	if s.agents == nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delegate failed: agent store not configured"})
+	// SKY-261 acceptance: re-check team_agents.enabled at gesture
+	// time. Factory drag-to-bot is the same semantic as swipe-up
+	// "delegate to bot" — both refuse with 409 when the bot is off
+	// for this team.
+	a, enabled, err := s.agentEnabledForLocalTeam(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delegate failed: " + err.Error()})
 		return
 	}
-	a, aerr := s.agents.GetForOrg(r.Context(), runmode.LocalDefaultOrg)
-	if aerr != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delegate failed: agent lookup: " + aerr.Error()})
-		return
-	}
-	if a == nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delegate failed: no agent bootstrapped — set up the bot first"})
+	if !enabled {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "bot is disabled for this team; enable it in team settings to delegate",
+		})
 		return
 	}
 	// HandoffAgentClaim handles all three legitimate factory drop

@@ -651,6 +651,74 @@ func TestHandleSwipe_ClaimRefusedOnTerminalTask(t *testing.T) {
 	}
 }
 
+// TestHandleSwipe_DelegateRefusedWhenBotDisabled pins the SKY-261
+// acceptance criterion "swipe-to-delegate re-checks team_agents.enabled
+// at swipe time." A team admin can toggle the bot off via SetEnabled
+// — subsequent /swipe delegate gestures must 409, with no claim
+// stamp, no spawn, no audit row. Local-mode N=1 doesn't normally
+// flip this off but the data-layer enforcement is what multi-tenant
+// will need.
+func TestHandleSwipe_DelegateRefusedWhenBotDisabled(t *testing.T) {
+	s := newTestServer(t)
+	// Flip the bot OFF on the local team.
+	if _, err := s.db.Exec(
+		`UPDATE team_agents SET enabled = 0 WHERE team_id = ? AND agent_id = ?`,
+		runmode.LocalDefaultTeamID, runmode.LocalDefaultAgentID,
+	); err != nil {
+		t.Fatalf("disable bot: %v", err)
+	}
+	const eventType = "github:pr:opened"
+	if _, err := s.db.Exec(
+		`INSERT INTO entities (id, source, source_id, kind, state)
+		 VALUES ('e_bot_off', 'github', 'sky/repo#off', 'pr', 'active')`,
+	); err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO events (id, entity_id, event_type, dedup_key)
+		 VALUES ('ev_bot_off', 'e_bot_off', ?, '')`,
+		eventType,
+	); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status)
+		 VALUES ('t_bot_off', 'e_bot_off', ?, 'ev_bot_off', 'queued')`,
+		eventType,
+	); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_bot_off/swipe",
+		map[string]any{"action": "delegate", "hesitation_ms": 0, "prompt_id": "any"})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (bot disabled); body=%s", rec.Code, rec.Body.String())
+	}
+
+	// No state changes — claim cols untouched, no swipe_events row.
+	var claimAgent, claimUser sql.NullString
+	if err := s.db.QueryRow(
+		`SELECT claimed_by_agent_id, claimed_by_user_id FROM tasks WHERE id = 't_bot_off'`,
+	).Scan(&claimAgent, &claimUser); err != nil {
+		t.Fatalf("scan task: %v", err)
+	}
+	if claimAgent.Valid {
+		t.Errorf("bot claim landed despite disabled flag: %q", claimAgent.String)
+	}
+	if claimUser.Valid {
+		t.Errorf("user claim disturbed: %q", claimUser.String)
+	}
+	var swipeCount int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM swipe_events WHERE task_id = 't_bot_off'`,
+	).Scan(&swipeCount); err != nil {
+		t.Fatalf("scan swipe_events: %v", err)
+	}
+	if swipeCount != 0 {
+		t.Errorf("swipe_events count = %d, want 0", swipeCount)
+	}
+}
+
 // TestHandleSnooze_404OnMissingTask pins missing-task parity with
 // /undo and /requeue. Pre-fix, hitting /snooze on a bogus id would
 // trip the swipe_events→tasks FK constraint inside SnoozeTask and

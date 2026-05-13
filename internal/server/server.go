@@ -1,8 +1,10 @@
 package server
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"strings"
@@ -13,8 +15,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -25,7 +29,8 @@ type Server struct {
 	swipes             db.SwipeStore
 	dashboard          db.DashboardStore
 	eventHandlers      db.EventHandlerStore
-	agents             db.AgentStore // SKY-261 D-Claims: resolves the org's agent for claim stamps
+	agents             db.AgentStore     // SKY-261 D-Claims: resolves the org's agent for claim stamps
+	teamAgents         db.TeamAgentStore // SKY-261 D-Claims: re-checks team_agents.enabled on swipe-delegate / factory-delegate
 	mux                *http.ServeMux
 	static             fs.FS
 	ws                 *websocket.Hub
@@ -72,12 +77,58 @@ func (s *Server) projectMutex(id string) *sync.Mutex {
 	return v.(*sync.Mutex)
 }
 
+// agentEnabledForLocalTeam returns the resolved agent and whether the
+// team_agents.enabled flag is true for it. Wraps the two-step lookup
+// (Agents.GetForOrg → TeamAgents.GetForTeam) so swipe-delegate and
+// factory-delegate share one code path for the SKY-261 acceptance
+// rule "swipe-to-delegate re-checks team_agents.enabled at swipe
+// time."
+//
+// Three outcomes the caller maps:
+//   - (a, true, nil)  — proceed with the delegate.
+//   - (a, false, nil) — bot disabled for this team; refuse with 409.
+//   - (_, _, err)     — store error; refuse with 500.
+//
+// Nil agent (no bootstrap) returns err so the caller surfaces a
+// distinguishable 500 message rather than a misleading "disabled"
+// 409. Bootstrap is fatal at startup post-D-Claims so this is
+// belt-and-suspenders for tests / degraded states.
+func (s *Server) agentEnabledForLocalTeam(ctx context.Context) (*domain.Agent, bool, error) {
+	if s.agents == nil {
+		return nil, false, fmt.Errorf("agent store not configured")
+	}
+	a, err := s.agents.GetForOrg(ctx, runmode.LocalDefaultOrg)
+	if err != nil {
+		return nil, false, fmt.Errorf("agent lookup: %w", err)
+	}
+	if a == nil {
+		return nil, false, fmt.Errorf("no agent bootstrapped — set up the bot first")
+	}
+	if s.teamAgents == nil {
+		// Pre-D-Claims wiring (tests). Treat as enabled to preserve
+		// the pre-flag behavior for any test path that hasn't wired
+		// teamAgents yet.
+		return a, true, nil
+	}
+	ta, err := s.teamAgents.GetForTeam(ctx, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, a.ID)
+	if err != nil {
+		return a, false, fmt.Errorf("team_agents lookup: %w", err)
+	}
+	if ta == nil {
+		// team_agents row missing — treat as disabled. Production
+		// installs always have the row via BootstrapLocalAgent; a
+		// missing row at runtime means something went sideways.
+		return a, false, nil
+	}
+	return a, ta.Enabled, nil
+}
+
 // New creates a new server with the given database + the per-resource
 // stores migrated under SKY-246, and registers all routes. The
 // argument list grows one store at a time as their callers migrate;
 // raw *sql.DB stays available for handlers that haven't been ported
 // to a store yet.
-func New(database *sql.DB, prompts db.PromptStore, swipes db.SwipeStore, dashboard db.DashboardStore, eventHandlers db.EventHandlerStore, agents db.AgentStore) *Server {
+func New(database *sql.DB, prompts db.PromptStore, swipes db.SwipeStore, dashboard db.DashboardStore, eventHandlers db.EventHandlerStore, agents db.AgentStore, teamAgents db.TeamAgentStore) *Server {
 	s := &Server{
 		db:            database,
 		prompts:       prompts,
@@ -85,6 +136,7 @@ func New(database *sql.DB, prompts db.PromptStore, swipes db.SwipeStore, dashboa
 		dashboard:     dashboard,
 		eventHandlers: eventHandlers,
 		agents:        agents,
+		teamAgents:    teamAgents,
 		mux:           http.NewServeMux(),
 		ws:            websocket.NewHub(),
 	}

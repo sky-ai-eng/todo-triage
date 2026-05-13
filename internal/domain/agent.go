@@ -28,6 +28,15 @@ type AgentRun struct {
 	// string = NULL on the row (run was spawned before the agent
 	// bootstrap completed, or after the agent was deleted).
 	ActorAgentID string
+
+	// CreatorUserID is the users.id of the human who initiated this
+	// run (SKY-261 D-Claims). Set for manual runs (swipe-delegate /
+	// drag-to-Agent / factory drop); empty / NULL for trigger-
+	// spawned runs where no human asked for the work. The schema
+	// CHECK pairs this with trigger_type: 'manual' ↔ non-NULL,
+	// 'event' ↔ NULL. Same shape SKY-262's system_rows_nullable
+	// migration introduced for prompts / task_rules / etc.
+	CreatorUserID string
 }
 
 // AgentMessage represents a single message within an agent run.

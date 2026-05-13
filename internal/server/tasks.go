@@ -264,20 +264,23 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	case "delegate":
-		if s.agents == nil {
-			log.Printf("[swipe] agent claim skipped on task %s: AgentStore not configured", id)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delegate failed: agent store not configured"})
+		// SKY-261 acceptance: swipe-delegate re-checks
+		// team_agents.enabled at swipe time. A team admin can
+		// toggle the bot off; trigger-spawned tasks landed
+		// unclaimed (router's auto-fire skipped), and the user
+		// can't manually delegate to a disabled bot either.
+		// Refuse with 409 — clear error the FE can surface as
+		// "bot is off; enable it in team settings."
+		a, enabled, err := s.agentEnabledForLocalTeam(r.Context())
+		if err != nil {
+			log.Printf("[swipe] delegate aborted on task %s: %v", id, err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delegate failed: " + err.Error()})
 			return
 		}
-		a, aerr := s.agents.GetForOrg(r.Context(), runmode.LocalDefaultOrg)
-		if aerr != nil {
-			log.Printf("[swipe] agent lookup failed on task %s delegate: %v", id, aerr)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delegate failed: agent lookup: " + aerr.Error()})
-			return
-		}
-		if a == nil {
-			log.Printf("[swipe] delegate aborted on task %s: no agent bootstrapped yet", id)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delegate failed: no agent bootstrapped — set up the bot first"})
+		if !enabled {
+			writeJSON(w, http.StatusConflict, map[string]string{
+				"error": "bot is disabled for this team; enable it in team settings to delegate",
+			})
 			return
 		}
 		// HandoffAgentClaim covers three legitimate user→bot

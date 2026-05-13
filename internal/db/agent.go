@@ -12,10 +12,23 @@ import (
 )
 
 // CreateAgentRun inserts a new agent run.
+//
+// CreatorUserID defaulting: when the caller didn't supply one and
+// trigger_type is "manual" (the run-creation default), fall back to
+// the LocalDefaultUserID sentinel. This keeps test fixtures + legacy
+// callers working without having to know the post-SKY-261 CHECK
+// invariant. Production spawner.Delegate explicitly sets the value
+// based on trigger_type, so this default only kicks in for direct-
+// SQL callers (tests). For trigger_type='event' we leave CreatorUserID
+// alone — the spawner sets it to "" and nullIfEmpty maps to SQL NULL,
+// which is what the CHECK requires.
 func CreateAgentRun(database *sql.DB, run domain.AgentRun) error {
 	triggerType := run.TriggerType
 	if triggerType == "" {
 		triggerType = "manual"
+	}
+	if triggerType == "manual" && run.CreatorUserID == "" {
+		run.CreatorUserID = runmode.LocalDefaultUserID
 	}
 	// team_id + visibility populated explicitly per SKY-262: runs inherit
 	// their task's team scope so the team-scoped queue / Board filter
@@ -29,10 +42,16 @@ func CreateAgentRun(database *sql.DB, run domain.AgentRun) error {
 	// agents.GetForOrg() when the task's claim is empty, so this is
 	// typically populated; NULL is reserved for "no agents row exists
 	// yet" — transient between db init and agent bootstrap).
+	//
+	// creator_user_id is the inverse: NULL for trigger-spawned runs
+	// (no human delegator), set to the requesting user for manual
+	// runs. The schema CHECK pairs trigger_type and creator nullability
+	// so the seeder can't drift back to lying. The caller's spawner
+	// decides which value to pass; nullIfEmpty maps "" → NULL.
 	_, err := database.Exec(`
-		INSERT INTO runs (id, task_id, prompt_id, status, model, worktree_path, trigger_type, trigger_id, team_id, visibility, actor_agent_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'team', ?)
-	`, run.ID, run.TaskID, nullIfEmpty(run.PromptID), run.Status, run.Model, run.WorktreePath, triggerType, nullIfEmpty(run.TriggerID), runmode.LocalDefaultTeamID, nullIfEmpty(run.ActorAgentID))
+		INSERT INTO runs (id, task_id, prompt_id, status, model, worktree_path, trigger_type, trigger_id, team_id, visibility, creator_user_id, actor_agent_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'team', ?, ?)
+	`, run.ID, run.TaskID, nullIfEmpty(run.PromptID), run.Status, run.Model, run.WorktreePath, triggerType, nullIfEmpty(run.TriggerID), runmode.LocalDefaultTeamID, nullIfEmpty(run.CreatorUserID), nullIfEmpty(run.ActorAgentID))
 	return err
 }
 
