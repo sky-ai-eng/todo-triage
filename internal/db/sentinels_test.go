@@ -114,14 +114,17 @@ func TestMigrationDefaults_MatchRuntimeConstants(t *testing.T) {
 			expected:       runmode.LocalDefaultOrgID + "|" + runmode.LocalDefaultUserID,
 		},
 		{
-			name: "event_handlers.org_id",
+			name: "event_handlers.org_id+team_id",
+			// Don't pass team_id explicitly — exercise the DEFAULT so a
+			// drift between the literal in the migration and
+			// runmode.LocalDefaultTeamID surfaces here.
 			probe: `INSERT INTO event_handlers
-			        (id, kind, event_type, source, name, default_priority, sort_order, team_id, creator_user_id)
-			        VALUES ('probe-eh', 'rule', 'github:pr:opened', 'user', 'n', 0.5, 0, ?, ?)`,
-			probeArgs:      []any{runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID},
-			readBackQuery:  `SELECT org_id FROM event_handlers WHERE id = 'probe-eh'`,
-			readBackColumn: "org_id",
-			expected:       runmode.LocalDefaultOrgID,
+			        (id, kind, event_type, source, name, default_priority, sort_order, creator_user_id)
+			        VALUES ('probe-eh', 'rule', 'github:pr:opened', 'user', 'n', 0.5, 0, ?)`,
+			probeArgs:      []any{runmode.LocalDefaultUserID},
+			readBackQuery:  `SELECT org_id || '|' || team_id FROM event_handlers WHERE id = 'probe-eh'`,
+			readBackColumn: "org_id|team_id",
+			expected:       runmode.LocalDefaultOrgID + "|" + runmode.LocalDefaultTeamID,
 		},
 	}
 

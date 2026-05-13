@@ -298,7 +298,13 @@ CREATE TABLE event_handlers (
     id              TEXT PRIMARY KEY,
     org_id          TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
     creator_user_id TEXT,
-    team_id         TEXT,
+    -- team_id ships with the LocalDefaultTeamID sentinel as DEFAULT to
+    -- match tasks/runs. With visibility='team' as the default, any
+    -- direct INSERT that omitted team_id would otherwise trip
+    -- event_handlers_team_visibility_requires_team. System-source
+    -- shipped rows (visibility='org') tolerate any team_id value;
+    -- the sentinel is consistent across them.
+    team_id         TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000010',
     visibility      TEXT NOT NULL DEFAULT 'team'
                        CHECK (visibility IN ('private','team','org')),
 

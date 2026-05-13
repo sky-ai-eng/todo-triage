@@ -24,6 +24,14 @@ import (
 //
 // Empty PinnedRepos serializes as `[]` (not null) — matches the DB
 // default and keeps the JSON round-trip predictable.
+//
+// Local-mode only: team_id is pinned to LocalDefaultTeamID. SKY-253
+// D9 (org-scoping pass) will replace this raw-SQL function with a
+// ProjectStore.Create(ctx, orgID, teamID, ...) that derives team_id
+// from the request-scoped session context, with SQLite + Postgres
+// impls. Until then, calling this in multi mode would silently attach
+// the row to the wrong team — guarded only by main.go's
+// log.Fatalf on TF_MODE=multi at startup.
 func CreateProject(database *sql.DB, p domain.Project) (string, error) {
 	id := p.ID
 	if id == "" {

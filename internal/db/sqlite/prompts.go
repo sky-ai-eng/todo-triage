@@ -193,18 +193,32 @@ func (s *promptStore) Get(ctx context.Context, orgID string, id string) (*domain
 	return &p, nil
 }
 
+// Create inserts a prompt row scoped to the local sentinel team. The
+// visibility + creator_user_id pair is derived from p.Source rather
+// than taken from the caller, which is a deliberate divergence from
+// the Postgres impl:
+//
+//   - Postgres Create hardcodes visibility='team' and derives
+//     creator_user_id from tf.current_user_id() (request context).
+//     System prompts there go through SeedOrUpdate only — the
+//     prompts_system_has_no_creator CHECK rejects source='system'
+//     rows that come through this path.
+//   - SQLite Create handles both source='system' (system tests +
+//     curator skill seeds) and source∈('user','imported') in one
+//     entry point because local mode has no request context to
+//     derive identity from and tests reach into Create directly.
+//
+// Local-mode call sites today: the prompts HTTP handler (source='user')
+// and skills.ImportAll (source='imported'). Tests that need a
+// source='system' row also use this method. The override keeps
+// those three call paths converging on a single Create rather than
+// adding a per-source variant or forcing the handler to wire team_id
+// + visibility from outside.
 func (s *promptStore) Create(ctx context.Context, orgID string, p domain.Prompt) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
 	now := time.Now().UTC()
-	// Post-SKY-262, user prompts are team-scoped with team_id =
-	// LocalDefaultTeamID + visibility='team'. SQLite has one team
-	// in local mode (sentinel from SKY-269). System rows (Source='system'
-	// — only the shipped defaults reach here via test fixtures that
-	// bypass SeedOrUpdate) must have creator_user_id NULL +
-	// visibility='org' to satisfy prompts_system_has_no_creator and
-	// prompts_team_visibility_requires_team.
 	var creatorUserID any = runmode.LocalDefaultUserID
 	visibility := "team"
 	if p.Source == "system" {
