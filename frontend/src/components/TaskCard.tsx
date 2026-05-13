@@ -159,11 +159,11 @@ function DelegateFailedBadge({ message }: { message: string }) {
   )
 }
 
-// SnoozedBadge surfaces "task is owned but parked until X." A claimed-
-// and-snoozed task lives in its owner's lane (You / Agent) — the
-// badge is the signal that the owner is deferring action, not that
-// the task is unowned. Uses the same snooze amber as DelegateFailed
-// + the muted card opacity to read "set aside on purpose."
+// SnoozedBadge surfaces "task is parked until X." Snoozed tasks are
+// not simultaneously claimed/delegated; claiming or delegating wakes
+// them. The badge signals intentional deferral rather than active
+// ownership. Uses the same snooze amber as DelegateFailed + the
+// muted card opacity to read "set aside on purpose."
 function SnoozedBadge({ until }: { until: Date }) {
   return (
     <span
