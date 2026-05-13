@@ -9,13 +9,18 @@ import (
 )
 
 // AssertLocalSentinels confirms the synthetic LocalDefault* rows
-// seeded by the v1.11.0 baseline migration are present and match the
-// runmode constants. Catches drift between the migration's hardcoded
-// UUID literals (in INSERT seed rows + NOT NULL DEFAULT clauses on
-// org_id/team_id/creator_user_id columns) and the Go runmode constants
-// — if either side moves without the other, this fails loudly at
-// startup rather than silently producing rows that reference a
-// non-existent team.
+// seeded by the v1.11.0 baseline migration are present at startup.
+// Catches the case where the seed INSERT block is removed or its
+// UUIDs are edited without updating the runmode constants — boot
+// fails loudly rather than silently producing orphan rows.
+//
+// Scope limit: this is a seed-row-presence check only. It does NOT
+// validate that the migration's NOT NULL DEFAULT '<uuid>' clauses
+// on org_id/team_id/creator_user_id columns still match the runmode
+// constants — those columns have no FK in SQLite, so DEFAULT drift
+// is invisible at runtime. That class of drift is caught at CI
+// time by TestMigrationDefaults_MatchRuntimeConstants in
+// sentinels_test.go, which probes every defaulted column by INSERT.
 //
 // Only meaningful in local mode (multi-mode boots through a different
 // path that creates orgs/teams/users at sign-up). Returns nil

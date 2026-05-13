@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -208,6 +209,13 @@ func Init(db *sql.DB) error {
 // of "values from earlier successful reads" + "Default() for later
 // tables" — silently inconsistent state that's hard to reason about
 // at call sites.
+//
+// To avoid the silent-degradation footgun for callers that drop the
+// error (a transient DB hiccup could otherwise quietly swap their
+// configured BaseURL/poll intervals for the package defaults), every
+// error path emits a `[config] load failed, degrading to Default()`
+// log line. Callers that need stricter handling still get the error
+// back to act on it.
 func Load() (Config, error) {
 	pkgMu.RLock()
 	db := pkgDB
@@ -228,7 +236,7 @@ func Load() (Config, error) {
 	case errors.Is(err, sql.ErrNoRows):
 		// keep Default()
 	case err != nil:
-		return Default(), fmt.Errorf("read instance_config: %w", err)
+		return loadFail(fmt.Errorf("read instance_config: %w", err))
 	default:
 		cfg.Server.Port = port
 		cfg.Server.TakeoverDir = takeover
@@ -245,14 +253,14 @@ func Load() (Config, error) {
 	case errors.Is(err, sql.ErrNoRows):
 		// keep Default()
 	case err != nil:
-		return Default(), fmt.Errorf("read org_settings: %w", err)
+		return loadFail(fmt.Errorf("read org_settings: %w", err))
 	default:
 		if ghURL.Valid {
 			cfg.GitHub.BaseURL = ghURL.String
 		}
 		d, err := time.ParseDuration(ghInterval)
 		if err != nil {
-			return Default(), fmt.Errorf("parse org_settings github_poll_interval %q: %w", ghInterval, err)
+			return loadFail(fmt.Errorf("parse org_settings github_poll_interval %q: %w", ghInterval, err))
 		}
 		cfg.GitHub.PollInterval = d
 		cfg.GitHub.CloneProtocol = cloneProto
@@ -261,7 +269,7 @@ func Load() (Config, error) {
 		}
 		d, err = time.ParseDuration(jiraInterval)
 		if err != nil {
-			return Default(), fmt.Errorf("parse org_settings jira_poll_interval %q: %w", jiraInterval, err)
+			return loadFail(fmt.Errorf("parse org_settings jira_poll_interval %q: %w", jiraInterval, err))
 		}
 		cfg.Jira.PollInterval = d
 	}
@@ -279,11 +287,11 @@ func Load() (Config, error) {
 	case errors.Is(err, sql.ErrNoRows):
 		// keep Default()
 	case err != nil:
-		return Default(), fmt.Errorf("read team_settings: %w", err)
+		return loadFail(fmt.Errorf("read team_settings: %w", err))
 	default:
 		var projects []string
 		if err := json.Unmarshal([]byte(projectsJSON), &projects); err != nil {
-			return Default(), fmt.Errorf("unmarshal team_settings.jira_projects: %w", err)
+			return loadFail(fmt.Errorf("unmarshal team_settings.jira_projects: %w", err))
 		}
 		cfg.Jira.Projects = projects
 		cfg.AI.ReprioritizeThreshold = aiThreshold
@@ -300,7 +308,7 @@ func Load() (Config, error) {
 	case errors.Is(err, sql.ErrNoRows):
 		// keep Default()
 	case err != nil:
-		return Default(), fmt.Errorf("read user_settings: %w", err)
+		return loadFail(fmt.Errorf("read user_settings: %w", err))
 	default:
 		cfg.AI.Model = aiModel
 		cfg.AI.AutoDelegateEnabled = aiAutoDelegate
@@ -315,7 +323,7 @@ func Load() (Config, error) {
 	// Returns ErrNoRows when no projects have been configured yet,
 	// which keeps Default()'s empty rules.
 	if rule, err := loadJiraStatusRules(ctx, db, runmode.LocalDefaultTeamID); err != nil {
-		return Default(), fmt.Errorf("read jira_project_status_rules: %w", err)
+		return loadFail(fmt.Errorf("read jira_project_status_rules: %w", err))
 	} else if rule != nil {
 		cfg.Jira.Pickup = rule.Pickup
 		cfg.Jira.InProgress = rule.InProgress
@@ -323,6 +331,16 @@ func Load() (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// loadFail centralizes the "log + return Default() + wrap error"
+// pattern used by every error branch in Load(). The log line
+// guarantees callers that drop the error (cfg, _ := config.Load())
+// still surface the failure in the process log instead of silently
+// substituting defaults.
+func loadFail(err error) (Config, error) {
+	log.Printf("[config] load failed, degrading to Default(): %v", err)
+	return Default(), err
 }
 
 // jiraStatusRules bundles the three rules read from a single
@@ -369,12 +387,32 @@ func loadJiraStatusRules(ctx context.Context, db *sql.DB, teamID string) (*jiraS
 	return &rules, nil
 }
 
+// ErrInvalidConfig is returned by Save when the supplied Config
+// fails the minimum-shape validation. Today this guards the zero-
+// value foot-gun: Save(Config{}) would otherwise silently write
+// port=0 + takeover_dir=” to instance_config, clobbering any
+// existing row.
+var ErrInvalidConfig = errors.New("config: invalid Config — fields must be populated (use Load() or Default() as a base, then mutate)")
+
 // Save upserts the five settings tables for the local sentinels.
 // Jira project rules are materialized one row per project in
 // cfg.Jira.Projects, all sharing identical Pickup/InProgress/Done
 // values (local mode). Projects no longer in the list have their
 // rules row deleted so the table stays clean.
+//
+// Required contract: cfg must come from Load() or Default(), then
+// be mutated — building a Config struct from scratch and calling
+// Save will fail validation (ErrInvalidConfig). The zero-value
+// check on Server.Port is a footgun guard: Server.Port=0 would
+// otherwise overwrite the persisted port with 0, and there's no
+// meaningful way for a caller to express "leave port alone" with
+// the current API.
 func Save(cfg Config) error {
+	if cfg.Server.Port <= 0 {
+		return fmt.Errorf("%w: Server.Port=%d (must be > 0; build the Config from Load() or Default())",
+			ErrInvalidConfig, cfg.Server.Port)
+	}
+
 	pkgMu.RLock()
 	db := pkgDB
 	pkgMu.RUnlock()
