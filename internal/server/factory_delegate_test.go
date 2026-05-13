@@ -2,14 +2,17 @@ package server
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -225,6 +228,91 @@ func TestHandleFactoryDelegate_DelegateErrorPreservesClaim(t *testing.T) {
 	}
 	if swipeCount != 1 {
 		t.Errorf("swipe_events count = %d, want 1 (audit must survive partial-success)", swipeCount)
+	}
+}
+
+// TestHandleFactoryDelegate_RefusedWhenBotDisabled pins the SKY-261
+// bot-disabled-team gate for the factory drag-to-Agent gesture.
+// Symmetric with the swipe-delegate handler's gate: when an admin
+// has flipped team_agents.enabled = false, the factory drop refuses
+// with 409 and the same disabled-bot message — no claim stamp, no
+// spawn attempt, no audit row, no task creation side effect on the
+// entity.
+//
+// "Bot disabled" means the team has no bot at all (not "auto-
+// delegation is paused" — that's the separate cfg.AI.AutoDelegateEnabled
+// kill switch which doesn't block manual gestures). So manual
+// delegate gestures must refuse alongside auto-fire, otherwise
+// users could route around the team's explicit no-bot setting via
+// the factory drop UI.
+func TestHandleFactoryDelegate_RefusedWhenBotDisabled(t *testing.T) {
+	s := newTestServer(t)
+	s.SetSpawner(delegate.NewSpawner(s.db, s.prompts, nil, nil, websocket.NewHub(), "haiku"))
+
+	// Flip the bot OFF on the local team. Production path is
+	// team_agents.SetEnabled via a team-admin gesture; direct
+	// UPDATE here mirrors the same end state without going through
+	// the (unrelated) admin handler.
+	if _, err := s.db.Exec(
+		`UPDATE team_agents SET enabled = 0 WHERE team_id = ? AND agent_id = ?`,
+		runmode.LocalDefaultTeamID, runmode.LocalDefaultAgentID,
+	); err != nil {
+		t.Fatalf("disable bot: %v", err)
+	}
+
+	// Seed an entity + event that would otherwise let the factory
+	// drop succeed (active entity, matching event for the station).
+	entity, _, err := db.FindOrCreateEntity(s.db, "github", "owner/repo#fdrop-off", "pr", "Disabled Factory", "https://example.com/fdo")
+	if err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	eid := entity.ID
+	if _, err := db.RecordEvent(s.db, domain.Event{
+		EntityID:  &eid,
+		EventType: domain.EventGitHubPRCICheckPassed,
+	}); err != nil {
+		t.Fatalf("record event: %v", err)
+	}
+
+	rec := doJSON(t, s, http.MethodPost, "/api/factory/delegate", map[string]string{
+		"entity_id":  entity.ID,
+		"event_type": domain.EventGitHubPRCICheckPassed,
+		"prompt_id":  "any-prompt",
+	})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (bot disabled); body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "disabled") {
+		t.Errorf("body=%s; want disabled-bot message", rec.Body.String())
+	}
+
+	// State invariants on refusal: no task created for the gesture,
+	// no swipe_events audit row, no run spawned. The factory drop
+	// returned before any of the find-or-create side effects could
+	// land. A pre-existing task on this entity from event recording
+	// would have status='queued' (router default), unclaimed; we
+	// just assert no claim/run/audit traces of the refused gesture.
+	var claimAgent sql.NullString
+	if err := s.db.QueryRow(
+		`SELECT COALESCE(claimed_by_agent_id, '') FROM tasks WHERE entity_id = ?`,
+		entity.ID,
+	).Scan(&claimAgent); err != nil && err != sql.ErrNoRows {
+		t.Fatalf("scan task claim: %v", err)
+	}
+	if claimAgent.Valid && claimAgent.String != "" {
+		t.Errorf("bot claim landed despite disabled flag: %q", claimAgent.String)
+	}
+	var swipeCount int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM swipe_events se
+		 JOIN tasks t ON t.id = se.task_id
+		 WHERE t.entity_id = ? AND se.action = 'delegate'`,
+		entity.ID,
+	).Scan(&swipeCount); err != nil {
+		t.Fatalf("scan swipe_events: %v", err)
+	}
+	if swipeCount != 0 {
+		t.Errorf("swipe_events count = %d, want 0 (refused gesture must leave no trace)", swipeCount)
 	}
 }
 
