@@ -425,11 +425,18 @@ func (r *Router) stampAgentClaim(task *domain.Task) {
 		return
 	}
 	if !ok {
-		// Either a user beat us to the claim (don't steal) or the
-		// bot already owns it (no-op). Either way: no broadcast.
-		// Logged at debug-equivalent so the auto-trigger-loses-race
-		// case is visible without firing on every duplicate stamp.
-		log.Printf("[router] agent claim stamp on task %s was a no-op (user got there first, or claim already stamped)", task.ID)
+		// StampAgentClaimIfUnclaimed returns ok=false for any of
+		// three reasons: a user beat the bot to the claim (don't
+		// steal), the bot already owns it (idempotent no-op), or
+		// the task is terminal (done/dismissed — sticky claim past
+		// close, refuse new mutations). All three legitimately
+		// produce "skip the broadcast"; we don't disambiguate at
+		// the log level because the helper doesn't surface the
+		// reason and re-reading just to log is wasted I/O. If a
+		// future debug session needs the breakdown, the helper can
+		// grow a tri-state return or the caller can re-read the
+		// task — neither is load-bearing for correctness.
+		log.Printf("[router] agent claim stamp on task %s was a no-op (user owns it, bot already owns it, or task is terminal)", task.ID)
 		return
 	}
 	task.ClaimedByAgentID = a.ID

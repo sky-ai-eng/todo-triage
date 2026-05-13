@@ -285,9 +285,28 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 		}
 		// HandoffAgentClaim covers three legitimate user→bot
 		// transitions (unclaimed → bot; user-claimed-by-me → bot
-		// transfer; bot-already-owns idempotent no-op) and one
-		// refusal (different user owns it). Refused → 409, no
-		// audit row, no state change.
+		// transfer; bot-already-owns idempotent no-op) and three
+		// refusal modes (missing task, terminal task, different-user
+		// claim). The helper collapses all three refusals into
+		// HandoffRefused, so we pre-load the task to disambiguate
+		// for the response — 404 for missing, 409 + closed-task
+		// message for terminal, 409 + theft message for different
+		// user. Matches the claim path's load-and-branch shape.
+		task, lerr := db.GetTask(s.db, id)
+		if lerr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": lerr.Error()})
+			return
+		}
+		if task == nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "task not found"})
+			return
+		}
+		if task.Status == "done" || task.Status == "dismissed" {
+			writeJSON(w, http.StatusConflict, map[string]string{
+				"error": "task is closed; delegate transitions aren't allowed past close",
+			})
+			return
+		}
 		result, err := db.HandoffAgentClaim(s.db, id, a.ID, runmode.LocalDefaultUserID)
 		if err != nil {
 			log.Printf("[swipe] failed to stamp agent claim on task %s: %v", id, err)
@@ -295,6 +314,13 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if result == db.HandoffRefused {
+			// Pre-load above ruled out missing + terminal, so the
+			// only remaining HandoffRefused path is "different user
+			// owns the claim." The TOCTOU window between GetTask and
+			// HandoffAgentClaim is narrow but real — if the task
+			// transitioned to terminal during it, the error message
+			// is slightly wrong but the user retries from a fresh
+			// view either way.
 			writeJSON(w, http.StatusConflict, map[string]string{
 				"error": "task is claimed by another user; refusing to steal",
 			})

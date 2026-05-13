@@ -170,11 +170,19 @@ func SetTaskStatus(db *sql.DB, taskID, status string) error {
 	return err
 }
 
-// SetTaskClaimedByAgent stamps the agent claim on a task (SKY-261
-// D-Claims). Called by the router on trigger match at task-creation and
-// by the user-delegate handler when a queued task is dragged to the
-// bot. Clears any existing user claim in the same UPDATE so the
-// XOR CHECK invariant holds throughout.
+// SetTaskClaimedByAgent stamps the agent claim on a task without
+// any race-safety guards or status checks (SKY-261 D-Claims).
+//
+// Production paths DO NOT use this helper post-v0.9 — they go
+// through StampAgentClaimIfUnclaimed (auto-trigger) or
+// HandoffAgentClaim (user-initiated). Both add status guards
+// (refuse on terminal rows), claim-axis guards (refuse to steal
+// concurrent claims), and the snoozed → queued wake. This
+// unconditional setter survives because it's the simplest
+// primitive for test fixtures + migration backfills where the
+// caller has already established a safe pre-state. Live code
+// reaching for this helper is almost always a mistake; reach for
+// the guarded variants instead.
 func SetTaskClaimedByAgent(db *sql.DB, taskID, agentID string) error {
 	var claimedByAgentID any = agentID
 	if agentID == "" {
@@ -190,11 +198,17 @@ func SetTaskClaimedByAgent(db *sql.DB, taskID, agentID string) error {
 	return err
 }
 
-// SetTaskClaimedByUser stamps the user claim on a task (SKY-261
-// D-Claims). Called by the user-claim handler when a user takes a
-// queued task themselves AND by the takeover handler when a user
-// reclaims a bot-running task. Clears any existing agent claim in the
-// same UPDATE so XOR holds.
+// SetTaskClaimedByUser stamps the user claim on a task without any
+// race-safety guards or status checks (SKY-261 D-Claims).
+//
+// Production paths DO NOT use this helper post-v0.9. The swipe-
+// claim handler load-and-branches through ClaimQueuedTaskForUser
+// (unclaimed → user) or TakeoverClaimFromAgent (bot → user); the
+// run-takeover path uses MarkAgentRunTakenOver's atomic
+// transaction. Each of those carries the status guard (refuse on
+// terminal), claim-axis guard, and snoozed-wake atomically.
+// This unconditional setter survives for test fixtures + edge-
+// case backfills only.
 func SetTaskClaimedByUser(db *sql.DB, taskID, userID string) error {
 	var claimedByUserID any = userID
 	if userID == "" {

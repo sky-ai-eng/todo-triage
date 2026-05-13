@@ -651,6 +651,100 @@ func TestHandleSwipe_ClaimRefusedOnTerminalTask(t *testing.T) {
 	}
 }
 
+// TestHandleSwipe_DelegateDifferentiatesRefusalReasons pins the
+// post-fix error-mapping on the swipe-delegate path. HandoffRefused
+// collapses three reasons (missing task / terminal task / different-
+// user claim); the handler pre-loads to disambiguate so the
+// response carries the right status code and message for each.
+//
+//   - missing task → 404 "task not found"
+//   - terminal task → 409 "task is closed; delegate transitions
+//     aren't allowed past close"
+//   - different-user claim → 409 "task is claimed by another user"
+func TestHandleSwipe_DelegateDifferentiatesRefusalReasons(t *testing.T) {
+	t.Run("missing_task_404", func(t *testing.T) {
+		s := newTestServer(t)
+		rec := doJSON(t, s, http.MethodPost, "/api/tasks/no-such-task/swipe",
+			map[string]any{"action": "delegate", "hesitation_ms": 0, "prompt_id": "any"})
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("terminal_task_409_with_closed_message", func(t *testing.T) {
+		s := newTestServer(t)
+		const eventType = "github:pr:opened"
+		if _, err := s.db.Exec(
+			`INSERT INTO entities (id, source, source_id, kind, state)
+			 VALUES ('e_term_del', 'github', 'sky/repo#td', 'pr', 'active')`,
+		); err != nil {
+			t.Fatalf("seed entity: %v", err)
+		}
+		if _, err := s.db.Exec(
+			`INSERT INTO events (id, entity_id, event_type, dedup_key)
+			 VALUES ('ev_term_del', 'e_term_del', ?, '')`,
+			eventType,
+		); err != nil {
+			t.Fatalf("seed event: %v", err)
+		}
+		if _, err := s.db.Exec(
+			`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status)
+			 VALUES ('t_term_del', 'e_term_del', ?, 'ev_term_del', 'done')`,
+			eventType,
+		); err != nil {
+			t.Fatalf("seed terminal task: %v", err)
+		}
+		rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_term_del/swipe",
+			map[string]any{"action": "delegate", "hesitation_ms": 0, "prompt_id": "any"})
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "closed") {
+			t.Errorf("body=%s; want closed-task message (not theft message)", rec.Body.String())
+		}
+	})
+
+	t.Run("different_user_409_with_theft_message", func(t *testing.T) {
+		s := newTestServer(t)
+		const eventType = "github:pr:opened"
+		const otherUserID = "00000000-0000-0000-0000-0000000003ee"
+		if _, err := s.db.Exec(
+			`INSERT INTO users (id, display_name) VALUES (?, 'Other User')`,
+			otherUserID,
+		); err != nil {
+			t.Fatalf("seed other user: %v", err)
+		}
+		if _, err := s.db.Exec(
+			`INSERT INTO entities (id, source, source_id, kind, state)
+			 VALUES ('e_diff_del', 'github', 'sky/repo#dd', 'pr', 'active')`,
+		); err != nil {
+			t.Fatalf("seed entity: %v", err)
+		}
+		if _, err := s.db.Exec(
+			`INSERT INTO events (id, entity_id, event_type, dedup_key)
+			 VALUES ('ev_diff_del', 'e_diff_del', ?, '')`,
+			eventType,
+		); err != nil {
+			t.Fatalf("seed event: %v", err)
+		}
+		if _, err := s.db.Exec(
+			`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
+			 VALUES ('t_diff_del', 'e_diff_del', ?, 'ev_diff_del', 'queued', ?)`,
+			eventType, otherUserID,
+		); err != nil {
+			t.Fatalf("seed other-user-claimed task: %v", err)
+		}
+		rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_diff_del/swipe",
+			map[string]any{"action": "delegate", "hesitation_ms": 0, "prompt_id": "any"})
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "another user") {
+			t.Errorf("body=%s; want theft message (not closed-task message)", rec.Body.String())
+		}
+	})
+}
+
 // TestHandleSwipe_DelegateRefusedWhenBotDisabled pins the SKY-261
 // acceptance criterion "swipe-to-delegate re-checks team_agents.enabled
 // at swipe time." A team admin can toggle the bot off via SetEnabled
