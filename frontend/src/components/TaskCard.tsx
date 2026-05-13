@@ -24,12 +24,12 @@ const TaskCard = forwardRef<HTMLDivElement, Props & React.HTMLAttributes<HTMLDiv
     // Normalize once so the condition and the prop share the same non-nullable
     // value — avoids the non-null assertion on a field typed as optional.
     const subtaskCount = task.open_subtask_count ?? 0
-    // SKY-261 B+: snooze is orthogonal to claim. A claimed-and-snoozed
-    // task is "owned by X, wait until Y" — first-class in the owner's
-    // lane (You / Agent) rather than hidden in a separate Snoozed column.
-    // We render the badge whenever snooze_until is in the future;
-    // past-time means the snooze has elapsed and the wake-on-bump path
-    // will move it back to status='queued' on the next event.
+    // SKY-261 B+: snooze is only expected on unclaimed tasks. Claiming or
+    // delegating wakes a snoozed task, so this badge reflects "hidden until
+    // Y" rather than a supported claimed-and-snoozed state.
+    // We render the badge whenever snooze_until is in the future; a past
+    // time means the snooze has elapsed and the next wake/bump path will
+    // move it back to status='queued'.
     const snoozedUntil = parseFutureSnooze(task.snooze_until)
     const isSnoozed = snoozedUntil !== null
 
