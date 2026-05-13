@@ -250,16 +250,20 @@ func Load() (Config, error) {
 		if ghURL.Valid {
 			cfg.GitHub.BaseURL = ghURL.String
 		}
-		if d, err := time.ParseDuration(ghInterval); err == nil {
-			cfg.GitHub.PollInterval = d
+		d, err := time.ParseDuration(ghInterval)
+		if err != nil {
+			return Default(), fmt.Errorf("parse org_settings github_poll_interval %q: %w", ghInterval, err)
 		}
+		cfg.GitHub.PollInterval = d
 		cfg.GitHub.CloneProtocol = cloneProto
 		if jiraURL.Valid {
 			cfg.Jira.BaseURL = jiraURL.String
 		}
-		if d, err := time.ParseDuration(jiraInterval); err == nil {
-			cfg.Jira.PollInterval = d
+		d, err = time.ParseDuration(jiraInterval)
+		if err != nil {
+			return Default(), fmt.Errorf("parse org_settings jira_poll_interval %q: %w", jiraInterval, err)
 		}
+		cfg.Jira.PollInterval = d
 	}
 
 	// team_settings (jira_projects + AI thresholds). Save always writes
