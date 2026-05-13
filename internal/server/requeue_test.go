@@ -7,8 +7,10 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
 // pendingApprovalFixture installs the full FK chain for a task whose
@@ -21,18 +23,42 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, runID, revi
 	t.Helper()
 
 	const eventType = "github:pr:ci_check_passed"
-	if _, err := database.Exec(`
-		INSERT INTO entities (id, source, source_id, kind, state)
-		VALUES ('e_pa', 'github', 'owner/repo#pa', 'pr', 'active');
-		INSERT INTO events (id, entity_id, event_type, dedup_key)
-		VALUES ('ev_pa', 'e_pa', ?, '');
-		INSERT INTO prompts (id, name, body) VALUES ('p_pa', 'Review', 'body');
-		INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status)
-		VALUES ('t_pa', 'e_pa', ?, 'ev_pa', 'delegated');
-		INSERT INTO runs (id, task_id, prompt_id, status, trigger_type)
-		VALUES ('r_pa', 't_pa', 'p_pa', 'pending_approval', 'manual');
-	`, eventType, eventType); err != nil {
-		t.Fatalf("seed FK chain: %v", err)
+	// SKY-261 B+: pre-B+ this fixture used status='delegated' to mean
+	// "the bot owns this task and has a pending review." Post-B+ that
+	// shape is status='queued' + claimed_by_agent_id stamped — status
+	// is lifecycle-only, claim is responsibility. Statements split
+	// (modernc.org/sqlite multi-statement Exec is unreliable on FK
+	// chains).
+	if _, err := database.Exec(
+		`INSERT INTO entities (id, source, source_id, kind, state)
+		 VALUES ('e_pa', 'github', 'owner/repo#pa', 'pr', 'active')`,
+	); err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	if _, err := database.Exec(
+		`INSERT INTO events (id, entity_id, event_type, dedup_key)
+		 VALUES ('ev_pa', 'e_pa', ?, '')`,
+		eventType,
+	); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	if _, err := database.Exec(
+		`INSERT INTO prompts (id, name, body) VALUES ('p_pa', 'Review', 'body')`,
+	); err != nil {
+		t.Fatalf("seed prompt: %v", err)
+	}
+	if _, err := database.Exec(
+		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_agent_id)
+		 VALUES ('t_pa', 'e_pa', ?, 'ev_pa', 'queued', ?)`,
+		eventType, runmode.LocalDefaultAgentID,
+	); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+	if _, err := database.Exec(
+		`INSERT INTO runs (id, task_id, prompt_id, status, trigger_type)
+		 VALUES ('r_pa', 't_pa', 'p_pa', 'pending_approval', 'manual')`,
+	); err != nil {
+		t.Fatalf("seed run: %v", err)
 	}
 
 	// run_memory: agent finished and wrote its self-report (the
@@ -297,8 +323,23 @@ func TestHandleSwipe_ClaimCleansUpPendingApprovalRun(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
+	// SKY-261 B+: claim no longer transitions status; the task stays
+	// 'queued' and claimed_by_user_id is set instead. The
+	// pending-approval cleanup invariants (run cancelled, review row
+	// removed, human_content marker) are unchanged.
 	assertPendingApprovalCleanedUp(t, s.db, taskID, runID, reviewID,
-		"claimed", "claimed the task to handle it themselves")
+		"queued", "claimed the task to handle it themselves")
+	// Pin the claim col too — it's the actual responsibility signal
+	// post-B+.
+	var claimedByUserID sql.NullString
+	if err := s.db.QueryRow(
+		`SELECT claimed_by_user_id FROM tasks WHERE id = ?`, taskID,
+	).Scan(&claimedByUserID); err != nil {
+		t.Fatalf("scan claim: %v", err)
+	}
+	if !claimedByUserID.Valid || claimedByUserID.String == "" {
+		t.Errorf("task.claimed_by_user_id empty after claim swipe; want stamped")
+	}
 }
 
 // TestHandleSwipe_ClaimWithoutPendingApprovalIsNoOp pins the
@@ -330,12 +371,665 @@ func TestHandleSwipe_ClaimWithoutPendingApprovalIsNoOp(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
+	// SKY-261 B+: claim is a responsibility-axis action; status stays
+	// 'queued', claim col gets stamped.
 	var status string
-	if err := s.db.QueryRow(`SELECT status FROM tasks WHERE id = 'task-noruns'`).Scan(&status); err != nil {
+	var claimedByUserID sql.NullString
+	if err := s.db.QueryRow(
+		`SELECT status, claimed_by_user_id FROM tasks WHERE id = 'task-noruns'`,
+	).Scan(&status, &claimedByUserID); err != nil {
 		t.Fatalf("scan task: %v", err)
 	}
-	if status != "claimed" {
-		t.Errorf("task.status = %q, want %q", status, "claimed")
+	if status != "queued" {
+		t.Errorf("task.status = %q, want %q (claim no longer changes status)", status, "queued")
+	}
+	if !claimedByUserID.Valid || claimedByUserID.String == "" {
+		t.Errorf("task.claimed_by_user_id empty after claim swipe; want stamped")
+	}
+}
+
+// TestHandleSwipe_ClaimRejectsStealingFromBot pins the swipe-claim
+// race-safe handler: when the task is bot-claimed, the handler must
+// route through TakeoverClaimFromAgent's optimistic guard and
+// produce a clean takeover (bot claim → user claim, atomic). This
+// pins the legitimate takeover branch — the steal-from-bot is
+// allowed; what's not allowed is stealing from another user.
+func TestHandleSwipe_ClaimAgainstBotClaimedIsTakeover(t *testing.T) {
+	s := newTestServer(t)
+	const eventType = "github:pr:opened"
+	if _, err := s.db.Exec(
+		`INSERT INTO entities (id, source, source_id, kind, state)
+		 VALUES ('e_bot', 'github', 'sky/repo#bot', 'pr', 'active')`,
+	); err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO events (id, entity_id, event_type, dedup_key)
+		 VALUES ('ev_bot', 'e_bot', ?, '')`,
+		eventType,
+	); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_agent_id)
+		 VALUES ('task-bot', 'e_bot', ?, 'ev_bot', 'queued', ?)`,
+		eventType, runmode.LocalDefaultAgentID,
+	); err != nil {
+		t.Fatalf("seed task with bot claim: %v", err)
+	}
+
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/task-bot/swipe",
+		map[string]any{"action": "claim", "hesitation_ms": 0})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	var claimedAgent, claimedUser sql.NullString
+	if err := s.db.QueryRow(
+		`SELECT claimed_by_agent_id, claimed_by_user_id FROM tasks WHERE id = 'task-bot'`,
+	).Scan(&claimedAgent, &claimedUser); err != nil {
+		t.Fatalf("scan task: %v", err)
+	}
+	if claimedAgent.Valid {
+		t.Errorf("claimed_by_agent_id = %q after takeover; want NULL", claimedAgent.String)
+	}
+	if !claimedUser.Valid || claimedUser.String != runmode.LocalDefaultUserID {
+		t.Errorf("claimed_by_user_id = %v; want sentinel user", claimedUser)
+	}
+}
+
+// TestHandleSwipe_ClaimRefusedLeavesNoAuditRow pins the SKY-261 v0.7
+// audit contract: swipe_events records state CHANGES, not gesture
+// ATTEMPTS. A claim swipe that's refused (different user owns the
+// task) returns 409 with no audit row, no status flip, no snooze
+// clear. The reviewer flagged this earlier as "RecordSwipe at the
+// top mutates state for refused gestures" — the post-restructure
+// handler runs claim mutation first and only records the audit
+// after accept.
+func TestHandleSwipe_ClaimRefusedLeavesNoAuditRow(t *testing.T) {
+	s := newTestServer(t)
+	const eventType = "github:pr:opened"
+	const otherUserID = "00000000-0000-0000-0000-0000000004cc"
+
+	if _, err := s.db.Exec(
+		`INSERT INTO users (id, display_name) VALUES (?, 'Other User')`,
+		otherUserID,
+	); err != nil {
+		t.Fatalf("seed other user: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO entities (id, source, source_id, kind, state)
+		 VALUES ('e_refuse', 'github', 'sky/repo#refuse', 'pr', 'active')`,
+	); err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO events (id, entity_id, event_type, dedup_key)
+		 VALUES ('ev_refuse', 'e_refuse', ?, '')`,
+		eventType,
+	); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
+		 VALUES ('t_refuse', 'e_refuse', ?, 'ev_refuse', 'queued', ?)`,
+		eventType, otherUserID,
+	); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_refuse/swipe",
+		map[string]any{"action": "claim", "hesitation_ms": 0})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// No swipe_events row written — refused gesture leaves no trace.
+	var swipeCount int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM swipe_events WHERE task_id = 't_refuse'`,
+	).Scan(&swipeCount); err != nil {
+		t.Fatalf("scan swipe_events: %v", err)
+	}
+	if swipeCount != 0 {
+		t.Errorf("swipe_events count = %d, want 0 (refused claim must not audit)", swipeCount)
+	}
+
+	// State unchanged — other user still owns it, status unchanged.
+	var status string
+	var claim sql.NullString
+	if err := s.db.QueryRow(
+		`SELECT status, claimed_by_user_id FROM tasks WHERE id = 't_refuse'`,
+	).Scan(&status, &claim); err != nil {
+		t.Fatalf("scan task: %v", err)
+	}
+	if status != "queued" {
+		t.Errorf("status = %q; refused gesture changed lifecycle", status)
+	}
+	if !claim.Valid || claim.String != otherUserID {
+		t.Errorf("claim = %v; refused gesture disturbed claim", claim)
+	}
+}
+
+// TestHandleSwipe_DelegateRefusedLeavesNoAuditRow is the delegate
+// half of the audit-contract guarantee. Pre-condition: task is
+// user-claimed by ANOTHER user (the only delegate refuse path).
+// Post: 409, no swipe_events, no state change.
+func TestHandleSwipe_DelegateRefusedLeavesNoAuditRow(t *testing.T) {
+	s := newTestServer(t)
+	s.SetSpawner(delegate.NewSpawner(s.db, s.prompts, nil, nil, websocket.NewHub(), "haiku"))
+	const eventType = "github:pr:opened"
+	const otherUserID = "00000000-0000-0000-0000-0000000004dd"
+
+	if _, err := s.db.Exec(
+		`INSERT INTO users (id, display_name) VALUES (?, 'Other User')`,
+		otherUserID,
+	); err != nil {
+		t.Fatalf("seed other user: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO entities (id, source, source_id, kind, state)
+		 VALUES ('e_drefuse', 'github', 'sky/repo#drefuse', 'pr', 'active')`,
+	); err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO events (id, entity_id, event_type, dedup_key)
+		 VALUES ('ev_drefuse', 'e_drefuse', ?, '')`,
+		eventType,
+	); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
+		 VALUES ('t_drefuse', 'e_drefuse', ?, 'ev_drefuse', 'queued', ?)`,
+		eventType, otherUserID,
+	); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_drefuse/swipe",
+		map[string]any{"action": "delegate", "hesitation_ms": 0, "prompt_id": "any"})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+
+	var swipeCount int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM swipe_events WHERE task_id = 't_drefuse'`,
+	).Scan(&swipeCount); err != nil {
+		t.Fatalf("scan swipe_events: %v", err)
+	}
+	if swipeCount != 0 {
+		t.Errorf("swipe_events count = %d, want 0 (refused delegate must not audit)", swipeCount)
+	}
+	var claimUser sql.NullString
+	var claimAgent sql.NullString
+	if err := s.db.QueryRow(
+		`SELECT claimed_by_user_id, claimed_by_agent_id FROM tasks WHERE id = 't_drefuse'`,
+	).Scan(&claimUser, &claimAgent); err != nil {
+		t.Fatalf("scan task: %v", err)
+	}
+	if !claimUser.Valid || claimUser.String != otherUserID {
+		t.Errorf("claim_by_user = %v; refused delegate disturbed claim", claimUser)
+	}
+	if claimAgent.Valid {
+		t.Errorf("claim_by_agent = %v; refused delegate stamped bot anyway", claimAgent)
+	}
+}
+
+// TestHandleSwipe_ClaimRefusedOnTerminalTask pins the handler-level
+// guard for the same-user-idempotent fall-through path. The data-
+// layer helpers refuse claim transitions on done/dismissed rows,
+// but the handler's same-user check is a no-op early-return that
+// doesn't call any helper — so without an explicit status check
+// in the handler, RecordSwipe's vestigial status='queued' write
+// would reopen a closed task as a side effect of recording the
+// audit row.
+//
+// Seeds a done task already claimed by the local user (the sticky-
+// past-close audit state), fires /swipe claim, asserts 409 +
+// status preserved + no swipe_events row written.
+func TestHandleSwipe_ClaimRefusedOnTerminalTask(t *testing.T) {
+	for _, terminalStatus := range []string{"done", "dismissed"} {
+		t.Run(terminalStatus, func(t *testing.T) {
+			s := newTestServer(t)
+			const eventType = "github:pr:opened"
+			if _, err := s.db.Exec(
+				`INSERT INTO entities (id, source, source_id, kind, state)
+				 VALUES ('e_term', 'github', 'sky/repo#term', 'pr', 'active')`,
+			); err != nil {
+				t.Fatalf("seed entity: %v", err)
+			}
+			if _, err := s.db.Exec(
+				`INSERT INTO events (id, entity_id, event_type, dedup_key)
+				 VALUES ('ev_term', 'e_term', ?, '')`,
+				eventType,
+			); err != nil {
+				t.Fatalf("seed event: %v", err)
+			}
+			// Sticky past close: terminal status with the user's
+			// claim retained as audit. This is the exact shape that
+			// would have triggered the reopen bug pre-guards.
+			if _, err := s.db.Exec(
+				`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
+				 VALUES ('t_term', 'e_term', ?, 'ev_term', ?, ?)`,
+				eventType, terminalStatus, runmode.LocalDefaultUserID,
+			); err != nil {
+				t.Fatalf("seed terminal task: %v", err)
+			}
+
+			rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_term/swipe",
+				map[string]any{"action": "claim", "hesitation_ms": 0})
+			if rec.Code != http.StatusConflict {
+				t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+			}
+
+			// Status must be preserved — the reopen bug would have
+			// flipped it to 'queued' via RecordSwipe's lifecycle write.
+			var status string
+			if err := s.db.QueryRow(
+				`SELECT status FROM tasks WHERE id = 't_term'`,
+			).Scan(&status); err != nil {
+				t.Fatalf("scan task: %v", err)
+			}
+			if status != terminalStatus {
+				t.Errorf("status = %q, want %q (refused claim reopened terminal task)", status, terminalStatus)
+			}
+
+			// Audit must be silent on the refusal.
+			var swipeCount int
+			if err := s.db.QueryRow(
+				`SELECT COUNT(*) FROM swipe_events WHERE task_id = 't_term'`,
+			).Scan(&swipeCount); err != nil {
+				t.Fatalf("scan swipe_events: %v", err)
+			}
+			if swipeCount != 0 {
+				t.Errorf("swipe_events count = %d, want 0 (refused gesture must leave no trace)", swipeCount)
+			}
+		})
+	}
+}
+
+// TestHandleSwipe_DelegateDifferentiatesRefusalReasons pins the
+// post-fix error-mapping on the swipe-delegate path. HandoffRefused
+// collapses three reasons (missing task / terminal task / different-
+// user claim); the handler pre-loads to disambiguate so the
+// response carries the right status code and message for each.
+//
+//   - missing task → 404 "task not found"
+//   - terminal task → 409 "task is closed; delegate transitions
+//     aren't allowed past close"
+//   - different-user claim → 409 "task is claimed by another user"
+func TestHandleSwipe_DelegateDifferentiatesRefusalReasons(t *testing.T) {
+	t.Run("missing_task_404", func(t *testing.T) {
+		s := newTestServer(t)
+		rec := doJSON(t, s, http.MethodPost, "/api/tasks/no-such-task/swipe",
+			map[string]any{"action": "delegate", "hesitation_ms": 0, "prompt_id": "any"})
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("terminal_task_409_with_closed_message", func(t *testing.T) {
+		s := newTestServer(t)
+		const eventType = "github:pr:opened"
+		if _, err := s.db.Exec(
+			`INSERT INTO entities (id, source, source_id, kind, state)
+			 VALUES ('e_term_del', 'github', 'sky/repo#td', 'pr', 'active')`,
+		); err != nil {
+			t.Fatalf("seed entity: %v", err)
+		}
+		if _, err := s.db.Exec(
+			`INSERT INTO events (id, entity_id, event_type, dedup_key)
+			 VALUES ('ev_term_del', 'e_term_del', ?, '')`,
+			eventType,
+		); err != nil {
+			t.Fatalf("seed event: %v", err)
+		}
+		if _, err := s.db.Exec(
+			`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status)
+			 VALUES ('t_term_del', 'e_term_del', ?, 'ev_term_del', 'done')`,
+			eventType,
+		); err != nil {
+			t.Fatalf("seed terminal task: %v", err)
+		}
+		rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_term_del/swipe",
+			map[string]any{"action": "delegate", "hesitation_ms": 0, "prompt_id": "any"})
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "closed") {
+			t.Errorf("body=%s; want closed-task message (not theft message)", rec.Body.String())
+		}
+	})
+
+	t.Run("different_user_409_with_theft_message", func(t *testing.T) {
+		s := newTestServer(t)
+		const eventType = "github:pr:opened"
+		const otherUserID = "00000000-0000-0000-0000-0000000003ee"
+		if _, err := s.db.Exec(
+			`INSERT INTO users (id, display_name) VALUES (?, 'Other User')`,
+			otherUserID,
+		); err != nil {
+			t.Fatalf("seed other user: %v", err)
+		}
+		if _, err := s.db.Exec(
+			`INSERT INTO entities (id, source, source_id, kind, state)
+			 VALUES ('e_diff_del', 'github', 'sky/repo#dd', 'pr', 'active')`,
+		); err != nil {
+			t.Fatalf("seed entity: %v", err)
+		}
+		if _, err := s.db.Exec(
+			`INSERT INTO events (id, entity_id, event_type, dedup_key)
+			 VALUES ('ev_diff_del', 'e_diff_del', ?, '')`,
+			eventType,
+		); err != nil {
+			t.Fatalf("seed event: %v", err)
+		}
+		if _, err := s.db.Exec(
+			`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
+			 VALUES ('t_diff_del', 'e_diff_del', ?, 'ev_diff_del', 'queued', ?)`,
+			eventType, otherUserID,
+		); err != nil {
+			t.Fatalf("seed other-user-claimed task: %v", err)
+		}
+		rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_diff_del/swipe",
+			map[string]any{"action": "delegate", "hesitation_ms": 0, "prompt_id": "any"})
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "another user") {
+			t.Errorf("body=%s; want theft message (not closed-task message)", rec.Body.String())
+		}
+	})
+}
+
+// TestHandleSwipe_DelegateRefusedWhenBotDisabled pins the SKY-261
+// acceptance criterion "swipe-to-delegate re-checks team_agents.enabled
+// at swipe time." A team admin can toggle the bot off via SetEnabled
+// — subsequent /swipe delegate gestures must 409, with no claim
+// stamp, no spawn, no audit row. Local-mode N=1 doesn't normally
+// flip this off but the data-layer enforcement is what multi-tenant
+// will need.
+func TestHandleSwipe_DelegateRefusedWhenBotDisabled(t *testing.T) {
+	s := newTestServer(t)
+	// Flip the bot OFF on the local team.
+	if _, err := s.db.Exec(
+		`UPDATE team_agents SET enabled = 0 WHERE team_id = ? AND agent_id = ?`,
+		runmode.LocalDefaultTeamID, runmode.LocalDefaultAgentID,
+	); err != nil {
+		t.Fatalf("disable bot: %v", err)
+	}
+	const eventType = "github:pr:opened"
+	if _, err := s.db.Exec(
+		`INSERT INTO entities (id, source, source_id, kind, state)
+		 VALUES ('e_bot_off', 'github', 'sky/repo#off', 'pr', 'active')`,
+	); err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO events (id, entity_id, event_type, dedup_key)
+		 VALUES ('ev_bot_off', 'e_bot_off', ?, '')`,
+		eventType,
+	); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status)
+		 VALUES ('t_bot_off', 'e_bot_off', ?, 'ev_bot_off', 'queued')`,
+		eventType,
+	); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_bot_off/swipe",
+		map[string]any{"action": "delegate", "hesitation_ms": 0, "prompt_id": "any"})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (bot disabled); body=%s", rec.Code, rec.Body.String())
+	}
+
+	// No state changes — claim cols untouched, no swipe_events row.
+	var claimAgent, claimUser sql.NullString
+	if err := s.db.QueryRow(
+		`SELECT claimed_by_agent_id, claimed_by_user_id FROM tasks WHERE id = 't_bot_off'`,
+	).Scan(&claimAgent, &claimUser); err != nil {
+		t.Fatalf("scan task: %v", err)
+	}
+	if claimAgent.Valid {
+		t.Errorf("bot claim landed despite disabled flag: %q", claimAgent.String)
+	}
+	if claimUser.Valid {
+		t.Errorf("user claim disturbed: %q", claimUser.String)
+	}
+	var swipeCount int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM swipe_events WHERE task_id = 't_bot_off'`,
+	).Scan(&swipeCount); err != nil {
+		t.Fatalf("scan swipe_events: %v", err)
+	}
+	if swipeCount != 0 {
+		t.Errorf("swipe_events count = %d, want 0", swipeCount)
+	}
+}
+
+// TestHandleSnooze_404OnMissingTask pins missing-task parity with
+// /undo and /requeue. Pre-fix, hitting /snooze on a bogus id would
+// trip the swipe_events→tasks FK constraint inside SnoozeTask and
+// surface the SQLite error string as 500. The GetTask pre-check
+// catches the common case so legitimate 404 callers don't have to
+// parse FK error strings to tell "doesn't exist" from "real server
+// error."
+func TestHandleSnooze_404OnMissingTask(t *testing.T) {
+	s := newTestServer(t)
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/no-such-task/snooze",
+		map[string]any{"until": "1h", "hesitation_ms": 0})
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandleSnooze_RefusesOnClaimedTask pins the SKY-261 B+
+// "snoozed ↔ unclaimed" invariant from the snooze side: the
+// SnoozeTask store-level atomic UPDATE refuses on a claimed task,
+// the handler maps the refusal to 409, and no state mutates (status
+// stays the same, snooze_until stays NULL, audit row was rolled
+// back as part of the atomic tx).
+//
+// This is the deliberate trade we made to avoid the snoozed+claimed
+// incoherent state: users wanting to defer work on a claimed task
+// must explicitly requeue first.
+func TestHandleSnooze_RefusesOnClaimedTask(t *testing.T) {
+	s := newTestServer(t)
+	const eventType = "github:pr:opened"
+	if _, err := s.db.Exec(
+		`INSERT INTO entities (id, source, source_id, kind, state)
+		 VALUES ('e_snz_claim', 'github', 'sky/repo#sz', 'pr', 'active')`,
+	); err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO events (id, entity_id, event_type, dedup_key)
+		 VALUES ('ev_snz_claim', 'e_snz_claim', ?, '')`,
+		eventType,
+	); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
+		 VALUES ('t_snz_claim', 'e_snz_claim', ?, 'ev_snz_claim', 'queued', ?)`,
+		eventType, runmode.LocalDefaultUserID,
+	); err != nil {
+		t.Fatalf("seed claimed task: %v", err)
+	}
+
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_snz_claim/snooze",
+		map[string]any{"until": "1h", "hesitation_ms": 0})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (snooze refused on claimed task); body=%s", rec.Code, rec.Body.String())
+	}
+
+	// State must be unchanged: status='queued', snooze_until NULL,
+	// claim still on the user. The atomic tx rollback means no
+	// swipe_events row either.
+	var status string
+	var snoozeUntil sql.NullTime
+	var claim sql.NullString
+	if err := s.db.QueryRow(
+		`SELECT status, snooze_until, claimed_by_user_id FROM tasks WHERE id = 't_snz_claim'`,
+	).Scan(&status, &snoozeUntil, &claim); err != nil {
+		t.Fatalf("scan task: %v", err)
+	}
+	if status != "queued" {
+		t.Errorf("status = %q, want 'queued' (refusal must not transition lifecycle)", status)
+	}
+	if snoozeUntil.Valid {
+		t.Errorf("snooze_until = %v, want NULL (refusal must not set deferral)", snoozeUntil.Time)
+	}
+	if !claim.Valid || claim.String != runmode.LocalDefaultUserID {
+		t.Errorf("claim was disturbed by refused snooze: got %v", claim)
+	}
+	var swipeCount int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM swipe_events WHERE task_id = 't_snz_claim'`,
+	).Scan(&swipeCount); err != nil {
+		t.Fatalf("scan swipe_events: %v", err)
+	}
+	if swipeCount != 0 {
+		t.Errorf("swipe_events count = %d, want 0 (refused gesture should leave no audit)", swipeCount)
+	}
+}
+
+// TestHandleSwipe_DelegateTransfersOwnUserClaim pins the SKY-133
+// flow: when the user drags their own claimed task from the You
+// lane to the Agent lane, the FE fires a delegate swipe. The
+// handler must accept the gesture as a legitimate user → bot
+// transfer, not refuse it as a stolen-claim race.
+//
+// This was broken in an earlier iteration where the delegate path
+// used a stamp helper that refused ANY non-NULL claimed_by_user_id
+// — HandoffAgentClaim is the post-fix helper that allows same-user
+// transfer while still refusing different-user theft.
+func TestHandleSwipe_DelegateTransfersOwnUserClaim(t *testing.T) {
+	s := newTestServer(t)
+	s.SetSpawner(delegate.NewSpawner(s.db, s.prompts, nil, nil, websocket.NewHub(), "haiku"))
+
+	// Seed a queued task already claimed by the local user — the
+	// pre-condition right before a You → Agent drag fires the
+	// delegate swipe.
+	const eventType = "github:pr:opened"
+	if _, err := s.db.Exec(
+		`INSERT INTO entities (id, source, source_id, kind, state)
+		 VALUES ('e_y2a', 'github', 'sky/repo#y2a', 'pr', 'active')`,
+	); err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO events (id, entity_id, event_type, dedup_key)
+		 VALUES ('ev_y2a', 'e_y2a', ?, '')`,
+		eventType,
+	); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
+		 VALUES ('task-y2a', 'e_y2a', ?, 'ev_y2a', 'queued', ?)`,
+		eventType, runmode.LocalDefaultUserID,
+	); err != nil {
+		t.Fatalf("seed user-claimed task: %v", err)
+	}
+
+	// Use a prompt id that won't resolve — the spawner will fail
+	// before producing a run, but the claim stamping is the part
+	// under test and that runs before the spawn. delegate_error in
+	// the response is expected; what we care about is that the
+	// transfer landed (claim flipped to bot).
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/task-y2a/swipe", map[string]any{
+		"action":        "delegate",
+		"hesitation_ms": 0,
+		"prompt_id":     "no-such-prompt",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (delegate accepted as user→bot transfer); body=%s", rec.Code, rec.Body.String())
+	}
+
+	var claimedAgent, claimedUser sql.NullString
+	if err := s.db.QueryRow(
+		`SELECT claimed_by_agent_id, claimed_by_user_id FROM tasks WHERE id = 'task-y2a'`,
+	).Scan(&claimedAgent, &claimedUser); err != nil {
+		t.Fatalf("scan task: %v", err)
+	}
+	if !claimedAgent.Valid || claimedAgent.String != runmode.LocalDefaultAgentID {
+		t.Errorf("claimed_by_agent_id = %v; want bot to have taken the claim", claimedAgent)
+	}
+	if claimedUser.Valid {
+		t.Errorf("claimed_by_user_id = %q; want NULL after transfer", claimedUser.String)
+	}
+}
+
+// TestHandleSwipe_ClaimAgainstOtherUserClaimReturns409 pins the
+// anti-steal guarantee: if a different user already owns the task,
+// the swipe-claim handler must refuse with 409 rather than
+// overwriting the other user's claim. The previous unconditional
+// SetTaskClaimedByUser would have silently stolen the row.
+//
+// At N=1 local mode this can't happen via real user gestures, but
+// the helper-level race-safety is load-bearing for multi-mode and
+// the test pins the contract.
+func TestHandleSwipe_ClaimAgainstOtherUserClaimReturns409(t *testing.T) {
+	s := newTestServer(t)
+	const eventType = "github:pr:opened"
+	// Synthetic "other user" — distinct from LocalDefaultUserID so
+	// the swipe-claim's "is it me?" branch routes to the refuse-
+	// to-steal path. In local-mode SQLite the users table has no
+	// FK to auth.users (that's the Postgres path); we can seed any
+	// UUID with the local-shape columns. Statements split so a
+	// stray FK violation points at the offending row rather than
+	// the whole multi-statement Exec.
+	const otherUserID = "00000000-0000-0000-0000-000000000999"
+	if _, err := s.db.Exec(
+		`INSERT INTO users (id, display_name) VALUES (?, 'Other User')`,
+		otherUserID,
+	); err != nil {
+		t.Fatalf("seed other user: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO entities (id, source, source_id, kind, state)
+		 VALUES ('e_oth', 'github', 'sky/repo#oth', 'pr', 'active')`,
+	); err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO events (id, entity_id, event_type, dedup_key)
+		 VALUES ('ev_oth', 'e_oth', ?, '')`,
+		eventType,
+	); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
+		 VALUES ('task-oth', 'e_oth', ?, 'ev_oth', 'queued', ?)`,
+		eventType, otherUserID,
+	); err != nil {
+		t.Fatalf("seed task with other-user claim: %v", err)
+	}
+
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/task-oth/swipe",
+		map[string]any{"action": "claim", "hesitation_ms": 0})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Claim must be unchanged — the swipe refused to overwrite.
+	var claimedUser sql.NullString
+	if err := s.db.QueryRow(
+		`SELECT claimed_by_user_id FROM tasks WHERE id = 'task-oth'`,
+	).Scan(&claimedUser); err != nil {
+		t.Fatalf("scan task: %v", err)
+	}
+	if !claimedUser.Valid || claimedUser.String != otherUserID {
+		t.Errorf("claimed_by_user_id = %v; want preserved as %q (handler must not steal)",
+			claimedUser, otherUserID)
 	}
 }
 
@@ -395,18 +1089,29 @@ func TestRequeueTask_OkFalseOnMissingID(t *testing.T) {
 func TestHandleUndo_NoPendingApprovalIsNoOp(t *testing.T) {
 	s := newTestServer(t)
 
-	// Seed a plain claimed task with no run at all — the simplest
-	// shape that exercises handleUndo's other half (status flip +
-	// Jira reversal skipped because EntitySource isn't 'jira').
-	if _, err := s.db.Exec(`
-		INSERT INTO entities (id, source, source_id, kind, state)
-		VALUES ('e_plain', 'github', 'owner/repo#plain', 'pr', 'active');
-		INSERT INTO events (id, entity_id, event_type, dedup_key)
-		VALUES ('ev_plain', 'e_plain', 'github:pr:opened', '');
-		INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status)
-		VALUES ('t_plain', 'e_plain', 'github:pr:opened', 'ev_plain', 'claimed');
-	`); err != nil {
-		t.Fatalf("seed: %v", err)
+	// Seed a plain user-claimed task with no run at all — the simplest
+	// shape that exercises handleUndo's other half (claim clear +
+	// Jira reversal skipped because EntitySource isn't 'jira'). Post-
+	// SKY-261 B+ this is status='queued' + claimed_by_user_id; pre-B+
+	// it was status='claimed'.
+	if _, err := s.db.Exec(
+		`INSERT INTO entities (id, source, source_id, kind, state)
+		 VALUES ('e_plain', 'github', 'owner/repo#plain', 'pr', 'active')`,
+	); err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO events (id, entity_id, event_type, dedup_key)
+		 VALUES ('ev_plain', 'e_plain', 'github:pr:opened', '')`,
+	); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
+		 VALUES ('t_plain', 'e_plain', 'github:pr:opened', 'ev_plain', 'queued', ?)`,
+		runmode.LocalDefaultUserID,
+	); err != nil {
+		t.Fatalf("seed task: %v", err)
 	}
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_plain/undo", nil)
@@ -419,6 +1124,71 @@ func TestHandleUndo_NoPendingApprovalIsNoOp(t *testing.T) {
 	}
 	if taskStatus != "queued" {
 		t.Errorf("task.status = %q, want %q", taskStatus, "queued")
+	}
+}
+
+// TestHandleUndo_ClearsClaimColumns pins the SKY-261 B+ semantic:
+// /undo returns the task to the team's unclaimed queue, which means
+// both claim_by_* cols are cleared — not just status reset. Without
+// this, a claim/delegate swipe followed by Undo would leave the task
+// status='queued' but still in the owner's lane (queue-view filter
+// requires both claim cols NULL), so the user would think they
+// undid the action while the Board kept rendering the task as
+// claimed.
+func TestHandleUndo_ClearsClaimColumns(t *testing.T) {
+	s := newTestServer(t)
+
+	// Seed a user-claimed queued task — the post-swipe state for
+	// action='claim'. (Pre-invariant this test also seeded
+	// snooze_until on the same row to cover "claim during a snoozed
+	// window"; that combo is now forbidden by the "snoozed ↔
+	// unclaimed" invariant, so the snooze_until pre-stage is dropped.
+	// Snooze-clearing on undo is covered by /requeue's existing test
+	// against unclaimed-snoozed rows.)
+	if _, err := s.db.Exec(
+		`INSERT INTO entities (id, source, source_id, kind, state)
+		 VALUES ('e_undo_claim', 'github', 'owner/repo#u1', 'pr', 'active')`,
+	); err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO events (id, entity_id, event_type, dedup_key)
+		 VALUES ('ev_undo_claim', 'e_undo_claim', 'github:pr:opened', '')`,
+	); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
+		 VALUES ('t_undo_claim', 'e_undo_claim', 'github:pr:opened', 'ev_undo_claim', 'queued', ?)`,
+		runmode.LocalDefaultUserID,
+	); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_undo_claim/undo", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	var status, claimedAgent, claimedUser sql.NullString
+	var snoozeUntil sql.NullTime
+	if err := s.db.QueryRow(
+		`SELECT status, claimed_by_agent_id, claimed_by_user_id, snooze_until
+		 FROM tasks WHERE id = ?`, "t_undo_claim",
+	).Scan(&status, &claimedAgent, &claimedUser, &snoozeUntil); err != nil {
+		t.Fatalf("scan task: %v", err)
+	}
+	if status.String != "queued" {
+		t.Errorf("status = %q, want %q", status.String, "queued")
+	}
+	if claimedAgent.Valid {
+		t.Errorf("claimed_by_agent_id = %q; want NULL (undo must clear claim)", claimedAgent.String)
+	}
+	if claimedUser.Valid {
+		t.Errorf("claimed_by_user_id = %q; want NULL (undo must clear claim)", claimedUser.String)
+	}
+	if snoozeUntil.Valid {
+		t.Errorf("snooze_until = %v; want NULL", snoozeUntil.Time)
 	}
 }
 

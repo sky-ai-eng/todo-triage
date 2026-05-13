@@ -2,15 +2,14 @@ package server
 
 import (
 	"encoding/json"
-	"errors"
 	"log"
 	"net/http"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
-	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
 // factoryDelegateRequest is the body for POST /api/factory/delegate.
@@ -23,9 +22,19 @@ type factoryDelegateRequest struct {
 	PromptID  string `json:"prompt_id"`
 }
 
+// factoryDelegateResponse mirrors the /api/tasks/{id}/swipe delegate
+// response: on partial success (claim stamped, run didn't fire),
+// DelegateError carries the spawner error and RunID stays empty. The
+// FE renders the "delegate failed — retry" affordance on the bot-
+// claimed card regardless of whether the failure was a 400-class
+// (ErrPromptNotFound) or 500-class (DB / spawner internal) error.
+// ClaimStamped is always true on a 200 response — the user's gesture
+// committed at the claim axis even when the run didn't materialize.
 type factoryDelegateResponse struct {
-	TaskID string `json:"task_id"`
-	RunID  string `json:"run_id"`
+	TaskID        string `json:"task_id"`
+	RunID         string `json:"run_id"`
+	DelegateError string `json:"delegate_error,omitempty"`
+	ClaimStamped  bool   `json:"claim_stamped"`
 }
 
 // handleFactoryDelegate is the drag-to-delegate endpoint behind the
@@ -165,47 +174,111 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Spawn the run BEFORE committing the status flip. Delegate's
-	// failure modes (prompt not found, DB error creating the run row)
-	// don't touch task.status — they return cleanly with no run
-	// created. Doing RecordSwipe first would leave a "delegated" task
-	// without a run when Delegate fails, which is exactly the
-	// partially-applied state the client treats as a hard error.
+	// SKY-261 B+ alignment with swipe-delegate: the user's gesture is
+	// commitment regardless of run outcome. Stamp the agent claim
+	// BEFORE attempting the spawn so a failed Delegate leaves the
+	// task in the bot's lane (with no run, surfacing as a "delegate
+	// failed — retry" card on the Board) rather than disappearing
+	// the gesture entirely. The user-facing semantic: "I told the bot
+	// to take this. The bot took the assignment but couldn't get the
+	// run going on this attempt."
 	//
-	// Order matters: Delegate's only DB write before it can fail is
-	// CreateAgentRun, which is idempotent at the row level (UUID PK).
-	// So if it fails, no orphan run rows are left either.
-	runID, err := s.spawner.Delegate(*task, req.PromptID, "manual", "")
+	// claim is the responsibility axis (commitment); runs are the
+	// execution axis. They're orthogonal; a failed run doesn't
+	// invalidate the assignment.
+	// SKY-261 acceptance: re-check team_agents.enabled at gesture
+	// time. Factory drag-to-bot is the same semantic as swipe-up
+	// "delegate to bot" — both refuse with 409 when the bot is off
+	// for this team.
+	a, enabled, err := s.agentEnabledForLocalTeam(r.Context())
 	if err != nil {
-		// Client-correctable prompt errors → 400. The picker should
-		// have prevented an empty prompt id, but a deletion race
-		// between snapshot fetch and drop can produce a not-found.
-		// Anything else (DB error creating the run row, etc.) stays
-		// 500 — server-side problem the client can't fix.
-		if errors.Is(err, delegate.ErrPromptNotFound) || errors.Is(err, delegate.ErrPromptUnspecified) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delegate failed: " + err.Error()})
+		return
+	}
+	if !enabled {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "bot is disabled for this team; enable it in team settings to delegate",
+		})
+		return
+	}
+	// HandoffAgentClaim handles all three legitimate factory drop
+	// transitions: unclaimed → bot, user-claimed-by-me → bot
+	// (a chip the user previously claimed via the Board), and the
+	// idempotent same-agent no-op. Refuses on a different-user
+	// claim — the factory drop shouldn't steal.
+	switch result, err := db.HandoffAgentClaim(s.db, task.ID, a.ID, runmode.LocalDefaultUserID); {
+	case err != nil:
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "claim stamp failed: " + err.Error()})
+		return
+	case result == db.HandoffChanged:
+		s.ws.Broadcast(websocket.Event{
+			Type: "task_claimed",
+			Data: map[string]any{
+				"task_id":             task.ID,
+				"claimed_by_agent_id": a.ID,
+				"claimed_by_user_id":  "",
+			},
+		})
+	case result == db.HandoffNoOp:
+		// Bot already owns it (e.g., a sibling factory drop landed
+		// first). Skip the broadcast and continue to the spawn so
+		// the user's gesture still gets a run if one isn't already
+		// underway.
+	case result == db.HandoffRefused:
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "task is claimed by another user; refusing to steal",
+		})
 		return
 	}
 
-	// Run is real; commit the status flip + swipe_events audit row.
-	// If RecordSwipe fails here (extremely unlikely — single INSERT +
-	// UPDATE under normal conditions), log it and return success
-	// anyway: the run is already in flight, returning an error would
-	// make the client think the delegate failed when it didn't.
-	// The status flicker self-heals when the run completes — the
-	// spawner's run-completion path unconditionally sets task.status
-	// to 'done' (spawner.go:829), so a missed queued→delegated
-	// transition still resolves correctly at the end.
+	// Record the swipe_events audit row BEFORE the spawn attempt.
+	// The audit captures the user's gesture (drag-to-bot), which is
+	// real regardless of whether the run materializes. The earlier
+	// "after-spawn-success only" placement meant partial-success
+	// gestures (claim stamped, spawn failed) had no audit trail —
+	// inconsistent with swipe-delegate (which audits at the top of
+	// the swipe handler) and with the SKY-261 B+ semantic that
+	// claim is commitment regardless of run outcome. RecordSwipe
+	// failure stays non-fatal because the claim col + WS broadcast
+	// already captured the state-level effect; the audit is best-
+	// effort.
 	if _, err := s.swipes.RecordSwipe(r.Context(), runmode.LocalDefaultOrg, task.ID, "delegate", 0); err != nil {
-		log.Printf("[factory] failed to record delegate swipe for task %s after run %s started: %v",
-			task.ID, runID, err)
+		log.Printf("[factory] failed to record delegate swipe for task %s: %v", task.ID, err)
+	}
+
+	// Now attempt the spawn. Delegate's failure modes (prompt not
+	// found, DB error creating the run row) DON'T unstamp the claim
+	// — the user's commitment is real, the run just didn't fire.
+	// The response carries delegate_error so the FE can render the
+	// "delegate failed — retry" affordance on the now-bot-claimed card.
+	// task.ClaimedByAgentID is set so spawner.Delegate's actor stamping
+	// reads it correctly.
+	task.ClaimedByAgentID = a.ID
+	runID, err := s.spawner.Delegate(*task, req.PromptID, "manual", "")
+	if err != nil {
+		// Claim is already stamped (and broadcast), swipe audit
+		// already recorded. The run didn't fire — mirror the
+		// swipe-delegate convention: 200 OK with delegate_error
+		// populated and run_id empty. The FE reads delegate_error
+		// to render the "delegate didn't fire, retry" affordance
+		// on the now-bot-claimed card; refetch still fires so the
+		// Board picks up the new claim col + the task surfaces in
+		// the Agent lane immediately. Whether the underlying error
+		// was a 400-class (ErrPromptNotFound, ErrPromptUnspecified)
+		// or 500-class (DB, spawner internal) is irrelevant to the
+		// caller — the response shape is the same.
+		writeJSON(w, http.StatusOK, factoryDelegateResponse{
+			TaskID:        task.ID,
+			RunID:         "",
+			DelegateError: err.Error(),
+			ClaimStamped:  true,
+		})
+		return
 	}
 
 	writeJSON(w, http.StatusOK, factoryDelegateResponse{
-		TaskID: task.ID,
-		RunID:  runID,
+		TaskID:       task.ID,
+		RunID:        runID,
+		ClaimStamped: true,
 	})
 }

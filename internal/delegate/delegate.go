@@ -81,15 +81,43 @@ func (s *Spawner) Delegate(task domain.Task, explicitPromptID string, triggerTyp
 	if triggerType == "" {
 		triggerType = "manual"
 	}
+
+	// SKY-261 D-Claims: stamp actor_agent_id at run start. Prefer the
+	// task's stamped claim (set by router on trigger match, or by the
+	// user-delegate handler when the user drags a queued task to the
+	// bot). Falls back to GetForOrg for unclaimed tasks and manual
+	// runs. Stays empty (NULL on the row) only in the seam between
+	// db init and agent bootstrap, which is transient.
+	actorAgentID := task.ClaimedByAgentID
+	if actorAgentID == "" && s.agents != nil {
+		if a, err := s.agents.GetForOrg(context.Background(), runmode.LocalDefaultOrg); err == nil && a != nil {
+			actorAgentID = a.ID
+		}
+	}
+
+	// SKY-261 D-Claims: pair creator_user_id with trigger_type per the
+	// audit-honesty invariant. Manual runs (swipe-delegate / drag-to-
+	// Agent / factory drop) carry the local user's id as the creator.
+	// Trigger-spawned runs ('event' type) carry NULL — there's no
+	// human delegator. The schema CHECK enforces this pairing so the
+	// seeder can't drift. In multi-mode (SKY-251) the manual branch
+	// will pull from the request's auth context instead of the
+	// LocalDefaultUserID sentinel.
+	creatorUserID := ""
+	if triggerType == "manual" {
+		creatorUserID = runmode.LocalDefaultUserID
+	}
 	runID := uuid.New().String()
 	if err := db.CreateAgentRun(s.database, domain.AgentRun{
-		ID:          runID,
-		TaskID:      task.ID,
-		PromptID:    promptID,
-		Status:      "initializing",
-		Model:       model,
-		TriggerType: triggerType,
-		TriggerID:   triggerID,
+		ID:            runID,
+		TaskID:        task.ID,
+		PromptID:      promptID,
+		Status:        "initializing",
+		Model:         model,
+		TriggerType:   triggerType,
+		TriggerID:     triggerID,
+		ActorAgentID:  actorAgentID,
+		CreatorUserID: creatorUserID,
 	}); err != nil {
 		return "", fmt.Errorf("create agent run: %w", err)
 	}

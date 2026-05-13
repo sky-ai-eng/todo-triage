@@ -17,8 +17,10 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/config"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
+	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
 // TakeoverResult is what Takeover returns to the HTTP handler.
@@ -196,22 +198,45 @@ func (s *Spawner) Takeover(runID, baseDir string) (*TakeoverResult, error) {
 		return nil, fmt.Errorf("copy session jsonl: %w", err)
 	}
 
-	ok, err := db.MarkAgentRunTakenOver(s.database, runID, destPath)
+	// SKY-261 B+: takeover is one semantic event — run.status='taken_over'
+	// AND the task's claim flips bot→user. MarkAgentRunTakenOver does
+	// both in a single transaction so a partial failure can't leave
+	// the system inconsistent (e.g., run reads taken_over but task
+	// still shows bot claim). Passing LocalDefaultUserID is what
+	// engages the claim-flip arm of the atomic UPDATE; the run's
+	// actor_agent_id stays stamped at the bot (immutable audit).
+	ok, err := db.MarkAgentRunTakenOver(s.database, runID, destPath, runmode.LocalDefaultUserID)
 	if err != nil {
-		// Same rollback as the copy-failure path. destPath needs
-		// removing too since the row never got marked.
+		// Transaction failed and rolled back — both run and task are
+		// unchanged. Same FS cleanup as the copy-failure path.
 		s.abortTakeover(runID, run.WorktreePath, destPath)
 		return nil, fmt.Errorf("mark taken_over: %w", err)
 	}
 	if !ok {
 		// Race-loss: the goroutine wrote a real terminal status before
-		// our flag was set. Its natural defers ran (the gates evaluated
-		// false at that point), but ours skipped because the flag was
-		// set by the time they fired — abortTakeover catches them up.
+		// our flag was set. The tx rolled back, leaving everything
+		// unchanged. Its natural defers ran (the gates evaluated false
+		// at that point), but ours skipped because the flag was set
+		// by the time they fired — abortTakeover catches them up.
 		// abortTakeover's guarded UPDATE will no-op since the row is
 		// already terminal, so the agent's actual outcome is preserved.
 		s.abortTakeover(runID, run.WorktreePath, destPath)
 		return nil, fmt.Errorf("%w: run %s", ErrTakeoverRaceLost, runID)
+	}
+
+	// Broadcast on the claim axis so the Board can move the card out
+	// of the bot's lane into the user's lane. The run status update
+	// (broadcastRunUpdate below) is separate — that's run lifecycle,
+	// not task responsibility. The two channels stay split (SKY-261 B+).
+	if s.wsHub != nil {
+		s.wsHub.Broadcast(websocket.Event{
+			Type: "task_claimed",
+			Data: map[string]any{
+				"task_id":             run.TaskID,
+				"claimed_by_agent_id": "",
+				"claimed_by_user_id":  runmode.LocalDefaultUserID,
+			},
+		})
 	}
 
 	s.broadcastRunUpdate(runID, "taken_over")

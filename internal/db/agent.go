@@ -12,10 +12,23 @@ import (
 )
 
 // CreateAgentRun inserts a new agent run.
+//
+// CreatorUserID defaulting: when the caller didn't supply one and
+// trigger_type is "manual" (the run-creation default), fall back to
+// the LocalDefaultUserID sentinel. This keeps test fixtures + legacy
+// callers working without having to know the post-SKY-261 CHECK
+// invariant. Production spawner.Delegate explicitly sets the value
+// based on trigger_type, so this default only kicks in for direct-
+// SQL callers (tests). For trigger_type='event' we leave CreatorUserID
+// alone — the spawner sets it to "" and nullIfEmpty maps to SQL NULL,
+// which is what the CHECK requires.
 func CreateAgentRun(database *sql.DB, run domain.AgentRun) error {
 	triggerType := run.TriggerType
 	if triggerType == "" {
 		triggerType = "manual"
+	}
+	if triggerType == "manual" && run.CreatorUserID == "" {
+		run.CreatorUserID = runmode.LocalDefaultUserID
 	}
 	// team_id + visibility populated explicitly per SKY-262: runs inherit
 	// their task's team scope so the team-scoped queue / Board filter
@@ -23,10 +36,22 @@ func CreateAgentRun(database *sql.DB, run domain.AgentRun) error {
 	// sentinel from SKY-269. Postgres enforces team_id NOT NULL on runs;
 	// SQLite tolerates NULL but the canonical path passes the sentinel
 	// for parity.
+	//
+	// actor_agent_id is the SKY-261 D-Claims audit pointer — who actually
+	// ran this. Empty string maps to NULL (the spawner falls back to
+	// agents.GetForOrg() when the task's claim is empty, so this is
+	// typically populated; NULL is reserved for "no agents row exists
+	// yet" — transient between db init and agent bootstrap).
+	//
+	// creator_user_id is the inverse: NULL for trigger-spawned runs
+	// (no human delegator), set to the requesting user for manual
+	// runs. The schema CHECK pairs trigger_type and creator nullability
+	// so the seeder can't drift back to lying. The caller's spawner
+	// decides which value to pass; nullIfEmpty maps "" → NULL.
 	_, err := database.Exec(`
-		INSERT INTO runs (id, task_id, prompt_id, status, model, worktree_path, trigger_type, trigger_id, team_id, visibility)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'team')
-	`, run.ID, run.TaskID, nullIfEmpty(run.PromptID), run.Status, run.Model, run.WorktreePath, triggerType, nullIfEmpty(run.TriggerID), runmode.LocalDefaultTeamID)
+		INSERT INTO runs (id, task_id, prompt_id, status, model, worktree_path, trigger_type, trigger_id, team_id, visibility, creator_user_id, actor_agent_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'team', ?, ?)
+	`, run.ID, run.TaskID, nullIfEmpty(run.PromptID), run.Status, run.Model, run.WorktreePath, triggerType, nullIfEmpty(run.TriggerID), runmode.LocalDefaultTeamID, nullIfEmpty(run.CreatorUserID), nullIfEmpty(run.ActorAgentID))
 	return err
 }
 
@@ -136,7 +161,7 @@ func GetAgentRun(database *sql.DB, runID string) (*domain.AgentRun, error) {
 	row := database.QueryRow(`
 		SELECT r.id, r.task_id, r.status, r.model, r.started_at, r.completed_at,
 		       r.total_cost_usd, r.duration_ms, r.num_turns, r.stop_reason, r.worktree_path,
-		       r.result_summary, r.session_id,
+		       r.result_summary, r.session_id, r.actor_agent_id,
 		       (NULLIF(TRIM(rm.agent_content, ' ' || char(9) || char(10) || char(13)), '') IS NULL) AS memory_missing
 		FROM runs r
 		LEFT JOIN run_memory rm ON rm.run_id = r.id
@@ -147,11 +172,11 @@ func GetAgentRun(database *sql.DB, runID string) (*domain.AgentRun, error) {
 	var completedAt sql.NullTime
 	var costUSD sql.NullFloat64
 	var durationMs, numTurns sql.NullInt64
-	var stopReason, worktreePath, model, resultSummary, sessionID sql.NullString
+	var stopReason, worktreePath, model, resultSummary, sessionID, actorAgentID sql.NullString
 
 	err := row.Scan(&r.ID, &r.TaskID, &r.Status, &model, &r.StartedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &stopReason, &worktreePath,
-		&resultSummary, &sessionID, &r.MemoryMissing)
+		&resultSummary, &sessionID, &actorAgentID, &r.MemoryMissing)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -164,6 +189,7 @@ func GetAgentRun(database *sql.DB, runID string) (*domain.AgentRun, error) {
 	r.WorktreePath = worktreePath.String
 	r.ResultSummary = resultSummary.String
 	r.SessionID = sessionID.String
+	r.ActorAgentID = actorAgentID.String
 	if completedAt.Valid {
 		r.CompletedAt = &completedAt.Time
 	}
@@ -192,7 +218,7 @@ func AgentRunsForTask(database *sql.DB, taskID string) ([]domain.AgentRun, error
 	rows, err := database.Query(`
 		SELECT r.id, r.task_id, r.status, r.model, r.started_at, r.completed_at,
 		       r.total_cost_usd, r.duration_ms, r.num_turns, r.stop_reason, r.worktree_path,
-		       r.result_summary, r.session_id,
+		       r.result_summary, r.session_id, r.actor_agent_id,
 		       (NULLIF(TRIM(rm.agent_content, ' ' || char(9) || char(10) || char(13)), '') IS NULL) AS memory_missing
 		FROM runs r
 		LEFT JOIN run_memory rm ON rm.run_id = r.id
@@ -210,11 +236,11 @@ func AgentRunsForTask(database *sql.DB, taskID string) ([]domain.AgentRun, error
 		var completedAt sql.NullTime
 		var costUSD sql.NullFloat64
 		var durationMs, numTurns sql.NullInt64
-		var stopReason, worktreePath, model, resultSummary, sessionID sql.NullString
+		var stopReason, worktreePath, model, resultSummary, sessionID, actorAgentID sql.NullString
 
 		if err := rows.Scan(&r.ID, &r.TaskID, &r.Status, &model, &r.StartedAt, &completedAt,
 			&costUSD, &durationMs, &numTurns, &stopReason, &worktreePath,
-			&resultSummary, &sessionID, &r.MemoryMissing); err != nil {
+			&resultSummary, &sessionID, &actorAgentID, &r.MemoryMissing); err != nil {
 			return nil, err
 		}
 
@@ -223,6 +249,7 @@ func AgentRunsForTask(database *sql.DB, taskID string) ([]domain.AgentRun, error
 		r.WorktreePath = worktreePath.String
 		r.ResultSummary = resultSummary.String
 		r.SessionID = sessionID.String
+		r.ActorAgentID = actorAgentID.String
 		if completedAt.Valid {
 			r.CompletedAt = &completedAt.Time
 		}
@@ -277,9 +304,44 @@ func SetAgentRunSession(database *sql.DB, runID, sessionID string) error {
 // error) when the row already reached a terminal state — the caller
 // treats that as "the run finished on its own; takeover came too
 // late."
-func MarkAgentRunTakenOver(database *sql.DB, runID, takeoverPath string) (bool, error) {
+// MarkAgentRunTakenOver atomically flips runs.status to 'taken_over'
+// AND (when claimUserID != "") flips the parent task's claim from
+// the bot to the user, in a single transaction. Without the
+// transaction, a partial failure between the two UPDATEs would leave
+// run.status='taken_over' alongside a stale bot claim on the task
+// (or vice versa) — the Board would render the AgentCard as taken-
+// over but show the task in the bot's lane, which is incoherent.
+// SKY-261 B+ tightened this to atomic.
+//
+// claimUserID="" is the legacy / test path: only the run is flipped.
+// Tests that pin run-flip behavior in isolation pass "".
+//
+// Returns ok=true when both UPDATEs landed; ok=false (no error) on
+// any race-loss, of which there are two flavors:
+//
+//   - run-race: the run row was already in a terminal status when
+//     we tried to flip it. "The run finished on its own; takeover
+//     came too late."
+//   - claim-race: the task's claim already moved out from under us
+//     (a concurrent swipe-claim takeover or /requeue) between our
+//     run UPDATE and our task UPDATE. The bot no longer owns the
+//     task, so the takeover's premise is gone.
+//
+// Both flavors trigger the deferred rollback, so neither the run
+// nor the task is mutated on race-loss. Caller treats ok=false the
+// same way regardless: call abortTakeover to clean up the worktree
+// copy and mark the run terminal.
+func MarkAgentRunTakenOver(database *sql.DB, runID, takeoverPath, claimUserID string) (bool, error) {
+	tx, err := database.Begin()
+	if err != nil {
+		return false, err
+	}
+	// Rollback is a no-op after a successful Commit; safe to defer
+	// unconditionally for the failure paths.
+	defer func() { _ = tx.Rollback() }()
+
 	now := time.Now()
-	res, err := database.Exec(`
+	res, err := tx.Exec(`
 		UPDATE runs
 		SET status = 'taken_over',
 		    completed_at = ?,
@@ -296,7 +358,60 @@ func MarkAgentRunTakenOver(database *sql.DB, runID, takeoverPath string) (bool, 
 	if err != nil {
 		return false, err
 	}
-	return n > 0, nil
+	if n == 0 {
+		// Race-lost. Returning here without commit triggers the
+		// deferred rollback, leaving both run and task unchanged.
+		return false, nil
+	}
+
+	if claimUserID != "" {
+		// Subquery resolves task_id from the run we just flipped —
+		// caller doesn't have to thread it separately, and the
+		// transaction guarantees the run's task_id is the one we
+		// just operated on (no race between the UPDATE and the
+		// subquery's SELECT).
+		//
+		// Race-safety guards on the task UPDATE itself: only fire
+		// when the bot still holds the claim AND no user has
+		// stepped in. In Postgres (READ COMMITTED) another
+		// transaction CAN commit changes to the task row between
+		// our run UPDATE and this task UPDATE — without the guards
+		// the takeover would silently overwrite a concurrent
+		// swipe-claim takeover or a /requeue's clear. SQLite's
+		// single-writer journal makes the race effectively
+		// impossible there, but Postgres needs the explicit
+		// protection. If the guards fail we return ok=false; the
+		// deferred rollback unwinds the run flip too, and the
+		// caller's abortTakeover cleans up the worktree move and
+		// marks the run terminal.
+		res, err := tx.Exec(`
+			UPDATE tasks
+			   SET claimed_by_user_id  = ?,
+			       claimed_by_agent_id = NULL
+			 WHERE id = (SELECT task_id FROM runs WHERE id = ?)
+			   AND claimed_by_agent_id IS NOT NULL
+			   AND claimed_by_user_id  IS NULL
+		`, claimUserID, runID)
+		if err != nil {
+			return false, err
+		}
+		taskN, err := res.RowsAffected()
+		if err != nil {
+			return false, err
+		}
+		if taskN == 0 {
+			// Race-lost on the task claim axis. Roll the whole
+			// transaction back (including the run flip we just
+			// did). Same downstream cleanup as the run-race path:
+			// caller calls abortTakeover.
+			return false, nil
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // MarkAgentRunReleased flips a held takeover into the "released" sub-state:

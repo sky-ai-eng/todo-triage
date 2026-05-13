@@ -2769,6 +2769,66 @@ func TestRLS_NonAdminCannotInsertOrgVisible(t *testing.T) {
 	}
 }
 
+// TestRLS_TasksClaimXorRejection pins the SKY-261 D-Claims tasks_claim_xor
+// CHECK: at most one of (claimed_by_agent_id, claimed_by_user_id) can be
+// set on a row. Both NULL is the unclaimed-in-queue state; either one set
+// is the current-claimant state; both set is forbidden.
+//
+// This is the schema-level invariant the claim-flip helpers
+// (SetTaskClaimedByAgent / SetTaskClaimedByUser) rely on: each does a
+// single UPDATE that sets one column AND clears the other in the same
+// statement, so the XOR is never temporarily violated. A direct SQL
+// attempt to set both at once must be rejected.
+func TestRLS_TasksClaimXorRejection(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	orgA, alice, teamA := seedOrgWithUser(t, h, "alice")
+	// agents row is required so the FK on tasks.claimed_by_agent_id
+	// resolves. seedOrgWithUser doesn't auto-create one.
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO agents (id, org_id, display_name)
+		VALUES (gen_random_uuid(), $1, 'Test Bot')
+	`, orgA); err != nil {
+		t.Fatalf("seed agent: %v", err)
+	}
+	var agentID string
+	if err := h.AdminDB.QueryRow(
+		`SELECT id FROM agents WHERE org_id = $1`, orgA,
+	).Scan(&agentID); err != nil {
+		t.Fatalf("read agent id: %v", err)
+	}
+
+	entityA := seedEntity(t, h, orgA, "github", "octo/repo#xor")
+	taskID := seedTask(t, h, orgA, alice, entityA, "github:pr:opened")
+
+	// Direct AdminDB UPDATE (BYPASSRLS) that sets BOTH claim columns
+	// must be rejected by the CHECK. This is the schema-level
+	// invariant — it fires regardless of the policy + regardless of
+	// the user. The claim-stamp helpers rely on it as the safety net.
+	_, err := h.AdminDB.Exec(`
+		UPDATE tasks SET claimed_by_agent_id = $1, claimed_by_user_id = $2
+		WHERE id = $3
+	`, agentID, alice, taskID)
+	if err == nil {
+		t.Fatal("tasks_claim_xor allowed both columns set — CHECK constraint broken")
+	}
+	assertPgCode(t, err, "23514", "tasks_claim_xor double-set")
+
+	// Single-column UPDATEs of course succeed. Sanity check.
+	if _, err := h.AdminDB.Exec(`UPDATE tasks SET claimed_by_agent_id = $1 WHERE id = $2`,
+		agentID, taskID); err != nil {
+		t.Errorf("single agent claim UPDATE rejected: %v", err)
+	}
+	// Setting user clears agent (single UPDATE — the helper pattern):
+	if _, err := h.AdminDB.Exec(`UPDATE tasks SET claimed_by_user_id = $1, claimed_by_agent_id = NULL WHERE id = $2`,
+		alice, taskID); err != nil {
+		t.Errorf("user-claim flip with explicit agent-clear rejected: %v", err)
+	}
+
+	_ = teamA
+}
+
 // assertPgCode asserts that err is a *pgconn.PgError with the given
 // SQLSTATE. Postgres error message text drifts across versions, but
 // SQLSTATE codes are spec-stable — assert codes, not text. The

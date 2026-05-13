@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"fmt"
 	"strings"
 	"time"
 
@@ -21,6 +22,7 @@ const taskColumnsWithEntity = `
 	t.priority_reasoning, t.scoring_status, t.severity, t.relevance_reason,
 	t.source_status, t.snooze_until, t.close_reason, t.close_event_type,
 	t.closed_at, t.created_at,
+	t.claimed_by_agent_id, t.claimed_by_user_id,
 	COALESCE(e.title, ''), COALESCE(e.url, ''), e.source_id, e.source, e.kind,
 	-- Guard json_extract so malformed or empty legacy snapshots do not fail
 	-- the entire task query. Missing paths and null values still fall back
@@ -154,11 +156,347 @@ func CloseAllEntityTasks(db *sql.DB, entityID, closeReason string) (int, error) 
 	return int(n), nil
 }
 
-// SetTaskStatus updates a task's status. Used by the router (queued→delegated)
-// and the swipe handler (queued→claimed, etc.).
+// SetTaskStatus updates a task's status on the lifecycle axis only.
+// Claim cols are unaffected — callers that want to change
+// responsibility use the dedicated claim helpers
+// (StampAgentClaimIfUnclaimed, HandoffAgentClaim, etc.). Post-SKY-261 B+
+// the only production caller is revertTaskStatus in DrainEntity's
+// mark-fired-failure rollback; swipe + close paths route through
+// SwipeStore.RecordSwipe + CloseTask. The pre-B+ "queued→delegated /
+// queued→claimed" doc was retired when status='delegated' and
+// status='claimed' were dropped from the lifecycle enum.
 func SetTaskStatus(db *sql.DB, taskID, status string) error {
 	_, err := db.Exec(`UPDATE tasks SET status = ? WHERE id = ?`, status, taskID)
 	return err
+}
+
+// SetTaskClaimedByAgent stamps the agent claim on a task without
+// any race-safety guards or status checks (SKY-261 D-Claims).
+//
+// Production paths DO NOT use this helper post-v0.9 — they go
+// through StampAgentClaimIfUnclaimed (auto-trigger) or
+// HandoffAgentClaim (user-initiated). Both add status guards
+// (refuse on terminal rows), claim-axis guards (refuse to steal
+// concurrent claims), and the snoozed → queued wake. This
+// unconditional setter survives because it's the simplest
+// primitive for test fixtures + migration backfills where the
+// caller has already established a safe pre-state. Live code
+// reaching for this helper is almost always a mistake; reach for
+// the guarded variants instead.
+func SetTaskClaimedByAgent(db *sql.DB, taskID, agentID string) error {
+	var claimedByAgentID any = agentID
+	if agentID == "" {
+		claimedByAgentID = nil
+	}
+
+	_, err := db.Exec(`
+		UPDATE tasks
+		   SET claimed_by_agent_id = ?,
+		       claimed_by_user_id  = NULL
+		 WHERE id = ?
+	`, claimedByAgentID, taskID)
+	return err
+}
+
+// SetTaskClaimedByUser stamps the user claim on a task without any
+// race-safety guards or status checks (SKY-261 D-Claims).
+//
+// Production paths DO NOT use this helper post-v0.9. The swipe-
+// claim handler load-and-branches through ClaimQueuedTaskForUser
+// (unclaimed → user) or TakeoverClaimFromAgent (bot → user); the
+// run-takeover path uses MarkAgentRunTakenOver's atomic
+// transaction. Each of those carries the status guard (refuse on
+// terminal), claim-axis guard, and snoozed-wake atomically.
+// This unconditional setter survives for test fixtures + edge-
+// case backfills only.
+func SetTaskClaimedByUser(db *sql.DB, taskID, userID string) error {
+	var claimedByUserID any = userID
+	if userID == "" {
+		// Empty string is the domain's NULL convention. Passing it raw
+		// would persist "" into the column, which would violate the
+		// users(id) FK on the next read and silently mis-render in any
+		// JOIN. Map to nil so the column is actually NULL.
+		claimedByUserID = nil
+	}
+	_, err := db.Exec(`
+		UPDATE tasks
+		   SET claimed_by_user_id  = ?,
+		       claimed_by_agent_id = NULL
+		 WHERE id = ?
+	`, claimedByUserID, taskID)
+	return err
+}
+
+// StampAgentClaimIfUnclaimed is the race-safe variant of
+// SetTaskClaimedByAgent. The unconditional version overwrites any
+// existing claim — including a user claim that landed during the
+// race window between trigger-match and stamp. That stole the user's
+// gesture; this helper refuses to.
+//
+// Two guards in one UPDATE:
+//
+//   - claimed_by_user_id IS NULL — won't steal a user claim. If the
+//     user beat the bot to it, the bot's auto-trigger silently
+//     loses the race (and the drain path's claim_changed guard
+//     will then skip any pending firing for this task too — the
+//     bot's commitment never lands at all).
+//
+//   - claimed_by_agent_id IS NULL OR != $1 — skip no-op rewrites
+//     when the same agent already holds the claim. Returns ok=false
+//     in that case so the caller can skip the broadcast — repeated
+//     stamps shouldn't churn the FE with redundant task_claimed
+//     events.
+//
+// Invariant enforcement: "snoozed ↔ unclaimed." A claim stamp on a
+// snoozed task IS the wake — the auto-trigger fired because a new
+// matching event landed, which the snooze can't override. The
+// CASE-WHEN flips status='snoozed' → 'queued' and clears
+// snooze_until in the same UPDATE so the post-state is the canonical
+// "claimed, not snoozed."
+//
+// Terminal-status refusal: the `status NOT IN ('done', 'dismissed')`
+// guard ensures claim transitions don't act on closed tasks. Sticky
+// claims past close are an audit signal ("who finished this") — they
+// shouldn't accept new claim mutations on top. Without this guard
+// the auto-trigger could land a claim on a terminal row, which the
+// downstream RecordSwipe's vestigial status='queued' write would
+// then reopen.
+//
+// Returns ok=true when the claim actually changed (caller should
+// broadcast). ok=false (no error) means either user-already-owns,
+// bot-already-owns, or the task is terminal; caller should not
+// broadcast.
+func StampAgentClaimIfUnclaimed(db *sql.DB, taskID, agentID string) (bool, error) {
+	if agentID == "" {
+		return false, fmt.Errorf("StampAgentClaimIfUnclaimed: empty agentID")
+	}
+	res, err := db.Exec(`
+		UPDATE tasks
+		   SET claimed_by_agent_id = ?,
+		       snooze_until = NULL,
+		       status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END
+		 WHERE id = ?
+		   AND claimed_by_user_id IS NULL
+		   AND (claimed_by_agent_id IS NULL OR claimed_by_agent_id != ?)
+		   AND status NOT IN ('done', 'dismissed')
+	`, agentID, taskID, agentID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// HandoffResult discriminates the three outcomes HandoffAgentClaim
+// can produce, so the caller can decide whether to broadcast on the
+// claim axis, skip broadcast (no-op), or surface a refusal as 409.
+type HandoffResult int
+
+const (
+	// HandoffChanged — claim actually moved (unclaimed → bot, or
+	// same-user → bot transfer). Caller broadcasts task_claimed.
+	HandoffChanged HandoffResult = iota
+	// HandoffNoOp — same agent already owns the task. Idempotent;
+	// caller skips the broadcast (and any sibling work like a
+	// duplicate run spawn if applicable).
+	HandoffNoOp
+	// HandoffRefused — a different user owns the task (or the task
+	// vanished mid-flight). Caller returns 409 — the gesture
+	// shouldn't steal.
+	HandoffRefused
+)
+
+// HandoffAgentClaim is the race-safe "user delegates to bot" helper.
+// Three legitimate inputs all land the task in the bot's lane:
+//
+//   - unclaimed → bot-claimed (matches the auto-trigger-style stamp).
+//   - user-claimed by THIS user → bot-claimed (explicit handoff: the
+//     Board's "You → Agent" drag, the swipe-up on a user-claimed
+//     card, factory drag-to-Agent on a card the user previously
+//     claimed).
+//   - bot-already-claimed by THIS agent → idempotent no-op.
+//
+// One refusal: a DIFFERENT user owns the task. The bot mustn't steal
+// what another teammate took on.
+//
+// All four cases resolve in a single guarded UPDATE; on 0 rows
+// affected the helper re-reads the row to differentiate no-op from
+// refused. (At N=1 the "different agent owns it" case isn't
+// reachable; if v2 multi-agent lands, that case currently falls
+// through to "stamp our agent" via the agent != $1 guard — revisit
+// the policy at that point.)
+//
+// This is distinct from StampAgentClaimIfUnclaimed: that helper is
+// for the AUTO-trigger path which has no user identity to transfer
+// from, so it refuses on any non-NULL claimed_by_user_id. Handoff
+// is for explicit user gestures where the user has a userID and
+// can legitimately transfer their own claim.
+func HandoffAgentClaim(db *sql.DB, taskID, agentID, userID string) (HandoffResult, error) {
+	if agentID == "" {
+		return HandoffRefused, fmt.Errorf("HandoffAgentClaim: empty agentID")
+	}
+	if userID == "" {
+		return HandoffRefused, fmt.Errorf("HandoffAgentClaim: empty userID")
+	}
+	// Same snoozed→queued + snooze_until clear as
+	// StampAgentClaimIfUnclaimed: a claim stamp is incompatible with
+	// the snoozed lifecycle state, so the stamp atomically wakes the
+	// task. The user-handoff path that lands here means the user
+	// explicitly chose to act now — overriding any deferral is
+	// correct. Terminal rows (done/dismissed) are refused — sticky
+	// claims past close are audit-only and shouldn't accept new
+	// claim mutations.
+	res, err := db.Exec(`
+		UPDATE tasks
+		   SET claimed_by_agent_id = ?,
+		       claimed_by_user_id  = NULL,
+		       snooze_until = NULL,
+		       status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END
+		 WHERE id = ?
+		   AND (claimed_by_user_id  IS NULL OR claimed_by_user_id  = ?)
+		   AND (claimed_by_agent_id IS NULL OR claimed_by_agent_id != ?)
+		   AND status NOT IN ('done', 'dismissed')
+	`, agentID, taskID, userID, agentID)
+	if err != nil {
+		return HandoffRefused, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return HandoffRefused, err
+	}
+	if n > 0 {
+		return HandoffChanged, nil
+	}
+	// 0 rows — re-read to figure out which guard tripped. Status
+	// has to be part of the SELECT because the terminal-status
+	// guard and the same-agent-owns guard can both fail
+	// simultaneously: sticky-claim-past-close means a done/dismissed
+	// task can have claimed_by_agent_id == our agentID. Pre-fix
+	// that combination returned HandoffNoOp (the same-agent branch
+	// fired without looking at status), and the caller — thinking
+	// "accepted, idempotent" — would fall through to RecordSwipe
+	// whose vestigial status='queued' write reopened the task.
+	// Terminal-status check takes precedence over the no-op check.
+	var curUser, curAgent sql.NullString
+	var curStatus string
+	err = db.QueryRow(
+		`SELECT claimed_by_user_id, claimed_by_agent_id, status FROM tasks WHERE id = ?`,
+		taskID,
+	).Scan(&curUser, &curAgent, &curStatus)
+	if err == sql.ErrNoRows {
+		return HandoffRefused, nil
+	}
+	if err != nil {
+		return HandoffRefused, err
+	}
+	if curStatus == "done" || curStatus == "dismissed" {
+		// Terminal task — refuse regardless of claim state. The
+		// caller maps to 409; no downstream RecordSwipe runs.
+		return HandoffRefused, nil
+	}
+	if curAgent.Valid && curAgent.String == agentID {
+		// Same agent already owns it on an active task — idempotent.
+		return HandoffNoOp, nil
+	}
+	// Either a different user owns it, or some other race state.
+	// Treat as refused so the caller doesn't accidentally proceed
+	// as if the claim landed.
+	return HandoffRefused, nil
+}
+
+// TakeoverClaimFromAgent atomically flips a bot-claimed task to a
+// user claim. Race-safe variant of SetTaskClaimedByUser for the
+// "user swipes claim on a bot-claimed task" path: guards on the
+// bot still holding the claim AND no other user owning it, so
+// concurrent takeovers don't trample each other.
+//
+// Returns ok=true when the flip landed (caller broadcasts +
+// proceeds). ok=false (no error) means the race was lost — either
+// another user took over first, or the bot's claim was cleared
+// (requeue) between the load and the UPDATE; caller surfaces 409
+// and the FE refetches.
+func TakeoverClaimFromAgent(db *sql.DB, taskID, userID string) (bool, error) {
+	if userID == "" {
+		return false, fmt.Errorf("TakeoverClaimFromAgent: empty userID")
+	}
+	// Snooze cleanup is defensive: post-invariant ("snoozed ↔
+	// unclaimed") a bot-claimed task can't be snoozed, but if a
+	// pre-invariant row somehow reaches us we coerce to the
+	// canonical shape on the way out rather than leaving an
+	// incoherent state. Terminal rows are refused — a takeover on
+	// a done/dismissed task would only churn the audit pointer
+	// without changing meaningful state, and the downstream
+	// RecordSwipe's status='queued' write would reopen the task.
+	res, err := db.Exec(`
+		UPDATE tasks
+		   SET claimed_by_user_id  = ?,
+		       claimed_by_agent_id = NULL,
+		       snooze_until = NULL,
+		       status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END
+		 WHERE id = ?
+		   AND claimed_by_agent_id IS NOT NULL
+		   AND claimed_by_user_id  IS NULL
+		   AND status NOT IN ('done', 'dismissed')
+	`, userID, taskID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// ClaimQueuedTaskForUser is the user-claim handler's atomic
+// "take this task off the queue" — succeeds only if the task is
+// (a) status IN ('queued', 'snoozed') AND (b) currently unclaimed
+// by anyone (both claim cols NULL). Returns true if the claim
+// landed, false on any guard violation: the task is already
+// claimed (race lost), or the task is closed (done/dismissed).
+// The caller refetches on false and surfaces the current state.
+//
+// The status guard admits both 'queued' and 'snoozed' under the
+// SKY-261 B+ "snoozed ↔ unclaimed" invariant: a snoozed task is
+// still in the team's queue (deferred but not closed), so a
+// user explicitly saying "I'll handle this now" should land the
+// claim AND wake the task — the snooze_until + status both reset
+// in the same UPDATE so the post-state is the canonical
+// "user-claimed, not snoozed."
+//
+// Closed states (done / dismissed) stay refused — claiming a
+// finished task makes no semantic sense, and the sticky claim
+// cols past close are audit-only.
+//
+// userID="" is rejected outright (returns false, error) — an empty
+// claim is the same as no claim, and persisting "" would violate
+// the users(id) FK on the next read. Caller must supply a real
+// user id.
+func ClaimQueuedTaskForUser(db *sql.DB, taskID, userID string) (bool, error) {
+	if userID == "" {
+		return false, fmt.Errorf("ClaimQueuedTaskForUser: empty userID is not a valid claimant")
+	}
+	res, err := db.Exec(`
+		UPDATE tasks
+		   SET claimed_by_user_id = ?,
+		       snooze_until = NULL,
+		       status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END
+		 WHERE id = ?
+		   AND status IN ('queued', 'snoozed')
+		   AND claimed_by_user_id  IS NULL
+		   AND claimed_by_agent_id IS NULL
+	`, userID, taskID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // RecordTaskEvent inserts into the task_events junction table.
@@ -306,6 +644,11 @@ func GetTask(db *sql.DB, id string) (*domain.Task, error) {
 // rules in one org can't influence task ordering in another (latent at
 // N=1 in local mode today, load-bearing once multi-mode shares a DB).
 func QueuedTasks(db *sql.DB) ([]domain.Task, error) {
+	// SKY-261 B+ derived filter: queue = status='queued' + both claim
+	// cols NULL + not future-snoozed. The claim-col exclusion is what
+	// makes the queue genuinely "unclaimed work" rather than "anything
+	// with status=queued" (post-B+ a user- or bot-claimed task also
+	// reads status='queued', but it's owned, not in the triage queue).
 	return queryTasks(db, `
 		SELECT `+taskColumnsWithEntity+`
 		FROM tasks t
@@ -317,13 +660,49 @@ func QueuedTasks(db *sql.DB) ([]domain.Task, error) {
 			GROUP BY org_id, event_type
 		) tr ON t.event_type = tr.event_type AND t.org_id = tr.org_id
 		WHERE t.status = 'queued'
+			AND t.claimed_by_agent_id IS NULL
+			AND t.claimed_by_user_id  IS NULL
 			AND (t.snooze_until IS NULL OR t.snooze_until <= datetime('now'))
 		ORDER BY COALESCE(tr.sort_order, 999) ASC, COALESCE(t.priority_score, 0.5) DESC
 	`)
 }
 
 // TasksByStatus returns tasks with the given status, ordered by priority.
+//
+// SKY-261 B+: 'claimed' and 'delegated' are no longer real status values
+// — they're derived filters on the claim columns. This helper preserves
+// the API surface (callers can still query "?status=claimed") by
+// interpreting those two values as their claim-axis equivalents:
+//
+//   - status="claimed"   → claimed_by_user_id IS NOT NULL + active
+//   - status="delegated" → claimed_by_agent_id IS NOT NULL + active
+//
+// "Active" here means status NOT IN ('done', 'dismissed') so the
+// per-claim views show both the in-flight and the awaiting-action
+// rows; closed rows fall under status='done' via the regular path.
+// The 'queued' / 'snoozed' / 'done' / 'dismissed' paths stay literal
+// — those are genuine status values.
 func TasksByStatus(db *sql.DB, status string) ([]domain.Task, error) {
+	switch status {
+	case "claimed":
+		return queryTasks(db, `
+			SELECT `+taskColumnsWithEntity+`
+			FROM tasks t
+			JOIN entities e ON t.entity_id = e.id
+			WHERE t.claimed_by_user_id IS NOT NULL
+				AND t.status NOT IN ('done', 'dismissed')
+			ORDER BY COALESCE(t.priority_score, 0.5) DESC
+		`)
+	case "delegated":
+		return queryTasks(db, `
+			SELECT `+taskColumnsWithEntity+`
+			FROM tasks t
+			JOIN entities e ON t.entity_id = e.id
+			WHERE t.claimed_by_agent_id IS NOT NULL
+				AND t.status NOT IN ('done', 'dismissed')
+			ORDER BY COALESCE(t.priority_score, 0.5) DESC
+		`)
+	}
 	return queryTasks(db, `
 		SELECT `+taskColumnsWithEntity+`
 		FROM tasks t
@@ -399,6 +778,7 @@ type taskScanState struct {
 	sourceStatus, scoringStatus        sql.NullString
 	closeReason, closeEventType        sql.NullString
 	snoozeUntil, closedAt              sql.NullTime
+	claimedByAgentID, claimedByUserID  sql.NullString
 }
 
 func (s *taskScanState) targets(t *domain.Task) []any {
@@ -408,6 +788,7 @@ func (s *taskScanState) targets(t *domain.Task) []any {
 		&s.priorityReasoning, &s.scoringStatus, &s.severity, &s.relevanceReason,
 		&s.sourceStatus, &s.snoozeUntil, &s.closeReason, &s.closeEventType,
 		&s.closedAt, &t.CreatedAt,
+		&s.claimedByAgentID, &s.claimedByUserID,
 		// Entity JOIN columns:
 		&t.Title, &t.SourceURL, &t.EntitySourceID, &t.EntitySource, &t.EntityKind,
 		&t.OpenSubtaskCount,
@@ -435,6 +816,8 @@ func (s *taskScanState) finalize(t *domain.Task) {
 	if s.closedAt.Valid {
 		t.ClosedAt = &s.closedAt.Time
 	}
+	t.ClaimedByAgentID = s.claimedByAgentID.String
+	t.ClaimedByUserID = s.claimedByUserID.String
 }
 
 // scanFields works for both *sql.Row and *sql.Rows via the Scanner interface.

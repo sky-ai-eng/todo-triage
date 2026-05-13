@@ -15,6 +15,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
 )
 
@@ -440,8 +441,21 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 				failed = append(failed, stockFailure{a.IssueKey, a.Action, err.Error()})
 				continue
 			}
-			if err := db.SetTaskStatus(s.db, task.ID, "claimed"); err != nil {
-				failed = append(failed, stockFailure{a.IssueKey, a.Action, err.Error()})
+			// SKY-261 B+: claim is on the responsibility axis now,
+			// not status. status='claimed' was dropped along with
+			// status='delegated' once the claim cols took over the
+			// "who's responsible" answer. Stamp the user claim
+			// optimistically — if the task pre-existed in some
+			// non-queued state or was already claimed by someone
+			// else, surface that as a failed action rather than
+			// stealing.
+			ok, err := db.ClaimQueuedTaskForUser(s.db, task.ID, runmode.LocalDefaultUserID)
+			if err != nil {
+				failed = append(failed, stockFailure{a.IssueKey, a.Action, "claim stamp: " + err.Error()})
+				continue
+			}
+			if !ok {
+				failed = append(failed, stockFailure{a.IssueKey, a.Action, "task already claimed or no longer queued"})
 				continue
 			}
 			claimed++
@@ -476,9 +490,12 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 	// Carry-over creates tasks without going through the poller, so no
 	// system:poll:completed fires to wake the scorer via its event-bus
 	// subscription. Poke it directly, but only when we actually produced
-	// queued tasks — claim promotes straight to 'claimed' (skipped by the
-	// UnscoredTasks query) and done doesn't create a task at all, so those
-	// two branches have nothing for the scorer to pick up.
+	// queued tasks — done doesn't create a task at all, and claim now
+	// (post-SKY-261 B+) creates a status='queued' task with the user
+	// claim col stamped. UnscoredTasks would pick up those rows on its
+	// next natural cycle, so leaving the trigger off this branch is fine
+	// — scoring a user-claimed task is harmless dormant work rather than
+	// the wrong-status skip the old comment described.
 	if queued > 0 && s.scorerTrigger != nil {
 		s.scorerTrigger()
 	}

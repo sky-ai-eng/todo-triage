@@ -7,7 +7,121 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
+
+// TestCreateAgentRun_CreatorUserIDPairsWithTriggerType pins the
+// SKY-261 v0.9 invariant: trigger-spawned runs (trigger_type='event')
+// have creator_user_id NULL; manual runs have it set. The CHECK
+// constraint enforces this at the schema level; CreateAgentRun has
+// a backward-compat default for manual runs that don't supply a
+// creator (test fixtures, legacy callers) so the constraint doesn't
+// trip them.
+func TestCreateAgentRun_CreatorUserIDPairsWithTriggerType(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		triggerType    string
+		creatorUserID  string
+		wantSQLCreator sql.NullString // null = empty/expected NULL
+	}{
+		{
+			name:           "event_with_empty_creator_lands_NULL",
+			triggerType:    "event",
+			creatorUserID:  "",
+			wantSQLCreator: sql.NullString{Valid: false},
+		},
+		{
+			name:           "manual_with_explicit_creator_lands_set",
+			triggerType:    "manual",
+			creatorUserID:  runmode.LocalDefaultUserID,
+			wantSQLCreator: sql.NullString{String: runmode.LocalDefaultUserID, Valid: true},
+		},
+		{
+			name:           "manual_without_creator_defaults_to_sentinel",
+			triggerType:    "manual",
+			creatorUserID:  "",
+			wantSQLCreator: sql.NullString{String: runmode.LocalDefaultUserID, Valid: true},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			database := newTestDB(t)
+			// Seed minimum FK graph.
+			entity, _, err := FindOrCreateEntity(database, "github", "octo/repo#run-"+tc.name, "pr", "T", "https://example.com/r")
+			if err != nil {
+				t.Fatalf("seed entity: %v", err)
+			}
+			eventID, err := RecordEvent(database, domain.Event{
+				EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entity.ID, MetadataJSON: `{}`,
+			})
+			if err != nil {
+				t.Fatalf("record event: %v", err)
+			}
+			task, _, err := FindOrCreateTask(database, entity.ID, domain.EventGitHubPRCICheckFailed, tc.name, eventID, 0.5)
+			if err != nil {
+				t.Fatalf("create task: %v", err)
+			}
+			if _, err := database.Exec(
+				`INSERT OR IGNORE INTO prompts (id, name, body) VALUES ('p-creator', 'P', 'x')`,
+			); err != nil {
+				t.Fatalf("seed prompt: %v", err)
+			}
+			runID := "r-creator-" + tc.name
+			if err := CreateAgentRun(database, domain.AgentRun{
+				ID:            runID,
+				TaskID:        task.ID,
+				PromptID:      "p-creator",
+				Status:        "initializing",
+				Model:         "m",
+				TriggerType:   tc.triggerType,
+				CreatorUserID: tc.creatorUserID,
+			}); err != nil {
+				t.Fatalf("CreateAgentRun: %v", err)
+			}
+			var gotCreator sql.NullString
+			if err := database.QueryRow(
+				`SELECT creator_user_id FROM runs WHERE id = ?`, runID,
+			).Scan(&gotCreator); err != nil {
+				t.Fatalf("scan creator: %v", err)
+			}
+			if gotCreator != tc.wantSQLCreator {
+				t.Errorf("creator_user_id = %v, want %v", gotCreator, tc.wantSQLCreator)
+			}
+		})
+	}
+
+	t.Run("event_with_explicit_creator_violates_CHECK", func(t *testing.T) {
+		// Negative case: 'event' + non-NULL creator must be rejected
+		// by the CHECK constraint at INSERT time. Confirms the
+		// schema-level invariant is real, not just an application-
+		// side convention.
+		database := newTestDB(t)
+		entity, _, _ := FindOrCreateEntity(database, "github", "octo/repo#run-neg", "pr", "T", "https://example.com/r")
+		eventID, _ := RecordEvent(database, domain.Event{
+			EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entity.ID, MetadataJSON: `{}`,
+		})
+		task, _, _ := FindOrCreateTask(database, entity.ID, domain.EventGitHubPRCICheckFailed, "neg", eventID, 0.5)
+		if _, err := database.Exec(
+			`INSERT OR IGNORE INTO prompts (id, name, body) VALUES ('p-neg', 'P', 'x')`,
+		); err != nil {
+			t.Fatalf("seed prompt: %v", err)
+		}
+		err := CreateAgentRun(database, domain.AgentRun{
+			ID:            "r-neg",
+			TaskID:        task.ID,
+			PromptID:      "p-neg",
+			Status:        "initializing",
+			Model:         "m",
+			TriggerType:   "event",
+			CreatorUserID: runmode.LocalDefaultUserID, // wrong combo
+		})
+		if err == nil {
+			t.Fatal("CreateAgentRun accepted 'event' + non-NULL creator; CHECK constraint missing")
+		}
+		if !strings.Contains(err.Error(), "CHECK") {
+			t.Errorf("error = %q; want CHECK-constraint violation", err.Error())
+		}
+	})
+}
 
 // TestActiveRunIDsForTask verifies the terminal-state filter matches the one
 // used by HasActiveRunForTask — the close cascade depends on this query
@@ -160,6 +274,210 @@ func takeoverFixture(t *testing.T, database *sql.DB, runID, status, worktreePath
 	return task.ID
 }
 
+// TestMarkAgentRunTakenOver_AtomicWithClaim pins the SKY-261 B+
+// atomicity invariant: when claimUserID is supplied, the run flip and
+// the task claim flip both happen in one transaction. The contract:
+//
+//   - Successful call: run.status='taken_over' AND task is now
+//     user-claimed (agent claim cleared). Single observable moment.
+//   - Race-lost (run already terminal): tx rolls back; BOTH the run
+//     AND the task are unchanged. The bot's claim survives the
+//     attempted takeover.
+//
+// Pre-B+ implementations did two separate UPDATEs with the task
+// UPDATE allowed to fail — leaving the system in an incoherent state
+// where the run reads "taken over" but the task still shows bot
+// claim. This test catches that regression by exercising both arms.
+func TestMarkAgentRunTakenOver_AtomicWithClaim(t *testing.T) {
+	database := newTestDB(t)
+	taskID := takeoverFixture(t, database, "run-atomic-takeover", "running", "/tmp/triagefactory-runs/run-atomic-takeover")
+
+	// Pre-condition: bot claims the task (via the local agent
+	// sentinel). seedLocalAgentForClaimTests is in tasks_claims_test.go,
+	// but inlining the INSERT here keeps this test self-contained.
+	if _, err := database.Exec(
+		`INSERT OR IGNORE INTO agents (id, org_id, display_name) VALUES (?, ?, 'Test Bot')`,
+		runmode.LocalDefaultAgentID, runmode.LocalDefaultOrgID,
+	); err != nil {
+		t.Fatalf("seed agent: %v", err)
+	}
+	if err := SetTaskClaimedByAgent(database, taskID, runmode.LocalDefaultAgentID); err != nil {
+		t.Fatalf("seed agent claim: %v", err)
+	}
+
+	const userID = runmode.LocalDefaultUserID
+	dest := "/home/user/.triagefactory/takeovers/run-atomic"
+	ok, err := MarkAgentRunTakenOver(database, "run-atomic-takeover", dest, userID)
+	if err != nil {
+		t.Fatalf("MarkAgentRunTakenOver: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected ok=true for active run")
+	}
+
+	// Both writes must have landed: run.status='taken_over' AND
+	// task.claimed_by_user_id=userID with the agent claim cleared.
+	run, err := GetAgentRun(database, "run-atomic-takeover")
+	if err != nil {
+		t.Fatalf("GetAgentRun: %v", err)
+	}
+	if run.Status != "taken_over" {
+		t.Errorf("run.Status=%q want taken_over", run.Status)
+	}
+	gotTask, err := GetTask(database, taskID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if gotTask.ClaimedByAgentID != "" {
+		t.Errorf("task.ClaimedByAgentID=%q want empty (atomic flip should have cleared it)", gotTask.ClaimedByAgentID)
+	}
+	if gotTask.ClaimedByUserID != userID {
+		t.Errorf("task.ClaimedByUserID=%q want %q (atomic flip should have set it)", gotTask.ClaimedByUserID, userID)
+	}
+}
+
+// TestMarkAgentRunTakenOver_AtomicRollsBackOnRaceLoss pins the
+// rollback side of the atomicity contract: when the run is already
+// terminal (race-lost), the transaction must roll back. The task's
+// claim must NOT have been flipped — a fast-completing run shouldn't
+// trigger a claim transfer.
+func TestMarkAgentRunTakenOver_AtomicRollsBackOnRaceLoss(t *testing.T) {
+	database := newTestDB(t)
+	taskID := takeoverFixture(t, database, "run-race-loss", "completed", "/tmp/triagefactory-runs/run-race-loss")
+
+	if _, err := database.Exec(
+		`INSERT OR IGNORE INTO agents (id, org_id, display_name) VALUES (?, ?, 'Test Bot')`,
+		runmode.LocalDefaultAgentID, runmode.LocalDefaultOrgID,
+	); err != nil {
+		t.Fatalf("seed agent: %v", err)
+	}
+	if err := SetTaskClaimedByAgent(database, taskID, runmode.LocalDefaultAgentID); err != nil {
+		t.Fatalf("seed agent claim: %v", err)
+	}
+
+	ok, err := MarkAgentRunTakenOver(database, "run-race-loss", "/dest", runmode.LocalDefaultUserID)
+	if err != nil {
+		t.Fatalf("MarkAgentRunTakenOver: %v", err)
+	}
+	if ok {
+		t.Fatal("expected ok=false on race-loss (run already completed)")
+	}
+
+	gotTask, err := GetTask(database, taskID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if gotTask.ClaimedByAgentID != runmode.LocalDefaultAgentID {
+		t.Errorf("task.ClaimedByAgentID=%q want %q (race-loss must roll back the claim flip too)",
+			gotTask.ClaimedByAgentID, runmode.LocalDefaultAgentID)
+	}
+	if gotTask.ClaimedByUserID != "" {
+		t.Errorf("task.ClaimedByUserID=%q want empty (race-loss rolled back, no user claim)", gotTask.ClaimedByUserID)
+	}
+}
+
+// TestMarkAgentRunTakenOver_AtomicRollsBackOnClaimRace pins the
+// second flavor of race-loss: the run flip succeeds (status not
+// terminal) but the task's claim has already moved out from under
+// us. Two staged variants — different-user claim and requeued
+// (both claim cols cleared) — exercise the WHERE clause's two
+// guards individually.
+//
+// Pre-fix MarkAgentRunTakenOver did the task UPDATE unconditionally
+// by task_id subquery, so a concurrent swipe-claim takeover or
+// /requeue between the run UPDATE and the task UPDATE would have
+// been silently overwritten. The post-fix guard refuses + rolls
+// the whole transaction back so neither the run nor the task is
+// mutated.
+func TestMarkAgentRunTakenOver_AtomicRollsBackOnClaimRace(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		stageTask func(t *testing.T, database *sql.DB, taskID, otherUserID string)
+	}{
+		{
+			name: "another_user_already_claimed",
+			stageTask: func(t *testing.T, database *sql.DB, taskID, otherUserID string) {
+				if err := SetTaskClaimedByUser(database, taskID, otherUserID); err != nil {
+					t.Fatalf("stage other-user claim: %v", err)
+				}
+			},
+		},
+		{
+			name: "task_was_requeued_clearing_bot_claim",
+			stageTask: func(t *testing.T, database *sql.DB, taskID, _ string) {
+				if _, err := database.Exec(
+					`UPDATE tasks SET claimed_by_agent_id = NULL, claimed_by_user_id = NULL WHERE id = ?`,
+					taskID,
+				); err != nil {
+					t.Fatalf("stage requeue: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			database := newTestDB(t)
+			runID := "run-claim-race-" + tc.name
+			taskID := takeoverFixture(t, database, runID, "running", "/tmp/triagefactory-runs/"+runID)
+
+			// Seed the agents row + the "other user" row up front
+			// so all FKs resolve regardless of which staging path
+			// the subtest takes.
+			if _, err := database.Exec(
+				`INSERT OR IGNORE INTO agents (id, org_id, display_name) VALUES (?, ?, 'Test Bot')`,
+				runmode.LocalDefaultAgentID, runmode.LocalDefaultOrgID,
+			); err != nil {
+				t.Fatalf("seed agent: %v", err)
+			}
+			const otherUserID = "00000000-0000-0000-0000-0000000007bb"
+			if _, err := database.Exec(
+				`INSERT INTO users (id, display_name) VALUES (?, 'Other User')`,
+				otherUserID,
+			); err != nil {
+				t.Fatalf("seed other user: %v", err)
+			}
+
+			// Start with bot claim. Stage the race by mutating to
+			// the concurrent-takeover/requeue post-state BEFORE
+			// calling MarkAgentRunTakenOver. The runs table still
+			// shows status='running', so the run UPDATE will pass
+			// its guard; only the task UPDATE's new claim guards
+			// should refuse.
+			if err := SetTaskClaimedByAgent(database, taskID, runmode.LocalDefaultAgentID); err != nil {
+				t.Fatalf("seed agent claim: %v", err)
+			}
+			tc.stageTask(t, database, taskID, otherUserID)
+
+			ok, err := MarkAgentRunTakenOver(database, runID, "/dest", runmode.LocalDefaultUserID)
+			if err != nil {
+				t.Fatalf("MarkAgentRunTakenOver: %v", err)
+			}
+			if ok {
+				t.Fatal("expected ok=false on claim-axis race-loss; tx should have rolled back")
+			}
+
+			// Run must be unchanged (status='running' from fixture).
+			run, err := GetAgentRun(database, runID)
+			if err != nil {
+				t.Fatalf("GetAgentRun: %v", err)
+			}
+			if run.Status != "running" {
+				t.Errorf("run.Status = %q; want 'running' (tx rollback should have reverted the run flip)", run.Status)
+			}
+
+			// Task claim must be unchanged from the staged state
+			// (not the LocalDefaultUserID we tried to flip to).
+			gotTask, err := GetTask(database, taskID)
+			if err != nil {
+				t.Fatalf("GetTask: %v", err)
+			}
+			if gotTask.ClaimedByUserID == runmode.LocalDefaultUserID {
+				t.Errorf("task.ClaimedByUserID = %q; want preserved (race-loss must not have stamped our user)",
+					gotTask.ClaimedByUserID)
+			}
+		})
+	}
+}
+
 // TestMarkAgentRunTakenOver_Active is the happy-path: an active run gets
 // marked taken_over with the right metadata and worktree_path is updated
 // to the takeover destination (so the row no longer points at the soon-
@@ -169,7 +487,7 @@ func TestMarkAgentRunTakenOver_Active(t *testing.T) {
 	takeoverFixture(t, database, "run-takeover-active", "running", "/tmp/triagefactory-runs/run-takeover-active")
 
 	dest := "/home/user/.triagefactory/takeovers/run-run-takeover-active"
-	ok, err := MarkAgentRunTakenOver(database, "run-takeover-active", dest)
+	ok, err := MarkAgentRunTakenOver(database, "run-takeover-active", dest, "")
 	if err != nil {
 		t.Fatalf("MarkAgentRunTakenOver: %v", err)
 	}
@@ -220,7 +538,7 @@ func TestMarkAgentRunTakenOver_RaceLoss(t *testing.T) {
 			origPath := "/tmp/triagefactory-runs/run-" + status
 			takeoverFixture(t, database, "run-"+status, status, origPath)
 
-			ok, err := MarkAgentRunTakenOver(database, "run-"+status, "/somewhere/new")
+			ok, err := MarkAgentRunTakenOver(database, "run-"+status, "/somewhere/new", "")
 			if err != nil {
 				t.Fatalf("MarkAgentRunTakenOver: %v", err)
 			}
@@ -246,7 +564,7 @@ func TestMarkAgentRunTakenOver_RaceLoss(t *testing.T) {
 // erroring. The takeover handler treats this the same as race-loss.
 func TestMarkAgentRunTakenOver_NonexistentRun(t *testing.T) {
 	database := newTestDB(t)
-	ok, err := MarkAgentRunTakenOver(database, "no-such-run", "/dest")
+	ok, err := MarkAgentRunTakenOver(database, "no-such-run", "/dest", "")
 	if err != nil {
 		t.Fatalf("MarkAgentRunTakenOver: %v", err)
 	}

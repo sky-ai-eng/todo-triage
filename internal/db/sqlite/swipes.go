@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -25,19 +26,21 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 	if err := assertLocalOrg(orgID); err != nil {
 		return "", err
 	}
-	// Action → status mapping. Unknown action defaults to "queued" so
-	// a typo or unknown future value doesn't strand the task in an
-	// invalid status (existing pre-D2 behavior; preserved verbatim).
+	// Action → status mapping. SKY-261 B+ split the responsibility axis
+	// (who owns this) off the lifecycle axis (where in its life the
+	// task is). claim + delegate are responsibility-only now — the
+	// handler stamps claim columns; the status stays 'queued' here.
+	// Only dismiss/snooze/complete (genuine lifecycle moves) transition
+	// status. Unknown action defaults to 'queued' so a typo doesn't
+	// strand the task; same fallback as pre-SKY-261.
 	var newStatus string
 	switch action {
-	case "claim":
-		newStatus = "claimed"
+	case "claim", "delegate":
+		newStatus = "queued"
 	case "dismiss":
 		newStatus = "dismissed"
 	case "snooze":
 		newStatus = "snoozed"
-	case "delegate":
-		newStatus = "delegated"
 	case "complete":
 		newStatus = "done"
 	default:
@@ -50,15 +53,15 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 		); err != nil {
 			return err
 		}
-		// snooze_until is cleared on EVERY transition out of the
-		// pre-swipe state. None of the swipe target statuses (claimed,
-		// dismissed, delegated, done, or the queued fallback for
-		// unknown actions) are semantically compatible with a future
-		// snooze_until — and the queue listing filter hides any
-		// 'queued' row whose snooze_until is in the future, so a
-		// snoozed→claimed→requeued path would otherwise leave the
-		// task invisible. SnoozeTask is the only method that should
-		// set snooze_until; everything else clears it.
+		// snooze_until is cleared on every transition this method
+		// handles — dismiss/complete (genuine lifecycle moves) are
+		// terminal so a leftover deferral makes no sense, and
+		// claim/delegate's snooze_until clear is redundant with the
+		// claim helpers (Stamp/Handoff/Takeover/ClaimQueued all do
+		// their own atomic snooze wake under the v0.7 "snoozed ↔
+		// unclaimed" invariant) but harmless. SnoozeTask is the
+		// only method that should SET snooze_until; everything
+		// else clears it.
 		_, err := q.ExecContext(ctx,
 			`UPDATE tasks SET status = ?, snooze_until = NULL WHERE id = ?`,
 			newStatus, taskID,
@@ -71,24 +74,62 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 	return newStatus, nil
 }
 
-func (s *swipeStore) SnoozeTask(ctx context.Context, orgID string, taskID string, until time.Time, hesitationMs int) error {
+func (s *swipeStore) SnoozeTask(ctx context.Context, orgID string, taskID string, until time.Time, hesitationMs int) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return false, err
 	}
-	return inTx(ctx, s.q, func(q queryer) error {
+	var ok bool
+	err := inTx(ctx, s.q, func(q queryer) error {
+		// Audit row first so a refused snooze rolls both back as a
+		// unit via the tx abort. If we wrote audit on refuse we'd
+		// leave an "attempted snooze" log entry plus zero state
+		// change — not useful, and inconsistent with the SKY-261 B+
+		// "refused gesture leaves no trace" semantic the helper
+		// callers depend on.
 		if _, err := q.ExecContext(ctx,
 			`INSERT INTO swipe_events (task_id, action, hesitation_ms) VALUES (?, 'snooze', ?)`,
 			taskID, hesitationMs,
 		); err != nil {
 			return err
 		}
-		_, err := q.ExecContext(ctx,
-			`UPDATE tasks SET status = 'snoozed', snooze_until = ? WHERE id = ?`,
+		// Claim guard: snooze is queue-only post-invariant. A
+		// claimed task being snoozed would create a state that no
+		// flow in the code path knows how to handle correctly
+		// (drain skips it, re-derive skips it, Board doesn't
+		// render the SnoozedBadge in a claimed lane). Refuse here;
+		// caller surfaces 409 and the user can requeue first.
+		res, err := q.ExecContext(ctx,
+			`UPDATE tasks
+			    SET status = 'snoozed', snooze_until = ?
+			  WHERE id = ?
+			    AND claimed_by_agent_id IS NULL
+			    AND claimed_by_user_id  IS NULL`,
 			until, taskID,
 		)
-		return err
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			// Refused: roll the audit row back too via the sentinel.
+			return errSnoozeRefused
+		}
+		ok = true
+		return nil
 	})
+	if errors.Is(err, errSnoozeRefused) {
+		return false, nil
+	}
+	return ok, err
 }
+
+// errSnoozeRefused signals the snooze-on-claimed-task guard tripped.
+// Distinct from a real DB error so SnoozeTask can return (false, nil)
+// while still triggering inTx's deferred rollback for the audit row.
+var errSnoozeRefused = errors.New("sqlite swipes: snooze refused (task is claimed)")
 
 func (s *swipeStore) RequeueTask(ctx context.Context, orgID string, taskID string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
@@ -96,8 +137,17 @@ func (s *swipeStore) RequeueTask(ctx context.Context, orgID string, taskID strin
 	}
 	var ok bool
 	err := inTx(ctx, s.q, func(q queryer) error {
+		// SKY-261 B+: Requeue clears both claim cols too — putting a
+		// task back in the team's triage queue means it's no longer
+		// claimed by anyone (the derived queue filter requires both
+		// claim cols NULL).
 		res, err := q.ExecContext(ctx,
-			`UPDATE tasks SET status = 'queued', snooze_until = NULL WHERE id = ?`,
+			`UPDATE tasks
+			    SET status = 'queued',
+			        snooze_until = NULL,
+			        claimed_by_agent_id = NULL,
+			        claimed_by_user_id  = NULL
+			  WHERE id = ?`,
 			taskID,
 		)
 		if err != nil {
@@ -124,8 +174,22 @@ func (s *swipeStore) UndoLastSwipe(ctx context.Context, orgID string, taskID str
 		); err != nil {
 			return err
 		}
+		// SKY-261 B+: undo mirrors requeue's full reset — claim cols
+		// also clear. A claim/delegate swipe stamps the relevant
+		// claim col; the post-swipe-handler teardown
+		// (cleanupPendingApprovalRun + spawner.Cancel for the
+		// dismiss/complete/claim paths) is the side-effect, but the
+		// claim col left on the row would keep the task in the
+		// owner's lane even after status returns to 'queued'. Clear
+		// both cols so the task lands back in the team's unclaimed
+		// triage queue, the same shape /requeue produces.
 		_, err := q.ExecContext(ctx,
-			`UPDATE tasks SET status = 'queued', snooze_until = NULL WHERE id = ?`,
+			`UPDATE tasks
+			    SET status = 'queued',
+			        snooze_until = NULL,
+			        claimed_by_agent_id = NULL,
+			        claimed_by_user_id  = NULL
+			  WHERE id = ?`,
 			taskID,
 		)
 		return err

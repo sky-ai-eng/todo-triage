@@ -265,7 +265,7 @@ func main() {
 		openBrowser(fmt.Sprintf("http://localhost%s", addr))
 	}
 
-	srv := server.New(database, stores.Prompts, stores.Swipes, stores.Dashboard, stores.EventHandlers)
+	srv := server.New(database, stores.Prompts, stores.Swipes, stores.Dashboard, stores.EventHandlers, stores.Agents, stores.TeamAgents)
 
 	distFS, err := frontendDist()
 	if err != nil {
@@ -308,14 +308,21 @@ func main() {
 
 	// Bootstrap the local-mode agent identity (SKY-260 D-Agent). One
 	// agents row + one team_agents row for the synthetic LocalDefaultOrg
-	// / LocalDefaultTeamID pair. Idempotent — re-runs across boots
-	// (including v1.10.1 → current upgrades) leave existing rows intact,
-	// preserving any user-disable on team_agents.enabled. Logged as a
-	// warning on failure rather than fatal because the rows aren't yet
-	// load-bearing for routing/spawner; D-Claims (SKY-261) will flip
-	// this to fatal once tasks.claimed_by_agent_id is wired.
+	// / LocalDefaultTeamID pair. Idempotent (INSERT OR IGNORE) — re-runs
+	// across boots leave existing rows intact, preserving any user-
+	// disable on team_agents.enabled.
+	//
+	// Fatal on failure: post-SKY-261 the agents row is load-bearing for
+	// the entire claim flow (stampAgentClaim's GetForOrg, the drain
+	// path's claim_changed guard, runs.actor_agent_id stamping). The
+	// idempotent INSERT means the only legitimate failure mode is a
+	// DB connection issue — and Migrate() above already fatals on
+	// that. Continuing past a bootstrap failure produces a silently-
+	// broken auto-delegation state where the user wouldn't see an
+	// error, just notice things never fire. Better to surface the
+	// failure at startup.
 	if err := db.BootstrapLocalAgent(context.Background(), stores); err != nil {
-		log.Printf("[bootstrap] warning: local agent: %v", err)
+		log.Fatalf("[bootstrap] local agent: %v (auto-delegation depends on this; refusing to start)", err)
 	}
 
 	// Auto-import Claude Code skill files as prompts. context.Background
@@ -513,7 +520,7 @@ func main() {
 	}
 
 	// Create spawner once — credentials are hot-swapped in place
-	spawner := delegate.NewSpawner(database, stores.Prompts, nil, wsHub, "")
+	spawner := delegate.NewSpawner(database, stores.Prompts, stores.Agents, nil, wsHub, "")
 	srv.SetSpawner(spawner)
 
 	// SKY-220: wire the classifier wait into the spawner's setup path.
@@ -558,7 +565,7 @@ func main() {
 	// Event router — records events, creates/bumps tasks, auto-delegates on
 	// matching triggers, runs inline close checks. Also handles post-scoring
 	// re-derive via the scorer callback wired above.
-	eventRouter = routing.NewRouter(database, stores.Prompts, stores.EventHandlers, spawner, scorer, wsHub)
+	eventRouter = routing.NewRouter(database, stores.Prompts, stores.EventHandlers, stores.Agents, stores.TeamAgents, spawner, scorer, wsHub)
 	bus.Subscribe(eventbus.Subscriber{
 		Name:   "router",
 		Filter: []string{"github:", "jira:"},

@@ -55,6 +55,13 @@ export default function Board() {
   // Delegate flow
   const [showPromptPicker, setShowPromptPicker] = useState(false)
   const pendingDelegateTask = useRef<Task | null>(null)
+  // SKY-261 B+: tracks bot-claimed tasks where the delegate run
+  // failed to fire. Keyed by task.id; cleared when a run for the
+  // task lands (handled in fetchTasks / WS update). Drives the
+  // "delegate didn't fire — retry" badge + button on the agent-
+  // lane TaskCard. claim is commitment, runs are execution; this
+  // map captures the divergence so the user can act on it.
+  const [delegateFailures, setDelegateFailures] = useState<Record<string, string>>({})
 
   // Approval overlay — review or PR depending on which side table the
   // run's pending_approval came from. The run's pending_kind field
@@ -169,6 +176,16 @@ export default function Board() {
           }))
         }
         if (event.type === 'tasks_updated' || event.type === 'scoring_completed') {
+          fetchTasks()
+        }
+        // SKY-261 B+: task_claimed fires when claim columns change
+        // (delegate, user-claim, takeover, requeue). The Board's per-
+        // claim lanes are derived from claim cols, so any claim-axis
+        // change requires a refetch to re-bucket cards across lanes.
+        // task_updated stays for genuine status transitions (done,
+        // dismissed, snoozed) which also re-bucket but on a different
+        // axis.
+        if (event.type === 'task_claimed' || event.type === 'task_updated') {
           fetchTasks()
         }
       },
@@ -463,8 +480,11 @@ export default function Board() {
       })
       if (res.ok) {
         try {
-          const { run_id: runID } = (await res.json()) as { run_id?: string }
+          const body = (await res.json()) as { run_id?: string; delegate_error?: string }
+          const runID = body.run_id
           if (runID) {
+            // Spawn succeeded — seed the AgentCard immediately,
+            // clear any prior failure marker for this task.
             setAgentRuns((prev) => ({
               ...prev,
               [task.id]: {
@@ -475,6 +495,22 @@ export default function Board() {
                 StartedAt: new Date().toISOString(),
                 ResultSummary: '',
               },
+            }))
+            setDelegateFailures((prev) => {
+              if (!(task.id in prev)) return prev
+              const next = { ...prev }
+              delete next[task.id]
+              return next
+            })
+          } else if (body.delegate_error) {
+            // SKY-261 B+: spawn failed but the claim was stamped
+            // (the user's commitment is recorded; the run just
+            // didn't fire on this attempt). Surface it on the
+            // agent-lane card via the "delegate didn't fire" badge
+            // + Retry button.
+            setDelegateFailures((prev) => ({
+              ...prev,
+              [task.id]: body.delegate_error || 'spawn failed',
             }))
           }
         } catch {
@@ -727,6 +763,38 @@ export default function Board() {
                       key={task.id}
                       task={task}
                       onRequeue={() => handleRequeue(task.id)}
+                      // SKY-261: bot-claimed cards without an
+                      // agentRuns entry land here. Three legitimate
+                      // shapes share this state:
+                      //   (a) explicit partial-success — delegate
+                      //       response returned delegate_error; we
+                      //       have an entry in delegateFailures.
+                      //   (b) trigger fired but the entity is busy
+                      //       and the firing is queued in
+                      //       pending_firings; no run row yet, will
+                      //       fire on the next drain.
+                      //   (c) transient race — the claim WS event
+                      //       arrived before the run WS event /
+                      //       fetchTasks refresh.
+                      // Only (a) deserves the "delegate didn't fire,
+                      // retry" badge. For (b) and (c) the neutral
+                      // card is right; the run will land via the WS
+                      // path. We gate the badge + Retry button on
+                      // explicit delegateFailures membership; absent
+                      // = render the neutral TaskCard.
+                      delegateFailed={
+                        delegateFailures[task.id]
+                          ? { message: delegateFailures[task.id] }
+                          : undefined
+                      }
+                      onRetry={
+                        delegateFailures[task.id]
+                          ? () => {
+                              pendingDelegateTask.current = task
+                              setShowPromptPicker(true)
+                            }
+                          : undefined
+                      }
                     />
                   ),
                 )
@@ -852,7 +920,17 @@ function SidebarTaskCard({ task }: { task: Task }) {
   )
 }
 
-function SortableTaskCard({ task, onRequeue }: { task: Task; onRequeue?: () => void }) {
+function SortableTaskCard({
+  task,
+  onRequeue,
+  delegateFailed,
+  onRetry,
+}: {
+  task: Task
+  onRequeue?: () => void
+  delegateFailed?: { message: string }
+  onRetry?: () => void
+}) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: task.id,
   })
@@ -870,6 +948,8 @@ function SortableTaskCard({ task, onRequeue }: { task: Task; onRequeue?: () => v
       style={style}
       isDragging={false}
       onRequeue={onRequeue}
+      delegateFailed={delegateFailed}
+      onRetry={onRetry}
       {...attributes}
       {...listeners}
     />

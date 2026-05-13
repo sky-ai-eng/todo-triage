@@ -36,6 +36,16 @@ type taskJSON struct {
 	AISummary           string   `json:"ai_summary,omitempty"`
 	PriorityReasoning   string   `json:"priority_reasoning,omitempty"`
 	CloseReason         string   `json:"close_reason,omitempty"`
+	// SnoozeUntil — populated when the task is in a snoozed state.
+	// Under the SKY-261 v0.7 invariant ("snoozed ↔ unclaimed"),
+	// this is only ever set on queue-lane tasks. Any claim-axis
+	// transition wakes the task atomically (clears snooze_until +
+	// flips status='snoozed' → 'queued'), so claimed cards on the
+	// Board never carry a snooze. The Cards triage view renders
+	// future-snoozed entries hidden via the QueuedTasks filter;
+	// the Board's Queue lane could optionally render them at the
+	// tail with a "wakes Mar 5" badge (deferred UI follow-up).
+	SnoozeUntil string `json:"snooze_until,omitempty"`
 	// OpenSubtaskCount lets the UI flag a task whose Jira entity has open
 	// subtasks — the "consider decomposing" signal (SKY-173). Zero for
 	// GitHub tasks and Jira tickets without subtasks.
@@ -43,6 +53,10 @@ type taskJSON struct {
 }
 
 func taskToJSON(t domain.Task) taskJSON {
+	snoozeUntil := ""
+	if t.SnoozeUntil != nil {
+		snoozeUntil = t.SnoozeUntil.Format(time.RFC3339)
+	}
 	return taskJSON{
 		ID:                  t.ID,
 		EntityID:            t.EntityID,
@@ -63,6 +77,7 @@ func taskToJSON(t domain.Task) taskJSON {
 		AISummary:           t.AISummary,
 		PriorityReasoning:   t.PriorityReasoning,
 		CloseReason:         t.CloseReason,
+		SnoozeUntil:         snoozeUntil,
 		OpenSubtaskCount:    t.OpenSubtaskCount,
 	}
 }
@@ -137,10 +152,222 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	newStatus, err := s.swipes.RecordSwipe(r.Context(), runmode.LocalDefaultOrg, id, req.Action, req.HesitationMs)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
+	// SKY-261 v0.7 audit contract: swipe_events = "state-change log,"
+	// not "user-gesture log." For lifecycle actions (dismiss/snooze/
+	// complete) the swipe IS the state change, so RecordSwipe at the
+	// top is correct — audit + lifecycle UPDATE land in one tx. For
+	// responsibility-axis actions (claim/delegate) the actual state
+	// change lives in a separate guarded UPDATE that can refuse the
+	// gesture (different user owns it, race lost); audit must only
+	// land after that UPDATE accepts. A refused gesture leaves no
+	// trace — no swipe_events row, no status flip, no snooze clear.
+	//
+	// The audit insert is best-effort once the claim mutation has
+	// committed: if RecordSwipe fails after a successful claim flip,
+	// the state change stands and we log the audit miss. Better an
+	// audit gap than a refused-into-mutated state where the user gets
+	// 500 on a state change that already happened.
+	var newStatus string
+
+	switch req.Action {
+	case "claim":
+		// Race-safe claim: branch on the task's current claim state
+		// and use the guarded helpers. Three accept paths
+		// (idempotent same-user, takeover from bot, claim from
+		// unclaimed) and one refuse path (different user owns it).
+		// Refused → 409 with NO state mutation and NO audit row.
+		task, lerr := db.GetTask(s.db, id)
+		if lerr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": lerr.Error()})
+			return
+		}
+		if task == nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "task not found"})
+			return
+		}
+		// Terminal-status refusal: claim transitions on done/
+		// dismissed rows are meaningless (sticky claim past close
+		// is audit-only) AND letting them fall through would tip
+		// RecordSwipe's vestigial status='queued' write — reopening
+		// a closed task as a side effect of the audit. Refuse here
+		// so neither the helper paths nor the same-user idempotent
+		// fall-through reach the lifecycle write.
+		if task.Status == "done" || task.Status == "dismissed" {
+			writeJSON(w, http.StatusConflict, map[string]string{
+				"error": "task is closed; claim transitions aren't allowed past close",
+			})
+			return
+		}
+		userID := runmode.LocalDefaultUserID
+		claimChanged := false
+		switch {
+		case task.ClaimedByUserID == userID:
+			// Idempotent: same user already owns it.
+		case task.ClaimedByUserID != "":
+			writeJSON(w, http.StatusConflict, map[string]string{
+				"error": "task is already claimed by another user",
+			})
+			return
+		case task.ClaimedByAgentID != "":
+			ok, err := db.TakeoverClaimFromAgent(s.db, id, userID)
+			if err != nil {
+				log.Printf("[swipe] takeover claim flip failed on task %s: %v", id, err)
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "claim stamp failed: " + err.Error()})
+				return
+			}
+			if !ok {
+				writeJSON(w, http.StatusConflict, map[string]string{
+					"error": "claim race lost; refetch task and retry",
+				})
+				return
+			}
+			claimChanged = true
+		default:
+			ok, err := db.ClaimQueuedTaskForUser(s.db, id, userID)
+			if err != nil {
+				log.Printf("[swipe] user claim stamp failed on task %s: %v", id, err)
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "claim stamp failed: " + err.Error()})
+				return
+			}
+			if !ok {
+				writeJSON(w, http.StatusConflict, map[string]string{
+					"error": "claim race lost; refetch task and retry",
+				})
+				return
+			}
+			claimChanged = true
+		}
+		// Audit post-mutation. Under the v0.7 invariant the claim
+		// helpers (TakeoverClaimFromAgent / ClaimQueuedTaskForUser)
+		// already cleared snooze_until and flipped status →
+		// 'queued' atomically if the pre-state was snoozed, so
+		// RecordSwipe's UPDATE is a no-op on lifecycle and the
+		// load-bearing effect at this point is the swipe_events
+		// row. Best-effort: if the insert fails, the claim still
+		// landed; log and continue rather than 500-ing on a
+		// committed state change.
+		ns, swipeErr := s.swipes.RecordSwipe(r.Context(), runmode.LocalDefaultOrg, id, req.Action, req.HesitationMs)
+		if swipeErr != nil {
+			log.Printf("[swipe] audit write failed for task %s claim: %v (claim mutation already landed)", id, swipeErr)
+			newStatus = "queued"
+		} else {
+			newStatus = ns
+		}
+		if claimChanged {
+			s.ws.Broadcast(websocket.Event{
+				Type: "task_claimed",
+				Data: map[string]any{
+					"task_id":             id,
+					"claimed_by_agent_id": "",
+					"claimed_by_user_id":  userID,
+				},
+			})
+		}
+	case "delegate":
+		// SKY-261 acceptance: swipe-delegate re-checks
+		// team_agents.enabled at swipe time. A team admin can
+		// toggle the bot off; trigger-spawned tasks landed
+		// unclaimed (router's auto-fire skipped), and the user
+		// can't manually delegate to a disabled bot either.
+		// Refuse with 409 — clear error the FE can surface as
+		// "bot is off; enable it in team settings."
+		a, enabled, err := s.agentEnabledForLocalTeam(r.Context())
+		if err != nil {
+			log.Printf("[swipe] delegate aborted on task %s: %v", id, err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delegate failed: " + err.Error()})
+			return
+		}
+		if !enabled {
+			writeJSON(w, http.StatusConflict, map[string]string{
+				"error": "bot is disabled for this team; enable it in team settings to delegate",
+			})
+			return
+		}
+		// HandoffAgentClaim covers three legitimate user→bot
+		// transitions (unclaimed → bot; user-claimed-by-me → bot
+		// transfer; bot-already-owns idempotent no-op) and three
+		// refusal modes (missing task, terminal task, different-user
+		// claim). The helper collapses all three refusals into
+		// HandoffRefused, so we pre-load the task to disambiguate
+		// for the response — 404 for missing, 409 + closed-task
+		// message for terminal, 409 + theft message for different
+		// user. Matches the claim path's load-and-branch shape.
+		task, lerr := db.GetTask(s.db, id)
+		if lerr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": lerr.Error()})
+			return
+		}
+		if task == nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "task not found"})
+			return
+		}
+		if task.Status == "done" || task.Status == "dismissed" {
+			writeJSON(w, http.StatusConflict, map[string]string{
+				"error": "task is closed; delegate transitions aren't allowed past close",
+			})
+			return
+		}
+		result, err := db.HandoffAgentClaim(s.db, id, a.ID, runmode.LocalDefaultUserID)
+		if err != nil {
+			log.Printf("[swipe] failed to stamp agent claim on task %s: %v", id, err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "claim stamp failed: " + err.Error()})
+			return
+		}
+		if result == db.HandoffRefused {
+			// Pre-load above ruled out missing + terminal, so the
+			// only remaining HandoffRefused path is "different user
+			// owns the claim." The TOCTOU window between GetTask and
+			// HandoffAgentClaim is narrow but real — if the task
+			// transitioned to terminal during it, the error message
+			// is slightly wrong but the user retries from a fresh
+			// view either way.
+			writeJSON(w, http.StatusConflict, map[string]string{
+				"error": "task is claimed by another user; refusing to steal",
+			})
+			return
+		}
+		// Accepted path (Changed or NoOp). Audit post-mutation,
+		// best-effort.
+		ns, swipeErr := s.swipes.RecordSwipe(r.Context(), runmode.LocalDefaultOrg, id, req.Action, req.HesitationMs)
+		if swipeErr != nil {
+			log.Printf("[swipe] audit write failed for task %s delegate: %v (claim mutation already landed)", id, swipeErr)
+			newStatus = "queued"
+		} else {
+			newStatus = ns
+		}
+		if result == db.HandoffChanged {
+			s.ws.Broadcast(websocket.Event{
+				Type: "task_claimed",
+				Data: map[string]any{
+					"task_id":             id,
+					"claimed_by_agent_id": a.ID,
+					"claimed_by_user_id":  "",
+				},
+			})
+		}
+	case "dismiss", "snooze", "complete":
+		// Lifecycle actions: the swipe IS the state change. Audit
+		// + UPDATE in one tx via RecordSwipe. No refuse path.
+		// ('snooze' here is defensive — the FE routes snoozing
+		// through /api/tasks/{id}/snooze; if it ever lands here
+		// the status would flip to 'snoozed' without snooze_until,
+		// which the FE doesn't produce and we don't bother
+		// guarding against beyond defaulting newStatus.)
+		ns, swipeErr := s.swipes.RecordSwipe(r.Context(), runmode.LocalDefaultOrg, id, req.Action, req.HesitationMs)
+		if swipeErr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": swipeErr.Error()})
+			return
+		}
+		newStatus = ns
+		// Lifecycle changed — broadcast on the status axis so peer
+		// sessions refetch. Post-SKY-261 the Board listens for
+		// task_updated separately from task_claimed; without this
+		// broadcast a dismissed/completed/snoozed task would stay
+		// in its old lane on other browsers until the next refresh.
+		s.ws.Broadcast(websocket.Event{
+			Type: "task_updated",
+			Data: map[string]any{"task_id": id, "status": newStatus},
+		})
 	}
 
 	// Dismiss is a terminal state — if the user swipes away a task mid-run
@@ -274,10 +501,46 @@ func (s *Server) handleSnooze(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.swipes.SnoozeTask(r.Context(), runmode.LocalDefaultOrg, id, until, req.HesitationMs); err != nil {
+	// Pre-load for 404 parity with /undo and /requeue. Without this,
+	// SnoozeTask's swipe_events INSERT would trip the tasks(id) FK
+	// for a missing task and surface a SQLite error string as 500 —
+	// leaking implementation detail and confusing legitimate 404
+	// callers. The pre-check fails fast before the store gets
+	// involved.
+	task, err := db.GetTask(s.db, id)
+	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	if task == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "task not found"})
+		return
+	}
+
+	ok, err := s.swipes.SnoozeTask(r.Context(), runmode.LocalDefaultOrg, id, until, req.HesitationMs)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if !ok {
+		// SKY-261 v0.7: snooze is queue-only ("snoozed ↔ both claim
+		// cols NULL"). The store's atomic UPDATE refused because
+		// the task is currently claimed by a user or the bot.
+		// Requeue first (releases the claim) then snooze.
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "can't snooze a claimed task; requeue or complete it first",
+		})
+		return
+	}
+
+	// Lifecycle changed (status='snoozed' now). Broadcast so other
+	// connected clients refetch and re-render — without this the
+	// Board on a peer session keeps showing the task in its old
+	// lane until the next user-driven refresh.
+	s.ws.Broadcast(websocket.Event{
+		Type: "task_updated",
+		Data: map[string]any{"task_id": id, "status": "snoozed"},
+	})
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "snoozed", "until": until.Format(time.RFC3339)})
 }

@@ -45,11 +45,11 @@ func (f *fakeDrainer) callsCopy() []string {
 func TestCancel_AwaitingInputAutoRun_DrainsQueue(t *testing.T) {
 	database := newTakeoverTestDB(t)
 	seedRun(t, database, "r1", "sess-1", "/tmp/wt-r1")
-	if _, err := database.Exec(`UPDATE runs SET status = 'awaiting_input', trigger_type = 'event' WHERE id = 'r1'`); err != nil {
+	if _, err := database.Exec(`UPDATE runs SET status = 'awaiting_input', trigger_type = 'event', creator_user_id = NULL WHERE id = 'r1'`); err != nil {
 		t.Fatalf("park run: %v", err)
 	}
 
-	s := NewSpawner(database, testPromptStore(database), nil, nil, "claude-sonnet-4-6")
+	s := NewSpawner(database, testPromptStore(database), nil, nil, nil, "claude-sonnet-4-6")
 	drainer := newFakeDrainer()
 	s.SetQueueDrainer(drainer)
 
@@ -87,7 +87,7 @@ func TestCancel_AwaitingInputManualRun_NoDrain(t *testing.T) {
 		t.Fatalf("park run: %v", err)
 	}
 
-	s := NewSpawner(database, testPromptStore(database), nil, nil, "claude-sonnet-4-6")
+	s := NewSpawner(database, testPromptStore(database), nil, nil, nil, "claude-sonnet-4-6")
 	drainer := newFakeDrainer()
 	s.SetQueueDrainer(drainer)
 
@@ -113,11 +113,14 @@ func TestCancel_AwaitingInputManualRun_NoDrain(t *testing.T) {
 func TestCancel_AlreadyTerminal_NoDrain(t *testing.T) {
 	database := newTakeoverTestDB(t)
 	seedRun(t, database, "r-done", "sess-3", "/tmp/wt-rd")
-	if _, err := database.Exec(`UPDATE runs SET status = 'completed', trigger_type = 'event' WHERE id = 'r-done'`); err != nil {
+	// Trigger_type='event' requires creator_user_id IS NULL per the
+	// SKY-261 v0.9 CHECK invariant. seedRun defaults to manual +
+	// sentinel creator; the UPDATE has to clear creator alongside.
+	if _, err := database.Exec(`UPDATE runs SET status = 'completed', trigger_type = 'event', creator_user_id = NULL WHERE id = 'r-done'`); err != nil {
 		t.Fatalf("complete run: %v", err)
 	}
 
-	s := NewSpawner(database, testPromptStore(database), nil, nil, "claude-sonnet-4-6")
+	s := NewSpawner(database, testPromptStore(database), nil, nil, nil, "claude-sonnet-4-6")
 	drainer := newFakeDrainer()
 	s.SetQueueDrainer(drainer)
 

@@ -163,6 +163,7 @@ func ListFactoryActiveRuns(database *sql.DB) ([]domain.FactoryActiveRun, error) 
 			COALESCE(r.result_summary, ''), COALESCE(r.session_id, ''),
 			(NULLIF(TRIM(rm.agent_content, ' ' || char(9) || char(10) || char(13)), '') IS NULL) AS memory_missing,
 			r.trigger_type, COALESCE(r.trigger_id, ''),
+			COALESCE(r.actor_agent_id, ''),
 			` + taskColumnsWithEntity + `
 		FROM runs r
 		LEFT JOIN run_memory rm ON rm.run_id = r.id
@@ -195,6 +196,7 @@ func ListFactoryActiveRuns(database *sql.DB) ([]domain.FactoryActiveRun, error) 
 			&r.StopReason, &r.WorktreePath,
 			&r.ResultSummary, &r.SessionID,
 			&r.MemoryMissing, &r.TriggerType, &r.TriggerID,
+			&r.ActorAgentID,
 		}
 		// Task half: taskScanState holds the NullX intermediates on the
 		// caller's stack so NULL-able text columns (ai_summary, severity,

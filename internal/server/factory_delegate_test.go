@@ -2,14 +2,17 @@ package server
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -142,15 +145,22 @@ func TestHandleFactoryDelegate_400OnMalformedJSON(t *testing.T) {
 	}
 }
 
-// TestHandleFactoryDelegate_400OnMissingPrompt is the regression for the
-// previous blanket-500 error mapping: a Delegate failure caused by a
-// race-deleted or invalid prompt id is client-correctable, so the
-// handler should classify it as 400 rather than 500. Wire a real
-// Spawner so the request reaches Delegate; pass a prompt_id that
-// doesn't resolve. errors.Is on the sentinel routes the response.
-func TestHandleFactoryDelegate_400OnMissingPrompt(t *testing.T) {
+// TestHandleFactoryDelegate_DelegateErrorPreservesClaim pins the SKY-261
+// B+ semantic: when the user's drag-to-delegate gesture commits at the
+// claim axis but the spawner.Delegate call fails (e.g. ErrPromptNotFound
+// from a race-deleted prompt), the handler returns 200 OK with
+// delegate_error populated and claim_stamped=true. Mirrors the swipe-
+// delegate response shape exactly. The claim must survive in the DB so
+// the Board renders the bot-claimed-but-no-run card with a Retry
+// affordance.
+//
+// Replaces the previous "TestHandleFactoryDelegate_400OnMissingPrompt"
+// which asserted a 400 — that contract changed when factory_delegate
+// adopted the swipe convention of 200 + delegate_error for partial
+// success (claim committed, run didn't fire).
+func TestHandleFactoryDelegate_DelegateErrorPreservesClaim(t *testing.T) {
 	s := newTestServer(t)
-	s.SetSpawner(delegate.NewSpawner(s.db, s.prompts, nil, websocket.NewHub(), "haiku"))
+	s.SetSpawner(delegate.NewSpawner(s.db, s.prompts, nil, nil, websocket.NewHub(), "haiku"))
 
 	entity, _, err := db.FindOrCreateEntity(s.db, "github", "owner/repo#400p", "pr", "", "")
 	if err != nil {
@@ -169,8 +179,140 @@ func TestHandleFactoryDelegate_400OnMissingPrompt(t *testing.T) {
 		"event_type": domain.EventGitHubPRCICheckPassed,
 		"prompt_id":  "no-such-prompt",
 	})
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want 400 (prompt-not-found is client-correctable)", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (partial-success convention: claim stamped, run didn't fire)", rec.Code)
+	}
+	var resp struct {
+		TaskID        string `json:"task_id"`
+		RunID         string `json:"run_id"`
+		DelegateError string `json:"delegate_error"`
+		ClaimStamped  bool   `json:"claim_stamped"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if resp.DelegateError == "" {
+		t.Errorf("delegate_error empty; expected spawner failure message")
+	}
+	if resp.RunID != "" {
+		t.Errorf("run_id = %q; want empty (spawn failed)", resp.RunID)
+	}
+	if !resp.ClaimStamped {
+		t.Errorf("claim_stamped = false; want true (claim committed before spawn attempt)")
+	}
+	if resp.TaskID == "" {
+		t.Fatal("task_id empty; can't verify claim persistence")
+	}
+
+	// Verify the claim survives in the DB — the FE relies on this to
+	// surface the bot-claimed-with-failed-run state.
+	task, err := db.GetTask(s.db, resp.TaskID)
+	if err != nil || task == nil {
+		t.Fatalf("read task back: task=%v err=%v", task, err)
+	}
+	if task.ClaimedByAgentID == "" {
+		t.Errorf("task.ClaimedByAgentID empty; claim should be stamped despite spawn failure")
+	}
+
+	// Verify the swipe_events audit row was written even on the
+	// partial-success path. Pre-fix RecordSwipe only fired on the
+	// run-success path, leaving the user's drag-to-bot gesture
+	// audit-less when the spawn errored — inconsistent with swipe-
+	// delegate which audits at the top of the swipe handler.
+	var swipeCount int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM swipe_events WHERE task_id = ? AND action = 'delegate'`,
+		resp.TaskID,
+	).Scan(&swipeCount); err != nil {
+		t.Fatalf("scan swipe_events: %v", err)
+	}
+	if swipeCount != 1 {
+		t.Errorf("swipe_events count = %d, want 1 (audit must survive partial-success)", swipeCount)
+	}
+}
+
+// TestHandleFactoryDelegate_RefusedWhenBotDisabled pins the SKY-261
+// bot-disabled-team gate for the factory drag-to-Agent gesture.
+// Symmetric with the swipe-delegate handler's gate: when an admin
+// has flipped team_agents.enabled = false, the factory drop refuses
+// with 409 and the same disabled-bot message — no claim stamp, no
+// spawn attempt, no audit row, no task creation side effect on the
+// entity.
+//
+// "Bot disabled" means the team has no bot at all (not "auto-
+// delegation is paused" — that's the separate cfg.AI.AutoDelegateEnabled
+// kill switch which doesn't block manual gestures). So manual
+// delegate gestures must refuse alongside auto-fire, otherwise
+// users could route around the team's explicit no-bot setting via
+// the factory drop UI.
+func TestHandleFactoryDelegate_RefusedWhenBotDisabled(t *testing.T) {
+	s := newTestServer(t)
+	s.SetSpawner(delegate.NewSpawner(s.db, s.prompts, nil, nil, websocket.NewHub(), "haiku"))
+
+	// Flip the bot OFF on the local team. Production path is
+	// team_agents.SetEnabled via a team-admin gesture; direct
+	// UPDATE here mirrors the same end state without going through
+	// the (unrelated) admin handler.
+	if _, err := s.db.Exec(
+		`UPDATE team_agents SET enabled = 0 WHERE team_id = ? AND agent_id = ?`,
+		runmode.LocalDefaultTeamID, runmode.LocalDefaultAgentID,
+	); err != nil {
+		t.Fatalf("disable bot: %v", err)
+	}
+
+	// Seed an entity + event that would otherwise let the factory
+	// drop succeed (active entity, matching event for the station).
+	entity, _, err := db.FindOrCreateEntity(s.db, "github", "owner/repo#fdrop-off", "pr", "Disabled Factory", "https://example.com/fdo")
+	if err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	eid := entity.ID
+	if _, err := db.RecordEvent(s.db, domain.Event{
+		EntityID:  &eid,
+		EventType: domain.EventGitHubPRCICheckPassed,
+	}); err != nil {
+		t.Fatalf("record event: %v", err)
+	}
+
+	rec := doJSON(t, s, http.MethodPost, "/api/factory/delegate", map[string]string{
+		"entity_id":  entity.ID,
+		"event_type": domain.EventGitHubPRCICheckPassed,
+		"prompt_id":  "any-prompt",
+	})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (bot disabled); body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "disabled") {
+		t.Errorf("body=%s; want disabled-bot message", rec.Body.String())
+	}
+
+	// State invariants on refusal: no task created for the gesture,
+	// no swipe_events audit row, no run spawned. The factory drop
+	// returned before any of the find-or-create side effects could
+	// land. A pre-existing task on this entity from event recording
+	// would have status='queued' (router default), unclaimed; we
+	// just assert no claim/run/audit traces of the refused gesture.
+	var claimAgent sql.NullString
+	if err := s.db.QueryRow(
+		`SELECT COALESCE(claimed_by_agent_id, '') FROM tasks WHERE entity_id = ?`,
+		entity.ID,
+	).Scan(&claimAgent); err != nil && err != sql.ErrNoRows {
+		t.Fatalf("scan task claim: %v", err)
+	}
+	if claimAgent.Valid && claimAgent.String != "" {
+		t.Errorf("bot claim landed despite disabled flag: %q", claimAgent.String)
+	}
+	var swipeCount int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM swipe_events se
+		 JOIN tasks t ON t.id = se.task_id
+		 WHERE t.entity_id = ? AND se.action = 'delegate'`,
+		entity.ID,
+	).Scan(&swipeCount); err != nil {
+		t.Fatalf("scan swipe_events: %v", err)
+	}
+	if swipeCount != 0 {
+		t.Errorf("swipe_events count = %d, want 0 (refused gesture must leave no trace)", swipeCount)
 	}
 }
 

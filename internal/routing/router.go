@@ -47,12 +47,14 @@ type Delegator interface {
 //     auto run or earlier queued firings (SKY-189).
 //  8. Runs inline close checks for the event type
 type Router struct {
-	db       *sql.DB
-	prompts  dbpkg.PromptStore
-	handlers dbpkg.EventHandlerStore
-	spawner  Delegator
-	scorer   Scorer
-	ws       *websocket.Hub
+	db         *sql.DB
+	prompts    dbpkg.PromptStore
+	handlers   dbpkg.EventHandlerStore
+	agents     dbpkg.AgentStore
+	teamAgents dbpkg.TeamAgentStore // SKY-261: read team_agents.enabled before auto-firing triggers
+	spawner    Delegator
+	scorer     Scorer
+	ws         *websocket.Hub
 
 	// drainLocks serializes DrainEntity calls per entity. Without this,
 	// the non-mutating PopPendingFiringForEntity creates a window between
@@ -70,12 +72,17 @@ type Router struct {
 	drainLocks  map[string]*sync.Mutex
 }
 
-// NewRouter creates a Router.
-func NewRouter(db *sql.DB, prompts dbpkg.PromptStore, handlers dbpkg.EventHandlerStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
+// NewRouter creates a Router. teamAgents is nil-safe — callers wired
+// before SKY-261 D-Claims can pass nil; the bot-disabled-team check
+// degrades to "always enabled" in that case (the pre-SKY-261
+// behavior).
+func NewRouter(db *sql.DB, prompts dbpkg.PromptStore, handlers dbpkg.EventHandlerStore, agents dbpkg.AgentStore, teamAgents dbpkg.TeamAgentStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
 	return &Router{
 		db:         db,
 		prompts:    prompts,
 		handlers:   handlers,
+		agents:     agents,
+		teamAgents: teamAgents,
 		spawner:    spawner,
 		scorer:     scorer,
 		ws:         ws,
@@ -276,6 +283,41 @@ func (r *Router) HandleEvent(evt domain.Event) {
 // for FIFO fairness), the firing enqueues onto pending_firings instead of
 // being dropped silently.
 func (r *Router) tryAutoDelegate(task *domain.Task, trigger domain.EventHandler, entityID string, triggeringEventID string) {
+	// SKY-261 bot-disabled-team gate. If the task's team has the bot
+	// turned off in team_agents.enabled, the auto-trigger is a no-op
+	// — the task is already in the team queue (created by HandleEvent
+	// upstream); a human will swipe-delegate later if they want a
+	// run. Skip silently rather than firing on a disabled team.
+	//
+	// The gate requires BOTH stores (agents to resolve the org's
+	// agent, teamAgents to read the enabled flag). If either is nil
+	// — pre-D-Claims test wiring that didn't thread the new stores
+	// — the gate degrades to "bot enabled check unavailable, proceed
+	// with auto-fire," which preserves the pre-SKY-261 behavior.
+	// Production server.New / main.go always passes both.
+	if r.teamAgents != nil && r.agents != nil {
+		a, err := r.agents.GetForOrg(context.Background(), runmode.LocalDefaultOrg)
+		if err != nil {
+			log.Printf("[router] auto-trigger skipped: agent lookup: %v", err)
+			return
+		}
+		if a == nil {
+			// No bootstrapped agent — bootstrap is now fatal at
+			// startup, so this shouldn't reach us in practice.
+			// Log + bail rather than crashing the goroutine.
+			log.Printf("[router] auto-trigger skipped on task %s: no agent bootstrapped", task.ID)
+			return
+		}
+		ta, err := r.teamAgents.GetForTeam(context.Background(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, a.ID)
+		if err != nil {
+			log.Printf("[router] auto-trigger skipped on task %s: team_agents lookup: %v", task.ID, err)
+			return
+		}
+		if ta == nil || !ta.Enabled {
+			log.Printf("[router] auto-trigger skipped on task %s: bot disabled for team", task.ID)
+			return
+		}
+	}
 	// Breaker gate. trigger.BreakerThreshold is *int because the column
 	// is nullable at the schema level (rule rows have NULL); kind='trigger'
 	// rows are guaranteed non-nil by the per-kind CHECK constraint.
@@ -319,6 +361,14 @@ func (r *Router) tryAutoDelegate(task *domain.Task, trigger domain.EventHandler,
 		if inserted {
 			log.Printf("[router] queued firing on entity %s (task %s, trigger %s) — entity busy",
 				entityID, task.ID, trigger.ID)
+			// SKY-261 D-Claims: pending firing landed in the queue,
+			// commit the task to the org's agent. Stamp here (after
+			// EnqueuePendingFiring succeeded) so a failed enqueue
+			// doesn't leave a phantom claim on an otherwise queued
+			// task. !inserted means a duplicate firing already in the
+			// queue — the original enqueue already stamped, no re-
+			// stamp needed.
+			r.stampAgentClaim(task)
 		} else {
 			log.Printf("[router] firing collapsed on entity %s (task %s, trigger %s) — duplicate already queued",
 				entityID, task.ID, trigger.ID)
@@ -328,7 +378,76 @@ func (r *Router) tryAutoDelegate(task *domain.Task, trigger domain.EventHandler,
 
 	if _, err := r.fireDelegate(task, trigger); err != nil {
 		log.Printf("[router] fire failed for task %s (trigger %s): %v", task.ID, trigger.ID, err)
+		return
 	}
+	// SKY-261 D-Claims: fireDelegate succeeded (run inserted + spawner
+	// goroutine launched) — stamp the agent claim. Done AFTER success
+	// so a fireDelegate that fails + reverts to status='queued'
+	// doesn't leave a phantom bot claim on a task that's back in the
+	// human-triage queue.
+	r.stampAgentClaim(task)
+}
+
+// stampAgentClaim writes claimed_by_agent_id on a task using the org's
+// agent row AND broadcasts the SKY-261 B+ task_claimed event so
+// listeners (Board) can re-render the per-claim lanes. Called from
+// the two commitment points in tryAutoDelegate (post-fireDelegate
+// success, post-EnqueuePendingFiring success). Both paths converge
+// on "the bot has committed to this task." Nil-safe on r.agents and
+// on GetForOrg returning (nil, nil) — both leave the claim
+// unstamped rather than crashing, which matches the "transient seam
+// between db init and agent bootstrap" case noted in §4 of the spec.
+//
+// Uses StampAgentClaimIfUnclaimed (race-safe variant) instead of the
+// unconditional setter: if a user claims the same task while the
+// trigger is mid-fire, the user-claim wins and the bot silently
+// loses the race. The drain path's claim_changed guard then skips
+// any pending firing for this task on the next pop — so the auto-
+// trigger commitment never lands, which is the right outcome when
+// the human said "I'll handle this." Same-agent rewrites also
+// short-circuit here, avoiding redundant task_claimed broadcasts on
+// flows that call stampAgentClaim twice in quick succession.
+func (r *Router) stampAgentClaim(task *domain.Task) {
+	if r.agents == nil {
+		return
+	}
+	a, err := r.agents.GetForOrg(context.Background(), runmode.LocalDefaultOrg)
+	if err != nil {
+		log.Printf("[router] agent lookup failed for task %s claim stamp: %v", task.ID, err)
+		return
+	}
+	if a == nil {
+		return
+	}
+	ok, err := dbpkg.StampAgentClaimIfUnclaimed(r.db, task.ID, a.ID)
+	if err != nil {
+		log.Printf("[router] failed to stamp agent claim on task %s: %v", task.ID, err)
+		return
+	}
+	if !ok {
+		// StampAgentClaimIfUnclaimed returns ok=false for any of
+		// three reasons: a user beat the bot to the claim (don't
+		// steal), the bot already owns it (idempotent no-op), or
+		// the task is terminal (done/dismissed — sticky claim past
+		// close, refuse new mutations). All three legitimately
+		// produce "skip the broadcast"; we don't disambiguate at
+		// the log level because the helper doesn't surface the
+		// reason and re-reading just to log is wasted I/O. If a
+		// future debug session needs the breakdown, the helper can
+		// grow a tri-state return or the caller can re-read the
+		// task — neither is load-bearing for correctness.
+		log.Printf("[router] agent claim stamp on task %s was a no-op (user owns it, bot already owns it, or task is terminal)", task.ID)
+		return
+	}
+	task.ClaimedByAgentID = a.ID
+	r.ws.Broadcast(websocket.Event{
+		Type: "task_claimed",
+		Data: map[string]any{
+			"task_id":             task.ID,
+			"claimed_by_agent_id": a.ID,
+			"claimed_by_user_id":  "",
+		},
+	})
 }
 
 // fireDelegate transitions the task to delegated status, broadcasts the
@@ -339,32 +458,33 @@ func (r *Router) fireDelegate(task *domain.Task, trigger domain.EventHandler) (s
 		return "", fmt.Errorf("spawner not configured")
 	}
 
-	// Transition task queued → delegated BEFORE spawning so the frontend
-	// reflects the state change immediately and dedup logic sees it.
-	if err := dbpkg.SetTaskStatus(r.db, task.ID, "delegated"); err != nil {
-		return "", fmt.Errorf("set task delegated: %w", err)
-	}
-	r.ws.Broadcast(websocket.Event{
-		Type: "task_updated",
-		Data: map[string]any{"task_id": task.ID, "status": "delegated"},
-	})
-
+	// SKY-261 B+: no status flip here. Pre-SKY-261 we transitioned to
+	// status='delegated' for UI feedback + dedup. Post-B+ the
+	// responsibility axis is the claim columns: stampAgentClaim
+	// (called by the caller on fireDelegate success) writes
+	// claimed_by_agent_id and broadcasts task_claimed, which is what
+	// the Board now listens for. Status stays 'queued' until a
+	// genuine lifecycle move (done / dismissed / snoozed). Dedup is
+	// unaffected — the partial unique index gates on status NOT IN
+	// ('done', 'dismissed'), so a queued+claimed task still matches.
 	log.Printf("[router] auto-delegating task %s (trigger %s, prompt %s)",
 		task.ID, trigger.ID, trigger.PromptID)
 
 	// Re-read task to get entity-joined display fields the spawner needs.
 	fresh, err := dbpkg.GetTask(r.db, task.ID)
 	if err != nil || fresh == nil {
-		r.revertTaskStatus(task.ID, "queued")
 		if err != nil {
 			return "", fmt.Errorf("re-read task: %w", err)
 		}
-		return "", fmt.Errorf("task %s disappeared between status flip and re-read", task.ID)
+		return "", fmt.Errorf("task %s disappeared before spawn", task.ID)
 	}
 
 	runID, err := r.spawner.Delegate(*fresh, trigger.PromptID, "event", trigger.ID)
 	if err != nil {
-		r.revertTaskStatus(task.ID, "queued")
+		// Post-B+: nothing to revert status-wise (status stayed 'queued').
+		// stampAgentClaim hasn't run yet either — the caller only calls
+		// it after fireDelegate returns nil. So this failure leaves the
+		// task in a clean unclaimed-queued state, which is correct.
 		return "", err
 	}
 	log.Printf("[router] started run %s for task %s", runID, task.ID)
@@ -507,8 +627,13 @@ func (r *Router) RunDrainSweeper(ctx context.Context, interval time.Duration) {
 //
 //   - (runID, "", nil)         — fire succeeded; caller marks 'fired'.
 //   - ("", skipReason, nil)    — definitive "no longer relevant"; caller
-//     marks 'skipped_stale'. Reserved for: task_closed, trigger_disabled,
-//     breaker_tripped.
+//     marks 'skipped_stale'. Reserved for: task_closed (done /
+//     dismissed / snoozed — task isn't drain-eligible on the
+//     lifecycle axis), trigger_disabled, breaker_tripped,
+//     claim_changed (SKY-261 B+: a user took the task over or
+//     requeued it after the firing was enqueued, so the bot's
+//     original commitment is no longer current; drainer must not
+//     fire a phantom bot run against a now-user-claimed task).
 //   - ("", "", err)            — transient failure (DB read, fire-time);
 //     caller leaves the firing in 'pending' state and bails the drain
 //     loop. The periodic sweeper or next run-terminal will retry.
@@ -527,8 +652,27 @@ func (r *Router) attemptDrainOne(firing *domain.PendingFiring) (runID, skipReaso
 	if err != nil {
 		return "", "", fmt.Errorf("task lookup: %w", err)
 	}
-	if task == nil || task.Status == "done" || task.Status == "dismissed" {
+	// SKY-261 B+: status='snoozed' belongs on the lifecycle-skip axis,
+	// not the claim axis. A bot-claimed task that gets snoozed (e.g.,
+	// the user said "wait until Tuesday") shouldn't fire a queued
+	// drain when the entity slot opens — the snooze itself is a "do
+	// not act" signal on the lifecycle axis. Grouped with
+	// done/dismissed under task_closed because all three mean "the
+	// task is not currently drain-eligible." A snooze wake-on-bump
+	// will create a NEW event → new firing if the trigger still
+	// matches; the deferred firing is the wrong path to wake it.
+	if task == nil || task.Status == "done" || task.Status == "dismissed" || task.Status == "snoozed" {
 		return "", domain.PendingFiringSkipTaskClosed, nil
+	}
+
+	// SKY-261 B+: drain only fires if the bot's claim still holds.
+	// User-claim (claimed_by_user_id set) or requeue (both cleared)
+	// invalidates the original commitment. Without this check, a
+	// pending firing would fire even after the user explicitly took
+	// the task over, producing a phantom bot run on a now-user-
+	// claimed task.
+	if task.ClaimedByAgentID == "" {
+		return "", domain.PendingFiringSkipClaimChanged, nil
 	}
 
 	trigger, err := r.handlers.Get(context.Background(), runmode.LocalDefaultOrg, firing.TriggerID)
@@ -555,9 +699,26 @@ func (r *Router) attemptDrainOne(firing *domain.PendingFiring) (runID, skipReaso
 	return id, "", nil
 }
 
-// revertTaskStatus sets a task back to the given status and broadcasts the
-// change so the frontend doesn't get stuck showing a stale state (e.g.,
-// "delegated" after a delegation failure).
+// revertTaskStatus moves a task's lifecycle axis back to the given
+// status and broadcasts the change so the frontend doesn't get stuck
+// showing a stale state. Claim cols are intentionally left alone —
+// after SKY-261 B+ the three axes (lifecycle / claim / runs) are
+// orthogonal, and this helper only touches lifecycle.
+//
+// The only caller today is the mark-fired-failure rollback path in
+// DrainEntity: a run was successfully spawned but the UPDATE that
+// records the firing→run association failed. The recovery flow
+// cancels the run, leaves the firing in 'pending' so the next drain
+// retries it, and reverts the task lifecycle for FE consistency.
+// Critically, the firing's *commitment* (the bot has taken this task)
+// is unchanged — the next drain pass needs the bot claim to remain
+// set or attemptDrainOne's ClaimedByAgentID guard would skip the
+// retry as claim_changed, silently dropping the queued intent. So
+// the claim col stays with the bot here; only status moves.
+//
+// Code paths that DO want to release the claim (user requeue, task
+// completion, swipe-undo) clear the claim cols on their own — they
+// don't go through this helper.
 func (r *Router) revertTaskStatus(taskID, status string) {
 	if err := dbpkg.SetTaskStatus(r.db, taskID, status); err != nil {
 		log.Printf("[router] failed to revert task %s to %s: %v", taskID, status, err)
@@ -593,8 +754,31 @@ func (r *Router) reDeriveTask(taskID string) {
 		return
 	}
 
-	// Only re-derive queued tasks — claimed/delegated/done are already handled.
+	// Only re-derive queued tasks. Post-SKY-261 B+ the lifecycle axis
+	// collapsed to {queued, snoozed, done, dismissed} so this gate
+	// also has to cover snoozed (a snoozed task is on a "wait" until
+	// its wake-on-bump event lands; a deferred-threshold re-derive
+	// should not bypass that signal). done/dismissed naturally fall
+	// out of the != "queued" check.
 	if task.Status != "queued" {
+		return
+	}
+
+	// Re-derive must not promote a task that's already claimed. After
+	// SKY-261 B+ the responsibility axis lives on the claim cols, not
+	// status — so a queued task may still be "already taken" by either
+	// the bot (auto-delegate already fired and enqueued a firing, or
+	// drag-to-bot stamped) or a user ("I'll take this myself" claim).
+	// Without this guard, re-derive could:
+	//   - stamp an agent claim onto a user-claimed task (XOR violation
+	//     blocked at the DB level, but the visible state would be a
+	//     spurious 500 log + WS toast)
+	//   - fire a second bot run on a task the bot is already
+	//     committed to (duplicate firing, breaker noise)
+	// Either claim col set = "not the re-derive's business; the
+	// commitment is real and the lifecycle event that ends the
+	// commitment will arrive via its own path."
+	if task.ClaimedByAgentID != "" || task.ClaimedByUserID != "" {
 		return
 	}
 

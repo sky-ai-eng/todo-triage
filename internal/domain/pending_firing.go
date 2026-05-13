@@ -40,4 +40,10 @@ const (
 	PendingFiringSkipTaskClosed      = "task_closed"
 	PendingFiringSkipTriggerDisabled = "trigger_disabled"
 	PendingFiringSkipBreakerTripped  = "breaker_tripped"
+	// PendingFiringSkipClaimChanged fires when the task is no longer
+	// bot-claimed at drain time — typically because a user took it
+	// over via swipe-claim or requeued it. SKY-261 B+ added the check;
+	// pre-B+ the drain would still fire even after a user grabbed the
+	// task, producing a phantom bot run on a now-user-claimed task.
+	PendingFiringSkipClaimChanged = "claim_changed"
 )
