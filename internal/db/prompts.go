@@ -2,11 +2,25 @@ package db
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 //go:generate go run github.com/vektra/mockery/v2 --name=PromptStore --output=./mocks --case=underscore --with-expecter
+
+// CountPromptRunReferences returns the number of runs rows that reference
+// the given prompt. Used by the update handler to block kind changes when
+// the prompt has execution history.
+func CountPromptRunReferences(database *sql.DB, promptID string) (int, error) {
+	var n int
+	err := database.QueryRow(`SELECT COUNT(*) FROM runs WHERE prompt_id = ?`, promptID).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count run references: %w", err)
+	}
+	return n, nil
+}
 
 // PromptStore owns prompts + the system_prompt_versions sidecar that
 // tracks shipped-content hashes. Three audiences:
@@ -63,11 +77,11 @@ type PromptStore interface {
 	// Caller-provided ID — the handler generates UUIDs upstream.
 	Create(ctx context.Context, orgID string, p domain.Prompt) error
 
-	// Update changes name + body + model and stamps user_modified=true.
+	// Update changes name + body + kind + model and stamps user_modified=true.
 	// The flag tells SeedOrUpdate to leave the row alone on subsequent
-	// shipped-content updates. model="" means "inherit the global
-	// default at dispatch time" — see internal/delegate.Spawner.Delegate.
-	Update(ctx context.Context, orgID string, id, name, body, model string) error
+	// shipped-content updates. kind defaults to "leaf" when blank.
+	// model="" means "inherit the global default at dispatch time".
+	Update(ctx context.Context, orgID string, id, name, body, kind, model string) error
 
 	// UpdateImported updates a re-imported skill's metadata + body
 	// + allowed_tools WITHOUT setting user_modified, because the

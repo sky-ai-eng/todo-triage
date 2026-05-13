@@ -6,12 +6,14 @@ import (
 
 	"github.com/pressly/goose/v3"
 
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/chain"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/gh"
 	jiraexec "github.com/sky-ai-eng/triage-factory/cmd/exec/jira"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/workspace"
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/config"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
 )
@@ -57,6 +59,9 @@ func Handle(args []string) {
 		fmt.Fprintf(os.Stderr, "warning: loading config: %v (proceeding with defaults)\n", err)
 	}
 	database := &db.DB{Conn: conn}
+	// exec always runs in local mode against SQLite — multi-mode agents
+	// never shell out to `triagefactory exec`.
+	stores := sqlite.New(conn)
 
 	cmd := args[0]
 	cmdArgs := args[1:]
@@ -96,6 +101,12 @@ func Handle(args []string) {
 		// validated inside the subcommand.
 		workspace.Handle(database, cmdArgs)
 
+	case "chain":
+		// No credentials needed — chain verdict only writes a row in
+		// run_artifacts keyed by TRIAGE_FACTORY_RUN_ID. The orchestrator
+		// reads it back to decide whether to proceed.
+		chain.Handle(stores.Chains, cmdArgs)
+
 	default:
 		fmt.Fprintf(os.Stderr, "unknown exec command: %s\nRun 'triagefactory exec --help' for usage.\n", cmd)
 		os.Exit(1)
@@ -112,5 +123,5 @@ func isHelp(args []string) bool {
 }
 
 func printHelp() {
-	fmt.Printf("Usage: triagefactory exec <command> [args]\n\n%s\n\n%s\n\n%s\n\nCommands print their result to stdout on success and errors to stderr. Most commands print JSON; workspace add prints a raw path.\n", gh.HelpText, jiraexec.HelpText, workspace.HelpText)
+	fmt.Printf("Usage: triagefactory exec <command> [args]\n\n%s\n\n%s\n\n%s\n\n%s\n\nCommands print their result to stdout on success and errors to stderr. Most commands print JSON; workspace add prints a raw path.\n", gh.HelpText, jiraexec.HelpText, workspace.HelpText, chain.HelpText)
 }

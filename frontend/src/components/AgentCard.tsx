@@ -5,18 +5,20 @@ import SourceBadge from './SourceBadge'
 import { toast } from './Toast/toastStore'
 import { readError } from '../lib/api'
 import { formatDurationMs, formatElapsed, isActiveRun, statusDisplay } from '../lib/runStatus'
+import ChainStepsRail from './ChainStepsRail'
 import TakeoverModal, { type TakeoverInfo } from './TakeoverModal'
 import YieldModal, { type YieldRequest } from './YieldModal'
 
 interface Props {
   task: Task
   run: AgentRun
+  chainSteps?: AgentRun[]
   messages: AgentMessage[]
   onRequeue?: () => void
   onReview?: () => void
 }
 
-export default function AgentCard({ task, run, messages, onRequeue, onReview }: Props) {
+export default function AgentCard({ task, run, chainSteps, messages, onRequeue, onReview }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const [now, setNow] = useState(() => Date.now())
   const [takeoverInfo, setTakeoverInfo] = useState<TakeoverInfo | null>(null)
@@ -219,6 +221,16 @@ export default function AgentCard({ task, run, messages, onRequeue, onReview }: 
           <span className="truncate">{task.source_id}</span>
         </div>
       </div>
+
+      {chainSteps && chainSteps.length > 1 && (
+        <div className="mx-5 mb-3">
+          <ChainStepsRail
+            steps={chainSteps}
+            currentRunID={run.ID}
+            currentStepIndex={run.chain_step_index ?? undefined}
+          />
+        </div>
+      )}
 
       {/* Activity log + optional pending-takeover overlay */}
       <div className="relative mx-3 mb-3">

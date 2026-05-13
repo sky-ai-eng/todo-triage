@@ -2,6 +2,8 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
 import { toast } from './Toast/toastStore'
 import { readError } from '../lib/api'
+import type { ChainStep, PromptKind } from '../types'
+import ChainStepEditor, { type ChainStepDraft } from './ChainStepEditor'
 
 interface Props {
   promptId: string | null
@@ -120,6 +122,8 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
   const [name, setName] = useState('')
   const [body, setBody] = useState('')
   const [source, setSource] = useState('user')
+  const [kind, setKind] = useState<PromptKind>('leaf')
+  const [chainDraft, setChainDraft] = useState<ChainStepDraft[]>([])
   const [model, setModel] = useState('')
   const [defaultModel, setDefaultModel] = useState('')
   const [stats, setStats] = useState<PromptStatsData | null>(null)
@@ -154,6 +158,8 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
       setName('')
       setBody('')
       setSource('user')
+      setKind('leaf')
+      setChainDraft([])
       setModel('')
       setStats(null)
       setError('')
@@ -171,12 +177,24 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
         setName(data.name)
         setBody(data.body)
         setSource(data.source)
+        setKind(data.kind === 'chain' ? 'chain' : 'leaf')
         setModel(data.model ?? '')
         setError('')
       })
       .catch(() => {
         if (!cancelled) setError('Failed to load prompt')
       })
+
+    // Always fetch chain steps too — for leaf prompts the response is
+    // an empty array, which keeps the toggle from chain → leaf safe
+    // (clicking back to chain shows zero steps as expected).
+    fetch(`/api/prompts/${promptId}/chain-steps`)
+      .then((res) => (res.ok ? res.json() : []))
+      .then((data: ChainStep[]) => {
+        if (cancelled) return
+        setChainDraft(data.map((s) => ({ step_prompt_id: s.step_prompt_id, brief: s.brief })))
+      })
+      .catch(() => {})
 
     fetch(`/api/prompts/${promptId}/stats`)
       .then((res) => {
@@ -232,8 +250,16 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
   }, [width])
 
   const save = async () => {
-    if (!name.trim() || !body.trim()) {
-      setError('Name and body are required')
+    if (!name.trim()) {
+      setError('Name is required')
+      return
+    }
+    if (kind === 'leaf' && !body.trim()) {
+      setError('Body is required for leaf prompts')
+      return
+    }
+    if (kind === 'chain' && chainDraft.length === 0) {
+      setError('A chain must have at least one step')
       return
     }
     setSaving(true)
@@ -244,16 +270,32 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
         ? await fetch('/api/prompts', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, body, model }),
+            body: JSON.stringify({ name, body, kind, model }),
           })
         : await fetch(`/api/prompts/${promptId}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, body, model }),
+            body: JSON.stringify({ name, body, kind, model }),
           })
       if (!res.ok) {
         toast.error(await readError(res, `Failed to ${isNew ? 'create' : 'save'} prompt`))
         return
+      }
+
+      // For chain prompts, persist the step list immediately after the
+      // prompt itself. We use the id from the response so it works for
+      // both create (server-assigned id) and update flows.
+      if (kind === 'chain') {
+        const created = (await res.json()) as { id: string }
+        const stepsRes = await fetch(`/api/prompts/${created.id}/chain-steps`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ steps: chainDraft }),
+        })
+        if (!stepsRes.ok) {
+          toast.error(await readError(stepsRes, 'Failed to save chain steps'))
+          return
+        }
       }
       onSaved()
     } catch (err) {
@@ -312,9 +354,33 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
 
             {/* Header */}
             <div className="px-6 py-5 border-b border-border-subtle flex items-center justify-between shrink-0">
-              <h2 className="text-[15px] font-semibold text-text-primary">
-                {isNew ? 'New Prompt' : 'Edit Prompt'}
-              </h2>
+              <div className="flex items-center gap-3">
+                <h2 className="text-[15px] font-semibold text-text-primary">
+                  {isNew ? 'New Prompt' : 'Edit Prompt'}
+                </h2>
+                <div className="inline-flex rounded-md border border-border-subtle overflow-hidden text-[11px]">
+                  <button
+                    onClick={() => setKind('leaf')}
+                    className={`px-2.5 py-1 transition-colors ${
+                      kind === 'leaf'
+                        ? 'bg-accent text-white'
+                        : 'bg-white/50 text-text-secondary hover:bg-white'
+                    }`}
+                  >
+                    Leaf
+                  </button>
+                  <button
+                    onClick={() => setKind('chain')}
+                    className={`px-2.5 py-1 transition-colors border-l border-border-subtle ${
+                      kind === 'chain'
+                        ? 'bg-accent text-white'
+                        : 'bg-white/50 text-text-secondary hover:bg-white'
+                    }`}
+                  >
+                    Chain
+                  </button>
+                </div>
+              </div>
               <button
                 onClick={onClose}
                 className="text-text-tertiary hover:text-text-secondary transition-colors text-lg leading-none px-1"
@@ -339,19 +405,23 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
                 />
               </div>
 
-              {/* Body */}
-              <div>
-                <label className="block text-[12px] font-medium text-text-secondary mb-1.5">
-                  Prompt Body
-                </label>
-                <textarea
-                  value={body}
-                  onChange={(e) => setBody(e.target.value)}
-                  placeholder="Describe what the agent should do..."
-                  rows={16}
-                  className="w-full px-3 py-2.5 rounded-lg border border-border-subtle bg-white/50 text-[13px] text-text-primary font-mono leading-relaxed placeholder:text-text-tertiary focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 transition-colors resize-y"
-                />
-              </div>
+              {/* Body — leaf prompts only. Chain prompts replace this
+                  with the step editor; their body is unused (the chain
+                  is defined by the step list). */}
+              {kind === 'leaf' && (
+                <div>
+                  <label className="block text-[12px] font-medium text-text-secondary mb-1.5">
+                    Prompt Body
+                  </label>
+                  <textarea
+                    value={body}
+                    onChange={(e) => setBody(e.target.value)}
+                    placeholder="Describe what the agent should do..."
+                    rows={16}
+                    className="w-full px-3 py-2.5 rounded-lg border border-border-subtle bg-white/50 text-[13px] text-text-primary font-mono leading-relaxed placeholder:text-text-tertiary focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 transition-colors resize-y"
+                  />
+                </div>
+              )}
 
               <div>
                 <label className="block text-[12px] font-medium text-text-secondary mb-1.5">
@@ -373,42 +443,53 @@ export default function PromptDrawer({ promptId, isNew, onClose, onSaved, onDele
                 </p>
               </div>
 
-              {/* Template variables reference — grouped by applicability so
-                  authors can tell at a glance which ones resolve for which
-                  task types. Unresolved placeholders render empty at spawn
-                  time; prompts stay coherent either way. */}
-              <div>
-                <label className="block text-[12px] font-medium text-text-secondary mb-1.5">
-                  Template Variables
-                </label>
-                <div className="bg-black/[0.02] rounded-lg border border-border-subtle p-3 space-y-4">
-                  {TEMPLATE_VAR_GROUPS.map((group) => (
-                    <div key={group.label}>
-                      <div className="text-[11px] font-semibold text-text-secondary">
-                        {group.label}
+              {kind === 'chain' && (
+                <ChainStepEditor
+                  chainPromptId={promptId ?? ''}
+                  steps={chainDraft}
+                  onChange={setChainDraft}
+                  busy={saving}
+                />
+              )}
+
+              {/* Template variables reference — leaf prompts only.
+                  Chain prompts don't reference task placeholders directly;
+                  the wrapper user prompt the spawner builds carries
+                  task context for each step. */}
+              {kind === 'leaf' && (
+                <div>
+                  <label className="block text-[12px] font-medium text-text-secondary mb-1.5">
+                    Template Variables
+                  </label>
+                  <div className="bg-black/[0.02] rounded-lg border border-border-subtle p-3 space-y-4">
+                    {TEMPLATE_VAR_GROUPS.map((group) => (
+                      <div key={group.label}>
+                        <div className="text-[11px] font-semibold text-text-secondary">
+                          {group.label}
+                        </div>
+                        <div className="text-[10px] text-text-tertiary mb-1.5">{group.caption}</div>
+                        <div className="space-y-1">
+                          {group.vars.map((v) => (
+                            <div key={v.name} className="flex items-start gap-3">
+                              <code className="text-[11px] font-mono text-accent bg-accent/[0.06] px-1.5 py-0.5 rounded shrink-0">
+                                {v.name}
+                              </code>
+                              <span className="text-[11px] text-text-tertiary leading-snug">
+                                {v.desc}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
                       </div>
-                      <div className="text-[10px] text-text-tertiary mb-1.5">{group.caption}</div>
-                      <div className="space-y-1">
-                        {group.vars.map((v) => (
-                          <div key={v.name} className="flex items-start gap-3">
-                            <code className="text-[11px] font-mono text-accent bg-accent/[0.06] px-1.5 py-0.5 rounded shrink-0">
-                              {v.name}
-                            </code>
-                            <span className="text-[11px] text-text-tertiary leading-snug">
-                              {v.desc}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
-                  <p className="text-[10px] text-text-tertiary pt-2 border-t border-border-subtle">
-                    Tool guidance and completion format are injected automatically. You only need to
-                    write the mission. Placeholders that don&rsquo;t apply to the task&rsquo;s event
-                    type render empty.
-                  </p>
+                    ))}
+                    <p className="text-[10px] text-text-tertiary pt-2 border-t border-border-subtle">
+                      Tool guidance and completion format are injected automatically. You only need
+                      to write the mission. Placeholders that don&rsquo;t apply to the task&rsquo;s
+                      event type render empty.
+                    </p>
+                  </div>
                 </div>
-              </div>
+              )}
 
               {/* Stats */}
               {!isNew && stats && stats.total_runs > 0 && (

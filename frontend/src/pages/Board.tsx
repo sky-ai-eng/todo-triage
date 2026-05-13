@@ -41,6 +41,11 @@ export default function Board() {
   // Agent run state
   const [agentRuns, setAgentRuns] = useState<Record<string, AgentRun>>({})
   const [agentMessages, setAgentMessages] = useState<Record<string, AgentMessage[]>>({})
+  const [chainStepRuns, setChainStepRuns] = useState<Record<string, AgentRun[]>>({})
+  const chainStepRunsRef = useRef(chainStepRuns)
+  useEffect(() => {
+    chainStepRunsRef.current = chainStepRuns
+  }, [chainStepRuns])
 
   // Sidebar state
   const [sidebarOpen, setSidebarOpen] = useState(false)
@@ -71,6 +76,34 @@ export default function Board() {
     kind: 'review' | 'pr'
   } | null>(null)
 
+  // Pads /api/chain-runs/{id} into a length-N array with synthetic
+  // 'pending' placeholders so the rail can render before all steps exist.
+  const seedChainStepRuns = useCallback(async (taskID: string, chainRunID: string) => {
+    try {
+      const res = await fetch(`/api/chain-runs/${chainRunID}`)
+      if (!res.ok) return
+      const data: {
+        steps?: Array<{ step: { step_index: number }; run?: AgentRun | null }>
+      } = await res.json()
+      const total = data.steps?.length ?? 0
+      if (total === 0) return
+      const padded: AgentRun[] = Array.from({ length: total }, (_, i) => {
+        const existing = data.steps?.[i]?.run
+        if (existing) return existing
+        return {
+          ID: `__pending-${chainRunID}-${i}`,
+          Status: 'pending',
+          chain_run_id: chainRunID,
+          ChainStepIndex: i,
+        } as unknown as AgentRun
+      })
+      setChainStepRuns((prev) => ({ ...prev, [taskID]: padded }))
+    } catch {
+      // Network error — leave chain indicator empty for now; the
+      // next fetchTasks pass will retry.
+    }
+  }, [])
+
   const fetchTasks = useCallback(async () => {
     try {
       const [queuedRes, claimedRes, delegatedRes, doneRes] = await Promise.all([
@@ -97,11 +130,39 @@ export default function Board() {
           const runs: AgentRun[] = await runsRes.json()
           if (runs.length > 0) {
             const latestRun = runs[0]
-            setAgentRuns((prev) => ({ ...prev, [task.id]: latestRun }))
-            const msgsRes = await fetch(`/api/agent/runs/${latestRun.ID}/messages`)
-            if (!msgsRes.ok) continue
-            const msgs: AgentMessage[] = await msgsRes.json()
-            setAgentMessages((prev) => ({ ...prev, [latestRun.ID]: msgs }))
+
+            // Chain runs: collect all step runs and use the active step
+            // (or the latest) as the "main" run for the AgentCard.
+            const chainRunID = latestRun.chain_run_id
+            if (chainRunID) {
+              const stepRuns = runs
+                .filter((r) => r.chain_run_id === chainRunID)
+                .sort((a, b) => (a.chain_step_index ?? 0) - (b.chain_step_index ?? 0))
+              await seedChainStepRuns(task.id, chainRunID)
+              const activeStep =
+                stepRuns.find((r) =>
+                  [
+                    'running',
+                    'cloning',
+                    'fetching',
+                    'worktree_created',
+                    'agent_starting',
+                    'initializing',
+                  ].includes(r.Status),
+                ) ?? stepRuns[stepRuns.length - 1]
+              setAgentRuns((prev) => ({ ...prev, [task.id]: activeStep }))
+              const msgsRes = await fetch(`/api/agent/runs/${activeStep.ID}/messages`)
+              if (msgsRes.ok) {
+                const msgs: AgentMessage[] = await msgsRes.json()
+                setAgentMessages((prev) => ({ ...prev, [activeStep.ID]: msgs }))
+              }
+            } else {
+              setAgentRuns((prev) => ({ ...prev, [task.id]: latestRun }))
+              const msgsRes = await fetch(`/api/agent/runs/${latestRun.ID}/messages`)
+              if (!msgsRes.ok) continue
+              const msgs: AgentMessage[] = await msgsRes.json()
+              setAgentMessages((prev) => ({ ...prev, [latestRun.ID]: msgs }))
+            }
           }
         } catch {
           // Individual agent run fetch failed — skip
@@ -112,7 +173,7 @@ export default function Board() {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [seedChainStepRuns])
 
   useEffect(() => {
     fetchTasks()
@@ -123,10 +184,12 @@ export default function Board() {
       (event: WSEvent) => {
         if (event.type === 'agent_run_update') {
           // Optimistic status update for an already-tracked run.
+          let matched = false
           setAgentRuns((prev) => {
             const updated = { ...prev }
             for (const [taskId, run] of Object.entries(updated)) {
               if (run.ID === event.run_id) {
+                matched = true
                 updated[taskId] = { ...run, Status: event.data.status }
                 break
               }
@@ -154,8 +217,55 @@ export default function Board() {
                 }
                 return { ...p, [fullRun.TaskID]: fullRun }
               })
+              // First WS update for a chain step seeds the chain
+              // indicator. Without this, the first step of a brand-new
+              // chain renders alone until step 2 starts.
+              if (fullRun.chain_run_id) {
+                seedChainStepRuns(fullRun.TaskID, fullRun.chain_run_id)
+              }
             })
             .catch(() => {})
+
+          if (!matched) {
+            // Chain step run that isn't the active step: a new step
+            // started or a prior one changed. Otherwise seed agentRuns
+            // so auto-delegation / cross-tab / swipe responses we
+            // haven't tracked yet render immediately.
+            let isChainStep = false
+            for (const steps of Object.values(chainStepRunsRef.current)) {
+              if (steps.some((r) => r.chain_run_id && r.ID === event.run_id)) {
+                isChainStep = true
+                break
+              }
+            }
+            if (isChainStep) {
+              // Only refetch on terminal transitions; mid-flight status
+              // pings (initializing → cloning → running) are covered by
+              // the per-run patch above.
+              if (
+                [
+                  'completed',
+                  'failed',
+                  'cancelled',
+                  'task_unsolvable',
+                  'pending_approval',
+                ].includes(event.data.status)
+              ) {
+                fetchTasks()
+              }
+            } else {
+              fetch(`/api/agent/runs/${event.run_id}`)
+                .then((r) => (r.ok ? r.json() : null))
+                .then((fullRun: AgentRun | null) => {
+                  if (!fullRun) return
+                  setAgentRuns((p) => ({ ...p, [fullRun.TaskID]: fullRun }))
+                  if (fullRun.chain_run_id) {
+                    seedChainStepRuns(fullRun.TaskID, fullRun.chain_run_id)
+                  }
+                })
+                .catch(() => {})
+            }
+          }
           // 'cancelled' triggers a task refetch so the
           // pending_approval-cleanup broadcast (SKY-206) collapses
           // the AgentCard and swaps in the queued SortableTaskCard
@@ -189,7 +299,7 @@ export default function Board() {
           fetchTasks()
         }
       },
-      [fetchTasks],
+      [fetchTasks, seedChainStepRuns],
     ),
   )
 
@@ -710,6 +820,7 @@ export default function Board() {
                       key={task.id}
                       task={task}
                       run={agentRuns[task.id]}
+                      chainSteps={chainStepRuns[task.id]}
                       messages={agentMessages[agentRuns[task.id].ID] || []}
                       onRequeue={() => handleRequeue(task.id)}
                       onReview={() => {
@@ -750,6 +861,7 @@ export default function Board() {
                       key={task.id}
                       task={task}
                       run={agentRuns[task.id]}
+                      chainSteps={chainStepRuns[task.id]}
                       messages={agentMessages[agentRuns[task.id].ID] || []}
                       onRequeue={() => handleRequeue(task.id)}
                       onReview={() => {
@@ -819,6 +931,7 @@ export default function Board() {
                       key={task.id}
                       task={task}
                       run={agentRuns[task.id]}
+                      chainSteps={chainStepRuns[task.id]}
                       messages={agentMessages[agentRuns[task.id].ID] || []}
                       onRequeue={() => handleRequeue(task.id)}
                       onReview={() => {
@@ -974,12 +1087,14 @@ const draggableRunStatuses = new Set([
 function SortableAgentCard({
   task,
   run,
+  chainSteps,
   messages,
   onRequeue,
   onReview,
 }: {
   task: Task
   run: AgentRun
+  chainSteps?: AgentRun[]
   messages: AgentMessage[]
   onRequeue?: () => void
   onReview?: () => void
@@ -1012,6 +1127,7 @@ function SortableAgentCard({
       <AgentCard
         task={task}
         run={run}
+        chainSteps={chainSteps}
         messages={messages}
         onRequeue={onRequeue}
         onReview={onReview}

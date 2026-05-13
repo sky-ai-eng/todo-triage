@@ -6,7 +6,7 @@ interface Props {
   open: boolean
   onSelect: (promptId: string) => void
   onClose: () => void
-  onEditPrompts: () => void
+  onEditPrompts?: () => void
   /** Optional override for the modal title. Defaults to "Choose a prompt"
    *  for backward compatibility with the delegation-strategy callers. */
   title?: string
@@ -17,6 +17,11 @@ interface Props {
    *  in effect. The delegation-strategy callers leave this undefined
    *  because their picker fires once per task with no prior selection. */
   selectedId?: string
+  /** Optional client-side filter applied after the prompts list is
+   *  fetched. Use this to hide prompts that aren't valid in the calling
+   *  context — e.g. the chain step editor passes a filter that hides
+   *  chain-kind prompts (no nested chains) and the chain itself. */
+  filter?: (p: Prompt) => boolean
 }
 
 export default function PromptPicker({
@@ -27,6 +32,7 @@ export default function PromptPicker({
   title = 'Choose a prompt',
   subtitle = 'Select a delegation strategy for this task',
   selectedId,
+  filter,
 }: Props) {
   const [prompts, setPrompts] = useState<Prompt[]>([])
   const [fetchFailed, setFetchFailed] = useState(false)
@@ -102,7 +108,7 @@ export default function PromptPicker({
                   </div>
                 ) : (
                   <div className="grid grid-cols-2 gap-3">
-                    {prompts.map((prompt) => (
+                    {(filter ? prompts.filter(filter) : prompts).map((prompt) => (
                       <button
                         key={prompt.id}
                         onClick={() => onSelect(prompt.id)}
@@ -134,27 +140,33 @@ export default function PromptPicker({
                       </button>
                     ))}
 
-                    {/* Add new tile */}
-                    <button
-                      onClick={onEditPrompts}
-                      className="flex flex-col items-center justify-center p-4 rounded-xl border border-dashed border-border-subtle hover:border-accent/40 hover:bg-accent/[0.03] transition-all duration-150 min-h-[88px]"
-                    >
-                      <span className="text-2xl text-text-tertiary leading-none mb-1">+</span>
-                      <span className="text-[11px] text-text-tertiary">New Prompt</span>
-                    </button>
+                    {/* Add new tile — hidden when no edit handler is wired
+                        (e.g. ChainStepEditor's nested picker has no
+                        meaningful "edit prompts" navigation). */}
+                    {onEditPrompts && (
+                      <button
+                        onClick={onEditPrompts}
+                        className="flex flex-col items-center justify-center p-4 rounded-xl border border-dashed border-border-subtle hover:border-accent/40 hover:bg-accent/[0.03] transition-all duration-150 min-h-[88px]"
+                      >
+                        <span className="text-2xl text-text-tertiary leading-none mb-1">+</span>
+                        <span className="text-[11px] text-text-tertiary">New Prompt</span>
+                      </button>
+                    )}
                   </div>
                 )}
               </div>
 
               {/* Footer */}
-              <div className="px-5 py-3 border-t border-border-subtle flex items-center justify-between shrink-0">
-                <button
-                  onClick={onEditPrompts}
-                  className="text-[12px] text-accent hover:text-accent/70 font-medium transition-colors"
-                >
-                  Edit Prompts
-                </button>
-              </div>
+              {onEditPrompts && (
+                <div className="px-5 py-3 border-t border-border-subtle flex items-center justify-between shrink-0">
+                  <button
+                    onClick={onEditPrompts}
+                    className="text-[12px] text-accent hover:text-accent/70 font-medium transition-colors"
+                  >
+                    Edit Prompts
+                  </button>
+                </div>
+              )}
             </div>
           </motion.div>
         </>

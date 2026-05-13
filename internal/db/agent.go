@@ -30,6 +30,10 @@ func CreateAgentRun(database *sql.DB, run domain.AgentRun) error {
 	if triggerType == "manual" && run.CreatorUserID == "" {
 		run.CreatorUserID = runmode.LocalDefaultUserID
 	}
+	var stepIdx interface{}
+	if run.ChainStepIndex != nil {
+		stepIdx = *run.ChainStepIndex
+	}
 	// team_id + visibility populated explicitly per SKY-262: runs inherit
 	// their task's team scope so the team-scoped queue / Board filter
 	// includes them. In local mode the team is the LocalDefaultTeamID
@@ -49,9 +53,12 @@ func CreateAgentRun(database *sql.DB, run domain.AgentRun) error {
 	// so the seeder can't drift back to lying. The caller's spawner
 	// decides which value to pass; nullIfEmpty maps "" → NULL.
 	_, err := database.Exec(`
-		INSERT INTO runs (id, task_id, prompt_id, status, model, worktree_path, trigger_type, trigger_id, team_id, visibility, creator_user_id, actor_agent_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'team', ?, ?)
-	`, run.ID, run.TaskID, nullIfEmpty(run.PromptID), run.Status, run.Model, run.WorktreePath, triggerType, nullIfEmpty(run.TriggerID), runmode.LocalDefaultTeamID, nullIfEmpty(run.CreatorUserID), nullIfEmpty(run.ActorAgentID))
+		INSERT INTO runs (id, task_id, prompt_id, status, model, worktree_path, trigger_type, trigger_id, team_id, visibility, creator_user_id, actor_agent_id, chain_run_id, chain_step_index)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'team', ?, ?, ?, ?)
+	`, run.ID, run.TaskID, nullIfEmpty(run.PromptID), run.Status, run.Model, run.WorktreePath,
+		triggerType, nullIfEmpty(run.TriggerID), runmode.LocalDefaultTeamID,
+		nullIfEmpty(run.CreatorUserID), nullIfEmpty(run.ActorAgentID),
+		nullIfEmpty(run.ChainRunID), stepIdx)
 	return err
 }
 
@@ -161,7 +168,7 @@ func GetAgentRun(database *sql.DB, runID string) (*domain.AgentRun, error) {
 	row := database.QueryRow(`
 		SELECT r.id, r.task_id, r.status, r.model, r.started_at, r.completed_at,
 		       r.total_cost_usd, r.duration_ms, r.num_turns, r.stop_reason, r.worktree_path,
-		       r.result_summary, r.session_id, r.actor_agent_id,
+		       r.result_summary, r.session_id, r.actor_agent_id, r.chain_run_id, r.chain_step_index,
 		       (NULLIF(TRIM(rm.agent_content, ' ' || char(9) || char(10) || char(13)), '') IS NULL) AS memory_missing
 		FROM runs r
 		LEFT JOIN run_memory rm ON rm.run_id = r.id
@@ -171,12 +178,12 @@ func GetAgentRun(database *sql.DB, runID string) (*domain.AgentRun, error) {
 	var r domain.AgentRun
 	var completedAt sql.NullTime
 	var costUSD sql.NullFloat64
-	var durationMs, numTurns sql.NullInt64
-	var stopReason, worktreePath, model, resultSummary, sessionID, actorAgentID sql.NullString
+	var durationMs, numTurns, chainStep sql.NullInt64
+	var stopReason, worktreePath, model, resultSummary, sessionID, actorAgentID, chainRunID sql.NullString
 
 	err := row.Scan(&r.ID, &r.TaskID, &r.Status, &model, &r.StartedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &stopReason, &worktreePath,
-		&resultSummary, &sessionID, &actorAgentID, &r.MemoryMissing)
+		&resultSummary, &sessionID, &actorAgentID, &chainRunID, &chainStep, &r.MemoryMissing)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -190,6 +197,13 @@ func GetAgentRun(database *sql.DB, runID string) (*domain.AgentRun, error) {
 	r.ResultSummary = resultSummary.String
 	r.SessionID = sessionID.String
 	r.ActorAgentID = actorAgentID.String
+	if chainRunID.Valid {
+		r.ChainRunID = chainRunID.String
+	}
+	if chainStep.Valid {
+		v := int(chainStep.Int64)
+		r.ChainStepIndex = &v
+	}
 	if completedAt.Valid {
 		r.CompletedAt = &completedAt.Time
 	}
@@ -218,7 +232,7 @@ func AgentRunsForTask(database *sql.DB, taskID string) ([]domain.AgentRun, error
 	rows, err := database.Query(`
 		SELECT r.id, r.task_id, r.status, r.model, r.started_at, r.completed_at,
 		       r.total_cost_usd, r.duration_ms, r.num_turns, r.stop_reason, r.worktree_path,
-		       r.result_summary, r.session_id, r.actor_agent_id,
+		       r.result_summary, r.session_id, r.actor_agent_id, r.chain_run_id, r.chain_step_index,
 		       (NULLIF(TRIM(rm.agent_content, ' ' || char(9) || char(10) || char(13)), '') IS NULL) AS memory_missing
 		FROM runs r
 		LEFT JOIN run_memory rm ON rm.run_id = r.id
@@ -235,12 +249,12 @@ func AgentRunsForTask(database *sql.DB, taskID string) ([]domain.AgentRun, error
 		var r domain.AgentRun
 		var completedAt sql.NullTime
 		var costUSD sql.NullFloat64
-		var durationMs, numTurns sql.NullInt64
-		var stopReason, worktreePath, model, resultSummary, sessionID, actorAgentID sql.NullString
+		var durationMs, numTurns, chainStep sql.NullInt64
+		var stopReason, worktreePath, model, resultSummary, sessionID, actorAgentID, chainRunID sql.NullString
 
 		if err := rows.Scan(&r.ID, &r.TaskID, &r.Status, &model, &r.StartedAt, &completedAt,
 			&costUSD, &durationMs, &numTurns, &stopReason, &worktreePath,
-			&resultSummary, &sessionID, &actorAgentID, &r.MemoryMissing); err != nil {
+			&resultSummary, &sessionID, &actorAgentID, &chainRunID, &chainStep, &r.MemoryMissing); err != nil {
 			return nil, err
 		}
 
@@ -250,6 +264,13 @@ func AgentRunsForTask(database *sql.DB, taskID string) ([]domain.AgentRun, error
 		r.ResultSummary = resultSummary.String
 		r.SessionID = sessionID.String
 		r.ActorAgentID = actorAgentID.String
+		if chainRunID.Valid {
+			r.ChainRunID = chainRunID.String
+		}
+		if chainStep.Valid {
+			v := int(chainStep.Int64)
+			r.ChainStepIndex = &v
+		}
 		if completedAt.Valid {
 			r.CompletedAt = &completedAt.Time
 		}

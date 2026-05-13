@@ -50,6 +50,7 @@ func (s *Store) WithTx(ctx context.Context, orgID, userID string, fn func(db.TxS
 		Dashboard:     newDashboardStore(tx),
 		Secrets:       newSecretStore(tx),
 		EventHandlers: newTxEventHandlerStore(tx),
+		Chains:        newChainStore(tx),
 		Agents:        newTxAgentStore(tx),
 		TeamAgents:    newTxTeamAgentStore(tx),
 		Users:         newUsersStore(tx),

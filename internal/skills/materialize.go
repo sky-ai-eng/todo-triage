@@ -1,0 +1,151 @@
+package skills
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+)
+
+// SlugForChainStep produces the directory name used under
+// `<wt>/.claude/skills/` for a chain step. Including the step index
+// guards against two steps in one chain referencing the same prompt
+// and overwriting each other's SKILL.md. The slug also doubles as the
+// `name:` field of the generated frontmatter.
+func SlugForChainStep(stepIndex int, promptName string) string {
+	return fmt.Sprintf("chain-step-%d-%s", stepIndex, sanitizeSlug(promptName))
+}
+
+var slugSanitizeRE = regexp.MustCompile(`[^a-z0-9-]+`)
+
+func sanitizeSlug(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	s = strings.ReplaceAll(s, "_", "-")
+	s = strings.ReplaceAll(s, " ", "-")
+	s = slugSanitizeRE.ReplaceAllString(s, "-")
+	s = strings.Trim(s, "-")
+	if s == "" {
+		return "step"
+	}
+	return s
+}
+
+// MaterializeStepSkill writes a SKILL.md for one chain step into
+// `<wt>/.claude/skills/<slug>/SKILL.md`. Branches on the prompt's
+// source so an off-the-shelf imported skill is written byte-identical
+// (modulo a name-rewrite when needed) and a regular user/system
+// prompt gets synthetic frontmatter so Claude Code's skill discovery
+// can index it.
+//
+//   - source = "imported": the body already carries valid SKILL.md
+//     content, often with frontmatter. Write verbatim. Rewrite only
+//     the `name:` field when it doesn't match the slug we materialized
+//     under (otherwise discovery indexes the wrong name).
+//
+//   - source = "user" | "system" | other: synthesize frontmatter with
+//     `name: <slug>` and `description: <brief or fallback>`, then the
+//     prompt body unchanged. The wrapper user prompt names the slug
+//     explicitly, so even a weak description still gets the skill
+//     selected — the description is a backstop.
+//
+// The caller is responsible for wiping `<wt>/.claude/skills/` (or at
+// least the slug subdirectory) between steps so step N+1 doesn't see
+// step N's leftover skill.
+func MaterializeStepSkill(worktree, slug string, prompt *domain.Prompt, brief string) error {
+	if prompt == nil {
+		return fmt.Errorf("nil prompt")
+	}
+	dir := filepath.Join(worktree, ".claude", "skills", slug)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create skill dir: %w", err)
+	}
+	path := filepath.Join(dir, "SKILL.md")
+
+	var contents string
+	if prompt.Source == "imported" {
+		contents = ensureFrontmatterName(prompt.Body, slug, prompt.Name, brief)
+	} else {
+		contents = synthesizeSkillFile(slug, prompt.Name, prompt.Body, brief)
+	}
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		return fmt.Errorf("write SKILL.md: %w", err)
+	}
+	return nil
+}
+
+// ensureFrontmatterName takes an imported SKILL.md body and rewrites
+// (or inserts) the `name:` field so it matches the slug we materialized
+// under. Description is preserved when present; a fallback is inserted
+// when the imported body has no frontmatter at all.
+func ensureFrontmatterName(body, slug, promptName, brief string) string {
+	frontmatter, markdown := splitFrontmatter(body)
+	if frontmatter == "" {
+		// No frontmatter — wrap the body in a synthesized one. This
+		// handles imported prompts whose body is the markdown payload
+		// only (the importer's parseSkillFile may have already stripped
+		// frontmatter when the caller stored the parsed body).
+		return synthesizeSkillFile(slug, promptName, body, brief)
+	}
+	lines := strings.Split(frontmatter, "\n")
+	hasName := false
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "name:") {
+			// Fix 1: if the existing name already matches, return the body unchanged.
+			existing := strings.TrimSpace(strings.TrimPrefix(trimmed, "name:"))
+			if existing == slug {
+				return body
+			}
+			lines[i] = "name: " + slug
+			hasName = true
+			break
+		}
+	}
+	if !hasName {
+		// name: goes first in the frontmatter content; splitFrontmatter already
+		// strips the surrounding "---" delimiters, so a plain prepend is correct.
+		lines = append([]string{"name: " + slug}, lines...)
+	}
+	rebuilt := strings.Join(lines, "\n")
+	return "---\n" + strings.TrimSpace(rebuilt) + "\n---\n\n" + strings.TrimLeft(markdown, "\n")
+}
+
+func synthesizeSkillFile(slug, promptName, body, brief string) string {
+	desc := strings.TrimSpace(brief)
+	if desc == "" {
+		desc = fmt.Sprintf("Run the %q step in this chain.", strings.TrimSpace(promptName))
+	}
+	var b strings.Builder
+	b.WriteString("---\n")
+	b.WriteString("name: ")
+	b.WriteString(slug)
+	b.WriteString("\n")
+	b.WriteString("description: ")
+	b.WriteString(desc)
+	b.WriteString("\n---\n\n")
+	if strings.TrimSpace(promptName) != "" {
+		b.WriteString("<!-- Sourced from prompt: ")
+		b.WriteString(strings.TrimSpace(promptName))
+		b.WriteString(" -->\n\n")
+	}
+	// Fix 3: do not trim trailing whitespace; preserve body byte-identical.
+	b.WriteString(body)
+	return b.String()
+}
+
+// WipeChainSkills removes the chain step skill directories so step
+// N+1 doesn't see step N's SKILL.md. The whole `.claude/skills/`
+// directory is wiped — chains don't compose with the curator skill
+// materialization (chains run on PRs/Jira, the curator runs on
+// projects), so collateral damage to other materialized skills is
+// not a concern in this code path.
+func WipeChainSkills(worktree string) error {
+	dir := filepath.Join(worktree, ".claude", "skills")
+	if err := os.RemoveAll(dir); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
