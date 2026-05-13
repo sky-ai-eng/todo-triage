@@ -356,20 +356,35 @@ func HandoffAgentClaim(db *sql.DB, taskID, agentID, userID string) (HandoffResul
 	if n > 0 {
 		return HandoffChanged, nil
 	}
-	// 0 rows — re-read to figure out which guard tripped.
+	// 0 rows — re-read to figure out which guard tripped. Status
+	// has to be part of the SELECT because the terminal-status
+	// guard and the same-agent-owns guard can both fail
+	// simultaneously: sticky-claim-past-close means a done/dismissed
+	// task can have claimed_by_agent_id == our agentID. Pre-fix
+	// that combination returned HandoffNoOp (the same-agent branch
+	// fired without looking at status), and the caller — thinking
+	// "accepted, idempotent" — would fall through to RecordSwipe
+	// whose vestigial status='queued' write reopened the task.
+	// Terminal-status check takes precedence over the no-op check.
 	var curUser, curAgent sql.NullString
+	var curStatus string
 	err = db.QueryRow(
-		`SELECT claimed_by_user_id, claimed_by_agent_id FROM tasks WHERE id = ?`,
+		`SELECT claimed_by_user_id, claimed_by_agent_id, status FROM tasks WHERE id = ?`,
 		taskID,
-	).Scan(&curUser, &curAgent)
+	).Scan(&curUser, &curAgent, &curStatus)
 	if err == sql.ErrNoRows {
 		return HandoffRefused, nil
 	}
 	if err != nil {
 		return HandoffRefused, err
 	}
+	if curStatus == "done" || curStatus == "dismissed" {
+		// Terminal task — refuse regardless of claim state. The
+		// caller maps to 409; no downstream RecordSwipe runs.
+		return HandoffRefused, nil
+	}
 	if curAgent.Valid && curAgent.String == agentID {
-		// Same agent already owns it — idempotent.
+		// Same agent already owns it on an active task — idempotent.
 		return HandoffNoOp, nil
 	}
 	// Either a different user owns it, or some other race state.

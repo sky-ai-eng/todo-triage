@@ -349,7 +349,7 @@ func TestClaimHelpers_RefuseOnTerminalTask(t *testing.T) {
 				}
 			})
 
-			t.Run("HandoffAgentClaim refuses", func(t *testing.T) {
+			t.Run("HandoffAgentClaim refuses (unclaimed)", func(t *testing.T) {
 				taskID := mkTerminalTask(t, "handoff", false, false)
 				result, err := HandoffAgentClaim(database, taskID, runmode.LocalDefaultAgentID, runmode.LocalDefaultUserID)
 				if err != nil {
@@ -364,6 +364,32 @@ func TestClaimHelpers_RefuseOnTerminalTask(t *testing.T) {
 				}
 				if got.ClaimedByAgentID != "" {
 					t.Errorf("claim landed: got %q", got.ClaimedByAgentID)
+				}
+			})
+
+			t.Run("HandoffAgentClaim refuses (sticky bot claim)", func(t *testing.T) {
+				// The specific bug-fix case: terminal task with the
+				// bot's sticky-audit claim already set. Pre-fix the
+				// re-read returned HandoffNoOp because curAgent ==
+				// agentID, letting the caller proceed to RecordSwipe
+				// which reopened the task. Post-fix the terminal
+				// check in the re-read takes precedence and returns
+				// HandoffRefused — caller maps to 409, no RecordSwipe,
+				// no reopen.
+				taskID := mkTerminalTask(t, "handoff-sticky", true, false)
+				result, err := HandoffAgentClaim(database, taskID, runmode.LocalDefaultAgentID, runmode.LocalDefaultUserID)
+				if err != nil {
+					t.Fatalf("HandoffAgentClaim: %v", err)
+				}
+				if result != HandoffRefused {
+					t.Errorf("result = %v, want HandoffRefused (terminal-with-sticky-bot-claim must not look like idempotent NoOp)", result)
+				}
+				got, _ := GetTask(database, taskID)
+				if got.Status != terminalStatus {
+					t.Errorf("status mutated: got %q want %q", got.Status, terminalStatus)
+				}
+				if got.ClaimedByAgentID != runmode.LocalDefaultAgentID {
+					t.Errorf("bot claim disturbed: got %q (sticky-past-close audit broken)", got.ClaimedByAgentID)
 				}
 			})
 
