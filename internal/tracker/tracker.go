@@ -111,7 +111,7 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, userTe
 				// is on (CODEOWNERS auto-assigning them to their own PR). That
 				// isn't an ask — surfacing it as a queued task pollutes the
 				// queue. Matches the same guard in DiffPRSnapshots.
-				if err := t.backfillReviewRequested(entity.ID, snap, username); err != nil {
+				if err := t.backfillReviewRequested(entity.ID, snap); err != nil {
 					log.Printf("[tracker] failed to backfill review_requested for %s: %v", sid, err)
 				}
 			}
@@ -184,14 +184,13 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, userTe
 			if userTeams != nil && !isReviewerMatch(snap.ReviewRequests, username, userTeams) {
 				if stale, err := db.FindActiveTasksByEntityAndType(t.database, e.ID, domain.EventGitHubPRReviewRequested); err == nil && len(stale) > 0 {
 					meta, _ := json.Marshal(events.GitHubPRReviewRequestRemovedMetadata{
-						Author:       snap.Author,
-						AuthorIsSelf: snap.Author == username,
-						Repo:         snap.Repo,
-						PRNumber:     snap.Number,
-						IsDraft:      snap.IsDraft,
-						HeadSHA:      snap.HeadSHA,
-						Labels:       snap.Labels,
-						Title:        snap.Title,
+						Author:   snap.Author,
+						Repo:     snap.Repo,
+						PRNumber: snap.Number,
+						IsDraft:  snap.IsDraft,
+						HeadSHA:  snap.HeadSHA,
+						Labels:   snap.Labels,
+						Title:    snap.Title,
 					})
 					eid := e.ID
 					t.bus.Publish(domain.Event{
@@ -342,17 +341,19 @@ func (t *Tracker) discoverGitHub(client *ghclient.Client, username string, repos
 // task creation here via FindOrCreateTask, identical to the Jira carry-over
 // queue path. The task's primary_event_id FK is satisfied by the synthesized
 // event's ID.
-func (t *Tracker) backfillReviewRequested(entityID string, snap domain.PRSnapshot, username string) error {
-	authorIsSelf := snap.Author == username
+//
+// The "is this PR's review requested from me" decision happens upstream at
+// the caller's matchesAny check, not here; this function just records the
+// author login on the metadata so the predicate matcher can do its work.
+func (t *Tracker) backfillReviewRequested(entityID string, snap domain.PRSnapshot) error {
 	meta := events.GitHubPRReviewRequestedMetadata{
-		Author:       snap.Author,
-		AuthorIsSelf: authorIsSelf,
-		Repo:         snap.Repo,
-		PRNumber:     snap.Number,
-		IsDraft:      snap.IsDraft,
-		HeadSHA:      snap.HeadSHA,
-		Labels:       snap.Labels,
-		Title:        snap.Title,
+		Author:   snap.Author,
+		Repo:     snap.Repo,
+		PRNumber: snap.Number,
+		IsDraft:  snap.IsDraft,
+		HeadSHA:  snap.HeadSHA,
+		Labels:   snap.Labels,
+		Title:    snap.Title,
 	}
 	metaJSON, err := json.Marshal(meta)
 	if err != nil {

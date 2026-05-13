@@ -28,12 +28,12 @@ func TestRegistryFieldSchemaGeneration(t *testing.T) {
 		t.Fatalf("label_added schema not registered")
 	}
 	want := map[string]string{
-		"author_is_self": "bool",
-		"author":         "string",
-		"label_name":     "string",
-		"repo":           "string",
-		"is_draft":       "bool",
-		"has_label":      "string",
+		"author_in":  "string_list",
+		"author":     "string",
+		"label_name": "string",
+		"repo":       "string",
+		"is_draft":   "bool",
+		"has_label":  "string",
 	}
 	got := map[string]string{}
 	for _, f := range s.Fields {
@@ -56,11 +56,10 @@ func TestMatcherAppliesPredicate(t *testing.T) {
 	s, _ := Get(domain.EventGitHubPRCICheckFailed)
 
 	meta := GitHubPRCICheckFailedMetadata{
-		Author:       "aidan",
-		AuthorIsSelf: true,
-		CheckName:    "test",
-		Repo:         "sky-ai-eng/triage-factory",
-		Labels:       []string{"wip", "self-review"},
+		Author:    "aidan",
+		CheckName: "test",
+		Repo:      "sky-ai-eng/triage-factory",
+		Labels:    []string{"wip", "self-review"},
 	}
 	metaJSON, _ := json.Marshal(meta)
 
@@ -70,14 +69,16 @@ func TestMatcherAppliesPredicate(t *testing.T) {
 		want      bool
 	}{
 		{"empty predicate matches all", "", true},
-		{"author_is_self:true matches", `{"author_is_self":true}`, true},
-		{"author_is_self:false rejects", `{"author_is_self":false}`, false},
+		{"author_in matches when author is in list", `{"author_in":["aidan"]}`, true},
+		{"author_in matches case-insensitively", `{"author_in":["AIDAN"]}`, true},
+		{"author_in rejects when author not in list", `{"author_in":["someone-else"]}`, false},
+		{"empty author_in is no-filter (matches)", `{"author_in":[]}`, true},
 		{"author exact-match hits", `{"author":"aidan"}`, true},
 		{"author exact-match misses", `{"author":"renovate[bot]"}`, false},
 		{"has_label hits when label present", `{"has_label":"self-review"}`, true},
 		{"has_label misses when absent", `{"has_label":"urgent"}`, false},
-		{"multi-field AND: all pass", `{"author_is_self":true,"check_name":"test"}`, true},
-		{"multi-field AND: one fails", `{"author_is_self":true,"check_name":"build"}`, false},
+		{"multi-field AND: all pass", `{"author_in":["aidan"],"check_name":"test"}`, true},
+		{"multi-field AND: one fails", `{"author_in":["aidan"],"check_name":"build"}`, false},
 	}
 
 	for _, tc := range cases {
@@ -106,10 +107,11 @@ func TestValidatePredicateJSON(t *testing.T) {
 		{"empty → match-all", domain.EventGitHubPRNewCommits, "", "", false},
 		{"{} → match-all", domain.EventGitHubPRNewCommits, "{}", "", false},
 		{"null → match-all", domain.EventGitHubPRNewCommits, "null", "", false},
-		{"canonical round-trip", domain.EventGitHubPRNewCommits, `{"author_is_self":true}`, `{"author_is_self":true}`, false},
+		{"canonical round-trip", domain.EventGitHubPRNewCommits, `{"author_in":["aidan"]}`, `{"author_in":["aidan"]}`, false},
 		{"unknown field rejected", domain.EventGitHubPRNewCommits, `{"bogus_field":true}`, "", true},
-		{"wrong type rejected", domain.EventGitHubPRNewCommits, `{"author_is_self":"nope"}`, "", true},
-		{"unknown event type rejected", "github:pr:does_not_exist", `{"author_is_self":true}`, "", true},
+		{"deprecated author_is_self rejected", domain.EventGitHubPRNewCommits, `{"author_is_self":true}`, "", true},
+		{"wrong type rejected", domain.EventGitHubPRNewCommits, `{"author_in":"nope"}`, "", true},
+		{"unknown event type rejected", "github:pr:does_not_exist", `{"author_in":["aidan"]}`, "", true},
 	}
 
 	for _, tc := range cases {

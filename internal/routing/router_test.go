@@ -17,10 +17,9 @@ import (
 
 func TestMatchPredicate_EmptyPredicate_MatchesAll(t *testing.T) {
 	meta := events.GitHubPRCICheckFailedMetadata{
-		Author:       "aidan",
-		AuthorIsSelf: true,
-		CheckName:    "build",
-		Repo:         "owner/repo",
+		Author:    "aidan",
+		CheckName: "build",
+		Repo:      "owner/repo",
 	}
 	metaJSON, _ := json.Marshal(meta)
 
@@ -33,59 +32,72 @@ func TestMatchPredicate_EmptyPredicate_MatchesAll(t *testing.T) {
 	}
 }
 
-func TestMatchPredicate_AuthorIsSelf_True(t *testing.T) {
+func TestMatchPredicate_AuthorIn_Match(t *testing.T) {
 	meta := events.GitHubPRCICheckFailedMetadata{
-		Author:       "aidan",
-		AuthorIsSelf: true,
-		CheckName:    "build",
+		Author:    "aidan",
+		CheckName: "build",
 	}
 	metaJSON, _ := json.Marshal(meta)
 
-	matched, err := matchPredicate(domain.EventGitHubPRCICheckFailed, `{"author_is_self":true}`, string(metaJSON))
+	matched, err := matchPredicate(domain.EventGitHubPRCICheckFailed, `{"author_in":["aidan"]}`, string(metaJSON))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !matched {
-		t.Error("expected match when AuthorIsSelf=true and predicate requires it")
+		t.Error("expected match when Author is in author_in allowlist")
 	}
 }
 
-func TestMatchPredicate_AuthorIsSelf_False_Rejects(t *testing.T) {
+func TestMatchPredicate_AuthorIn_NoMatch(t *testing.T) {
 	meta := events.GitHubPRCICheckFailedMetadata{
-		Author:       "someone-else",
-		AuthorIsSelf: false,
-		CheckName:    "build",
+		Author:    "someone-else",
+		CheckName: "build",
 	}
 	metaJSON, _ := json.Marshal(meta)
 
-	matched, err := matchPredicate(domain.EventGitHubPRCICheckFailed, `{"author_is_self":true}`, string(metaJSON))
+	matched, err := matchPredicate(domain.EventGitHubPRCICheckFailed, `{"author_in":["aidan"]}`, string(metaJSON))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if matched {
-		t.Error("expected no match when AuthorIsSelf=false but predicate requires true")
+		t.Error("expected no match when Author isn't in author_in allowlist")
+	}
+}
+
+// author_in is case-insensitive — GitHub logins are case-insensitive on the
+// platform side too. The matcher uses strings.EqualFold at compare time.
+func TestMatchPredicate_AuthorIn_CaseInsensitive(t *testing.T) {
+	meta := events.GitHubPRCICheckFailedMetadata{
+		Author:    "AidanAllchin",
+		CheckName: "build",
+	}
+	metaJSON, _ := json.Marshal(meta)
+
+	matched, _ := matchPredicate(domain.EventGitHubPRCICheckFailed,
+		`{"author_in":["aidanallchin"]}`, string(metaJSON))
+	if !matched {
+		t.Error("expected case-insensitive author_in match")
 	}
 }
 
 func TestMatchPredicate_MultiField_AND(t *testing.T) {
 	meta := events.GitHubPRCICheckFailedMetadata{
-		Author:       "aidan",
-		AuthorIsSelf: true,
-		CheckName:    "test",
-		Repo:         "owner/repo",
+		Author:    "aidan",
+		CheckName: "test",
+		Repo:      "owner/repo",
 	}
 	metaJSON, _ := json.Marshal(meta)
 
 	// Both fields match.
 	matched, _ := matchPredicate(domain.EventGitHubPRCICheckFailed,
-		`{"author_is_self":true,"check_name":"test"}`, string(metaJSON))
+		`{"author_in":["aidan"],"check_name":"test"}`, string(metaJSON))
 	if !matched {
 		t.Error("expected match when both fields pass")
 	}
 
 	// One field fails.
 	matched, _ = matchPredicate(domain.EventGitHubPRCICheckFailed,
-		`{"author_is_self":true,"check_name":"build"}`, string(metaJSON))
+		`{"author_in":["aidan"],"check_name":"build"}`, string(metaJSON))
 	if matched {
 		t.Error("expected no match when one field fails (AND semantics)")
 	}
@@ -93,10 +105,9 @@ func TestMatchPredicate_MultiField_AND(t *testing.T) {
 
 func TestMatchPredicate_HasLabel(t *testing.T) {
 	meta := events.GitHubPRNewCommitsMetadata{
-		Author:       "aidan",
-		AuthorIsSelf: true,
-		Labels:       []string{"wip", "self-review"},
-		Repo:         "owner/repo",
+		Author: "aidan",
+		Labels: []string{"wip", "self-review"},
+		Repo:   "owner/repo",
 	}
 	metaJSON, _ := json.Marshal(meta)
 
@@ -117,18 +128,17 @@ func TestMatchPredicate_HasLabel(t *testing.T) {
 
 func TestMatchPredicate_LabelName_OnLabelEvent(t *testing.T) {
 	meta := events.GitHubPRLabelAddedMetadata{
-		Author:       "aidan",
-		AuthorIsSelf: true,
-		LabelName:    "self-review",
-		Labels:       []string{"self-review"},
-		Repo:         "owner/repo",
+		Author:    "aidan",
+		LabelName: "self-review",
+		Labels:    []string{"self-review"},
+		Repo:      "owner/repo",
 	}
 	metaJSON, _ := json.Marshal(meta)
 
 	matched, _ := matchPredicate(domain.EventGitHubPRLabelAdded,
-		`{"label_name":"self-review","author_is_self":true}`, string(metaJSON))
+		`{"label_name":"self-review","author_in":["aidan"]}`, string(metaJSON))
 	if !matched {
-		t.Error("expected match on label_name + author_is_self")
+		t.Error("expected match on label_name + author_in")
 	}
 
 	matched, _ = matchPredicate(domain.EventGitHubPRLabelAdded,
@@ -139,7 +149,7 @@ func TestMatchPredicate_LabelName_OnLabelEvent(t *testing.T) {
 }
 
 func TestMatchPredicate_UnknownEventType_NoMatch(t *testing.T) {
-	matched, err := matchPredicate("github:pr:does_not_exist", `{"author_is_self":true}`, `{}`)
+	matched, err := matchPredicate("github:pr:does_not_exist", `{"author_in":["aidan"]}`, `{}`)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -148,6 +158,9 @@ func TestMatchPredicate_UnknownEventType_NoMatch(t *testing.T) {
 	}
 }
 
+// Jira's *_is_self predicates are out of scope for SKY-264 and will be
+// migrated to *_in allowlists under SKY-270 once Atlassian multi-mode auth
+// lands. Until then, the Jira matcher continues to support the bool form.
 func TestMatchPredicate_JiraAssigneeIsSelf(t *testing.T) {
 	meta := events.JiraIssueAssignedMetadata{
 		Assignee:       "Aidan Allchin",
@@ -174,33 +187,32 @@ func TestMatchPredicate_JiraAssigneeIsSelf(t *testing.T) {
 	}
 }
 
-func TestMatchPredicate_ReviewerIsSelf_SelfReview(t *testing.T) {
+// Self-review scenario: combine author_in + reviewer_in + has_label so a
+// trigger only fires when the user reviews their own PR with a specific
+// label set.
+func TestMatchPredicate_ReviewerIn_SelfReview(t *testing.T) {
 	meta := events.GitHubPRReviewCommentedMetadata{
-		Author:         "aidan",
-		AuthorIsSelf:   true,
-		Reviewer:       "aidan",
-		ReviewerIsSelf: true,
-		Labels:         []string{"self-review"},
+		Author:   "aidan",
+		Reviewer: "aidan",
+		Labels:   []string{"self-review"},
 	}
 	metaJSON, _ := json.Marshal(meta)
 
-	// Self-review scenario: reviewer_is_self + author_is_self + has_label
 	matched, _ := matchPredicate(domain.EventGitHubPRReviewCommented,
-		`{"reviewer_is_self":true,"author_is_self":true,"has_label":"self-review"}`,
+		`{"reviewer_in":["aidan"],"author_in":["aidan"],"has_label":"self-review"}`,
 		string(metaJSON))
 	if !matched {
 		t.Error("expected match for self-review scenario predicate")
 	}
 
-	// External review: reviewer_is_self=false
+	// External reviewer.
 	meta.Reviewer = "alice"
-	meta.ReviewerIsSelf = false
 	metaJSON, _ = json.Marshal(meta)
 	matched, _ = matchPredicate(domain.EventGitHubPRReviewCommented,
-		`{"reviewer_is_self":true,"author_is_self":true,"has_label":"self-review"}`,
+		`{"reviewer_in":["aidan"],"author_in":["aidan"],"has_label":"self-review"}`,
 		string(metaJSON))
 	if matched {
-		t.Error("expected no match when reviewer_is_self=false")
+		t.Error("expected no match when reviewer isn't in reviewer_in allowlist")
 	}
 }
 

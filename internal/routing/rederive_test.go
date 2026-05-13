@@ -61,10 +61,9 @@ func setupReDeriveScenario(t *testing.T, database *sql.DB, minAutonomy float64) 
 
 	// Create event with metadata
 	meta := events.GitHubPRCICheckFailedMetadata{
-		Author:       "aidan",
-		AuthorIsSelf: true,
-		CheckName:    "build",
-		Repo:         "owner/repo",
+		Author:    "aidan",
+		CheckName: "build",
+		Repo:      "owner/repo",
 	}
 	metaJSON, _ := json.Marshal(meta)
 	eventID, err := db.RecordEvent(database, domain.Event{
@@ -331,7 +330,7 @@ func TestReDeriveAfterScoring_ZeroThresholdTrigger_SkippedByReDerive(t *testing.
 	entity2, _, _ := db.FindOrCreateEntity(database, "github", "owner/repo#2", "pr", "Test PR 2", "https://github.com/owner/repo/pull/2")
 	entityID := entity2.ID
 	meta := events.GitHubPRCICheckFailedMetadata{
-		Author: "aidan", AuthorIsSelf: true, CheckName: "lint", Repo: "owner/repo",
+		Author: "aidan", CheckName: "lint", Repo: "owner/repo",
 	}
 	metaJSON, _ := json.Marshal(meta)
 	eventID, _ := db.RecordEvent(database, domain.Event{
@@ -371,11 +370,12 @@ func TestReDeriveAfterScoring_ZeroThresholdTrigger_SkippedByReDerive(t *testing.
 func TestReDeriveAfterScoring_PredicateMismatch_Skips(t *testing.T) {
 	database := newTestDB(t)
 
-	// Create entity + event where author_is_self=false
+	// Create entity + event where the author isn't in the predicate's
+	// author_in allowlist — the rederive pass should skip the trigger.
 	entity3, _, _ := db.FindOrCreateEntity(database, "github", "owner/repo#3", "pr", "Test PR 3", "https://github.com/owner/repo/pull/3")
 	entityID := entity3.ID
 	meta := events.GitHubPRCICheckFailedMetadata{
-		Author: "someone-else", AuthorIsSelf: false, CheckName: "build", Repo: "owner/repo",
+		Author: "someone-else", CheckName: "build", Repo: "owner/repo",
 	}
 	metaJSON, _ := json.Marshal(meta)
 	eventID, _ := db.RecordEvent(database, domain.Event{
@@ -387,8 +387,9 @@ func TestReDeriveAfterScoring_PredicateMismatch_Skips(t *testing.T) {
 	// Prompt
 	createTestPrompt(t, database, domain.Prompt{ID: "p3", Name: "Test3", Body: "Do", Source: "user"})
 
-	// Trigger with predicate requiring author_is_self=true
-	pred := `{"author_is_self":true}`
+	// Trigger with predicate requiring author in {"aidan"} — the event
+	// above has author "someone-else", so the predicate won't match.
+	pred := `{"author_in":["aidan"]}`
 	createTriggerForTestRouting(t, database, domain.EventHandler{
 		ID: "t-pred", Kind: domain.EventHandlerKindTrigger,
 		PromptID: "p3", TriggerType: domain.TriggerTypeEvent,

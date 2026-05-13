@@ -1077,12 +1077,14 @@ func (r *Router) closeCheckReviewResolved(evt domain.Event, entityID string) boo
 
 // closeCheckReviewSubmitted: if I submitted my review, close any active
 // review_requested task on this entity (the request is satisfied).
+//
+// The tracker emits review_submitted only when the session user is the
+// reviewer (see diff.go's reviewerIsSelf gate), so by construction any
+// review_submitted event we see here is a self-review — no defensive
+// check needed.
 func (r *Router) closeCheckReviewSubmitted(evt domain.Event, entityID string) bool {
 	var meta events.GitHubPRReviewSubmittedMetadata
 	if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {
-		return false
-	}
-	if !meta.ReviewerIsSelf {
 		return false
 	}
 

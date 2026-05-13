@@ -55,6 +55,13 @@ type Stores struct {
 	// on the app pool and gate on team membership via RLS.
 	TeamAgents TeamAgentStore
 
+	// Users owns the users table — non-secret identity facts like
+	// display_name and github_username. The keychain holds the PAT;
+	// the row holds everything else. See SKY-264 for the
+	// github_username column that backs the predicate-matcher
+	// allowlists.
+	Users UsersStore
+
 	// Tx is the transaction runner — handlers that need atomic
 	// multi-store writes call Tx.WithTx and receive a TxStores with
 	// every field tx-bound. Postgres impl also sets the JWT claims
@@ -76,6 +83,7 @@ type TxStores struct {
 	EventHandlers EventHandlerStore
 	Agents        AgentStore
 	TeamAgents    TeamAgentStore
+	Users         UsersStore
 }
 
 // TxRunner runs fn inside a single database transaction. Postgres

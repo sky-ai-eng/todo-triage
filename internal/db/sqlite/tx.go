@@ -38,6 +38,7 @@ func (s *Store) WithTx(ctx context.Context, orgID, userID string, fn func(db.TxS
 		EventHandlers: newEventHandlerStore(tx),
 		Agents:        newAgentStore(tx),
 		TeamAgents:    newTeamAgentStore(tx),
+		Users:         newUsersStore(tx),
 	}
 	if err := fn(txStores); err != nil {
 		return err

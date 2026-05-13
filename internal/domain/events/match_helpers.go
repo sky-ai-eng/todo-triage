@@ -1,5 +1,7 @@
 package events
 
+import "strings"
+
 // Tiny helpers used by every Matches() implementation. A nil pointer on the
 // predicate means "no filter" — always matches; a non-nil pointer means
 // "must equal." Slices on metadata (Labels) are checked with set semantics.
@@ -26,6 +28,25 @@ func hasLabel(pred *string, labels []string) bool {
 	}
 	for _, l := range labels {
 		if l == *pred {
+			return true
+		}
+	}
+	return false
+}
+
+// stringInSliceFold is the SKY-264 matcher primitive for `author_in` /
+// `reviewer_in` allowlists. An empty (or nil) slice means "no filter,"
+// matching the nil-pointer convention above — if the rule didn't say who
+// it cared about, it doesn't filter on identity. A non-empty slice
+// requires meta to match at least one entry under case-insensitive
+// comparison using Unicode case folding (GitHub logins and Jira account
+// IDs are case-insensitive in practice).
+func stringInSliceFold(pred []string, meta string) bool {
+	if len(pred) == 0 {
+		return true
+	}
+	for _, v := range pred {
+		if strings.EqualFold(v, meta) {
 			return true
 		}
 	}

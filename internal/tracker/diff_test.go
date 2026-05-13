@@ -151,8 +151,8 @@ func TestDiff_CI_NewFailingCheck_EmitsPerCheck(t *testing.T) {
 	// for Actions-backed checks so auto-delegated CI-fix prompts can
 	// download logs without a discovery round-trip.
 	meta := decodeMetadata[events.GitHubPRCICheckFailedMetadata](t, failed[0])
-	if !meta.AuthorIsSelf {
-		t.Error("expected AuthorIsSelf=true")
+	if meta.Author != testUser {
+		t.Errorf("expected Author=%s, got %s", testUser, meta.Author)
 	}
 	if meta.Repo != "owner/repo" {
 		t.Errorf("expected Repo=owner/repo, got %s", meta.Repo)
@@ -386,11 +386,8 @@ func TestDiff_Review_NewChangesRequested(t *testing.T) {
 	if meta.Reviewer != "alice" {
 		t.Errorf("expected Reviewer=alice, got %s", meta.Reviewer)
 	}
-	if meta.ReviewerIsSelf {
-		t.Error("expected ReviewerIsSelf=false for alice")
-	}
-	if !meta.AuthorIsSelf {
-		t.Error("expected AuthorIsSelf=true (PR author is testUser)")
+	if meta.Author != testUser {
+		t.Errorf("expected Author=%s (PR author is testUser), got %s", testUser, meta.Author)
 	}
 }
 
@@ -432,8 +429,8 @@ func TestDiff_Review_SelfReview_EmitsSubmitted(t *testing.T) {
 		t.Fatal("expected review_submitted event for self-review")
 	}
 	meta := decodeMetadata[events.GitHubPRReviewSubmittedMetadata](t, *submitted)
-	if !meta.ReviewerIsSelf {
-		t.Error("expected ReviewerIsSelf=true on submitted event")
+	if meta.Reviewer != testUser {
+		t.Errorf("expected Reviewer=%s on submitted event (tracker only emits review_submitted when session user is the reviewer), got %s", testUser, meta.Reviewer)
 	}
 	if meta.ReviewType != "commented" {
 		t.Errorf("expected ReviewType=commented, got %s", meta.ReviewType)
@@ -784,9 +781,14 @@ func TestDiff_AllPREvents_CarryLabels(t *testing.T) {
 	}
 }
 
-// --- Metadata: AuthorIsSelf -------------------------------------------------
+// --- Metadata: Author -------------------------------------------------------
+//
+// The emitter records the author login on every PR event; predicate
+// matching against author_in allowlists is done by the matcher, not here.
+// These tests pin that the author login is propagated correctly regardless
+// of whether the session user authored the PR.
 
-func TestDiff_AuthorIsSelf_True(t *testing.T) {
+func TestDiff_Author_Propagated(t *testing.T) {
 	prev := basePRSnapshot()
 	prev.HeadSHA = "aaa"
 	curr := basePRSnapshot()
@@ -799,12 +801,12 @@ func TestDiff_AuthorIsSelf_True(t *testing.T) {
 		t.Fatal("expected event")
 	}
 	meta := decodeMetadata[events.GitHubPRNewCommitsMetadata](t, *evt)
-	if !meta.AuthorIsSelf {
-		t.Error("expected AuthorIsSelf=true when Author matches username")
+	if meta.Author != testUser {
+		t.Errorf("expected Author=%s, got %s", testUser, meta.Author)
 	}
 }
 
-func TestDiff_AuthorIsSelf_False(t *testing.T) {
+func TestDiff_Author_NotSelf_Propagated(t *testing.T) {
 	prev := basePRSnapshot()
 	prev.HeadSHA = "aaa"
 	curr := basePRSnapshot()
@@ -817,8 +819,8 @@ func TestDiff_AuthorIsSelf_False(t *testing.T) {
 		t.Fatal("expected event")
 	}
 	meta := decodeMetadata[events.GitHubPRNewCommitsMetadata](t, *evt)
-	if meta.AuthorIsSelf {
-		t.Error("expected AuthorIsSelf=false when Author differs from username")
+	if meta.Author != "someone-else" {
+		t.Errorf("expected Author=someone-else, got %s", meta.Author)
 	}
 }
 

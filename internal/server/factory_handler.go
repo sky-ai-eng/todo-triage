@@ -6,9 +6,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // factoryEntityLimit caps how many active entities we ship per snapshot.
@@ -191,14 +191,12 @@ type factorySnapshotJSON struct {
 func (s *Server) handleFactorySnapshot(w http.ResponseWriter, r *http.Request) {
 	since := time.Now().Add(-24 * time.Hour)
 
-	// Session user's GitHub login drives the "mine" flag. Missing creds
-	// (fresh install, no github configured) degrade to everyone-is-other
-	// rather than failing the whole endpoint — the factory should still
-	// render for a user who's only set up Jira.
-	ghUsername := ""
-	if creds, err := auth.Load(); err == nil {
-		ghUsername = creds.GitHubUsername
-	}
+	// Session user's GitHub login drives the "mine" flag. Identity lives on
+	// users.github_username (SKY-264). Missing identity (fresh install, no
+	// GitHub configured) degrades to everyone-is-other rather than failing
+	// the whole endpoint — the factory should still render for a user who's
+	// only set up Jira.
+	ghUsername, _ := s.users.GetGitHubUsername(r.Context(), runmode.LocalDefaultUserID)
 
 	// --- Throughput counters ------------------------------------------------
 	eventCounts, err := db.EventCountsByTypeSince(s.db, since)

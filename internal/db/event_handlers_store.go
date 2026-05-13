@@ -156,11 +156,19 @@ func (h ShippedEventHandler) UUIDFor(orgID string) string {
 // → prompts (id, org_id) is satisfied at seed time in Postgres.
 var ShippedEventHandlers = []ShippedEventHandler{
 	// ----- rules ------------------------------------------------------------
+	//
+	// Rules that scope to "my PR" carry `author_in: []` as a placeholder.
+	// The SQLite Seed implementation substitutes the local user's
+	// users.github_username into the empty allowlist at insert time
+	// (SKY-264). Postgres Seed leaves the empty allowlist alone — multi
+	// mode doesn't have a single "self" to substitute; team visibility
+	// is the scoping mechanism there. Either way, users can edit the
+	// allowlist via the Settings UI to add or remove handles.
 	{
 		ID:              "system-rule-ci-check-failed",
 		Kind:            domain.EventHandlerKindRule,
 		EventType:       domain.EventGitHubPRCICheckFailed,
-		Predicate:       `{"author_is_self":true}`,
+		Predicate:       `{"author_in":[]}`,
 		Name:            "CI check failed on my PR",
 		DefaultPriority: 0.75,
 		SortOrder:       0,
@@ -169,7 +177,7 @@ var ShippedEventHandlers = []ShippedEventHandler{
 		ID:              "system-rule-review-changes-requested",
 		Kind:            domain.EventHandlerKindRule,
 		EventType:       domain.EventGitHubPRReviewChangesRequested,
-		Predicate:       `{"author_is_self":true}`,
+		Predicate:       `{"author_in":[]}`,
 		Name:            "Changes requested on my PR",
 		DefaultPriority: 0.85,
 		SortOrder:       1,
@@ -178,7 +186,7 @@ var ShippedEventHandlers = []ShippedEventHandler{
 		ID:              "system-rule-review-commented",
 		Kind:            domain.EventHandlerKindRule,
 		EventType:       domain.EventGitHubPRReviewCommented,
-		Predicate:       `{"author_is_self":true}`,
+		Predicate:       `{"author_in":[]}`,
 		Name:            "Reviewer commented on my PR",
 		DefaultPriority: 0.65,
 		SortOrder:       2,
@@ -222,7 +230,7 @@ var ShippedEventHandlers = []ShippedEventHandler{
 		Kind:                   domain.EventHandlerKindTrigger,
 		PromptID:               "system-ci-fix",
 		EventType:              domain.EventGitHubPRCICheckFailed,
-		Predicate:              `{"author_is_self":true}`,
+		Predicate:              `{"author_in":[]}`,
 		BreakerThreshold:       3,
 		MinAutonomySuitability: 0.0,
 	},
@@ -231,7 +239,7 @@ var ShippedEventHandlers = []ShippedEventHandler{
 		Kind:                   domain.EventHandlerKindTrigger,
 		PromptID:               "system-conflict-resolution",
 		EventType:              domain.EventGitHubPRConflicts,
-		Predicate:              `{"author_is_self":true}`,
+		Predicate:              `{"author_in":[]}`,
 		BreakerThreshold:       2,
 		MinAutonomySuitability: 0.0,
 	},
@@ -272,7 +280,7 @@ var ShippedEventHandlers = []ShippedEventHandler{
 		Kind:                   domain.EventHandlerKindTrigger,
 		PromptID:               "system-fix-review-feedback",
 		EventType:              domain.EventGitHubPRReviewChangesRequested,
-		Predicate:              `{"author_is_self":true}`,
+		Predicate:              `{"author_in":[]}`,
 		BreakerThreshold:       3,
 		MinAutonomySuitability: 0.0,
 	},

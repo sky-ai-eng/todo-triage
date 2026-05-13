@@ -1,6 +1,7 @@
 package poller
 
 import (
+	"context"
 	"database/sql"
 	"log"
 	"sync"
@@ -12,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/tracker"
 )
 
@@ -21,6 +23,7 @@ type Manager struct {
 	database *sql.DB
 	bus      *eventbus.Bus
 	tracker  *tracker.Tracker
+	users    db.UsersStore // SKY-264: source of the session user's github_username
 
 	// OnError fires when a poll cycle returns an error. Source is "github"
 	// or "jira". Wired from main to a toast helper so users see the
@@ -32,11 +35,12 @@ type Manager struct {
 	jiraStop chan struct{}
 }
 
-func NewManager(database *sql.DB, bus *eventbus.Bus) *Manager {
+func NewManager(database *sql.DB, bus *eventbus.Bus, users db.UsersStore) *Manager {
 	return &Manager{
 		database: database,
 		bus:      bus,
 		tracker:  tracker.New(database, bus),
+		users:    users,
 	}
 }
 
@@ -132,7 +136,15 @@ func (m *Manager) startGitHub(cfg config.Config, creds auth.Credentials) {
 		return
 	}
 
-	if creds.GitHubUsername == "" {
+	// NULL/empty github_username means identity hasn't been captured
+	// yet (fresh install before first Settings save) — short-circuit
+	// so the tracker doesn't start without knowing who "me" is.
+	username, err := m.users.GetGitHubUsername(context.Background(), runmode.LocalDefaultUserID)
+	if err != nil {
+		log.Printf("[github] failed to read users.github_username: %v", err)
+		return
+	}
+	if username == "" {
 		log.Println("[github] no username stored, skipping tracker")
 		return
 	}
@@ -158,13 +170,13 @@ func (m *Manager) startGitHub(cfg config.Config, creds auth.Credentials) {
 	// a degraded-but-honest state and the error is logged.
 	userTeams, err := client.ListMyTeams()
 	if err != nil {
-		log.Printf("[github] failed to list teams for %s: %v (team-based review requests will be missed until next restart)", creds.GitHubUsername, err)
+		log.Printf("[github] failed to list teams for %s: %v (team-based review requests will be missed until next restart)", username, err)
 		userTeams = nil
 	}
 
 	go func() {
 		// Initial poll
-		if _, err := m.tracker.RefreshGitHub(client, creds.GitHubUsername, userTeams, repos); err != nil {
+		if _, err := m.tracker.RefreshGitHub(client, username, userTeams, repos); err != nil {
 			log.Printf("[github] tracker error: %v", err)
 			m.reportError("github", err)
 		}
@@ -174,7 +186,7 @@ func (m *Manager) startGitHub(cfg config.Config, creds auth.Credentials) {
 		for {
 			select {
 			case <-ticker.C:
-				if _, err := m.tracker.RefreshGitHub(client, creds.GitHubUsername, userTeams, repos); err != nil {
+				if _, err := m.tracker.RefreshGitHub(client, username, userTeams, repos); err != nil {
 					log.Printf("[github] tracker error: %v", err)
 					m.reportError("github", err)
 				}
@@ -184,7 +196,7 @@ func (m *Manager) startGitHub(cfg config.Config, creds auth.Credentials) {
 		}
 	}()
 
-	log.Printf("[github] tracker started (interval: %s, user: %s, repos: %d, teams: %d)", interval, creds.GitHubUsername, len(repos), len(userTeams))
+	log.Printf("[github] tracker started (interval: %s, user: %s, repos: %d, teams: %d)", interval, username, len(repos), len(userTeams))
 }
 
 // startJira launches the Jira tracking loop.

@@ -88,6 +88,46 @@ func bootstrapBareClones(database *sql.DB) {
 	worktree.BootstrapBareClones(context.Background(), targets)
 }
 
+// bootstrapLocalGitHubIdentity populates users.github_username on the
+// local synthetic user row by deriving the login from the configured
+// PAT+URL. Runs at startup before seedDefaultPrompts so the SQLite
+// Seed substitution sees the populated value when it wires
+// author_in/reviewer_in/commenter_in allowlists into shipped event
+// handler predicates.
+//
+// No-op when (a) the column already has a value, (b) credentials are
+// absent (Settings UI capture is the alternate write path), or
+// (c) ValidateGitHub fails (PAT invalid / GitHub down — the user
+// can recapture via Settings, or the next boot retries).
+func bootstrapLocalGitHubIdentity(users db.UsersStore) error {
+	if runmode.Current() != runmode.ModeLocal {
+		return nil
+	}
+	ctx := context.Background()
+
+	creds, _ := auth.Load() // auth errors are non-fatal — degrade to no-op
+	if creds.GitHubPAT == "" || creds.GitHubURL == "" {
+		return nil
+	}
+	existing, err := users.GetGitHubUsername(ctx, runmode.LocalDefaultUserID)
+	if err != nil {
+		return fmt.Errorf("read users.github_username: %w", err)
+	}
+	if existing != "" {
+		return nil
+	}
+	ghUser, err := auth.ValidateGitHub(creds.GitHubURL, creds.GitHubPAT)
+	if err != nil {
+		log.Printf("[bootstrap] derive users.github_username from PAT: %v (continuing — Settings will capture next save)", err)
+		return nil
+	}
+	if err := users.SetGitHubUsername(ctx, runmode.LocalDefaultUserID, ghUser.Login); err != nil {
+		return fmt.Errorf("persist users.github_username: %w", err)
+	}
+	log.Printf("[bootstrap] users.github_username: derived %q from credentials", ghUser.Login)
+	return nil
+}
+
 // printTopLevelHelp routes the two audiences (delegated Claude Code
 // agents vs. human users) to the right surface. Agents almost always
 // reach this through autocomplete / accidental invocation when they
@@ -256,7 +296,7 @@ func main() {
 		openBrowser(fmt.Sprintf("http://localhost%s", addr))
 	}
 
-	srv := server.New(database, stores.Prompts, stores.Swipes, stores.Dashboard, stores.EventHandlers, stores.Agents, stores.TeamAgents)
+	srv := server.New(database, stores.Prompts, stores.Swipes, stores.Dashboard, stores.EventHandlers, stores.Agents, stores.TeamAgents, stores.Users)
 
 	distFS, err := frontendDist()
 	if err != nil {
@@ -294,6 +334,12 @@ func main() {
 	// trigger rows.
 	if err := db.SeedEventTypes(database); err != nil {
 		log.Fatalf("failed to seed event types: %v", err)
+	}
+	// Populate users.github_username before seeding event handlers so the
+	// SQLite Seed substitution sees the local user's login when it wires
+	// allowlist placeholders on shipped predicates.
+	if err := bootstrapLocalGitHubIdentity(stores.Users); err != nil {
+		log.Printf("[bootstrap] users.github_username: %v (continuing — Settings will capture on next save)", err)
 	}
 	seedDefaultPrompts(stores.Prompts, stores.EventHandlers)
 
@@ -493,7 +539,7 @@ func main() {
 		errorThrottleMu sync.Mutex
 		lastErrorToast  = map[string]time.Time{}
 	)
-	pollerMgr := poller.NewManager(database, bus)
+	pollerMgr := poller.NewManager(database, bus, stores.Users)
 	pollerMgr.OnError = func(source string, err error) {
 		errorThrottleMu.Lock()
 		if last, ok := lastErrorToast[source]; ok && time.Since(last) < errorToastMinInterval {

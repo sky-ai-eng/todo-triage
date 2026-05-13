@@ -19,7 +19,6 @@ func interpolate(r *strings.Replacer, template string) string {
 func TestBuildPromptReplacer_CICheckFailed(t *testing.T) {
 	meta := events.GitHubPRCICheckFailedMetadata{
 		Author:        "alice",
-		AuthorIsSelf:  true,
 		CheckRunID:    42,
 		CheckName:     "test",
 		CheckURL:      "https://github.com/owner/repo/runs/42",

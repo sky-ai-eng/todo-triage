@@ -1291,6 +1291,7 @@ CREATE TABLE public.users (
     timezone text DEFAULT 'UTC'::text NOT NULL,
     default_org_id uuid,
     external_id text,
+    github_username text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
