@@ -88,20 +88,15 @@ func buildSchemaBundle() (string, error) {
 	}
 
 	// Seed rows preserved across the bundle:
-	//   - goose_db_version  — a follow-up Migrate sees head (post-SKY-245
-	//     the runner is goose-managed; the legacy schema_migrations
-	//     table is no longer created on fresh installs).
-	//   - events_catalog    — FK target for task_rules.event_type and
-	//     prompt_triggers.event_type; many tests INSERT against it.
-	//   - tenancy sentinels — the SKY-269 migration inserts five rows
-	//     into orgs/teams/users/org_memberships/memberships and adds
-	//     org_id/team_id/creator_user_id columns to resource tables
-	//     with NOT NULL DEFAULT pointing at these sentinel UUIDs.
-	//     SQLite ALTER can't declare FK constraints on existing
-	//     columns, so resource tables aren't structurally FK'd — but
-	//     the agents + team_agents rebuilds in the same migration DO
-	//     declare FKs to orgs/teams/agents, and tests that INSERT
-	//     into those tables need the parent rows present.
+	//   - goose_db_version  — a follow-up Migrate sees head.
+	//   - events_catalog    — FK target for event_handlers.event_type;
+	//     many tests INSERT against it.
+	//   - tenancy sentinels — the v1.11.0 baseline inserts five rows
+	//     into orgs/teams/users/org_memberships/memberships. Resource
+	//     tables carry org_id/team_id/creator_user_id columns with
+	//     NOT NULL DEFAULT pointing at these sentinel UUIDs. The
+	//     agents + team_agents tables declare FKs to orgs/teams/agents,
+	//     so tests that INSERT into them need the parent rows present.
 	//
 	// agents + team_agents are included in the dump list defensively.
 	// They're empty in the template (the SKY-260 migration creates the

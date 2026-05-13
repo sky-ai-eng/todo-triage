@@ -2,22 +2,16 @@ package domain
 
 import "time"
 
-// EventType defines a specific kind of triage event that can occur. In the
-// new model (see docs/data-model-target.md) this maps to the read-only
-// `events_catalog` table; only ID/Source/Category/Label/Description are
-// persisted. DefaultPriority/Enabled/SortOrder are retained on the struct
-// only as stale fields some consumers still read — they no longer round-trip
-// to the DB and will be removed when those consumers are rewritten in later
-// sub-tickets.
+// EventType defines a specific kind of triage event that can occur.
+// Maps to the read-only `events_catalog` table (see
+// docs/data-model-target.md). Per-rule scheduling/priority lives on
+// `event_handlers` rows now; EventType is purely the catalog entry.
 type EventType struct {
-	ID              string  `json:"id"`       // e.g. "github:pr:review_requested"
-	Source          string  `json:"source"`   // "github", "jira", "system"
-	Category        string  `json:"category"` // "pr", "issue", "scoring", "delegation"
-	Label           string  `json:"label"`    // Human-readable: "Review Requested"
-	Description     string  `json:"description"`
-	DefaultPriority float64 `json:"default_priority"` // deprecated — moved to task_rules
-	Enabled         bool    `json:"enabled"`          // deprecated — gone from events_catalog
-	SortOrder       int     `json:"sort_order"`       // deprecated — moved to task_rules
+	ID          string `json:"id"`       // e.g. "github:pr:review_requested"
+	Source      string `json:"source"`   // "github", "jira", "system"
+	Category    string `json:"category"` // "pr", "issue", "scoring", "delegation"
+	Label       string `json:"label"`    // Human-readable: "Review Requested"
+	Description string `json:"description"`
 }
 
 // Event is a single occurrence of an EventType. The persisted columns
@@ -117,10 +111,7 @@ const (
 // AllEventTypes returns the canonical seed catalog for the per-action
 // event model (see docs/data-model-target.md).
 //
-// DefaultPriority/Enabled/SortOrder fields on the struct are stale (the
-// events_catalog table no longer has those columns). AllEventTypes does not
-// populate them, so they remain zero-valued here; SeedEventTypes only
-// persists id/source/category/label/description.
+// SeedEventTypes persists the result of this function into events_catalog.
 func AllEventTypes() []EventType {
 	return []EventType{
 		// --- GitHub PR — per-action review events (split on review type) ---
