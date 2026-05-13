@@ -1246,8 +1246,8 @@ CREATE TABLE public.team_agents (
 CREATE TABLE public.team_settings (
     team_id uuid NOT NULL,
     jira_projects text[] DEFAULT '{}'::text[] NOT NULL,
-    ai_reprioritize_threshold integer,
-    ai_preference_update_interval interval,
+    ai_reprioritize_threshold integer DEFAULT 5 NOT NULL,
+    ai_preference_update_interval integer DEFAULT 20 NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
 

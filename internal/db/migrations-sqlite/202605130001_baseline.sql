@@ -157,8 +157,13 @@ CREATE TABLE team_settings (
     team_id                       TEXT PRIMARY KEY REFERENCES teams(id) ON DELETE CASCADE,
     -- JSON array of project keys. Stored as JSON text since SQLite has no array type.
     jira_projects                 TEXT NOT NULL DEFAULT '[]',
-    ai_reprioritize_threshold     INTEGER,
-    ai_preference_update_interval INTEGER,
+    -- AI knobs ship NOT NULL with defaults matching config.Default() so
+    -- Load can scan directly into int and a freshly-inserted row never
+    -- needs a "use the app default" decoding step. The numbers are
+    -- counts (events seen) — not durations — kept aligned with the
+    -- Go-side defaults in config.Default().
+    ai_reprioritize_threshold     INTEGER NOT NULL DEFAULT 5,
+    ai_preference_update_interval INTEGER NOT NULL DEFAULT 20,
     updated_at                    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 

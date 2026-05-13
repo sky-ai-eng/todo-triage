@@ -266,13 +266,10 @@ func Load() (Config, error) {
 		cfg.Jira.PollInterval = d
 	}
 
-	// team_settings (jira_projects + AI thresholds). Save always writes
-	// non-NULL ints from the in-memory Config, so scanning directly into
-	// int matches the only path that ever populates this row in local
-	// mode. A future multi-mode admin path that writes NULL via a
-	// different code path would surface a scan error here, which is the
-	// behavior we want — it would mean the local config layer is being
-	// pointed at multi-mode-shaped data.
+	// team_settings (jira_projects + AI thresholds). The AI columns
+	// ship NOT NULL DEFAULT in both backends, so scanning directly
+	// into int is safe — the schema invariant holds whether the row
+	// was inserted by Save() or by any future admin path.
 	var projectsJSON string
 	var aiThreshold, aiInterval int
 	switch err := db.QueryRowContext(ctx, `
@@ -478,6 +475,16 @@ func Save(cfg Config) error {
 	// jira_project_status_rules — one row per project in
 	// cfg.Jira.Projects, all sharing the same values. Drop rules
 	// for projects no longer in the list.
+	//
+	// Empty cfg.Jira.Projects intentionally wipes every row: rules
+	// are scoped to projects, so "no projects tracked" means "no
+	// rules to keep". Re-adding a project later attaches whatever
+	// Pickup/InProgress/Done the user has in the form at that point
+	// (which may be empty if they cleared everything). SKY-272
+	// replaces this whole flow with per-project rule editing in the
+	// FE; until then, callers that need to preserve rules through a
+	// projects-empty save must keep at least one project key in the
+	// list.
 	pickupJSON, err := json.Marshal(orEmpty(cfg.Jira.Pickup.Members))
 	if err != nil {
 		return fmt.Errorf("marshal pickup_members: %w", err)
