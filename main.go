@@ -236,21 +236,12 @@ func main() {
 	}
 	defer database.Close()
 
-	// Wire the config package against the DB and run the one-shot
-	// import of any pre-DB ~/.triagefactory/config.yaml. Must happen
-	// after Migrate (settings table is created there) and before any
-	// config.Load / Save call.
+	// Wire the config package against the DB. Must run after Migrate
+	// (settings table is created there) and before any config.Load /
+	// Save call. Fresh installs land at Default() on first Load() and
+	// write to the settings row on first Save().
 	if err := config.Init(database); err != nil {
 		log.Fatalf("failed to initialize config: %v", err)
-	}
-	if err := config.MigrateLegacyYAML(database); err != nil {
-		log.Printf("[config] legacy YAML import: %v (continuing with defaults)", err)
-	}
-	// Preserve HTTPS for installs that predate the SSH/HTTPS toggle.
-	// New installs (no settings row) skip this; the new Default() of
-	// "ssh" applies. See MigrateLegacyCloneProtocol's docstring.
-	if err := config.MigrateLegacyCloneProtocol(database); err != nil {
-		log.Printf("[config] legacy clone_protocol migration: %v (continuing — backend treats empty as HTTPS so this is non-fatal)", err)
 	}
 
 	addr := fmt.Sprintf(":%d", port)

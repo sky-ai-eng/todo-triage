@@ -312,6 +312,7 @@ footer {
 <header class="hero">
   <div class="sub">SKY-245 · child of SKY-242 · v1 critical-path enabler</div>
   <h1>D1 — Adopt goose for migration tooling</h1>
+  <p class="lede" style="background:rgba(245, 158, 11, 0.15); border-left:3px solid #f59e0b; padding:0.75rem 1rem; margin-bottom:1rem;"><strong>HISTORICAL.</strong> The legacy-install upgrade path described here (install-state classification, <code>ErrPreRunnerInstall</code>, <code>ErrPartialLegacyInstall</code>, baseline stamping of <code>schema_migrations</code>-tracked DBs) was retired in v1.11.0. The migration tree was collapsed into a single fresh-install baseline (<code>202605130001_baseline.sql</code>) and the runner now refuses any DB that isn't either empty or already stamped at the v1.11.0 baseline. Operators upgrade by wiping <code>~/.triagefactory/</code> and reinstalling. This spec is preserved as the design record for the goose adoption itself.</p>
   <p class="lede">Swap the hand-rolled migration runner in <code>internal/db/migrations.go</code> for <code>pressly/goose/v3</code>. Multi-tenant adds 8+ tables and modifies most existing ones; the next 12 months will see more schema motion than the last six. Goose is the standard tool for that — Go-native, embeds migrations, supports SQLite + Postgres with the same file format.</p>
   <div class="hero__meta">
     <span class="meta-pill"><strong>SCOPE</strong> · tool swap, no schema changes</span>

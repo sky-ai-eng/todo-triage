@@ -52,9 +52,6 @@ func Handle(args []string) {
 		fmt.Fprintf(os.Stderr, "error initializing config: %v\n", err)
 		os.Exit(1)
 	}
-	if err := config.MigrateLegacyYAML(conn); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: legacy config import: %v\n", err)
-	}
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: loading config: %v (proceeding with defaults)\n", err)

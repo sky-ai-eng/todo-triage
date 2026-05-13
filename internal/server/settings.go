@@ -204,12 +204,6 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 	prevGHURL := creds.GitHubURL
 	prevGHPAT := creds.GitHubPAT
 	prevGHPollInterval := cfg.GitHub.PollInterval
-	// Compare the raw stored value (not defaulted), so a legacy install
-	// that the migration left at "https" detects an explicit flip to
-	// "ssh" as a real change. Defaulting both sides via
-	// defaultedCloneProtocol would treat empty (legacy/pre-feature)
-	// and "ssh" (post-feature default) as equal, silently skipping
-	// the re-profile + re-bootstrap that the toggle relies on.
 	prevGHCloneProtocol := cfg.GitHub.CloneProtocol
 	prevJiraURL := creds.JiraURL
 	prevJiraPAT := creds.JiraPAT

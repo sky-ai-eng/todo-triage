@@ -8,7 +8,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -17,9 +16,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config is the persisted settings shape. YAML tags are retained for the
-// blob serialization stored in the settings row (and for the legacy
-// config.yaml that the importer reads on first run).
+// Config is the persisted settings shape. YAML tags are retained for
+// the blob serialization stored in the settings row.
 type Config struct {
 	GitHub GitHubConfig `yaml:"github"`
 	Jira   JiraConfig   `yaml:"jira"`
@@ -168,10 +166,8 @@ var ErrNotInitialized = errors.New("config: Init not called")
 
 // Init wires the package against an open, migrated DB handle.
 // Subsequent calls replace the handle (useful for tests). Does NOT
-// touch the filesystem — see MigrateLegacyYAML for the one-shot import
-// of any pre-DB ~/.triagefactory/config.yaml. Production entry points
-// call both; tests should only call Init so they don't read or delete
-// the developer's real YAML file.
+// touch the filesystem; fresh installs land at Default() on first
+// Load() and write to the settings row on first Save().
 func Init(db *sql.DB) error {
 	if db == nil {
 		return errors.New("config.Init: nil db")
@@ -179,63 +175,6 @@ func Init(db *sql.DB) error {
 	pkgMu.Lock()
 	pkgDB = db
 	pkgMu.Unlock()
-	return nil
-}
-
-// MigrateLegacyYAML runs the one-shot migration from
-// ~/.triagefactory/config.yaml into the settings row. It exits early
-// when (a) the row already exists, or (b) no YAML file is present
-// (fresh install — defaults will apply). On a successful import it
-// also forces both poll intervals to the new 5m default — the whole
-// point of pulling the trigger here is to bring everyone onto the
-// less-aggressive cadence regardless of what they had saved.
-//
-// Idempotent: subsequent runs see a populated row and return nil.
-func MigrateLegacyYAML(db *sql.DB) error {
-	var n int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM settings WHERE id = 1`).Scan(&n); err != nil {
-		return fmt.Errorf("probe settings row: %w", err)
-	}
-	if n > 0 {
-		return nil
-	}
-
-	path, err := legacyYAMLPath()
-	if err != nil {
-		return err
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		log.Printf("[config] read %s: %v (skipping import; defaults will apply until you save settings)", path, err)
-		return nil
-	}
-
-	cfg := Default()
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		log.Printf("[config] parse %s: %v (skipping import; defaults will apply until you save settings)", path, err)
-		return nil
-	}
-
-	cfg.GitHub.PollInterval = 5 * time.Minute
-	cfg.Jira.PollInterval = 5 * time.Minute
-
-	out, err := yaml.Marshal(cfg)
-	if err != nil {
-		return fmt.Errorf("marshal cfg: %w", err)
-	}
-	if _, err := db.Exec(`INSERT INTO settings (id, data) VALUES (1, ?)`, string(out)); err != nil {
-		return fmt.Errorf("insert settings: %w", err)
-	}
-
-	if err := os.Remove(path); err != nil {
-		log.Printf("[config] imported %s into DB but couldn't remove the file: %v (safe to delete manually)", path, err)
-	} else {
-		log.Printf("[config] imported %s into DB and removed the file (poll intervals reset to 5m)", path)
-	}
 	return nil
 }
 
@@ -266,80 +205,6 @@ func Load() (Config, error) {
 	return cfg, nil
 }
 
-// MigrateLegacyCloneProtocol runs once at startup to preserve HTTPS for
-// installs that predate the SSH/HTTPS toggle. Without this step, the
-// new-install default ("ssh", from Default()) would silently migrate
-// existing HTTPS workflows to SSH the first time anything triggers a
-// re-profile (a settings change, the 3-day profile TTL, etc.) — and
-// users without SSH configured would see clones start failing for
-// no apparent reason.
-//
-// Detection: parse the raw settings blob and check whether the
-// `github.clone_protocol` key was ever written. If absent, this row
-// was produced by a pre-feature version of TF; we set CloneProtocol to
-// "https" so the existing working state is preserved. If present
-// (including the empty value, which the toggle never produces but the
-// user might write manually), this is a current-version row and we
-// leave it alone.
-//
-// We deliberately parse the YAML rather than substring-matching the
-// blob: a substring search could false-positive on a user-controlled
-// value containing "clone_protocol" (Jira project names, base URLs,
-// etc.) and skip the migration, silently flipping legacy installs to
-// SSH — exactly the footgun this function exists to prevent.
-//
-// Idempotent: subsequent runs see the key in the blob and return nil.
-// Fresh installs (no row at all) also return nil — Default() handles
-// them.
-func MigrateLegacyCloneProtocol(db *sql.DB) error {
-	if db == nil {
-		return errors.New("config.MigrateLegacyCloneProtocol: nil db")
-	}
-	var blob string
-	err := db.QueryRow(`SELECT data FROM settings WHERE id = 1`).Scan(&blob)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("probe settings row: %w", err)
-	}
-	if cloneProtocolKeyPresent(blob) {
-		return nil
-	}
-
-	cfg, err := Load()
-	if err != nil {
-		return fmt.Errorf("load settings for legacy migration: %w", err)
-	}
-	cfg.GitHub.CloneProtocol = "https"
-	if err := Save(cfg); err != nil {
-		return fmt.Errorf("save legacy clone-protocol default: %w", err)
-	}
-	log.Printf("[config] migrated legacy install to clone_protocol=https (toggle is now opt-in via Settings)")
-	return nil
-}
-
-// cloneProtocolKeyPresent reports whether the YAML blob has the
-// `github.clone_protocol` key set (any value, including the empty
-// string). On unmarshal failure we conservatively report `true` —
-// migrating a corrupt blob would Save() over it with whatever Load()
-// degraded to, potentially destroying recoverable user state. The
-// post-migration "you're stuck on the new-install default" path
-// reproduces deterministically on next save once the user fixes the
-// blob; the destroy-corrupt-blob path doesn't.
-func cloneProtocolKeyPresent(blob string) bool {
-	var raw map[string]any
-	if err := yaml.Unmarshal([]byte(blob), &raw); err != nil {
-		return true
-	}
-	gh, ok := raw["github"].(map[string]any)
-	if !ok {
-		return false
-	}
-	_, ok = gh["clone_protocol"]
-	return ok
-}
-
 // Save upserts the settings row.
 func Save(cfg Config) error {
 	pkgMu.RLock()
@@ -359,14 +224,4 @@ func Save(cfg Config) error {
 		string(out),
 	)
 	return err
-}
-
-// legacyYAMLPath is the pre-DB config location. Only referenced by the
-// import path — new state writes to the settings table.
-func legacyYAMLPath() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, ".triagefactory", "config.yaml"), nil
 }
