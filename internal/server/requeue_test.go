@@ -578,6 +578,22 @@ func TestHandleSwipe_DelegateRefusedLeavesNoAuditRow(t *testing.T) {
 	}
 }
 
+// TestHandleSnooze_404OnMissingTask pins missing-task parity with
+// /undo and /requeue. Pre-fix, hitting /snooze on a bogus id would
+// trip the swipe_events→tasks FK constraint inside SnoozeTask and
+// surface the SQLite error string as 500. The GetTask pre-check
+// catches the common case so legitimate 404 callers don't have to
+// parse FK error strings to tell "doesn't exist" from "real server
+// error."
+func TestHandleSnooze_404OnMissingTask(t *testing.T) {
+	s := newTestServer(t)
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/no-such-task/snooze",
+		map[string]any{"until": "1h", "hesitation_ms": 0})
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 // TestHandleSnooze_RefusesOnClaimedTask pins the SKY-261 B+
 // "snoozed ↔ unclaimed" invariant from the snooze side: the
 // SnoozeTask store-level atomic UPDATE refuses on a claimed task,

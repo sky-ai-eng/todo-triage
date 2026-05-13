@@ -317,6 +317,15 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		newStatus = ns
+		// Lifecycle changed — broadcast on the status axis so peer
+		// sessions refetch. Post-SKY-261 the Board listens for
+		// task_updated separately from task_claimed; without this
+		// broadcast a dismissed/completed/snoozed task would stay
+		// in its old lane on other browsers until the next refresh.
+		s.ws.Broadcast(websocket.Event{
+			Type: "task_updated",
+			Data: map[string]any{"task_id": id, "status": newStatus},
+		})
 	}
 
 	// Dismiss is a terminal state — if the user swipes away a task mid-run
@@ -450,13 +459,29 @@ func (s *Server) handleSnooze(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Pre-load for 404 parity with /undo and /requeue. Without this,
+	// SnoozeTask's swipe_events INSERT would trip the tasks(id) FK
+	// for a missing task and surface a SQLite error string as 500 —
+	// leaking implementation detail and confusing legitimate 404
+	// callers. The pre-check fails fast before the store gets
+	// involved.
+	task, err := db.GetTask(s.db, id)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if task == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "task not found"})
+		return
+	}
+
 	ok, err := s.swipes.SnoozeTask(r.Context(), runmode.LocalDefaultOrg, id, until, req.HesitationMs)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 	if !ok {
-		// SKY-261 B+: snooze is queue-only ("snoozed ↔ both claim
+		// SKY-261 v0.7: snooze is queue-only ("snoozed ↔ both claim
 		// cols NULL"). The store's atomic UPDATE refused because
 		// the task is currently claimed by a user or the bot.
 		// Requeue first (releases the claim) then snooze.
@@ -465,6 +490,15 @@ func (s *Server) handleSnooze(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+
+	// Lifecycle changed (status='snoozed' now). Broadcast so other
+	// connected clients refetch and re-render — without this the
+	// Board on a peer session keeps showing the task in its old
+	// lane until the next user-driven refresh.
+	s.ws.Broadcast(websocket.Event{
+		Type: "task_updated",
+		Data: map[string]any{"task_id": id, "status": "snoozed"},
+	})
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "snoozed", "until": until.Format(time.RFC3339)})
 }
