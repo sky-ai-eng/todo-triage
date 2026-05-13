@@ -29,11 +29,25 @@ export default function IdentityListField({
   value: string[] | undefined
   onChange: (val: string[] | undefined) => void
 }) {
-  const { config, loading } = useDeploymentConfig()
+  const { config, loading, error } = useDeploymentConfig()
   const labels = labelsForField(fieldName)
 
-  if (loading || !config) {
+  if (loading) {
     return <div className="h-10 rounded-lg bg-black/[0.03] animate-pulse" />
+  }
+  if (error || !config) {
+    // No fallback form: this field holds a string[] of GitHub logins,
+    // and a plain text input would silently accept comma-strings the
+    // matcher doesn't parse. Refuse to render the editor and tell the
+    // user what's wrong; a page refresh re-fetches /api/config.
+    return (
+      <div
+        role="alert"
+        className="rounded-lg border border-red-300/40 bg-red-50/40 px-3 py-2 text-[12px] text-red-700"
+      >
+        Couldn’t load deployment config{error ? `: ${error}` : '.'} Refresh the page to retry.
+      </div>
+    )
   }
 
   if (config.team_size <= 1) {
@@ -215,7 +229,7 @@ function VariantB({
   config: { current_user: { github_username: string | null } }
   labels: ActorLabels
 }) {
-  const { members, loading } = useTeamMembers()
+  const { members, loading, error: rosterError } = useTeamMembers()
   const [search, setSearch] = useState('')
   const [open, setOpen] = useState(false)
   const [activeIndex, setActiveIndex] = useState(0)
@@ -345,7 +359,7 @@ function VariantB({
     }
   }
 
-  const showDropdown = open && (dropdownItems.length > 0 || loading)
+  const showDropdown = open && (dropdownItems.length > 0 || loading || !!rosterError)
   const ariaExpanded = showDropdown
 
   return (
@@ -416,6 +430,11 @@ function VariantB({
           {loading && (
             <li className="px-3 py-2 text-[12px] text-text-tertiary" aria-disabled="true">
               Loading team…
+            </li>
+          )}
+          {!loading && rosterError && (
+            <li role="alert" className="px-3 py-2 text-[12px] text-red-700" aria-disabled="true">
+              Couldn’t load team roster: {rosterError}. Type a handle to add manually.
             </li>
           )}
           {dropdownItems.map((item, i) => {
