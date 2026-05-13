@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // createPromptForTest is the raw-SQL replacement for the deleted
@@ -23,7 +24,7 @@ func createPromptForTest(t *testing.T, database *sql.DB, p domain.Prompt) {
 	if source == "" {
 		source = "user"
 	}
-	var creatorUserID any = "00000000-0000-0000-0000-000000000100"
+	var creatorUserID any = runmode.LocalDefaultUserID
 	if source == "system" {
 		creatorUserID = nil
 	}
@@ -31,7 +32,7 @@ func createPromptForTest(t *testing.T, database *sql.DB, p domain.Prompt) {
 		INSERT INTO prompts (id, name, body, source, allowed_tools, usage_count, team_id, creator_user_id, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
 	`, p.ID, p.Name, p.Body, source, p.AllowedTools,
-		"00000000-0000-0000-0000-000000000010", creatorUserID, now, now); err != nil {
+		runmode.LocalDefaultTeamID, creatorUserID, now, now); err != nil {
 		t.Fatalf("createPromptForTest %s: %v", p.ID, err)
 	}
 }

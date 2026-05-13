@@ -25,7 +25,8 @@ CREATE TABLE prompts (
     id              TEXT PRIMARY KEY,
     name            TEXT NOT NULL,
     body            TEXT NOT NULL,
-    source          TEXT NOT NULL DEFAULT 'user',
+    source          TEXT NOT NULL DEFAULT 'user'
+                        CHECK (source IN ('system', 'user', 'imported')),
     usage_count     INTEGER DEFAULT 0,
     hidden          BOOLEAN DEFAULT 0,
     created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -40,6 +41,10 @@ CREATE TABLE prompts (
     creator_user_id TEXT,
     visibility      TEXT NOT NULL DEFAULT 'team'
         CHECK (visibility IN ('private','team','org')),
+    -- Uses source<>'system' (not source='user') because prompts.source
+    -- has three valid values (system|user|imported) — both non-system
+    -- variants require a creator. event_handlers, whose enum is just
+    -- system|user, uses a tighter source='user' form.
     CONSTRAINT prompts_system_has_no_creator CHECK (
         (source = 'system' AND creator_user_id IS NULL)
         OR (source <> 'system' AND creator_user_id IS NOT NULL)
@@ -164,11 +169,14 @@ CREATE TABLE user_settings (
     updated_at               TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- One row per (org, jira_project). Mirrors the PG table. Local mode
--- treats all projects uniformly — config.Save() writes one row per
--- jira_projects entry with identical pickup/in_progress/done values.
+-- One row per (team, jira_project). Team-keyed (not org-keyed) so
+-- different teams within an org can give the same Jira project
+-- different pickup/in_progress/done semantics — same domain shape as
+-- team_settings.jira_projects, which is also team-level. Local mode
+-- treats all projects uniformly: config.Save() writes one row per
+-- jira_projects entry with identical values for the LocalDefaultTeam.
 CREATE TABLE jira_project_status_rules (
-    org_id                TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    team_id               TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
     project_key           TEXT NOT NULL,
     pickup_members        TEXT NOT NULL DEFAULT '[]',
     in_progress_members   TEXT NOT NULL DEFAULT '[]',
@@ -176,7 +184,7 @@ CREATE TABLE jira_project_status_rules (
     done_members          TEXT NOT NULL DEFAULT '[]',
     done_canonical        TEXT,
     updated_at            TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (org_id, project_key)
+    PRIMARY KEY (team_id, project_key)
 );
 
 -- === Agents ==============================================================
@@ -294,7 +302,8 @@ CREATE TABLE event_handlers (
     event_type           TEXT NOT NULL REFERENCES events_catalog(id) ON DELETE RESTRICT,
     scope_predicate_json TEXT,
     enabled              BOOLEAN NOT NULL DEFAULT 1,
-    source               TEXT NOT NULL DEFAULT 'user',
+    source               TEXT NOT NULL DEFAULT 'user'
+                            CHECK (source IN ('system', 'user')),
 
     -- Rule-only fields. NULL for triggers.
     name             TEXT,

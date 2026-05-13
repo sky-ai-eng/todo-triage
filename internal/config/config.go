@@ -49,11 +49,13 @@ type JiraConfig struct {
 	BaseURL      string        `json:"base_url"`
 	PollInterval time.Duration `json:"poll_interval"`
 	Projects     []string      `json:"projects"`
-	// Pickup/InProgress/Done are org-wide in local mode: the same rule
-	// applies to every Jira project. Persisted to
-	// jira_project_status_rules with one row per project_key, all
-	// sharing identical values; multi-mode admins can edit per-project
-	// values directly via the admin UI.
+	// Pickup/InProgress/Done are team-wide in local mode: the same
+	// rule applies to every Jira project the team works on. Persisted
+	// to jira_project_status_rules (team-keyed) with one row per
+	// project_key, all sharing identical values. Multi-mode admins
+	// can edit per-project values directly via the admin UI through
+	// a separate handler path — do not route those edits through
+	// config.Save() or they collapse back to one shared value.
 	Pickup     JiraStatusRule `json:"pickup"`
 	InProgress JiraStatusRule `json:"in_progress"`
 	Done       JiraStatusRule `json:"done"`
@@ -251,9 +253,15 @@ func Load() (Config, error) {
 		}
 	}
 
-	// team_settings (jira_projects + AI thresholds)
+	// team_settings (jira_projects + AI thresholds). Save always writes
+	// non-NULL ints from the in-memory Config, so scanning directly into
+	// int matches the only path that ever populates this row in local
+	// mode. A future multi-mode admin path that writes NULL via a
+	// different code path would surface a scan error here, which is the
+	// behavior we want — it would mean the local config layer is being
+	// pointed at multi-mode-shaped data.
 	var projectsJSON string
-	var aiThreshold, aiInterval sql.NullInt64
+	var aiThreshold, aiInterval int
 	switch err := db.QueryRowContext(ctx, `
 		SELECT jira_projects, ai_reprioritize_threshold, ai_preference_update_interval
 		FROM team_settings WHERE team_id = ?
@@ -270,12 +278,8 @@ func Load() (Config, error) {
 			}
 			cfg.Jira.Projects = projects
 		}
-		if aiThreshold.Valid {
-			cfg.AI.ReprioritizeThreshold = int(aiThreshold.Int64)
-		}
-		if aiInterval.Valid {
-			cfg.AI.PreferenceUpdateInterval = int(aiInterval.Int64)
-		}
+		cfg.AI.ReprioritizeThreshold = aiThreshold
+		cfg.AI.PreferenceUpdateInterval = aiInterval
 	}
 
 	// user_settings (AI model + auto-delegate)
@@ -296,11 +300,13 @@ func Load() (Config, error) {
 
 	// jira_project_status_rules (Pickup / InProgress / Done)
 	//
-	// Local mode treats all projects uniformly — all rows share the
-	// same values. Read the first row to populate the org-wide rule.
+	// Team-keyed (different teams within an org can have different
+	// status rules for the same Jira project). Local mode treats all
+	// projects uniformly — all rows for the LocalDefaultTeam share the
+	// same values. Read the first row to populate the team-wide rule.
 	// Returns ErrNoRows when no projects have been configured yet,
 	// which keeps Default()'s empty rules.
-	if rule, err := loadJiraStatusRules(ctx, db, runmode.LocalDefaultOrgID); err != nil {
+	if rule, err := loadJiraStatusRules(ctx, db, runmode.LocalDefaultTeamID); err != nil {
 		return cfg, fmt.Errorf("read jira_project_status_rules: %w", err)
 	} else if rule != nil {
 		cfg.Jira.Pickup = rule.Pickup
@@ -319,16 +325,16 @@ type jiraStatusRules struct {
 	Done       JiraStatusRule
 }
 
-func loadJiraStatusRules(ctx context.Context, db *sql.DB, orgID string) (*jiraStatusRules, error) {
+func loadJiraStatusRules(ctx context.Context, db *sql.DB, teamID string) (*jiraStatusRules, error) {
 	var pickupJSON, inProgressJSON, doneJSON string
 	var inProgressCanon, doneCanon sql.NullString
 	err := db.QueryRowContext(ctx, `
 		SELECT pickup_members, in_progress_members, in_progress_canonical,
 		       done_members, done_canonical
 		FROM jira_project_status_rules
-		WHERE org_id = ?
+		WHERE team_id = ?
 		LIMIT 1
-	`, orgID).Scan(&pickupJSON, &inProgressJSON, &inProgressCanon, &doneJSON, &doneCanon)
+	`, teamID).Scan(&pickupJSON, &inProgressJSON, &inProgressCanon, &doneJSON, &doneCanon)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -470,21 +476,25 @@ func Save(cfg Config) error {
 	if err != nil {
 		return fmt.Errorf("marshal done_members: %w", err)
 	}
+	// DELETE+INSERT scoped to the local team. In multi mode an admin UI
+	// (SKY-257 D14) edits per-project rows directly through its own
+	// handlers — it must NOT route through this code path, or per-project
+	// Canonical/members differences would collapse to one shared value.
 	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM jira_project_status_rules WHERE org_id = ?`,
-		runmode.LocalDefaultOrgID,
+		`DELETE FROM jira_project_status_rules WHERE team_id = ?`,
+		runmode.LocalDefaultTeamID,
 	); err != nil {
 		return fmt.Errorf("clear jira_project_status_rules: %w", err)
 	}
 	for _, key := range projects {
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO jira_project_status_rules (
-				org_id, project_key,
+				team_id, project_key,
 				pickup_members, in_progress_members, in_progress_canonical,
 				done_members, done_canonical, updated_at
 			) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		`,
-			runmode.LocalDefaultOrgID, key,
+			runmode.LocalDefaultTeamID, key,
 			string(pickupJSON), string(inProgressJSON), nullIfEmpty(cfg.Jira.InProgress.Canonical),
 			string(doneJSON), nullIfEmpty(cfg.Jira.Done.Canonical),
 		); err != nil {

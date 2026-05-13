@@ -1127,12 +1127,13 @@ func TestRLS_SettingsAdminOnly(t *testing.T) {
 		t.Fatalf("bob update attempt: %v", err)
 	}
 
-	// Bob cannot INSERT a jira rule — WITH CHECK fails.
+	// Bob cannot INSERT a jira rule — WITH CHECK fails. (jira rules
+	// are team-keyed; bob is a team member but not a team admin.)
 	err = h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
 		_, err := tx.Exec(`
-			INSERT INTO jira_project_status_rules (org_id, project_key)
+			INSERT INTO jira_project_status_rules (team_id, project_key)
 			VALUES ($1, 'SKY')
-		`, orgA)
+		`, teamA)
 		return err
 	})
 	if err == nil {
@@ -1146,12 +1147,13 @@ func TestRLS_SettingsAdminOnly(t *testing.T) {
 		}
 	}
 
-	// Alice (owner) can INSERT a jira rule.
+	// Alice (owner) can INSERT a jira rule — owner is implicitly
+	// admin on every team in the org.
 	err = h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
 		_, err := tx.Exec(`
-			INSERT INTO jira_project_status_rules (org_id, project_key)
+			INSERT INTO jira_project_status_rules (team_id, project_key)
 			VALUES ($1, 'SKY')
-		`, orgA)
+		`, teamA)
 		return err
 	})
 	if err != nil {

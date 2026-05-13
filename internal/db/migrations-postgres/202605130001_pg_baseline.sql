@@ -651,6 +651,7 @@ CREATE TABLE public.event_handlers (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT event_handlers_kind_check CHECK ((kind = ANY (ARRAY['rule'::text, 'trigger'::text]))),
     CONSTRAINT event_handlers_rule_shape CHECK (((kind <> 'rule'::text) OR ((prompt_id IS NULL) AND (breaker_threshold IS NULL) AND (min_autonomy_suitability IS NULL) AND (name IS NOT NULL) AND (default_priority IS NOT NULL) AND (sort_order IS NOT NULL)))),
+    CONSTRAINT event_handlers_source_check CHECK ((source = ANY (ARRAY['system'::text, 'user'::text]))),
     CONSTRAINT event_handlers_system_has_no_creator CHECK ((((source = 'system'::text) AND (creator_user_id IS NULL)) OR ((source = 'user'::text) AND (creator_user_id IS NOT NULL)))),
     CONSTRAINT event_handlers_team_visibility_requires_team CHECK (((visibility <> 'team'::text) OR (team_id IS NOT NULL))),
     CONSTRAINT event_handlers_trigger_shape CHECK (((kind <> 'trigger'::text) OR ((prompt_id IS NOT NULL) AND (breaker_threshold IS NOT NULL) AND (min_autonomy_suitability IS NOT NULL) AND (default_priority IS NULL) AND (sort_order IS NULL) AND (name IS NULL)))),
@@ -695,7 +696,7 @@ CREATE TABLE public.events_catalog (
 --
 
 CREATE TABLE public.jira_project_status_rules (
-    org_id uuid NOT NULL,
+    team_id uuid NOT NULL,
     project_key text NOT NULL,
     pickup_members text[] DEFAULT '{}'::text[] NOT NULL,
     in_progress_members text[] DEFAULT '{}'::text[] NOT NULL,
@@ -953,6 +954,7 @@ CREATE TABLE public.prompts (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     model text DEFAULT ''::text NOT NULL,
+    CONSTRAINT prompts_source_check CHECK ((source = ANY (ARRAY['system'::text, 'user'::text, 'imported'::text]))),
     CONSTRAINT prompts_system_has_no_creator CHECK ((((source = 'system'::text) AND (creator_user_id IS NULL)) OR ((source <> 'system'::text) AND (creator_user_id IS NOT NULL)))),
     CONSTRAINT prompts_team_visibility_requires_team CHECK (((visibility <> 'team'::text) OR (team_id IS NOT NULL))),
     CONSTRAINT prompts_visibility_check CHECK ((visibility = ANY (ARRAY['private'::text, 'team'::text, 'org'::text])))
@@ -1463,7 +1465,7 @@ ALTER TABLE ONLY public.events
 --
 
 ALTER TABLE ONLY public.jira_project_status_rules
-    ADD CONSTRAINT jira_project_status_rules_pkey PRIMARY KEY (org_id, project_key);
+    ADD CONSTRAINT jira_project_status_rules_pkey PRIMARY KEY (team_id, project_key);
 
 
 --
@@ -2456,11 +2458,11 @@ ALTER TABLE ONLY public.events
 
 
 --
--- Name: jira_project_status_rules jira_project_status_rules_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: jira_project_status_rules jira_project_status_rules_team_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.jira_project_status_rules
-    ADD CONSTRAINT jira_project_status_rules_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+    ADD CONSTRAINT jira_project_status_rules_team_id_fkey FOREIGN KEY (team_id) REFERENCES public.teams(id) ON DELETE CASCADE;
 
 
 --
@@ -3246,28 +3248,30 @@ ALTER TABLE public.jira_project_status_rules ENABLE ROW LEVEL SECURITY;
 -- Name: jira_project_status_rules jira_rules_delete; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY jira_rules_delete ON public.jira_project_status_rules FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)));
+CREATE POLICY jira_rules_delete ON public.jira_project_status_rules FOR DELETE USING ((tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id)));
 
 
 --
 -- Name: jira_project_status_rules jira_rules_insert; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY jira_rules_insert ON public.jira_project_status_rules FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)));
+CREATE POLICY jira_rules_insert ON public.jira_project_status_rules FOR INSERT WITH CHECK ((tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id)));
 
 
 --
 -- Name: jira_project_status_rules jira_rules_select; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY jira_rules_select ON public.jira_project_status_rules FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
+CREATE POLICY jira_rules_select ON public.jira_project_status_rules FOR SELECT USING ((tf.team_in_current_org(team_id) AND (EXISTS ( SELECT 1
+   FROM public.memberships m
+  WHERE ((m.team_id = jira_project_status_rules.team_id) AND (m.user_id = tf.current_user_id()))))));
 
 
 --
 -- Name: jira_project_status_rules jira_rules_update; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY jira_rules_update ON public.jira_project_status_rules FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)));
+CREATE POLICY jira_rules_update ON public.jira_project_status_rules FOR UPDATE USING ((tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id))) WITH CHECK ((tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id)));
 
 
 --

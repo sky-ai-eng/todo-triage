@@ -284,7 +284,7 @@ func TestProject_SpecAuthorshipPromptID_Roundtrip(t *testing.T) {
 	database := newTestDB(t)
 
 	createPromptForTest(t, database, domain.Prompt{
-		ID: "test-spec-prompt", Name: "Test Spec", Body: "x", Source: "test",
+		ID: "test-spec-prompt", Name: "Test Spec", Body: "x", Source: "user",
 	})
 
 	id, err := CreateProject(database, domain.Project{

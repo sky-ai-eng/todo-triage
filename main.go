@@ -268,6 +268,13 @@ func main() {
 		if err := db.Migrate(database, "sqlite3"); err != nil {
 			log.Fatalf("failed to migrate database: %v", err)
 		}
+		// Fail fast if the migration's seeded UUIDs drifted from the
+		// runmode constants — every team_id/creator_user_id DEFAULT
+		// clause in the SQLite baseline embeds these literally, so a
+		// mismatch would silently produce orphan rows.
+		if err := db.AssertLocalSentinels(database); err != nil {
+			log.Fatalf("%v", err)
+		}
 		stores = sqlitestore.New(database)
 	case runmode.ModeMulti:
 		log.Fatalf("TF_MODE=multi: multi-tenant mode is not yet wired end-to-end; see SKY-242 (v1 multi-tenant epic). Unset TF_MODE to run in local mode.")

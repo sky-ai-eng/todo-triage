@@ -61,7 +61,8 @@ func TestCreateAgentRun_CreatorUserIDPairsWithTriggerType(t *testing.T) {
 				t.Fatalf("create task: %v", err)
 			}
 			if _, err := database.Exec(
-				`INSERT OR IGNORE INTO prompts (id, name, body, creator_user_id, team_id) VALUES ('p-creator', 'P', 'x', '00000000-0000-0000-0000-000000000100', '00000000-0000-0000-0000-000000000010')`,
+				`INSERT OR IGNORE INTO prompts (id, name, body, creator_user_id, team_id) VALUES ('p-creator', 'P', 'x', ?, ?)`,
+				runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID,
 			); err != nil {
 				t.Fatalf("seed prompt: %v", err)
 			}
@@ -101,7 +102,8 @@ func TestCreateAgentRun_CreatorUserIDPairsWithTriggerType(t *testing.T) {
 		})
 		task, _, _ := FindOrCreateTask(database, entity.ID, domain.EventGitHubPRCICheckFailed, "neg", eventID, 0.5)
 		if _, err := database.Exec(
-			`INSERT OR IGNORE INTO prompts (id, name, body, creator_user_id, team_id) VALUES ('p-neg', 'P', 'x', '00000000-0000-0000-0000-000000000100', '00000000-0000-0000-0000-000000000010')`,
+			`INSERT OR IGNORE INTO prompts (id, name, body, creator_user_id, team_id) VALUES ('p-neg', 'P', 'x', ?, ?)`,
+			runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID,
 		); err != nil {
 			t.Fatalf("seed prompt: %v", err)
 		}
