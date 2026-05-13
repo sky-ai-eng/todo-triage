@@ -199,6 +199,15 @@ func Init(db *sql.DB) error {
 // org_settings, team_settings, user_settings, jira_project_status_rules)
 // scoped to the local-mode sentinel IDs. Missing rows degrade to
 // Default() values — first Save() upserts them.
+//
+// Error contract: on the first per-table read failure, Load returns
+// (Default(), err) — never a partially-built struct. Callers that
+// swallow the error (cfg, _ := config.Load()) implicitly take
+// Default() in the error path, matching the fresh-install behavior.
+// Without this contract, a mid-sequence failure would surface a mix
+// of "values from earlier successful reads" + "Default() for later
+// tables" — silently inconsistent state that's hard to reason about
+// at call sites.
 func Load() (Config, error) {
 	pkgMu.RLock()
 	db := pkgDB
@@ -219,7 +228,7 @@ func Load() (Config, error) {
 	case errors.Is(err, sql.ErrNoRows):
 		// keep Default()
 	case err != nil:
-		return cfg, fmt.Errorf("read instance_config: %w", err)
+		return Default(), fmt.Errorf("read instance_config: %w", err)
 	default:
 		cfg.Server.Port = port
 		cfg.Server.TakeoverDir = takeover
@@ -236,7 +245,7 @@ func Load() (Config, error) {
 	case errors.Is(err, sql.ErrNoRows):
 		// keep Default()
 	case err != nil:
-		return cfg, fmt.Errorf("read org_settings: %w", err)
+		return Default(), fmt.Errorf("read org_settings: %w", err)
 	default:
 		if ghURL.Valid {
 			cfg.GitHub.BaseURL = ghURL.String
@@ -269,12 +278,12 @@ func Load() (Config, error) {
 	case errors.Is(err, sql.ErrNoRows):
 		// keep Default()
 	case err != nil:
-		return cfg, fmt.Errorf("read team_settings: %w", err)
+		return Default(), fmt.Errorf("read team_settings: %w", err)
 	default:
 		if projectsJSON != "" {
 			var projects []string
 			if err := json.Unmarshal([]byte(projectsJSON), &projects); err != nil {
-				return cfg, fmt.Errorf("unmarshal team_settings.jira_projects: %w", err)
+				return Default(), fmt.Errorf("unmarshal team_settings.jira_projects: %w", err)
 			}
 			cfg.Jira.Projects = projects
 		}
@@ -292,7 +301,7 @@ func Load() (Config, error) {
 	case errors.Is(err, sql.ErrNoRows):
 		// keep Default()
 	case err != nil:
-		return cfg, fmt.Errorf("read user_settings: %w", err)
+		return Default(), fmt.Errorf("read user_settings: %w", err)
 	default:
 		cfg.AI.Model = aiModel
 		cfg.AI.AutoDelegateEnabled = aiAutoDelegate
@@ -307,7 +316,7 @@ func Load() (Config, error) {
 	// Returns ErrNoRows when no projects have been configured yet,
 	// which keeps Default()'s empty rules.
 	if rule, err := loadJiraStatusRules(ctx, db, runmode.LocalDefaultTeamID); err != nil {
-		return cfg, fmt.Errorf("read jira_project_status_rules: %w", err)
+		return Default(), fmt.Errorf("read jira_project_status_rules: %w", err)
 	} else if rule != nil {
 		cfg.Jira.Pickup = rule.Pickup
 		cfg.Jira.InProgress = rule.InProgress
