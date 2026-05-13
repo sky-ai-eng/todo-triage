@@ -281,13 +281,11 @@ func Load() (Config, error) {
 	case err != nil:
 		return Default(), fmt.Errorf("read team_settings: %w", err)
 	default:
-		if projectsJSON != "" {
-			var projects []string
-			if err := json.Unmarshal([]byte(projectsJSON), &projects); err != nil {
-				return Default(), fmt.Errorf("unmarshal team_settings.jira_projects: %w", err)
-			}
-			cfg.Jira.Projects = projects
+		var projects []string
+		if err := json.Unmarshal([]byte(projectsJSON), &projects); err != nil {
+			return Default(), fmt.Errorf("unmarshal team_settings.jira_projects: %w", err)
 		}
+		cfg.Jira.Projects = projects
 		cfg.AI.ReprioritizeThreshold = aiThreshold
 		cfg.AI.PreferenceUpdateInterval = aiInterval
 	}
