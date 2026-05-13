@@ -233,6 +233,15 @@ func SetTaskClaimedByUser(db *sql.DB, taskID, userID string) error {
 //     stamps shouldn't churn the FE with redundant task_claimed
 //     events.
 //
+// Invariant enforcement: "snoozed ↔ unclaimed." A claim stamp on a
+// snoozed task IS the wake — the auto-trigger fired because a new
+// matching event landed, which the snooze can't override. The
+// CASE-WHEN flips status='snoozed' → 'queued' and clears
+// snooze_until in the same UPDATE so the post-state is the canonical
+// "claimed, not snoozed." Non-snoozed rows keep their existing
+// status (queued stays queued; the rare sticky-claim-past-close case
+// leaves done/dismissed alone).
+//
 // Returns ok=true when the claim actually changed (caller should
 // broadcast). ok=false (no error) means either user-already-owns
 // or bot-already-owns; caller should not broadcast.
@@ -242,7 +251,9 @@ func StampAgentClaimIfUnclaimed(db *sql.DB, taskID, agentID string) (bool, error
 	}
 	res, err := db.Exec(`
 		UPDATE tasks
-		   SET claimed_by_agent_id = ?
+		   SET claimed_by_agent_id = ?,
+		       snooze_until = NULL,
+		       status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END
 		 WHERE id = ?
 		   AND claimed_by_user_id IS NULL
 		   AND (claimed_by_agent_id IS NULL OR claimed_by_agent_id != ?)
@@ -308,10 +319,18 @@ func HandoffAgentClaim(db *sql.DB, taskID, agentID, userID string) (HandoffResul
 	if userID == "" {
 		return HandoffRefused, fmt.Errorf("HandoffAgentClaim: empty userID")
 	}
+	// Same snoozed→queued + snooze_until clear as
+	// StampAgentClaimIfUnclaimed: a claim stamp is incompatible with
+	// the snoozed lifecycle state, so the stamp atomically wakes the
+	// task. The user-handoff path that lands here means the user
+	// explicitly chose to act now — overriding any deferral is
+	// correct.
 	res, err := db.Exec(`
 		UPDATE tasks
 		   SET claimed_by_agent_id = ?,
-		       claimed_by_user_id  = NULL
+		       claimed_by_user_id  = NULL,
+		       snooze_until = NULL,
+		       status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END
 		 WHERE id = ?
 		   AND (claimed_by_user_id  IS NULL OR claimed_by_user_id  = ?)
 		   AND (claimed_by_agent_id IS NULL OR claimed_by_agent_id != ?)
@@ -363,10 +382,17 @@ func TakeoverClaimFromAgent(db *sql.DB, taskID, userID string) (bool, error) {
 	if userID == "" {
 		return false, fmt.Errorf("TakeoverClaimFromAgent: empty userID")
 	}
+	// Snooze cleanup is defensive: post-invariant ("snoozed ↔
+	// unclaimed") a bot-claimed task can't be snoozed, but if a
+	// pre-invariant row somehow reaches us we coerce to the
+	// canonical shape on the way out rather than leaving an
+	// incoherent state.
 	res, err := db.Exec(`
 		UPDATE tasks
 		   SET claimed_by_user_id  = ?,
-		       claimed_by_agent_id = NULL
+		       claimed_by_agent_id = NULL,
+		       snooze_until = NULL,
+		       status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END
 		 WHERE id = ?
 		   AND claimed_by_agent_id IS NOT NULL
 		   AND claimed_by_user_id  IS NULL
@@ -383,20 +409,23 @@ func TakeoverClaimFromAgent(db *sql.DB, taskID, userID string) (bool, error) {
 
 // ClaimQueuedTaskForUser is the user-claim handler's atomic
 // "take this task off the queue" — succeeds only if the task is
-// (a) status='queued' AND (b) currently unclaimed by anyone (both
-// claim cols NULL). Returns true if the claim landed, false on any
-// guard violation: the task is already claimed (race lost), or the
-// task is no longer queued (snoozed / closed mid-gesture). The
-// caller refetches on false and surfaces the current state.
+// (a) status IN ('queued', 'snoozed') AND (b) currently unclaimed
+// by anyone (both claim cols NULL). Returns true if the claim
+// landed, false on any guard violation: the task is already
+// claimed (race lost), or the task is closed (done/dismissed).
+// The caller refetches on false and surfaces the current state.
 //
-// The status='queued' guard is load-bearing: without it, the
-// optimistic claim could land on a snoozed (deferred) task or a
-// terminal (done/dismissed) row, which is surprising — "I'll handle
-// this" against a snoozed task should require requeuing it first,
-// and claiming a finished task makes no semantic sense. Other claim
-// transitions (swipe-delegate, takeover) operate on active-but-
-// not-necessarily-queued tasks via SetTaskClaimedByUser /
-// SetTaskClaimedByAgent, which don't carry this restriction.
+// The status guard admits both 'queued' and 'snoozed' under the
+// SKY-261 B+ "snoozed ↔ unclaimed" invariant: a snoozed task is
+// still in the team's queue (deferred but not closed), so a
+// user explicitly saying "I'll handle this now" should land the
+// claim AND wake the task — the snooze_until + status both reset
+// in the same UPDATE so the post-state is the canonical
+// "user-claimed, not snoozed."
+//
+// Closed states (done / dismissed) stay refused — claiming a
+// finished task makes no semantic sense, and the sticky claim
+// cols past close are audit-only.
 //
 // userID="" is rejected outright (returns false, error) — an empty
 // claim is the same as no claim, and persisting "" would violate
@@ -408,9 +437,11 @@ func ClaimQueuedTaskForUser(db *sql.DB, taskID, userID string) (bool, error) {
 	}
 	res, err := db.Exec(`
 		UPDATE tasks
-		   SET claimed_by_user_id = ?
+		   SET claimed_by_user_id = ?,
+		       snooze_until = NULL,
+		       status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END
 		 WHERE id = ?
-		   AND status = 'queued'
+		   AND status IN ('queued', 'snoozed')
 		   AND claimed_by_user_id  IS NULL
 		   AND claimed_by_agent_id IS NULL
 	`, userID, taskID)

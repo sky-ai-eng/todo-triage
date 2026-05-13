@@ -32,7 +32,13 @@ type SwipeStore interface {
 	// swipe_events row + sets tasks.snooze_until and
 	// tasks.status='snoozed'. Separate from RecordSwipe because the
 	// timestamp parameter has no other use and the action is fixed.
-	SnoozeTask(ctx context.Context, orgID string, taskID string, until time.Time, hesitationMs int) error
+	//
+	// SKY-261 B+ invariant: snooze is queue-only ("snoozed ↔ both
+	// claim cols NULL"). The UPDATE refuses on a claimed task and
+	// returns ok=false; the audit row is rolled back atomically so
+	// a refused gesture leaves no state change. Handler maps
+	// ok=false to 409.
+	SnoozeTask(ctx context.Context, orgID string, taskID string, until time.Time, hesitationMs int) (ok bool, err error)
 
 	// RequeueTask sends a task back to the queue WITHOUT recording a
 	// swipe_events row. Used by drag-to-Queue and the "Return to

@@ -437,8 +437,19 @@ func (s *Server) handleSnooze(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.swipes.SnoozeTask(r.Context(), runmode.LocalDefaultOrg, id, until, req.HesitationMs); err != nil {
+	ok, err := s.swipes.SnoozeTask(r.Context(), runmode.LocalDefaultOrg, id, until, req.HesitationMs)
+	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if !ok {
+		// SKY-261 B+: snooze is queue-only ("snoozed ↔ both claim
+		// cols NULL"). The store's atomic UPDATE refused because
+		// the task is currently claimed by a user or the bot.
+		// Requeue first (releases the claim) then snooze.
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "can't snooze a claimed task; requeue or complete it first",
+		})
 		return
 	}
 

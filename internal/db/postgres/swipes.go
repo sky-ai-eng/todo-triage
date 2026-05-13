@@ -66,14 +66,52 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 	return newStatus, nil
 }
 
-func (s *swipeStore) SnoozeTask(ctx context.Context, orgID string, taskID string, until time.Time, hesitationMs int) error {
-	return s.runInTx(ctx, func(tx *sql.Tx) error {
+func (s *swipeStore) SnoozeTask(ctx context.Context, orgID string, taskID string, until time.Time, hesitationMs int) (bool, error) {
+	var ok bool
+	err := s.runInTx(ctx, func(tx *sql.Tx) error {
+		// Audit row first so a refused snooze rolls both back as a
+		// unit via tx abort. Mirrors the SQLite impl.
 		if err := insertSwipeEvent(ctx, tx, orgID, taskID, "snooze", &hesitationMs); err != nil {
 			return err
 		}
-		return updateTaskStatus(ctx, tx, orgID, taskID, "snoozed", &until, false)
+		// Claim guard: snooze is queue-only post-invariant ("snoozed
+		// ↔ both claim cols NULL"). updateTaskStatus only handles
+		// the (status, snooze_until) axis pair, so we inline the
+		// UPDATE here to add the claim guard; growing the helper to
+		// take claim flags would proliferate booleans across every
+		// callsite for one path's needs.
+		res, err := tx.ExecContext(ctx,
+			`UPDATE tasks
+			    SET status = 'snoozed', snooze_until = $1
+			  WHERE org_id = $2 AND id = $3
+			    AND claimed_by_agent_id IS NULL
+			    AND claimed_by_user_id  IS NULL`,
+			until, orgID, taskID,
+		)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return errSnoozeRefused
+		}
+		ok = true
+		return nil
 	})
+	if errors.Is(err, errSnoozeRefused) {
+		return false, nil
+	}
+	return ok, err
 }
+
+// errSnoozeRefused signals the snooze-on-claimed-task guard tripped.
+// Sentinel distinct from real DB errors so SnoozeTask can return
+// (false, nil) while triggering the deferred tx rollback for the
+// audit row.
+var errSnoozeRefused = errors.New("postgres swipes: snooze refused (task is claimed)")
 
 func (s *swipeStore) RequeueTask(ctx context.Context, orgID string, taskID string) (bool, error) {
 	var ok bool

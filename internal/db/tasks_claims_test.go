@@ -173,13 +173,18 @@ func TestClaimQueuedTaskForUser_GuardsAgainstStealing(t *testing.T) {
 	}
 }
 
-// TestClaimQueuedTaskForUser_GuardsStatusQueued pins the status='queued'
-// half of the guard: even if both claim cols are NULL (an unclaimed
-// task), ClaimQueuedTaskForUser must reject the claim if the task is
-// in any non-queued state. Snoozed and terminal states both fall under
-// this rule — the function's name promises "queued task," and
-// claiming a snoozed/closed task is a surprising state that the
-// caller should resolve via Requeue or a different gesture instead.
+// TestClaimQueuedTaskForUser_GuardsStatusQueued pins the
+// active-status half of the guard: ClaimQueuedTaskForUser lands on
+// 'queued' OR 'snoozed' (both are active queue states under the
+// "snoozed ↔ unclaimed" invariant), and refuses on terminal states
+// (done / dismissed) where claiming makes no semantic sense and the
+// claim cols are audit-sticky.
+//
+// Pre-invariant: snoozed was rejected too. Post-invariant: claiming
+// a snoozed unclaimed task IS the wake — the helper atomically
+// clears snooze_until and flips status='queued' as part of the
+// stamp, so the post-state is the canonical "user-claimed, not
+// snoozed."
 func TestClaimQueuedTaskForUser_GuardsStatusQueued(t *testing.T) {
 	database := newTestDB(t)
 	seedLocalAgentForClaimTests(t, database)
@@ -190,11 +195,17 @@ func TestClaimQueuedTaskForUser_GuardsStatusQueued(t *testing.T) {
 		closeReason   string // for done/dismissed; uses CloseTask
 		wantOK        bool
 		wantClaimUser string // populated user id when claim should land; "" if shouldn't
+		wantStatus    string // post-claim status; differs from setStatus for snoozed→queued wake
+		wantSnoozed   bool   // whether snooze_until should still be set post-claim
 	}{
-		{name: "queued_unclaimed_lands", setStatus: "", wantOK: true, wantClaimUser: runmode.LocalDefaultUserID},
-		{name: "snoozed_rejected", setStatus: "snoozed", wantOK: false, wantClaimUser: ""},
-		{name: "done_rejected", closeReason: "run_completed", wantOK: false, wantClaimUser: ""},
-		{name: "dismissed_rejected", closeReason: "user_dismissed", wantOK: false, wantClaimUser: ""},
+		{name: "queued_unclaimed_lands", setStatus: "", wantOK: true, wantClaimUser: runmode.LocalDefaultUserID, wantStatus: "queued"},
+		{name: "snoozed_unclaimed_wakes_and_lands", setStatus: "snoozed", wantOK: true, wantClaimUser: runmode.LocalDefaultUserID, wantStatus: "queued", wantSnoozed: false},
+		// CloseTask always sets status='done' regardless of
+		// close_reason — there is no separate 'dismissed' branch in
+		// that helper. Test the dismissed case via direct
+		// SetTaskStatus instead (covered as a separate setStatus row).
+		{name: "done_rejected", closeReason: "run_completed", wantOK: false, wantClaimUser: "", wantStatus: "done"},
+		{name: "dismissed_rejected", setStatus: "dismissed", wantOK: false, wantClaimUser: "", wantStatus: "dismissed"},
 	}
 
 	for _, tc := range cases {
@@ -223,6 +234,15 @@ func TestClaimQueuedTaskForUser_GuardsStatusQueued(t *testing.T) {
 				if err := CloseTask(database, task.ID, tc.closeReason, ""); err != nil {
 					t.Fatalf("close task: %v", err)
 				}
+			case tc.setStatus == "snoozed":
+				// Use a real future snooze_until so the snoozed →
+				// queued wake assertion has something to verify.
+				if _, err := database.Exec(
+					`UPDATE tasks SET status = 'snoozed', snooze_until = '2099-01-01 00:00:00' WHERE id = ?`,
+					task.ID,
+				); err != nil {
+					t.Fatalf("set snoozed: %v", err)
+				}
 			case tc.setStatus != "":
 				if err := SetTaskStatus(database, task.ID, tc.setStatus); err != nil {
 					t.Fatalf("set status: %v", err)
@@ -241,7 +261,115 @@ func TestClaimQueuedTaskForUser_GuardsStatusQueued(t *testing.T) {
 			if got.ClaimedByUserID != tc.wantClaimUser {
 				t.Errorf("ClaimedByUserID = %q, want %q", got.ClaimedByUserID, tc.wantClaimUser)
 			}
+			if got.Status != tc.wantStatus {
+				t.Errorf("Status = %q, want %q (claim should wake snoozed → queued)", got.Status, tc.wantStatus)
+			}
+			snoozeStillSet := got.SnoozeUntil != nil
+			if snoozeStillSet != tc.wantSnoozed {
+				t.Errorf("snooze_until set = %v, want %v (claim should clear snooze atomically)", snoozeStillSet, tc.wantSnoozed)
+			}
 		})
+	}
+}
+
+// TestStampAgentClaimIfUnclaimed_WakesSnoozed pins the "snoozed ↔
+// unclaimed" invariant from the auto-trigger angle: when a snoozed
+// task receives a new matching event and the trigger fires, the
+// stamp atomically wakes the task (snoozed → queued, snooze_until
+// cleared) AND lands the bot claim. Pre-invariant, the stamp left
+// status='snoozed' alongside a bot claim — an incoherent state
+// (drain skips snoozed, but the immediate stamp+run spawn path
+// ignored status). The invariant collapses that gap.
+func TestStampAgentClaimIfUnclaimed_WakesSnoozed(t *testing.T) {
+	database := newTestDB(t)
+	seedLocalAgentForClaimTests(t, database)
+	entity, _, err := FindOrCreateEntity(database, "github", "octo/repo#wake-stamp", "pr", "Wake Stamp", "https://example.com/ws")
+	if err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	eventID, err := RecordEvent(database, domain.Event{
+		EventType: domain.EventGitHubPROpened, EntityID: &entity.ID, MetadataJSON: `{}`,
+	})
+	if err != nil {
+		t.Fatalf("record event: %v", err)
+	}
+	task, _, err := FindOrCreateTask(database, entity.ID, domain.EventGitHubPROpened, "", eventID, 0.5)
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	// Pre-stage: snoozed unclaimed (valid state under invariant).
+	if _, err := database.Exec(
+		`UPDATE tasks SET status = 'snoozed', snooze_until = '2099-01-01 00:00:00' WHERE id = ?`,
+		task.ID,
+	); err != nil {
+		t.Fatalf("stage snooze: %v", err)
+	}
+
+	ok, err := StampAgentClaimIfUnclaimed(database, task.ID, runmode.LocalDefaultAgentID)
+	if err != nil {
+		t.Fatalf("StampAgentClaimIfUnclaimed: %v", err)
+	}
+	if !ok {
+		t.Fatal("ok=false; stamp should have landed on the snoozed unclaimed task")
+	}
+
+	got, _ := GetTask(database, task.ID)
+	if got.Status != "queued" {
+		t.Errorf("Status = %q, want 'queued' (stamp must wake the snoozed task)", got.Status)
+	}
+	if got.SnoozeUntil != nil {
+		t.Errorf("snooze_until still set = %v, want nil (stamp must clear snooze atomically)", got.SnoozeUntil)
+	}
+	if got.ClaimedByAgentID != runmode.LocalDefaultAgentID {
+		t.Errorf("ClaimedByAgentID = %q, want %q", got.ClaimedByAgentID, runmode.LocalDefaultAgentID)
+	}
+}
+
+// TestHandoffAgentClaim_WakesSnoozed pins the same invariant from
+// the user→bot handoff angle: a user dragging their snoozed task
+// to the Agent lane wakes the task as part of the transfer.
+func TestHandoffAgentClaim_WakesSnoozed(t *testing.T) {
+	database := newTestDB(t)
+	seedLocalAgentForClaimTests(t, database)
+	entity, _, err := FindOrCreateEntity(database, "github", "octo/repo#wake-handoff", "pr", "Wake Handoff", "https://example.com/wh")
+	if err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	eventID, err := RecordEvent(database, domain.Event{
+		EventType: domain.EventGitHubPROpened, EntityID: &entity.ID, MetadataJSON: `{}`,
+	})
+	if err != nil {
+		t.Fatalf("record event: %v", err)
+	}
+	task, _, err := FindOrCreateTask(database, entity.ID, domain.EventGitHubPROpened, "", eventID, 0.5)
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	// Stage snoozed unclaimed.
+	if _, err := database.Exec(
+		`UPDATE tasks SET status = 'snoozed', snooze_until = '2099-01-01 00:00:00' WHERE id = ?`,
+		task.ID,
+	); err != nil {
+		t.Fatalf("stage snooze: %v", err)
+	}
+
+	result, err := HandoffAgentClaim(database, task.ID, runmode.LocalDefaultAgentID, runmode.LocalDefaultUserID)
+	if err != nil {
+		t.Fatalf("HandoffAgentClaim: %v", err)
+	}
+	if result != HandoffChanged {
+		t.Fatalf("result = %v, want HandoffChanged", result)
+	}
+
+	got, _ := GetTask(database, task.ID)
+	if got.Status != "queued" {
+		t.Errorf("Status = %q, want 'queued' (handoff must wake snoozed)", got.Status)
+	}
+	if got.SnoozeUntil != nil {
+		t.Errorf("snooze_until still set; handoff must clear it atomically")
+	}
+	if got.ClaimedByAgentID != runmode.LocalDefaultAgentID {
+		t.Errorf("ClaimedByAgentID = %q, want bot", got.ClaimedByAgentID)
 	}
 }
 

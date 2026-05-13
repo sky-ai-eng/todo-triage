@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -73,24 +74,62 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 	return newStatus, nil
 }
 
-func (s *swipeStore) SnoozeTask(ctx context.Context, orgID string, taskID string, until time.Time, hesitationMs int) error {
+func (s *swipeStore) SnoozeTask(ctx context.Context, orgID string, taskID string, until time.Time, hesitationMs int) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return false, err
 	}
-	return inTx(ctx, s.q, func(q queryer) error {
+	var ok bool
+	err := inTx(ctx, s.q, func(q queryer) error {
+		// Audit row first so a refused snooze rolls both back as a
+		// unit via the tx abort. If we wrote audit on refuse we'd
+		// leave an "attempted snooze" log entry plus zero state
+		// change — not useful, and inconsistent with the SKY-261 B+
+		// "refused gesture leaves no trace" semantic the helper
+		// callers depend on.
 		if _, err := q.ExecContext(ctx,
 			`INSERT INTO swipe_events (task_id, action, hesitation_ms) VALUES (?, 'snooze', ?)`,
 			taskID, hesitationMs,
 		); err != nil {
 			return err
 		}
-		_, err := q.ExecContext(ctx,
-			`UPDATE tasks SET status = 'snoozed', snooze_until = ? WHERE id = ?`,
+		// Claim guard: snooze is queue-only post-invariant. A
+		// claimed task being snoozed would create a state that no
+		// flow in the code path knows how to handle correctly
+		// (drain skips it, re-derive skips it, Board doesn't
+		// render the SnoozedBadge in a claimed lane). Refuse here;
+		// caller surfaces 409 and the user can requeue first.
+		res, err := q.ExecContext(ctx,
+			`UPDATE tasks
+			    SET status = 'snoozed', snooze_until = ?
+			  WHERE id = ?
+			    AND claimed_by_agent_id IS NULL
+			    AND claimed_by_user_id  IS NULL`,
 			until, taskID,
 		)
-		return err
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			// Refused: roll the audit row back too via the sentinel.
+			return errSnoozeRefused
+		}
+		ok = true
+		return nil
 	})
+	if errors.Is(err, errSnoozeRefused) {
+		return false, nil
+	}
+	return ok, err
 }
+
+// errSnoozeRefused signals the snooze-on-claimed-task guard tripped.
+// Distinct from a real DB error so SnoozeTask can return (false, nil)
+// while still triggering inTx's deferred rollback for the audit row.
+var errSnoozeRefused = errors.New("sqlite swipes: snooze refused (task is claimed)")
 
 func (s *swipeStore) RequeueTask(ctx context.Context, orgID string, taskID string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {

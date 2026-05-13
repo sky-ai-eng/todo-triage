@@ -438,6 +438,77 @@ func TestHandleSwipe_ClaimAgainstBotClaimedIsTakeover(t *testing.T) {
 	}
 }
 
+// TestHandleSnooze_RefusesOnClaimedTask pins the SKY-261 B+
+// "snoozed ↔ unclaimed" invariant from the snooze side: the
+// SnoozeTask store-level atomic UPDATE refuses on a claimed task,
+// the handler maps the refusal to 409, and no state mutates (status
+// stays the same, snooze_until stays NULL, audit row was rolled
+// back as part of the atomic tx).
+//
+// This is the deliberate trade we made to avoid the snoozed+claimed
+// incoherent state: users wanting to defer work on a claimed task
+// must explicitly requeue first.
+func TestHandleSnooze_RefusesOnClaimedTask(t *testing.T) {
+	s := newTestServer(t)
+	const eventType = "github:pr:opened"
+	if _, err := s.db.Exec(
+		`INSERT INTO entities (id, source, source_id, kind, state)
+		 VALUES ('e_snz_claim', 'github', 'sky/repo#sz', 'pr', 'active')`,
+	); err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO events (id, entity_id, event_type, dedup_key)
+		 VALUES ('ev_snz_claim', 'e_snz_claim', ?, '')`,
+		eventType,
+	); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
+		 VALUES ('t_snz_claim', 'e_snz_claim', ?, 'ev_snz_claim', 'queued', ?)`,
+		eventType, runmode.LocalDefaultUserID,
+	); err != nil {
+		t.Fatalf("seed claimed task: %v", err)
+	}
+
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_snz_claim/snooze",
+		map[string]any{"until": "1h", "hesitation_ms": 0})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (snooze refused on claimed task); body=%s", rec.Code, rec.Body.String())
+	}
+
+	// State must be unchanged: status='queued', snooze_until NULL,
+	// claim still on the user. The atomic tx rollback means no
+	// swipe_events row either.
+	var status string
+	var snoozeUntil sql.NullTime
+	var claim sql.NullString
+	if err := s.db.QueryRow(
+		`SELECT status, snooze_until, claimed_by_user_id FROM tasks WHERE id = 't_snz_claim'`,
+	).Scan(&status, &snoozeUntil, &claim); err != nil {
+		t.Fatalf("scan task: %v", err)
+	}
+	if status != "queued" {
+		t.Errorf("status = %q, want 'queued' (refusal must not transition lifecycle)", status)
+	}
+	if snoozeUntil.Valid {
+		t.Errorf("snooze_until = %v, want NULL (refusal must not set deferral)", snoozeUntil.Time)
+	}
+	if !claim.Valid || claim.String != runmode.LocalDefaultUserID {
+		t.Errorf("claim was disturbed by refused snooze: got %v", claim)
+	}
+	var swipeCount int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM swipe_events WHERE task_id = 't_snz_claim'`,
+	).Scan(&swipeCount); err != nil {
+		t.Fatalf("scan swipe_events: %v", err)
+	}
+	if swipeCount != 0 {
+		t.Errorf("swipe_events count = %d, want 0 (refused gesture should leave no audit)", swipeCount)
+	}
+}
+
 // TestHandleSwipe_DelegateTransfersOwnUserClaim pins the SKY-133
 // flow: when the user drags their own claimed task from the You
 // lane to the Agent lane, the FE fires a delegate swipe. The
@@ -676,20 +747,31 @@ func TestHandleUndo_NoPendingApprovalIsNoOp(t *testing.T) {
 func TestHandleUndo_ClearsClaimColumns(t *testing.T) {
 	s := newTestServer(t)
 
-	// Seed a task carrying both a status that /undo will revert and
-	// a user claim (simulates the post-swipe state for action='claim').
-	// snooze_until is also set so the regression covers the "claim
-	// during a snoozed window" path — both cols + snooze_until must
-	// reset.
-	if _, err := s.db.Exec(`
-		INSERT INTO entities (id, source, source_id, kind, state)
-		VALUES ('e_undo_claim', 'github', 'owner/repo#u1', 'pr', 'active');
-		INSERT INTO events (id, entity_id, event_type, dedup_key)
-		VALUES ('ev_undo_claim', 'e_undo_claim', 'github:pr:opened', '');
-		INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id, snooze_until)
-		VALUES ('t_undo_claim', 'e_undo_claim', 'github:pr:opened', 'ev_undo_claim', 'snoozed', ?, '2099-01-01 00:00:00');
-	`, runmode.LocalDefaultUserID); err != nil {
-		t.Fatalf("seed: %v", err)
+	// Seed a user-claimed queued task — the post-swipe state for
+	// action='claim'. (Pre-invariant this test also seeded
+	// snooze_until on the same row to cover "claim during a snoozed
+	// window"; that combo is now forbidden by the "snoozed ↔
+	// unclaimed" invariant, so the snooze_until pre-stage is dropped.
+	// Snooze-clearing on undo is covered by /requeue's existing test
+	// against unclaimed-snoozed rows.)
+	if _, err := s.db.Exec(
+		`INSERT INTO entities (id, source, source_id, kind, state)
+		 VALUES ('e_undo_claim', 'github', 'owner/repo#u1', 'pr', 'active')`,
+	); err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO events (id, entity_id, event_type, dedup_key)
+		 VALUES ('ev_undo_claim', 'e_undo_claim', 'github:pr:opened', '')`,
+	); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
+		 VALUES ('t_undo_claim', 'e_undo_claim', 'github:pr:opened', 'ev_undo_claim', 'queued', ?)`,
+		runmode.LocalDefaultUserID,
+	); err != nil {
+		t.Fatalf("seed task: %v", err)
 	}
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_undo_claim/undo", nil)

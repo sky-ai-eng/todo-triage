@@ -133,8 +133,8 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 		store, orgID, seedTask, readTask, _ := factory(t)
 		taskID := seedTask(t)
 		until := time.Now().Add(2 * time.Hour).UTC()
-		if err := store.SnoozeTask(context.Background(), orgID, taskID, until, 0); err != nil {
-			t.Fatalf("snooze: %v", err)
+		if ok, err := store.SnoozeTask(context.Background(), orgID, taskID, until, 0); err != nil || !ok {
+			t.Fatalf("snooze: ok=%v err=%v", ok, err)
 		}
 		if _, err := store.RecordSwipe(context.Background(), orgID, taskID, "claim", 0); err != nil {
 			t.Fatalf("RecordSwipe: %v", err)
@@ -152,8 +152,8 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 		store, orgID, seedTask, readTask, readAudit := factory(t)
 		taskID := seedTask(t)
 		until := time.Now().Add(2 * time.Hour).UTC().Truncate(time.Second)
-		if err := store.SnoozeTask(context.Background(), orgID, taskID, until, 150); err != nil {
-			t.Fatalf("SnoozeTask: %v", err)
+		if ok, err := store.SnoozeTask(context.Background(), orgID, taskID, until, 150); err != nil || !ok {
+			t.Fatalf("SnoozeTask: ok=%v err=%v", ok, err)
 		}
 		status, snoozeUntil := readTask(t, taskID)
 		if status != "snoozed" {
@@ -218,8 +218,8 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 		taskID := seedTask(t)
 		// Snooze first so we can verify the undo clears snooze_until.
 		until := time.Now().Add(time.Hour).UTC()
-		if err := store.SnoozeTask(context.Background(), orgID, taskID, until, 0); err != nil {
-			t.Fatalf("snooze: %v", err)
+		if ok, err := store.SnoozeTask(context.Background(), orgID, taskID, until, 0); err != nil || !ok {
+			t.Fatalf("snooze: ok=%v err=%v", ok, err)
 		}
 		if err := store.UndoLastSwipe(context.Background(), orgID, taskID); err != nil {
 			t.Fatalf("UndoLastSwipe: %v", err)

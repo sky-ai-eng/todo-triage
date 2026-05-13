@@ -276,7 +276,7 @@ footer {
     </div>
     <div class="topbar__meta">
       <span class="pill pill--size">SIZE · M</span>
-      <span class="pill pill--draft">DRAFT v0.6</span>
+      <span class="pill pill--draft">DRAFT v0.7</span>
     </div>
   </div>
 </div>
@@ -382,6 +382,10 @@ footer {
 
   <div class="callout callout--good">
     <strong>The queue view is a derived filter, not a status value.</strong> "What's in the queue" = <code>WHERE claimed_by_agent_id IS NULL AND claimed_by_user_id IS NULL AND status NOT IN ('done', 'dismissed', 'snoozed')</code>. Team-scoped via the existing <code>team_id</code> + visibility/RLS. A user claiming a queued task is a claim-column transition, not a status change. This is what makes the "user claims without involving the bot" case clean — no new status enum value needed.
+  </div>
+
+  <div class="callout callout--good">
+    <strong>Snooze is queue-only.</strong> The v0.7 invariant: <code>status='snoozed' ↔ claimed_by_agent_id IS NULL AND claimed_by_user_id IS NULL</code>. A snoozed task is a deferred unclaimed-queue entry — nothing more. Any claim-axis transition (auto-trigger fire, swipe-claim, swipe-delegate, factory drop, user→bot handoff) atomically wakes the task in the same UPDATE: <code>SET ..., snooze_until = NULL, status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END</code>. The inverse — <code>SnoozeTask</code> on a claimed task — refuses with 409 and the audit row rolls back as part of the same tx, so the user sees no state change. Users wanting to defer work on a claimed task must explicitly requeue first. Cuts the snoozed-and-claimed incoherent state out of the model entirely, which closes the gap between drain/re-derive (both correctly skip snoozed) and the immediate auto-trigger fire path (used to silently fire on snoozed tasks).
   </div>
 </section>
 
@@ -854,7 +858,7 @@ actorAgentID := task.ClaimedByAgentID
 </main>
 
 <footer>
-  SKY-261 · D-Claims · v0.6 · 2026-05-12
+  SKY-261 · D-Claims · v0.7 · 2026-05-12
 </footer>
 </body>
 </html>
