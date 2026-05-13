@@ -342,6 +342,7 @@ func loadJiraStatusRules(ctx context.Context, db *sql.DB, teamID string) (*jiraS
 		       done_members, done_canonical
 		FROM jira_project_status_rules
 		WHERE team_id = ?
+		ORDER BY project_key
 		LIMIT 1
 	`, teamID).Scan(&pickupJSON, &inProgressJSON, &inProgressCanon, &doneJSON, &doneCanon)
 	if errors.Is(err, sql.ErrNoRows) {
