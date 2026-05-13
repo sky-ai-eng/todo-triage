@@ -243,16 +243,22 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			creds.GitHubPAT = req.GitHubPAT
-			if err := s.users.SetGitHubUsername(r.Context(), runmode.LocalDefaultUserID, ghUser.Login); err != nil {
-				log.Printf("[settings] failed to persist users.github_username: %v", err)
+			// Username persistence targets the LocalDefaultUserID row —
+			// only safe in local mode. Multi mode must derive the
+			// authenticated user ID from the session (SKY-251).
+			if runmode.Current() == runmode.ModeLocal {
+				if err := s.users.SetGitHubUsername(r.Context(), runmode.LocalDefaultUserID, ghUser.Login); err != nil {
+					log.Printf("[settings] failed to persist users.github_username: %v", err)
+				}
 			}
 		}
 		// Backfill username on the users row when we have a PAT but the row
 		// is empty (e.g. user saves a PAT for the first time without changing
 		// it through the validation branch above). Skip on DB error — a
 		// transient read failure shouldn't fan out into a GitHub API call;
-		// the next Settings save retries naturally.
-		if creds.GitHubPAT != "" {
+		// the next Settings save retries naturally. Local mode only — same
+		// reasoning as the validation-branch write above.
+		if creds.GitHubPAT != "" && runmode.Current() == runmode.ModeLocal {
 			stored, err := s.users.GetGitHubUsername(r.Context(), runmode.LocalDefaultUserID)
 			if err != nil {
 				log.Printf("[settings] failed to read users.github_username for backfill: %v (skipping backfill this save)", err)
@@ -285,8 +291,11 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 		// Also clear the captured login on the users row so a downstream
 		// "are we connected to GitHub" check via DB stays in sync with the
 		// keychain reality (PAT gone → username should be gone too).
-		if err := s.users.SetGitHubUsername(r.Context(), runmode.LocalDefaultUserID, ""); err != nil {
-			log.Printf("[settings] failed to clear users.github_username: %v", err)
+		// Local mode only — multi mode must clear the session user's row.
+		if runmode.Current() == runmode.ModeLocal {
+			if err := s.users.SetGitHubUsername(r.Context(), runmode.LocalDefaultUserID, ""); err != nil {
+				log.Printf("[settings] failed to clear users.github_username: %v", err)
+			}
 		}
 	}
 

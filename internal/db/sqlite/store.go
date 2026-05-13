@@ -27,16 +27,17 @@ type Store struct {
 // 21 fields on the bundle.
 func New(conn *sql.DB) db.Stores {
 	s := &Store{conn: conn}
+	users := newUsersStore(conn)
 	s.stores = db.Stores{
 		Scores:        newScoreStore(conn),
 		Prompts:       newPromptStore(conn, conn),
 		Swipes:        newSwipeStore(conn),
 		Dashboard:     newDashboardStore(conn),
 		Secrets:       newSecretStore(),
-		EventHandlers: newEventHandlerStore(conn),
+		EventHandlers: newEventHandlerStore(conn, users),
 		Agents:        newAgentStore(conn),
 		TeamAgents:    newTeamAgentStore(conn),
-		Users:         newUsersStore(conn),
+		Users:         users,
 		Tx:            s,
 	}
 	return s.stores

@@ -24,10 +24,16 @@ import (
 // pair at the DB level; this store branches on Kind where the SQL
 // diverges (Create / Update / Seed write different column sets per
 // kind).
-type eventHandlerStore struct{ q queryer }
+// users is plumbed in so Seed can read users.github_username through the
+// canonical store (gets any forward-compat behavior added there for
+// free) rather than duplicating the SELECT here.
+type eventHandlerStore struct {
+	q     queryer
+	users db.UsersStore
+}
 
-func newEventHandlerStore(q queryer) db.EventHandlerStore {
-	return &eventHandlerStore{q: q}
+func newEventHandlerStore(q queryer, users db.UsersStore) db.EventHandlerStore {
+	return &eventHandlerStore{q: q, users: users}
 }
 
 var _ db.EventHandlerStore = (*eventHandlerStore)(nil)
@@ -55,17 +61,10 @@ func (s *eventHandlerStore) Seed(ctx context.Context, orgID string) error {
 	// Empty username (user hasn't connected GitHub yet) leaves the
 	// allowlist empty — the rule fires for everyone, which is the
 	// match-all default. User can edit the rule once they connect.
-	var localGitHubUsername string
-	{
-		var login sql.NullString
-		// Best-effort: a missing users row (fresh install pre-bootstrap)
-		// returns sql.ErrNoRows and we leave localGitHubUsername empty.
-		_ = s.q.QueryRowContext(ctx,
-			`SELECT github_username FROM users WHERE id = ?`,
-			runmode.LocalDefaultUserID,
-		).Scan(&login)
-		localGitHubUsername = login.String
-	}
+	// Best-effort: a missing row (fresh install pre-bootstrap) returns
+	// empty and substituteLocalGitHubIdentity degrades to leaving the
+	// placeholder allowlist empty.
+	localGitHubUsername, _ := s.users.GetGitHubUsername(ctx, runmode.LocalDefaultUserID)
 
 	for _, h := range db.ShippedEventHandlers {
 		predStr := substituteLocalGitHubIdentity(h.Predicate, localGitHubUsername)

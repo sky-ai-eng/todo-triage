@@ -219,9 +219,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/settings", s.handleSettingsPost)
 
 	// SKY-264: deployment shape + team roster for the predicate editor.
-	// /api/config is a one-shot read at FE boot (deployment_mode doesn't
-	// change). /api/team/members backs the Variant-B multi-select; the
-	// FE caches it briefly so a join/leave doesn't need a websocket push.
+	// Both endpoints are fetched fresh on every consumer mount (the FE
+	// hooks dedup concurrent in-flight calls within a render but don't
+	// hold a persistent cache — current_user.github_username and the
+	// roster are both mutable mid-session). Endpoint costs are a single
+	// SELECT each, so re-fetching per editor mount is cheap and correct.
 	s.mux.HandleFunc("GET /api/config", s.handleConfig)
 	s.mux.HandleFunc("GET /api/team/members", s.handleTeamMembers)
 	s.mux.HandleFunc("POST /api/skills/import", s.handleSkillsImport)

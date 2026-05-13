@@ -37,7 +37,7 @@ func TestHandleConfig_LocalDefaults(t *testing.T) {
 }
 
 // TestHandleConfig_GitHubUsernamePopulated returns the username after
-// SetLocalUserGitHubUsername populates the users row — exercises the
+// UsersStore.SetGitHubUsername populates the users row — exercises the
 // path the SPA hits after a user saves a PAT.
 func TestHandleConfig_GitHubUsernamePopulated(t *testing.T) {
 	s := newTestServer(t)

@@ -29,16 +29,17 @@ func (s *Store) WithTx(ctx context.Context, orgID, userID string, fn func(db.TxS
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	users := newUsersStore(tx)
 	txStores := db.TxStores{
 		Scores:        newScoreStore(tx),
 		Prompts:       newPromptStore(tx, tx),
 		Swipes:        newSwipeStore(tx),
 		Dashboard:     newDashboardStore(tx),
 		Secrets:       newSecretStore(),
-		EventHandlers: newEventHandlerStore(tx),
+		EventHandlers: newEventHandlerStore(tx, users),
 		Agents:        newAgentStore(tx),
 		TeamAgents:    newTeamAgentStore(tx),
-		Users:         newUsersStore(tx),
+		Users:         users,
 	}
 	if err := fn(txStores); err != nil {
 		return err

@@ -26,20 +26,25 @@ type configResponseUser struct {
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
-	mode := string(runmode.Current())
+	// Until SKY-251 plumbs the team-scoped session middleware, the only
+	// supported runtime is local mode. Refusing in multi mode is safer
+	// than returning a response stuffed with local-sentinel values that
+	// would silently mislead the SPA into rendering the wrong editor
+	// variant.
+	if runmode.Current() != runmode.ModeLocal {
+		writeJSON(w, http.StatusNotImplemented, map[string]string{
+			"error": "/api/config is not yet wired for multi mode (see SKY-251)",
+		})
+		return
+	}
 
-	// Local mode: synthetic single-user team. Team size is always 1.
-	// Multi mode will compute team size from memberships once the team-
-	// scoped session middleware lands (SKY-251). For now multi-mode
-	// callers never reach this code path (main.go fatal's on TF_MODE=multi
-	// because the rest of the multi wiring isn't in place yet).
 	username, _ := s.users.GetGitHubUsername(r.Context(), runmode.LocalDefaultUserID)
 	var gh *string
 	if username != "" {
 		gh = &username
 	}
 	writeJSON(w, http.StatusOK, configResponse{
-		DeploymentMode: mode,
+		DeploymentMode: string(runmode.Current()),
 		TeamSize:       1,
 		CurrentUser: configResponseUser{
 			ID:             runmode.LocalDefaultUserID,
@@ -64,9 +69,17 @@ type teamMemberRow struct {
 }
 
 func (s *Server) handleTeamMembers(w http.ResponseWriter, r *http.Request) {
-	// Local mode: single-entry array containing the synthetic user.
 	// Multi mode would query memberships for the session user's active
 	// team — gated behind SKY-251's middleware which doesn't exist yet.
+	// Refuse rather than return a synthetic local roster that would
+	// mislead the FE's "you" highlighting.
+	if runmode.Current() != runmode.ModeLocal {
+		writeJSON(w, http.StatusNotImplemented, map[string]string{
+			"error": "/api/team/members is not yet wired for multi mode (see SKY-251)",
+		})
+		return
+	}
+
 	username, _ := s.users.GetGitHubUsername(r.Context(), runmode.LocalDefaultUserID)
 	displayName, _ := s.users.GetDisplayName(r.Context(), runmode.LocalDefaultUserID)
 	var login *string
