@@ -268,6 +268,13 @@ func main() {
 		if err := db.Migrate(database, "sqlite3"); err != nil {
 			log.Fatalf("failed to migrate database: %v", err)
 		}
+		// Fail fast if the migration's seeded UUIDs drifted from the
+		// runmode constants — every team_id/creator_user_id DEFAULT
+		// clause in the SQLite baseline embeds these literally, so a
+		// mismatch would silently produce orphan rows.
+		if err := db.AssertLocalSentinels(database); err != nil {
+			log.Fatalf("%v", err)
+		}
 		stores = sqlitestore.New(database)
 	case runmode.ModeMulti:
 		log.Fatalf("TF_MODE=multi: multi-tenant mode is not yet wired end-to-end; see SKY-242 (v1 multi-tenant epic). Unset TF_MODE to run in local mode.")
@@ -326,15 +333,12 @@ func main() {
 		worktree.CleanupWithOptions(worktree.CleanupOptions{PreserveClaudeProjectFor: preserveSet})
 	}
 
-	// Seed event type catalog, event_handlers defaults (rules + triggers,
-	// post-SKY-259), and default prompts. Order matters: event_handlers FK
-	// to events_catalog(id), so catalog must be seeded first. Prompts are
-	// seeded inside seedDefaultPrompts before EventHandlers.Seed runs so
-	// the FK from event_handlers.prompt_id → prompts.id resolves on the
-	// trigger rows.
-	if err := db.SeedEventTypes(database); err != nil {
-		log.Fatalf("failed to seed event types: %v", err)
-	}
+	// events_catalog is seeded by the v1.11.0 baseline migration in both
+	// backends — no boot-time seed call needed. New event types ship via
+	// a new forward migration. Prompts are seeded inside seedDefaultPrompts
+	// before EventHandlers.Seed runs so the FK from event_handlers.prompt_id
+	// → prompts.id resolves on the trigger rows.
+	//
 	// Populate users.github_username before seeding event handlers so the
 	// SQLite Seed substitution sees the local user's login when it wires
 	// allowlist placeholders on shipped predicates.

@@ -216,19 +216,21 @@ func (s *eventHandlerStore) Create(ctx context.Context, orgID string, h domain.E
 	// Post-SKY-262, user-source rows are team-scoped with team_id =
 	// LocalDefaultTeamID + visibility='team'. SQLite has one team in
 	// local mode (sentinel from SKY-269) so the lookup is trivial.
+	// creator_user_id is required for source='user' rows by the
+	// event_handlers_system_has_no_creator CHECK.
 	switch h.Kind {
 	case domain.EventHandlerKindRule:
 		_, err := s.q.ExecContext(ctx, `
 			INSERT INTO event_handlers
-				(id, org_id, team_id, visibility, kind, event_type,
+				(id, org_id, team_id, creator_user_id, visibility, kind, event_type,
 				 scope_predicate_json, enabled, source,
 				 name, default_priority, sort_order,
 				 created_at, updated_at)
-			VALUES (?, ?, ?, 'team', 'rule', ?,
+			VALUES (?, ?, ?, ?, 'team', 'rule', ?,
 			        ?, ?, 'user',
 			        ?, ?, ?,
 			        ?, ?)
-		`, h.ID, orgID, runmode.LocalDefaultTeamID, h.EventType,
+		`, h.ID, orgID, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID, h.EventType,
 			pred, h.Enabled,
 			h.Name, derefFloat(h.DefaultPriority), derefInt(h.SortOrder),
 			now, now)
@@ -237,15 +239,15 @@ func (s *eventHandlerStore) Create(ctx context.Context, orgID string, h domain.E
 	case domain.EventHandlerKindTrigger:
 		_, err := s.q.ExecContext(ctx, `
 			INSERT INTO event_handlers
-				(id, org_id, team_id, visibility, kind, event_type,
+				(id, org_id, team_id, creator_user_id, visibility, kind, event_type,
 				 scope_predicate_json, enabled, source,
 				 prompt_id, breaker_threshold, min_autonomy_suitability,
 				 created_at, updated_at)
-			VALUES (?, ?, ?, 'team', 'trigger', ?,
+			VALUES (?, ?, ?, ?, 'team', 'trigger', ?,
 			        ?, ?, 'user',
 			        ?, ?, ?,
 			        ?, ?)
-		`, h.ID, orgID, runmode.LocalDefaultTeamID, h.EventType,
+		`, h.ID, orgID, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID, h.EventType,
 			pred, h.Enabled,
 			h.PromptID, derefInt(h.BreakerThreshold), derefFloat(h.MinAutonomySuitability),
 			now, now)

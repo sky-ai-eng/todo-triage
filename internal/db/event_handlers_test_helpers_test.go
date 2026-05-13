@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // createTriggerForTest is the raw-SQL replacement for SavePromptTrigger
@@ -26,14 +27,23 @@ func createTriggerForTest(t *testing.T, database *sql.DB, trig domain.EventHandl
 	if trig.TriggerType == "" {
 		trig.TriggerType = domain.TriggerTypeEvent
 	}
+	// creator_user_id is NULL for system rows, LocalDefaultUserID for
+	// user rows — enforced by event_handlers_system_has_no_creator.
+	var creatorUserID any
+	if source == domain.EventHandlerSourceUser {
+		creatorUserID = runmode.LocalDefaultUserID
+	}
 	if _, err := database.Exec(`
 		INSERT INTO event_handlers (id, kind, event_type, scope_predicate_json,
 		                            breaker_threshold, min_autonomy_suitability,
-		                            prompt_id, enabled, source, created_at, updated_at)
-		VALUES (?, 'trigger', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                            prompt_id, enabled, source, team_id, creator_user_id,
+		                            created_at, updated_at)
+		VALUES (?, 'trigger', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, trig.ID, trig.EventType, trig.ScopePredicateJSON,
 		ptrDerefInt(trig.BreakerThreshold), ptrDerefFloat(trig.MinAutonomySuitability),
-		trig.PromptID, trig.Enabled, source, now, now,
+		trig.PromptID, trig.Enabled, source,
+		runmode.LocalDefaultTeamID, creatorUserID,
+		now, now,
 	); err != nil {
 		t.Fatalf("createTriggerForTest %s: %v", trig.ID, err)
 	}

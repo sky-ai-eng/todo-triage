@@ -43,7 +43,8 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, runID, revi
 		t.Fatalf("seed event: %v", err)
 	}
 	if _, err := database.Exec(
-		`INSERT INTO prompts (id, name, body) VALUES ('p_pa', 'Review', 'body')`,
+		`INSERT INTO prompts (id, name, body, creator_user_id, team_id) VALUES ('p_pa', 'Review', 'body', ?, ?)`,
+		runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID,
 	); err != nil {
 		t.Fatalf("seed prompt: %v", err)
 	}

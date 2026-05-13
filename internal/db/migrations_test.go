@@ -43,7 +43,12 @@ func TestMigrate_FreshInstall(t *testing.T) {
 		t.Errorf("version_id = %d, want %d", version, v1110BaselineVersionID)
 	}
 
-	for _, table := range []string{"entities", "events", "tasks", "runs", "projects", "settings", "orgs", "users", "event_handlers"} {
+	for _, table := range []string{
+		"entities", "events", "tasks", "runs", "projects",
+		"orgs", "users", "event_handlers",
+		"instance_config", "org_settings", "team_settings", "user_settings",
+		"jira_project_status_rules",
+	} {
 		exists, err := tableExists(database, table)
 		if err != nil {
 			t.Fatalf("probe %s: %v", table, err)

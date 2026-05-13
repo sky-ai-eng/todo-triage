@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // seedRunForMemoryTest seeds the minimum FK chain needed to attach a
@@ -29,8 +30,8 @@ func seedRunForMemoryTest(t *testing.T, db *sql.DB, runID, entityID string) {
 		t.Fatalf("seed event: %v", err)
 	}
 	if _, err := db.Exec(`
-		INSERT OR IGNORE INTO prompts (id, name, body) VALUES ('p_test', 'Test', 'body')
-	`); err != nil {
+		INSERT OR IGNORE INTO prompts (id, name, body, creator_user_id, team_id) VALUES ('p_test', 'Test', 'body', ?, ?)
+	`, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID); err != nil {
 		t.Fatalf("seed prompt: %v", err)
 	}
 	taskID := "t_" + runID

@@ -21,6 +21,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
@@ -310,6 +311,13 @@ func preflightPinnedRepos(ctx context.Context, pinned []string, probe GitHubProb
 	return cloneURLs, nil
 }
 
+// insertImportedProject inserts a row into projects from a bundle
+// manifest. Local-mode only: team_id is pinned to LocalDefaultTeamID.
+// When SKY-253 D9 lands the org-scoping pass, this should be
+// rewritten to route through a ProjectStore that derives team_id
+// from the session context — until then, calling this in multi mode
+// would silently bind every imported project to LocalDefaultTeamID.
+// Guarded only by main.go's log.Fatalf on TF_MODE=multi.
 func insertImportedProject(tx *sql.Tx, projectID, curatorSessionID string, manifestProject ManifestProject) error {
 	pinned := cloneStrings(manifestProject.PinnedRepos)
 	if pinned == nil {
@@ -324,8 +332,8 @@ func insertImportedProject(tx *sql.Tx, projectID, curatorSessionID string, manif
 		INSERT INTO projects (
 			id, name, description,
 			curator_session_id, pinned_repos, jira_project_key,
-			linear_project_key, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			linear_project_key, team_id, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		projectID,
 		strings.TrimSpace(manifestProject.Name),
@@ -334,6 +342,7 @@ func insertImportedProject(tx *sql.Tx, projectID, curatorSessionID string, manif
 		string(pinnedJSON),
 		nullIfEmptyString(manifestProject.JiraProjectKey),
 		nullIfEmptyString(manifestProject.LinearProjectKey),
+		runmode.LocalDefaultTeamID,
 		now,
 		now,
 	)
