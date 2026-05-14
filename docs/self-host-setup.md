@@ -53,8 +53,8 @@ The Triage Factory binary itself runs from the host (D13 will package it as a co
 TF_MODE=multi \
   TF_GOTRUE_URL=http://localhost:9999 \
   TF_GOTRUE_JWKS_URL=http://localhost:9999/.well-known/jwks.json \
-  TF_GOTRUE_ISSUER=${TF_PUBLIC_URL}/auth/v1 \
-  TF_PUBLIC_URL=${TF_PUBLIC_URL} \
+  TF_GOTRUE_ISSUER=https://triagefactory.yourcompany.com/auth/v1 \
+  TF_PUBLIC_URL=https://triagefactory.yourcompany.com \
   ./triagefactory
 ```
 
