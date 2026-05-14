@@ -84,6 +84,9 @@ func runGenerate(writeEnvPath string) error {
 		return fmt.Errorf("open env file: %w", err)
 	}
 	defer f.Close()
+	if err := f.Chmod(0o600); err != nil {
+		return fmt.Errorf("chmod env file: %w", err)
+	}
 	if _, err := fmt.Fprintf(f, "GOTRUE_JWT_KEYS=%s\n", string(encoded)); err != nil {
 		return fmt.Errorf("write env line: %w", err)
 	}
