@@ -197,7 +197,7 @@ export default function Settings() {
         for (const k of keys) {
           next[k] = statuses
         }
-        setJiraStatusesByProject(next)
+        setJiraStatusesByProject((current) => ({ ...current, ...next }))
       }
     } catch {
       // Non-critical
