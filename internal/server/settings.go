@@ -418,16 +418,33 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			creds.JiraPAT = req.JiraPAT
-			creds.JiraDisplayName = jiraUser.DisplayName
+			// SKY-270: Jira identity (account ID + display name) lives on
+			// the users row, derived from the same /myself response. Same
+			// pattern as the GitHub branch above. Local mode only — multi
+			// mode derives identity from the session user via Atlassian
+			// OAuth (separate ticket, not yet shipped).
+			if runmode.Current() == runmode.ModeLocal {
+				if err := s.users.SetJiraIdentity(r.Context(), runmode.LocalDefaultUserID, jiraUser.StableID(), jiraUser.DisplayName); err != nil {
+					log.Printf("[settings] failed to persist users.jira_identity: %v", err)
+				}
+			}
 		}
 	} else {
 		// Soft disconnect — keep entities/tasks/runs/memory intact.
 		creds.JiraURL = ""
 		creds.JiraPAT = ""
-		creds.JiraDisplayName = ""
 		cfg.Jira.BaseURL = ""
 		if err := auth.ClearJira(); err != nil {
 			log.Printf("[settings] failed to clear Jira keychain entry: %v", err)
+		}
+		// Clear the captured identity on the users row so downstream
+		// "are we connected to Jira" checks stay in sync with the
+		// keychain reality (PAT gone → identity should be gone too).
+		// Local mode only — multi mode clears via the session user path.
+		if runmode.Current() == runmode.ModeLocal {
+			if err := s.users.SetJiraIdentity(r.Context(), runmode.LocalDefaultUserID, "", ""); err != nil {
+				log.Printf("[settings] failed to clear users.jira_identity: %v", err)
+			}
 		}
 	}
 
@@ -611,7 +628,6 @@ func (s *Server) handleJiraConnect(w http.ResponseWriter, r *http.Request) {
 	// Persist credentials and config
 	creds.JiraURL = req.URL
 	creds.JiraPAT = req.PAT
-	creds.JiraDisplayName = jiraUser.DisplayName
 	cfg.Jira.BaseURL = req.URL
 
 	if err := auth.Store(creds); err != nil {
@@ -625,6 +641,16 @@ func (s *Server) handleJiraConnect(w http.ResponseWriter, r *http.Request) {
 		auth.Store(creds) //nolint:errcheck
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save config: " + err.Error()})
 		return
+	}
+
+	// SKY-270: persist the captured Jira identity on the users row.
+	// Local mode only — multi mode derives identity from the session
+	// user via Atlassian OAuth (not yet shipped). Failure is logged
+	// but non-fatal; the next save (or the boot-time bootstrap) retries.
+	if runmode.Current() == runmode.ModeLocal {
+		if err := s.users.SetJiraIdentity(r.Context(), runmode.LocalDefaultUserID, jiraUser.StableID(), jiraUser.DisplayName); err != nil {
+			log.Printf("[settings] failed to persist users.jira_identity: %v", err)
+		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{

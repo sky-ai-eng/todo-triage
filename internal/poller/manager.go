@@ -223,7 +223,7 @@ func (m *Manager) startJira(cfg config.Config, creds auth.Credentials) {
 
 	go func() {
 		// Initial poll
-		if _, err := m.tracker.RefreshJira(client, creds.JiraURL, projects, creds.JiraDisplayName); err != nil {
+		if _, err := m.tracker.RefreshJira(client, creds.JiraURL, projects); err != nil {
 			log.Printf("[jira] tracker error: %v", err)
 			m.reportError("jira", err)
 		}
@@ -233,7 +233,7 @@ func (m *Manager) startJira(cfg config.Config, creds auth.Credentials) {
 		for {
 			select {
 			case <-ticker.C:
-				if _, err := m.tracker.RefreshJira(client, creds.JiraURL, projects, creds.JiraDisplayName); err != nil {
+				if _, err := m.tracker.RefreshJira(client, creds.JiraURL, projects); err != nil {
 					log.Printf("[jira] tracker error: %v", err)
 					m.reportError("jira", err)
 				}

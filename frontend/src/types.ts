@@ -284,6 +284,14 @@ export interface DeploymentConfig {
   current_user: {
     id: string
     github_username: string | null
+    /** Atlassian account ID (SKY-270). Null when Jira is not yet
+     *  connected — the editor renders a disabled Variant A in that
+     *  case, with a "configure Jira on Settings" hint. */
+    jira_account_id: string | null
+    /** Jira-side display name. Captured alongside account ID from
+     *  /rest/api/2/myself; used in UI hints ("Match my issues as
+     *  Aidan Allchin"). Null when Jira not connected. */
+    jira_display_name: string | null
   }
 }
 
@@ -295,6 +303,9 @@ export interface TeamMember {
   user_id: string
   display_name: string
   github_username: string | null
+  /** Atlassian account ID (SKY-270). Null when this member hasn't
+   *  connected Jira yet. */
+  jira_account_id: string | null
   is_current_user: boolean
 }
 

@@ -34,4 +34,22 @@ type UsersStore interface {
 	// row is missing. The team-members endpoint surfaces this in
 	// Variant B's roster dropdown.
 	GetDisplayName(ctx context.Context, userID string) (string, error)
+
+	// GetJiraIdentity returns (jira_account_id, jira_display_name) for
+	// a user row, both "" if the columns are NULL or the row does not
+	// exist. Used by the SKY-270 predicate matcher (assignee_in /
+	// reporter_in / commenter_in allowlists), the stock handler's
+	// "is this assigned to me" check, and the optimistic post-claim
+	// snapshot update.
+	GetJiraIdentity(ctx context.Context, userID string) (accountID, displayName string, err error)
+
+	// SetJiraIdentity writes both jira_account_id and jira_display_name
+	// for an existing user row in a single UPDATE. Both come from one
+	// auth.ValidateJira call (Atlassian's /myself endpoint returns
+	// them together), so pairing them keeps the columns consistent.
+	// Passing "" for either clears the column (NULL). Returns an error
+	// when the target row does not exist — bootstrap paths own row
+	// creation; this store only mutates existing rows. Idempotent on
+	// identical input.
+	SetJiraIdentity(ctx context.Context, userID, accountID, displayName string) error
 }

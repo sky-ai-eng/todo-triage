@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -52,6 +53,7 @@ type Router struct {
 	handlers   dbpkg.EventHandlerStore
 	agents     dbpkg.AgentStore
 	teamAgents dbpkg.TeamAgentStore // SKY-261: read team_agents.enabled before auto-firing triggers
+	users      dbpkg.UsersStore     // SKY-270: read local user's jira_account_id for inline close gates
 	spawner    Delegator
 	scorer     Scorer
 	ws         *websocket.Hub
@@ -75,14 +77,17 @@ type Router struct {
 // NewRouter creates a Router. teamAgents is nil-safe — callers wired
 // before SKY-261 D-Claims can pass nil; the bot-disabled-team check
 // degrades to "always enabled" in that case (the pre-SKY-261
-// behavior).
-func NewRouter(db *sql.DB, prompts dbpkg.PromptStore, handlers dbpkg.EventHandlerStore, agents dbpkg.AgentStore, teamAgents dbpkg.TeamAgentStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
+// behavior). users is nil-safe too — the SKY-270 inline-close gate
+// degrades to "treat every reassignment as away-from-me" when missing,
+// which over-closes (acceptable: user can reopen via the next poll).
+func NewRouter(db *sql.DB, prompts dbpkg.PromptStore, handlers dbpkg.EventHandlerStore, agents dbpkg.AgentStore, teamAgents dbpkg.TeamAgentStore, users dbpkg.UsersStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
 	return &Router{
 		db:         db,
 		prompts:    prompts,
 		handlers:   handlers,
 		agents:     agents,
 		teamAgents: teamAgents,
+		users:      users,
 		spawner:    spawner,
 		scorer:     scorer,
 		ws:         ws,
@@ -1126,14 +1131,27 @@ func (r *Router) closeCheckReviewRequestRemoved(evt domain.Event, entityID strin
 
 // closeCheckJiraReassigned: when a Jira issue is assigned to someone who is
 // NOT self, close any active jira:issue:assigned or jira:issue:available
-// tasks on this entity.
+// tasks on this entity. "Self" here is the local user's jira_account_id;
+// in multi mode the inline close still over-closes acceptably (the next
+// poll reopens via discovery for any other user the assignment landed on).
 func (r *Router) closeCheckJiraReassigned(evt domain.Event, entityID string) bool {
 	var meta events.JiraIssueAssignedMetadata
 	if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {
 		return false
 	}
-	if meta.AssigneeIsSelf {
-		return false // assigned to me — not a reassignment-away
+	if r.users != nil {
+		localAccountID, localDisplayName, err := r.users.GetJiraIdentity(context.Background(), runmode.LocalDefaultUserID)
+		if err == nil {
+			if meta.AssigneeAccountID != "" && localAccountID != "" && strings.EqualFold(meta.AssigneeAccountID, localAccountID) {
+				return false // assigned to me — not a reassignment-away
+			}
+			// Legacy snapshots (pre-fix) or Server/DC with no accountId: fall
+			// back to a case-insensitive display-name comparison so we don't
+			// auto-close tasks that are still assigned to the local user.
+			if meta.AssigneeAccountID == "" && meta.Assignee != "" && localDisplayName != "" && strings.EqualFold(meta.Assignee, localDisplayName) {
+				return false // display-name fallback — not a reassignment-away
+			}
+		}
 	}
 
 	// Close active assigned tasks.

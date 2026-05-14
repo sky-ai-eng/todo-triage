@@ -325,10 +325,21 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, us
 }
 
 // DiffJiraSnapshots compares two Jira issue snapshots and returns per-action
-// events. username is needed for assignee_is_self metadata. doneStatuses is
-// the configured Done.Members set — any status in it is treated as terminal
-// for the purpose of emitting jira:issue:completed.
-func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID, username string, doneStatuses []string) []domain.Event {
+// events. doneStatuses is the configured Done.Members set — any status in
+// it is treated as terminal for the purpose of emitting
+// jira:issue:completed.
+//
+// SKY-270: the actor-identity fields on emitted metadata
+// (Assignee/AssigneeAccountID, Reporter/ReporterAccountID,
+// Commenter/CommenterAccountID) are copied verbatim from the snapshot.
+// Predicate matching against assignee_in / reporter_in / commenter_in
+// allowlists runs downstream — there is no per-user derivation here.
+// Reporter and commenter account IDs are not yet captured by the
+// snapshot (the Jira API client doesn't expose them on the issue or
+// comment list), so those fields land empty in metadata; rules that
+// scope on reporter_in / commenter_in degrade to "no match" naturally
+// until that plumbing arrives.
+func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID string, doneStatuses []string) []domain.Event {
 	terminal := func(s string) bool {
 		for _, d := range doneStatuses {
 			if d == s {
@@ -350,13 +361,11 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID, username string
 		emitWithFallback(eventType, dedupKey, curr.UpdatedAt, metadata, eid, now, &evts)
 	}
 
-	assigneeIsSelf := curr.Assignee != "" && curr.Assignee == username
-
 	if prev.Key == "" {
 		// First discovery — emit the matching initial event.
 		if terminal(curr.Status) {
 			emit(domain.EventJiraIssueCompleted, "", events.JiraIssueCompletedMetadata{
-				Assignee: curr.Assignee, AssigneeIsSelf: assigneeIsSelf,
+				Assignee: curr.Assignee, AssigneeAccountID: curr.AssigneeAccountID,
 				IssueKey: curr.Key, Project: extractProject(curr.Key),
 				IssueType: curr.IssueType, FinalStatus: curr.Status,
 			})
@@ -370,15 +379,13 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID, username string
 			// tracking state changes.
 		} else if curr.Assignee != "" {
 			emit(domain.EventJiraIssueAssigned, "", events.JiraIssueAssignedMetadata{
-				Assignee: curr.Assignee, AssigneeIsSelf: assigneeIsSelf,
-				Reporter: "", ReporterIsSelf: false,
+				Assignee: curr.Assignee, AssigneeAccountID: curr.AssigneeAccountID,
 				IssueKey: curr.Key, Project: extractProject(curr.Key),
 				IssueType: curr.IssueType, Priority: curr.Priority,
 				Status: curr.Status, Summary: curr.Summary,
 			})
 		} else {
 			emit(domain.EventJiraIssueAvailable, "", events.JiraIssueAvailableMetadata{
-				Reporter: "", ReporterIsSelf: false,
 				IssueKey: curr.Key, Project: extractProject(curr.Key),
 				IssueType: curr.IssueType, Priority: curr.Priority,
 				Status: curr.Status, Summary: curr.Summary,
@@ -392,13 +399,13 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID, username string
 	// Status change — dedup_key = new status name.
 	if prev.Status != curr.Status && curr.Status != "" {
 		emit(domain.EventJiraIssueStatusChanged, curr.Status, events.JiraIssueStatusChangedMetadata{
-			Assignee: curr.Assignee, AssigneeIsSelf: assigneeIsSelf,
+			Assignee: curr.Assignee, AssigneeAccountID: curr.AssigneeAccountID,
 			IssueKey: curr.Key, Project: project, IssueType: curr.IssueType,
 			OldStatus: prev.Status, NewStatus: curr.Status, Priority: curr.Priority,
 		})
 		if terminal(curr.Status) {
 			emit(domain.EventJiraIssueCompleted, "", events.JiraIssueCompletedMetadata{
-				Assignee: curr.Assignee, AssigneeIsSelf: assigneeIsSelf,
+				Assignee: curr.Assignee, AssigneeAccountID: curr.AssigneeAccountID,
 				IssueKey: curr.Key, Project: project,
 				IssueType: curr.IssueType, FinalStatus: curr.Status,
 			})
@@ -415,15 +422,13 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID, username string
 	if prev.Assignee != curr.Assignee && curr.OpenSubtaskCount == 0 {
 		if curr.Assignee != "" {
 			emit(domain.EventJiraIssueAssigned, "", events.JiraIssueAssignedMetadata{
-				Assignee: curr.Assignee, AssigneeIsSelf: assigneeIsSelf,
-				Reporter: "", ReporterIsSelf: false,
+				Assignee: curr.Assignee, AssigneeAccountID: curr.AssigneeAccountID,
 				IssueKey: curr.Key, Project: project,
 				IssueType: curr.IssueType, Priority: curr.Priority,
 				Status: curr.Status, Summary: curr.Summary,
 			})
 		} else {
 			emit(domain.EventJiraIssueAvailable, "", events.JiraIssueAvailableMetadata{
-				Reporter: "", ReporterIsSelf: false,
 				IssueKey: curr.Key, Project: project,
 				IssueType: curr.IssueType, Priority: curr.Priority,
 				Status: curr.Status, Summary: curr.Summary,
@@ -434,7 +439,7 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID, username string
 	// Priority change — dedup_key = new priority value.
 	if prev.Priority != curr.Priority && curr.Priority != "" {
 		emit(domain.EventJiraIssuePriorityChanged, curr.Priority, events.JiraIssuePriorityChangedMetadata{
-			Assignee: curr.Assignee, AssigneeIsSelf: assigneeIsSelf,
+			Assignee: curr.Assignee, AssigneeAccountID: curr.AssigneeAccountID,
 			IssueKey: curr.Key, Project: project,
 			OldPriority: prev.Priority, NewPriority: curr.Priority,
 		})
@@ -443,8 +448,7 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID, username string
 	// New comments.
 	if curr.CommentCount > prev.CommentCount {
 		emit(domain.EventJiraIssueCommented, "", events.JiraIssueCommentedMetadata{
-			Assignee: curr.Assignee, AssigneeIsSelf: assigneeIsSelf,
-			Commenter: "", CommenterIsSelf: false, CommentID: "",
+			Assignee: curr.Assignee, AssigneeAccountID: curr.AssigneeAccountID,
 			IssueKey: curr.Key, Project: project,
 		})
 	}
@@ -457,7 +461,7 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID, username string
 	// never had subtasks, this condition is never true.
 	if prev.OpenSubtaskCount > 0 && curr.OpenSubtaskCount == 0 && !terminal(curr.Status) {
 		emit(domain.EventJiraIssueBecameAtomic, "", events.JiraIssueBecameAtomicMetadata{
-			Assignee: curr.Assignee, AssigneeIsSelf: assigneeIsSelf,
+			Assignee: curr.Assignee, AssigneeAccountID: curr.AssigneeAccountID,
 			IssueKey: curr.Key, Project: project,
 			IssueType: curr.IssueType, Priority: curr.Priority,
 			Status: curr.Status, Summary: curr.Summary,

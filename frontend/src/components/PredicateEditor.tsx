@@ -95,6 +95,7 @@ export default function PredicateEditor({ eventType, value, onChange }: Predicat
         <FieldRow
           key={field.name}
           field={field}
+          eventType={eventType}
           value={value[field.name]}
           onChange={(val) => setField(field.name, val)}
         />
@@ -107,11 +108,12 @@ export default function PredicateEditor({ eventType, value, onChange }: Predicat
 
 interface FieldRowProps {
   field: FieldSchema
+  eventType: string
   value: unknown
   onChange: (val: unknown) => void
 }
 
-function FieldRow({ field, value, onChange }: FieldRowProps) {
+function FieldRow({ field, eventType, value, onChange }: FieldRowProps) {
   return (
     <div>
       <div className="flex items-center gap-1.5 mb-1.5">
@@ -150,14 +152,17 @@ function FieldRow({ field, value, onChange }: FieldRowProps) {
         <StringField value={value as string | undefined} onChange={onChange} />
       )}
       {field.type === 'int' && <IntField value={value as number | undefined} onChange={onChange} />}
-      {/* SKY-264: every string_list field today is an identity allowlist
-          (author_in / reviewer_in / commenter_in). IdentityListField
-          handles both variants — toggle for solo / local mode, multi-
-          select for teams. If a non-identity string_list lands later
-          (e.g. labels_any_of), branch on field.name. */}
+      {/* Every string_list field today is an identity allowlist:
+          GitHub (SKY-264) → author_in / reviewer_in / commenter_in;
+          Jira (SKY-270) → assignee_in / reporter_in / commenter_in.
+          IdentityListField branches on identityKind to read the right
+          column (github_username vs jira_account_id) from /api/config.
+          If a non-identity string_list lands later (e.g. labels_any_of),
+          branch on field.name. */}
       {field.type === 'string_list' && (
         <IdentityListField
           fieldName={field.name}
+          identityKind={eventType.startsWith('jira:') ? 'jira' : 'github'}
           value={Array.isArray(value) ? (value as string[]) : undefined}
           onChange={(v) => onChange(v)}
         />

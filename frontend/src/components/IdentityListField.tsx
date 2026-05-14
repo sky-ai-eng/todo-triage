@@ -1,36 +1,45 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { X } from 'lucide-react'
 import { useDeploymentConfig, useTeamMembers } from '../hooks/useDeploymentConfig'
-import type { TeamMember } from '../types'
+import type { DeploymentConfig, TeamMember } from '../types'
 
 /** IdentityListField is the editor for `author_in` / `reviewer_in` /
- *  `commenter_in` predicate fields (SKY-264). Two variants based on
- *  the active user's team size:
+ *  `commenter_in` (GitHub, SKY-264) and `assignee_in` / `reporter_in` /
+ *  `commenter_in` (Jira, SKY-270) predicate fields. Two variants based
+ *  on the active user's team size:
  *
  *  - Variant A (team_size===1, i.e. local mode or solo team): a single
- *    "Match my <actor>" toggle. ON → ["<current_user.github_username>"].
- *    OFF → field omitted (no filter). Disabled when github_username is
- *    null with a configure-GitHub hint.
+ *    "Match my <actor>" toggle. ON → ["<current_user.<identityField>>"].
+ *    OFF → field omitted (no filter). Disabled when the identity field
+ *    is null with a configure-<source> hint.
  *
  *  - Variant B (team_size>1): chips + searchable dropdown of team
  *    members. Free-text entry supports external handles (bots,
  *    contractors not on the team). Implements the ARIA combobox
  *    pattern + keyboard navigation (Arrow keys, Enter, Escape).
  *
+ *  identityKind selects which user-row column drives Variant A's
+ *  toggle and Variant B's roster lookups: 'github' for GitHub logins,
+ *  'jira' for Atlassian account IDs.
+ *
  *  Both serialize to the same wire shape: `string[] | undefined`. The
  *  matcher does case-insensitive compare server-side, so client casing
  *  is preserved verbatim for round-trip rendering. */
+export type IdentityKind = 'github' | 'jira'
+
 export default function IdentityListField({
   fieldName,
+  identityKind,
   value,
   onChange,
 }: {
   fieldName: string
+  identityKind: IdentityKind
   value: string[] | undefined
   onChange: (val: string[] | undefined) => void
 }) {
   const { config, loading, error } = useDeploymentConfig()
-  const labels = labelsForField(fieldName)
+  const labels = labelsForField(fieldName, identityKind)
 
   if (loading) {
     return <div className="h-10 rounded-lg bg-black/[0.03] animate-pulse" />
@@ -51,9 +60,35 @@ export default function IdentityListField({
   }
 
   if (config.team_size <= 1) {
-    return <VariantA value={value} onChange={onChange} config={config} labels={labels} />
+    return (
+      <VariantA
+        value={value}
+        onChange={onChange}
+        config={config}
+        labels={labels}
+        identityKind={identityKind}
+      />
+    )
   }
-  return <VariantB value={value} onChange={onChange} config={config} labels={labels} />
+  return (
+    <VariantB
+      value={value}
+      onChange={onChange}
+      config={config}
+      labels={labels}
+      identityKind={identityKind}
+    />
+  )
+}
+
+// identityFromUser returns the canonical identifier on a user row for
+// the given identity source. Centralizes the github_username vs
+// jira_account_id branch so call sites don't have to know.
+function identityFromUser(
+  user: { github_username: string | null; jira_account_id: string | null },
+  kind: IdentityKind,
+): string | null {
+  return kind === 'jira' ? user.jira_account_id : user.github_username
 }
 
 // --- Actor-specific copy ----------------------------------------------------
@@ -75,13 +110,19 @@ interface ActorLabels {
   emptyHint: string
 }
 
-function labelsForField(fieldName: string): ActorLabels {
+function labelsForField(fieldName: string, kind: IdentityKind): ActorLabels {
   // Strip the canonical "_in" suffix to derive the actor name. Falls
   // back to the field name itself if the suffix is missing — future
   // non-identity string_list predicates would hit that path and get
   // generic copy, which is still less wrong than mislabeling everything
   // as "author."
   const actor = fieldName.endsWith('_in') ? fieldName.slice(0, -3) : fieldName
+  const idLabel = kind === 'jira' ? 'account ID' : 'handle'
+  const teamOrManualHint =
+    kind === 'jira'
+      ? `Empty = match any ${actor}. Atlassian account IDs are opaque — paste from Jira's user profile URL.`
+      : `Empty = match any ${actor}. Case-insensitive.`
+
   switch (actor) {
     case 'author':
       return {
@@ -110,18 +151,38 @@ function labelsForField(fieldName: string): ActorLabels {
         toggleOffLabel: 'Match any commenter',
         scopedHint: (login) => `Scoped to comments left by ${login}.`,
         unscopedHint: 'Fires on every commenter’s comments.',
-        searchPlaceholder: 'search team or type a commenter handle…',
-        emptyHint: 'Empty = match any commenter. Case-insensitive.',
+        searchPlaceholder: `search team or type a commenter ${idLabel}…`,
+        emptyHint: teamOrManualHint,
+      }
+    case 'assignee':
+      return {
+        actor,
+        toggleOnLabel: 'Match issues assigned to me',
+        toggleOffLabel: 'Match any assignee',
+        scopedHint: (id) => `Scoped to issues assigned to your Atlassian account (${id}).`,
+        unscopedHint: 'Fires on every assignee.',
+        searchPlaceholder: 'paste an Atlassian account ID…',
+        emptyHint: teamOrManualHint,
+      }
+    case 'reporter':
+      return {
+        actor,
+        toggleOnLabel: 'Match issues I reported',
+        toggleOffLabel: 'Match any reporter',
+        scopedHint: (id) => `Scoped to issues reported by ${id}.`,
+        unscopedHint: 'Fires on every reporter.',
+        searchPlaceholder: 'paste an Atlassian account ID…',
+        emptyHint: teamOrManualHint,
       }
     default:
       return {
         actor: actor || 'actor',
         toggleOnLabel: 'Match my events',
         toggleOffLabel: 'Match anyone',
-        scopedHint: (login) => `Scoped to ${login}.`,
+        scopedHint: (id) => `Scoped to ${id}.`,
         unscopedHint: 'Fires on every actor.',
-        searchPlaceholder: 'search team or type a handle…',
-        emptyHint: 'Empty = match anyone. Case-insensitive.',
+        searchPlaceholder: `search team or type a ${idLabel}…`,
+        emptyHint: teamOrManualHint,
       }
   }
 }
@@ -133,31 +194,41 @@ function VariantA({
   onChange,
   config,
   labels,
+  identityKind,
 }: {
   value: string[] | undefined
   onChange: (val: string[] | undefined) => void
-  config: { current_user: { github_username: string | null } }
+  config: DeploymentConfig
   labels: ActorLabels
+  identityKind: IdentityKind
 }) {
-  const myLogin = config.current_user.github_username
-  const hasIdentity = !!myLogin
+  const myID = identityFromUser(config.current_user, identityKind)
+  const hasIdentity = !!myID
   // The toggle is ON whenever the allowlist contains the current user's
-  // login. If the user has manually added external handles too, the
+  // identity. If the user has manually added external IDs too, the
   // toggle still represents "am I in the list" — clicking off removes
   // the user but leaves other entries alone. v1 doesn't surface those
-  // other entries in Variant A; if you have external handles you should
+  // other entries in Variant A; if you have external IDs you should
   // probably be on Variant B anyway.
-  const isOn = !!myLogin && (value ?? []).some((h) => h.toLowerCase() === myLogin.toLowerCase())
+  const isOn = !!myID && (value ?? []).some((h) => h.toLowerCase() === myID.toLowerCase())
 
   const handleToggle = () => {
     if (!hasIdentity) return
     if (isOn) {
-      const next = (value ?? []).filter((h) => h.toLowerCase() !== myLogin!.toLowerCase())
+      const next = (value ?? []).filter((h) => h.toLowerCase() !== myID!.toLowerCase())
       onChange(next.length === 0 ? undefined : next)
     } else {
-      onChange([...(value ?? []), myLogin!])
+      onChange([...(value ?? []), myID!])
     }
   }
+
+  // For the Variant A scoped hint, prefer the friendly display name
+  // when available (Jira gives us both account ID and display name;
+  // GitHub's login doubles as the display string).
+  const displayForHint =
+    identityKind === 'jira' ? config.current_user.jira_display_name || myID || '' : myID || ''
+
+  const sourceLabel = identityKind === 'jira' ? 'Jira' : 'GitHub'
 
   return (
     <div>
@@ -181,13 +252,13 @@ function VariantA({
       </button>
       {hasIdentity ? (
         <p className="mt-1.5 text-[11px] text-text-tertiary">
-          {isOn ? labels.scopedHint(myLogin!) : labels.unscopedHint}
+          {isOn ? labels.scopedHint(displayForHint) : labels.unscopedHint}
         </p>
       ) : (
         <p className="mt-1.5 text-[11px] text-amber-600">
-          GitHub identity not yet captured.{' '}
+          {sourceLabel} identity not yet captured.{' '}
           <a href="/settings" className="underline">
-            Configure GitHub on Settings
+            Configure {sourceLabel} on Settings
           </a>{' '}
           to enable this filter.
         </p>
@@ -223,11 +294,13 @@ function VariantB({
   onChange,
   config: _config,
   labels,
+  identityKind,
 }: {
   value: string[] | undefined
   onChange: (val: string[] | undefined) => void
-  config: { current_user: { github_username: string | null } }
+  config: DeploymentConfig
   labels: ActorLabels
+  identityKind: IdentityKind
 }) {
   const { members, loading, error: rosterError } = useTeamMembers()
   const [search, setSearch] = useState('')
@@ -243,6 +316,13 @@ function VariantB({
   // would invalidate every downstream memo.)
   const selected = useMemo(() => value ?? [], [value])
 
+  // memberIdentity reads the canonical ID for a team member under the
+  // active identity kind: github_username for GitHub predicates,
+  // jira_account_id for Jira predicates. Members without that field
+  // captured show up as "no identity" rows below the option list.
+  const memberIdentity = (m: TeamMember): string | null => identityFromUser(m, identityKind)
+  const sourceLabel = identityKind === 'jira' ? 'Jira' : 'GitHub'
+
   // Close the dropdown when clicking outside the container.
   useEffect(() => {
     const onClick = (e: MouseEvent) => {
@@ -254,9 +334,10 @@ function VariantB({
 
   const memberByLogin = new Map<string, { display: string; isSelf: boolean }>()
   for (const m of members) {
-    if (m.github_username) {
-      memberByLogin.set(m.github_username.toLowerCase(), {
-        display: m.display_name || m.github_username,
+    const id = memberIdentity(m)
+    if (id) {
+      memberByLogin.set(id.toLowerCase(), {
+        display: m.display_name || id,
         isSelf: m.is_current_user,
       })
     }
@@ -268,26 +349,27 @@ function VariantB({
   const dropdownItems = useMemo<DropdownItem[]>(() => {
     const q = search.trim().toLowerCase()
     const teamMatches = members.filter((m) => {
-      if (!m.github_username) return false
-      if (selected.some((h) => h.toLowerCase() === m.github_username!.toLowerCase())) return false
+      const id = memberIdentity(m)
+      if (!id) return false
+      if (selected.some((h) => h.toLowerCase() === id.toLowerCase())) return false
       return (
-        q === '' ||
-        m.github_username.toLowerCase().includes(q) ||
-        (m.display_name || '').toLowerCase().includes(q)
+        q === '' || id.toLowerCase().includes(q) || (m.display_name || '').toLowerCase().includes(q)
       )
     })
     const items: DropdownItem[] = teamMatches.map((m) => ({ kind: 'team', member: m }))
-    const exactMatchExists = members.some(
-      (m) => m.github_username && m.github_username.toLowerCase() === q,
-    )
+    const exactMatchExists = members.some((m) => {
+      const id = memberIdentity(m)
+      return id && id.toLowerCase() === q
+    })
     const alreadySelected = selected.some((h) => h.toLowerCase() === q)
     if (q !== '' && !exactMatchExists && !alreadySelected) {
       items.push({ kind: 'external', handle: search.trim() })
     }
     return items
-    // Recompute when search query or selection set changes; `members`
-    // is identity-stable per fetch so it's safe in deps.
-  }, [members, search, selected])
+    // identityKind is the only mutable input besides search/selected.
+    // members is identity-stable per fetch.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [members, search, selected, identityKind])
 
   // Clamp the active-index during render rather than via an effect:
   // storing the raw setState value and reading a clamped derivation
@@ -320,8 +402,9 @@ function VariantB({
     }
     const item = dropdownItems[safeActiveIndex]
     if (!item) return
-    if (item.kind === 'team' && item.member.github_username) {
-      addHandle(item.member.github_username)
+    if (item.kind === 'team') {
+      const id = memberIdentity(item.member)
+      if (id) addHandle(id)
     } else if (item.kind === 'external') {
       addHandle(item.handle)
     }
@@ -444,6 +527,7 @@ function VariantB({
             }`
             if (item.kind === 'team') {
               const m = item.member
+              const id = memberIdentity(m)
               return (
                 <li
                   id={optionIdFor(i)}
@@ -454,20 +538,18 @@ function VariantB({
                     // mousedown rather than click so the input doesn't blur
                     // and close the dropdown before the selection registers.
                     e.preventDefault()
-                    addHandle(m.github_username!)
+                    if (id) addHandle(id)
                   }}
                   onMouseEnter={() => setActiveIndex(i)}
                   className={baseCls}
                 >
                   <span className="text-[13px] text-text-primary">
-                    {m.display_name || m.github_username}
+                    {m.display_name || id}
                     {m.is_current_user && (
                       <span className="ml-1 text-[10px] text-text-tertiary">(you)</span>
                     )}
                   </span>
-                  <span className="text-[11px] font-mono text-text-tertiary">
-                    {m.github_username}
-                  </span>
+                  <span className="text-[11px] font-mono text-text-tertiary">{id}</span>
                 </li>
               )
             }
@@ -494,17 +576,17 @@ function VariantB({
               flow so they're not navigable and don't enter the
               active-descendant rotation. Surfaces the gap honestly. */}
           {members
-            .filter((m) => !m.github_username)
+            .filter((m) => !memberIdentity(m))
             .map((m) => (
               <li
                 key={m.user_id}
                 role="presentation"
                 aria-hidden="true"
                 className="px-3 py-2 text-[12px] text-text-tertiary opacity-60"
-                title="No GitHub identity captured — ask this user to configure GitHub on Settings"
+                title={`No ${sourceLabel} identity captured — ask this user to configure ${sourceLabel} on Settings`}
               >
                 {m.display_name || '(no name)'}{' '}
-                <span className="text-[10px]">— no GitHub identity</span>
+                <span className="text-[10px]">— no {sourceLabel} identity</span>
               </li>
             ))}
         </ul>

@@ -489,7 +489,12 @@ func (r JiraRules) doneMembersForKey(issueKey string) []string {
 // JQL per project and looks up terminal-status sets by the issue's
 // project_key. Tickets whose project_key has no row degrade silently
 // — no terminal check, no pickup discovery.
-func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, projects JiraRules, username string) (int, error) {
+//
+// SKY-270 dropped the username parameter: actor identity now flows through
+// the snapshot (assignee_account_id) and predicate matching happens
+// downstream against the assignee_in / reporter_in / commenter_in
+// allowlists.
+func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, projects JiraRules) (int, error) {
 	startedAt := time.Now()
 	terminal := func(snap domain.JiraSnapshot) bool {
 		rule := projects.ForKey(extractProject(snap.Key))
@@ -595,7 +600,7 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 		// back to the union across all projects when the entity is in
 		// a project that's no longer configured (defensive — terminal
 		// detection still works for previously-known done statuses).
-		events := DiffJiraSnapshots(prevSnap, newSnap, e.ID, username, projects.doneMembersForKey(newSnap.Key))
+		events := DiffJiraSnapshots(prevSnap, newSnap, e.ID, projects.doneMembersForKey(newSnap.Key))
 
 		snapJSON, _ := json.Marshal(newSnap)
 		if err := db.UpdateEntitySnapshot(t.database, e.ID, string(snapJSON)); err != nil {
@@ -782,6 +787,15 @@ func issueToState(issue jiraclient.Issue, baseURL string, doneStatuses []string)
 	}
 	if issue.Fields.Assignee != nil {
 		snap.Assignee = issue.Fields.Assignee.DisplayName
+		// Prefer AccountID (Jira Cloud). Fall back to Name (Jira
+		// Server/DC username key) so predicates and inline-close
+		// comparisons work on both deployment types. This mirrors
+		// auth.JiraUser.StableID() which prefers accountId over key.
+		if issue.Fields.Assignee.AccountID != "" {
+			snap.AssigneeAccountID = issue.Fields.Assignee.AccountID
+		} else {
+			snap.AssigneeAccountID = issue.Fields.Assignee.Name
+		}
 	}
 	if issue.Fields.Priority != nil {
 		snap.Priority = issue.Fields.Priority.Name

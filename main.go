@@ -128,6 +128,51 @@ func bootstrapLocalGitHubIdentity(users db.UsersStore) error {
 	return nil
 }
 
+// bootstrapLocalJiraIdentity is the Jira analog of
+// bootstrapLocalGitHubIdentity. Populates users.jira_account_id and
+// users.jira_display_name on the local synthetic user row by
+// deriving them from the configured Jira PAT+URL. Both fields come
+// from the same /rest/api/2/myself response, so the capture is one
+// round-trip per boot.
+//
+// Runs at startup before seedDefaultPrompts so the SQLite Seed
+// substitution can fill `assignee_in: []` placeholders on shipped
+// jira-assigned / jira-became-atomic handler predicates with the
+// local user's account ID.
+//
+// No-op when (a) the row already has both columns populated,
+// (b) credentials are absent, or (c) ValidateJira fails. The Settings
+// handler covers the alternate write path on Jira reconnect.
+func bootstrapLocalJiraIdentity(users db.UsersStore) error {
+	if runmode.Current() != runmode.ModeLocal {
+		return nil
+	}
+	ctx := context.Background()
+
+	creds, _ := auth.Load()
+	if creds.JiraPAT == "" || creds.JiraURL == "" {
+		return nil
+	}
+	existingID, existingName, err := users.GetJiraIdentity(ctx, runmode.LocalDefaultUserID)
+	if err != nil {
+		return fmt.Errorf("read users.jira_identity: %w", err)
+	}
+	if existingID != "" && existingName != "" {
+		return nil
+	}
+	jiraUser, err := auth.ValidateJira(creds.JiraURL, creds.JiraPAT)
+	if err != nil {
+		log.Printf("[bootstrap] derive users.jira_identity from PAT: %v (continuing — Settings will capture next save)", err)
+		return nil
+	}
+	accountID := jiraUser.StableID()
+	if err := users.SetJiraIdentity(ctx, runmode.LocalDefaultUserID, accountID, jiraUser.DisplayName); err != nil {
+		return fmt.Errorf("persist users.jira_identity: %w", err)
+	}
+	log.Printf("[bootstrap] users.jira_identity: derived account=%q name=%q from credentials", accountID, jiraUser.DisplayName)
+	return nil
+}
+
 // printTopLevelHelp routes the two audiences (delegated Claude Code
 // agents vs. human users) to the right surface. Agents almost always
 // reach this through autocomplete / accidental invocation when they
@@ -344,6 +389,9 @@ func main() {
 	// allowlist placeholders on shipped predicates.
 	if err := bootstrapLocalGitHubIdentity(stores.Users); err != nil {
 		log.Printf("[bootstrap] users.github_username: %v (continuing — Settings will capture on next save)", err)
+	}
+	if err := bootstrapLocalJiraIdentity(stores.Users); err != nil {
+		log.Printf("[bootstrap] users.jira_identity: %v (continuing — Settings will capture on next save)", err)
 	}
 	seedDefaultPrompts(stores.Prompts, stores.EventHandlers)
 
@@ -606,7 +654,7 @@ func main() {
 	// Event router — records events, creates/bumps tasks, auto-delegates on
 	// matching triggers, runs inline close checks. Also handles post-scoring
 	// re-derive via the scorer callback wired above.
-	eventRouter = routing.NewRouter(database, stores.Prompts, stores.EventHandlers, stores.Agents, stores.TeamAgents, spawner, scorer, wsHub)
+	eventRouter = routing.NewRouter(database, stores.Prompts, stores.EventHandlers, stores.Agents, stores.TeamAgents, stores.Users, spawner, scorer, wsHub)
 	bus.Subscribe(eventbus.Subscriber{
 		Name:   "router",
 		Filter: []string{"github:", "jira:"},

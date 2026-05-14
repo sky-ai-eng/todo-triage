@@ -66,8 +66,17 @@ func (s *eventHandlerStore) Seed(ctx context.Context, orgID string) error {
 	// placeholder allowlist empty.
 	localGitHubUsername, _ := s.users.GetGitHubUsername(ctx, runmode.LocalDefaultUserID)
 
+	// SKY-270: same shape for Jira. The shipped jira-assigned and
+	// jira-became-atomic rules ship with `assignee_in: []` placeholders;
+	// fill them with the local user's Atlassian account ID so the rule
+	// matches without manual setup. Empty value (Jira not connected yet)
+	// leaves the allowlist empty → rule matches every assignee, matching
+	// the GitHub side's degrade-cleanly default.
+	localJiraAccountID, _, _ := s.users.GetJiraIdentity(ctx, runmode.LocalDefaultUserID)
+
 	for _, h := range db.ShippedEventHandlers {
 		predStr := substituteLocalGitHubIdentity(h.Predicate, localGitHubUsername)
+		predStr = substituteLocalJiraIdentity(predStr, localJiraAccountID)
 		var pred any
 		if predStr != "" {
 			pred = predStr
@@ -489,7 +498,32 @@ func derefInt(p *int) int {
 // stomp it. Malformed predicate JSON falls through unchanged; the
 // downstream matcher already fails-closed on undecodable predicates.
 func substituteLocalGitHubIdentity(predJSON, localUser string) string {
-	if predJSON == "" || localUser == "" {
+	return substituteEmptyAllowlists(predJSON, localUser, "author_in", "reviewer_in", "commenter_in")
+}
+
+// substituteLocalJiraIdentity is the Jira analog of
+// substituteLocalGitHubIdentity. Shipped Jira-scoped rules carry
+// `assignee_in: []` placeholders; this fills them with the local user's
+// jira_account_id at seed time. Same semantics as the GitHub helper —
+// non-empty arrays are user-customizations and preserved; missing keys
+// stay missing; malformed JSON falls through unchanged.
+//
+// Reporter / commenter allowlists are not currently shipped on any
+// system handler (they're predicate-only — exposed in the rule editor
+// for user-authored rules), so this helper covers `assignee_in` only.
+// Adding more keys here is the right extension if reporter / commenter
+// system handlers ever ship.
+func substituteLocalJiraIdentity(predJSON, localAccountID string) string {
+	return substituteEmptyAllowlists(predJSON, localAccountID, "assignee_in")
+}
+
+// substituteEmptyAllowlists is the shared body for the GitHub/Jira
+// substitution helpers. For each named key, if the predicate has the
+// key set to an empty array, replace it with `[identity]`. Pre-filled
+// arrays are preserved; missing keys are ignored; malformed predicate
+// JSON falls through unchanged.
+func substituteEmptyAllowlists(predJSON, identity string, keys ...string) string {
+	if predJSON == "" || identity == "" {
 		return predJSON
 	}
 	var fields map[string]json.RawMessage
@@ -497,7 +531,7 @@ func substituteLocalGitHubIdentity(predJSON, localUser string) string {
 		return predJSON
 	}
 	changed := false
-	for _, key := range []string{"author_in", "reviewer_in", "commenter_in"} {
+	for _, key := range keys {
 		raw, ok := fields[key]
 		if !ok {
 			continue
@@ -512,7 +546,7 @@ func substituteLocalGitHubIdentity(predJSON, localUser string) string {
 			// User-customized; preserve.
 			continue
 		}
-		substituted, err := json.Marshal([]string{localUser})
+		substituted, err := json.Marshal([]string{identity})
 		if err != nil {
 			continue
 		}

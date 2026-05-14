@@ -158,32 +158,44 @@ func TestMatchPredicate_UnknownEventType_NoMatch(t *testing.T) {
 	}
 }
 
-// Jira's *_is_self predicates are out of scope for SKY-264 and will be
-// migrated to *_in allowlists under SKY-270 once Atlassian multi-mode auth
-// lands. Until then, the Jira matcher continues to support the bool form.
-func TestMatchPredicate_JiraAssigneeIsSelf(t *testing.T) {
+// SKY-270 cutover: Jira predicates moved from *_is_self booleans to *_in
+// allowlists of Atlassian account IDs, mirroring the SKY-264 GitHub shape.
+// The matcher resolves an event's actor via the metadata's
+// assignee_account_id and looks for case-insensitive membership in the
+// rule's assignee_in slice.
+func TestMatchPredicate_JiraAssigneeIn(t *testing.T) {
+	const myAccountID = "557058:abc-aidan"
 	meta := events.JiraIssueAssignedMetadata{
-		Assignee:       "Aidan Allchin",
-		AssigneeIsSelf: true,
-		IssueKey:       "SKY-123",
-		Project:        "SKY",
+		Assignee:          "Aidan Allchin",
+		AssigneeAccountID: myAccountID,
+		IssueKey:          "SKY-123",
+		Project:           "SKY",
 	}
 	metaJSON, _ := json.Marshal(meta)
 
-	matched, _ := matchPredicate(domain.EventJiraIssueAssigned,
-		`{"assignee_is_self":true}`, string(metaJSON))
+	pred := `{"assignee_in":["` + myAccountID + `"]}`
+	matched, _ := matchPredicate(domain.EventJiraIssueAssigned, pred, string(metaJSON))
 	if !matched {
-		t.Error("expected match when assignee_is_self=true")
+		t.Error("expected match when assignee_account_id is in assignee_in allowlist")
 	}
 
-	// Reassigned to someone else.
-	meta.AssigneeIsSelf = false
+	// Reassigned to someone else — metadata carries a different account ID,
+	// which isn't in the allowlist.
+	meta.AssigneeAccountID = "557058:xyz-bob"
 	meta.Assignee = "Bob"
 	metaJSON, _ = json.Marshal(meta)
-	matched, _ = matchPredicate(domain.EventJiraIssueAssigned,
-		`{"assignee_is_self":true}`, string(metaJSON))
+	matched, _ = matchPredicate(domain.EventJiraIssueAssigned, pred, string(metaJSON))
 	if matched {
-		t.Error("expected no match when assignee_is_self=false")
+		t.Error("expected no match when assignee_account_id is not in allowlist")
+	}
+
+	// Empty allowlist = match-all (same convention as author_in).
+	meta.AssigneeAccountID = myAccountID
+	metaJSON, _ = json.Marshal(meta)
+	matched, _ = matchPredicate(domain.EventJiraIssueAssigned,
+		`{"assignee_in":[]}`, string(metaJSON))
+	if !matched {
+		t.Error("expected match when assignee_in is empty (no filter)")
 	}
 }
 

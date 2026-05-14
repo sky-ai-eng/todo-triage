@@ -35,11 +35,11 @@ func TestHandleEvent_BecameAtomic_ExistingTask_NoDuplicate(t *testing.T) {
 	// exists from jira:issue:assigned. This is the pre-existing state
 	// when became_atomic is about to fire.
 	assignedMeta := events.JiraIssueAssignedMetadata{
-		Assignee:       "aidan",
-		AssigneeIsSelf: true,
-		IssueKey:       "SKY-500",
-		Project:        "SKY",
-		Summary:        "Epic",
+		Assignee:          "aidan",
+		AssigneeAccountID: "557058:abc-aidan",
+		IssueKey:          "SKY-500",
+		Project:           "SKY",
+		Summary:           "Epic",
 	}
 	assignedJSON, _ := json.Marshal(assignedMeta)
 	assignedEventID, err := db.RecordEvent(database, domain.Event{
@@ -61,16 +61,16 @@ func TestHandleEvent_BecameAtomic_ExistingTask_NoDuplicate(t *testing.T) {
 	// closed, triggering the belated-discovery path). HandleEvent
 	// records the event itself, so we pass an unpersisted one.
 	atomicMeta := events.JiraIssueBecameAtomicMetadata{
-		Assignee:       "aidan",
-		AssigneeIsSelf: true,
-		IssueKey:       "SKY-500",
-		Project:        "SKY",
-		Summary:        "Epic",
+		Assignee:          "aidan",
+		AssigneeAccountID: "557058:abc-aidan",
+		IssueKey:          "SKY-500",
+		Project:           "SKY",
+		Summary:           "Epic",
 	}
 	atomicJSON, _ := json.Marshal(atomicMeta)
 
 	ws := websocket.NewHub()
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, noopScorer{}, ws)
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, nil, noopScorer{}, ws)
 
 	router.HandleEvent(domain.Event{
 		EventType:    domain.EventJiraIssueBecameAtomic,
@@ -113,15 +113,15 @@ func TestHandleEvent_BecameAtomic_NoExistingTask_CreatesTask(t *testing.T) {
 	}
 
 	meta := events.JiraIssueBecameAtomicMetadata{
-		Assignee:       "aidan",
-		AssigneeIsSelf: true,
-		IssueKey:       "SKY-501",
-		Project:        "SKY",
+		Assignee:          "aidan",
+		AssigneeAccountID: "557058:abc-aidan",
+		IssueKey:          "SKY-501",
+		Project:           "SKY",
 	}
 	metaJSON, _ := json.Marshal(meta)
 
 	ws := websocket.NewHub()
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, noopScorer{}, ws)
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, nil, noopScorer{}, ws)
 
 	router.HandleEvent(domain.Event{
 		EventType:    domain.EventJiraIssueBecameAtomic,
