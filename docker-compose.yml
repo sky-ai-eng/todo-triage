@@ -1,0 +1,96 @@
+# Triage Factory — multi-mode compose stack.
+#
+# Brings up Postgres + GoTrue. Local-mode (SQLite) doesn't need any of this.
+# The triagefactory container image is a D13 (SKY-256) concern — until then
+# the TF binary runs from the host against this stack:
+#
+#   TF_MODE=multi \
+#   TF_GOTRUE_JWKS_URL=http://localhost:9999/.well-known/jwks.json \
+#   TF_GOTRUE_ISSUER=${TF_PUBLIC_URL}/auth/v1 \
+#   ./triagefactory
+#
+# Prerequisites — see docs/self-host-setup.md:
+#   1. Create a GitHub OAuth app with callback ${TF_PUBLIC_URL}/auth/v1/callback
+#   2. cp .env.example .env, fill in the placeholders
+#   3. ./triagefactory jwk-init --write-env .env   (one-shot; rotates if re-run)
+#   4. docker compose up -d
+#
+# D6 ships the substrate (gotrue + JWKS verify). D7 (SKY-251) adds the
+# OAuth handlers, /api/me, sessions + /auth/v1/* reverse proxy. D13
+# (SKY-256) layers in the TF image, admin + https profiles, and final
+# operational polish.
+
+services:
+  postgres:
+    # Plain postgres for D6. D5 (SKY-249, secret store) swaps this to
+    # supabase/postgres for the Vault extension. The supabase image
+    # ships opinionated user setup (postgres-superuser + supabase-specific
+    # roles + supabase_map peer-auth) that would force changes here for
+    # zero benefit until Vault is actually in use.
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: tf
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: triagefactory
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      # Pre-creates the `auth` schema GoTrue migrates into. Only runs on
+      # a fresh data volume (postgres init-script semantics); subsequent
+      # boots reuse the existing schema.
+      - ./scripts/postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tf"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  gotrue:
+    image: supabase/gotrue:v2.189.0
+    environment:
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://tf:${POSTGRES_PASSWORD}@postgres:5432/triagefactory?search_path=auth
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: 9999
+      API_EXTERNAL_URL: ${TF_PUBLIC_URL}/auth/v1
+      GOTRUE_JWT_ALGORITHM: RS256
+      # GOTRUE_JWT_KEYS (JWKS w/ private+public) is the actual signing
+      # material when ALGORITHM=RS256. GOTRUE_JWT_SECRET is required by
+      # config validation even in asymmetric mode (legacy HS256 fallback);
+      # GoTrue prefers KEYS when both are set. Generated once via
+      # `./triagefactory jwk-init --write-env .env` — re-running rotates.
+      GOTRUE_JWT_KEYS: ${GOTRUE_JWT_KEYS}
+      GOTRUE_JWT_SECRET: unused-asymmetric-mode-uses-jwt-keys-above
+      GOTRUE_JWT_AUD: authenticated
+      GOTRUE_JWT_ISSUER: ${TF_PUBLIC_URL}/auth/v1
+      GOTRUE_SITE_URL: ${TF_PUBLIC_URL}
+      GOTRUE_URI_ALLOW_LIST: ${TF_PUBLIC_URL}
+      GOTRUE_DISABLE_SIGNUP: "false"
+      # Email confirmation requires SMTP, which we don't configure in v1
+      # (no mail infra dependency). Auto-confirming on signup means a
+      # password signup hands back a usable access_token immediately —
+      # useful for smoke tests and for self-host without SMTP. GitHub
+      # OAuth users are already provider-verified, so this only relaxes
+      # the password-signup path.
+      GOTRUE_MAILER_AUTOCONFIRM: "true"
+      GOTRUE_EXTERNAL_GITHUB_ENABLED: "true"
+      GOTRUE_EXTERNAL_GITHUB_CLIENT_ID: ${GH_CLIENT_ID}
+      GOTRUE_EXTERNAL_GITHUB_SECRET: ${GH_CLIENT_SECRET}
+      # GitHub's own redirect target — must match the OAuth app's
+      # authorized-callback config exactly. This is GoTrue's /callback,
+      # *not* the TF callback handler (which D7 sets per-request via the
+      # `redirect_to` query param on /authorize).
+      GOTRUE_EXTERNAL_GITHUB_REDIRECT_URI: ${TF_PUBLIC_URL}/auth/v1/callback
+    ports:
+      # Exposed so the host-side TF binary can reach JWKS and so GitHub
+      # OAuth callbacks can land. D7's reverse proxy moves this behind TF.
+      - "9999:9999"
+    depends_on:
+      postgres: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9999/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pg-data:

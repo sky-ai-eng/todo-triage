@@ -116,7 +116,6 @@ CREATE TABLE users (
     avatar_url        TEXT,
     timezone          TEXT NOT NULL DEFAULT 'UTC',
     default_org_id    TEXT,
-    external_id       TEXT,
     github_username   TEXT,
     -- jira_account_id is the Atlassian-side stable identifier
     -- (Cloud: accountId; Server/DC: legacy key). Used by the
