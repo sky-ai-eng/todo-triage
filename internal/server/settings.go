@@ -19,12 +19,12 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
-// jiraProjectKeyRe matches Jira's own project-key rule: a leading
-// uppercase letter followed by uppercase letters, digits, or
-// underscores. Keys arriving through the API are uppercased before
-// matching so users typing "sky" land on the same canonical form as
-// Jira's wire-side "SKY-123".
-var jiraProjectKeyRe = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
+// jiraProjectKeyRe matches Jira's standard project-key rule: a
+// leading uppercase letter followed by uppercase letters or digits.
+// Keys arriving through the API are uppercased before matching so
+// users typing "sky" land on the same canonical form as Jira's
+// wire-side "SKY-123".
+var jiraProjectKeyRe = regexp.MustCompile(`^[A-Z][A-Z0-9]*$`)
 
 // normalizeJiraProjectKey trims whitespace and uppercases. Used at
 // the HTTP boundary in handleSettingsPost (the write path) and in
