@@ -35,6 +35,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec"
 	"github.com/sky-ai-eng/triage-factory/cmd/install"
+	"github.com/sky-ai-eng/triage-factory/cmd/jwkinit"
 	"github.com/sky-ai-eng/triage-factory/cmd/migrate"
 	"github.com/sky-ai-eng/triage-factory/cmd/resume"
 	"github.com/sky-ai-eng/triage-factory/cmd/uninstall"
@@ -264,6 +265,9 @@ func main() {
 			return
 		case "migrate":
 			migrate.Handle(os.Args[2:])
+			return
+		case "jwk-init":
+			jwkinit.Handle(os.Args[2:])
 			return
 		case "-h", "--help", "help":
 			printTopLevelHelp()

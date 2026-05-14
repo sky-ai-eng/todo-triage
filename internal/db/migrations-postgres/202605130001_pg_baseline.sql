@@ -1310,7 +1310,6 @@ CREATE TABLE public.users (
     avatar_url text,
     timezone text DEFAULT 'UTC'::text NOT NULL,
     default_org_id uuid,
-    external_id text,
     github_username text,
     jira_account_id text,
     jira_display_name text,
@@ -2151,13 +2150,6 @@ CREATE INDEX team_agents_agent_idx ON public.team_agents USING btree (agent_id);
 --
 
 CREATE INDEX team_agents_team_idx ON public.team_agents USING btree (team_id);
-
-
---
--- Name: users_external_id_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE UNIQUE INDEX users_external_id_idx ON public.users USING btree (external_id) WHERE (external_id IS NOT NULL);
 
 
 --
