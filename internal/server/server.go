@@ -31,7 +31,7 @@ type Server struct {
 	eventHandlers      db.EventHandlerStore
 	agents             db.AgentStore     // SKY-261 D-Claims: resolves the org's agent for claim stamps
 	teamAgents         db.TeamAgentStore // SKY-261 D-Claims: re-checks team_agents.enabled on swipe-delegate / factory-delegate
-	users              db.UsersStore // SKY-264: github_username + display_name on the synthetic local user row
+	users              db.UsersStore     // SKY-264: github_username + display_name on the synthetic local user row
 	chains             db.ChainStore
 	mux                *http.ServeMux
 	static             fs.FS

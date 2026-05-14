@@ -38,17 +38,17 @@ type ChainStep struct {
 // call. Owns the shared worktree across all steps. Per-step state
 // lives on the runs table linked back via runs.chain_run_id.
 type ChainRun struct {
-	ID            string         `json:"id"`
-	ChainPromptID string         `json:"chain_prompt_id"`
-	TaskID        string         `json:"task_id"`
+	ID            string           `json:"id"`
+	ChainPromptID string           `json:"chain_prompt_id"`
+	TaskID        string           `json:"task_id"`
 	TriggerType   ChainTriggerType `json:"trigger_type"`
-	TriggerID     string         `json:"trigger_id,omitempty"`
-	Status        ChainRunStatus `json:"status"`
-	AbortReason   string         `json:"abort_reason,omitempty"`
-	AbortedAtStep *int           `json:"aborted_at_step,omitempty"`
-	WorktreePath  string         `json:"worktree_path"`
-	StartedAt     time.Time      `json:"started_at"`
-	CompletedAt   *time.Time     `json:"completed_at,omitempty"`
+	TriggerID     string           `json:"trigger_id,omitempty"`
+	Status        ChainRunStatus   `json:"status"`
+	AbortReason   string           `json:"abort_reason,omitempty"`
+	AbortedAtStep *int             `json:"aborted_at_step,omitempty"`
+	WorktreePath  string           `json:"worktree_path"`
+	StartedAt     time.Time        `json:"started_at"`
+	CompletedAt   *time.Time       `json:"completed_at,omitempty"`
 }
 
 // ChainVerdictOutcome is the tri-state result of a chain step's verdict.

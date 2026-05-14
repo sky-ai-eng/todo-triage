@@ -642,4 +642,3 @@ func (s *Spawner) isNonFinalChainStep(runID string) bool {
 	}
 	return int(stepIndex.Int64)+1 < len(steps)
 }
-

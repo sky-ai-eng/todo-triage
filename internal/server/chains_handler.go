@@ -133,14 +133,14 @@ func (s *Server) handleChainStepsPut(w http.ResponseWriter, r *http.Request) {
 // and verdicts so the run-detail UI can render the timeline in one
 // fetch instead of N+1.
 type chainRunResponse struct {
-	ChainRun *domain.ChainRun       `json:"chain_run"`
-	Steps    []chainRunStepView     `json:"steps"`
+	ChainRun *domain.ChainRun   `json:"chain_run"`
+	Steps    []chainRunStepView `json:"steps"`
 }
 
 type chainRunStepView struct {
-	Step    domain.ChainStep      `json:"step"`
-	Run     *domain.AgentRun      `json:"run,omitempty"`
-	Verdict *domain.ChainVerdict  `json:"verdict,omitempty"`
+	Step    domain.ChainStep     `json:"step"`
+	Run     *domain.AgentRun     `json:"run,omitempty"`
+	Verdict *domain.ChainVerdict `json:"verdict,omitempty"`
 }
 
 func (s *Server) handleChainRunGet(w http.ResponseWriter, r *http.Request) {
