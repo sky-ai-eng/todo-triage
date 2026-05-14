@@ -787,13 +787,15 @@ func issueToState(issue jiraclient.Issue, baseURL string, doneStatuses []string)
 	}
 	if issue.Fields.Assignee != nil {
 		snap.Assignee = issue.Fields.Assignee.DisplayName
-		// AccountID is empty for Jira Server/DC users whose API
-		// response uses `key` instead; the jira client struct only
-		// exposes `accountId` so legacy installs land at "" here and
-		// fall through the SKY-270 predicate matcher cleanly (the
-		// allowlist check on an empty string returns false unless the
-		// rule was authored with an empty entry).
-		snap.AssigneeAccountID = issue.Fields.Assignee.AccountID
+		// Prefer AccountID (Jira Cloud). Fall back to Name (Jira
+		// Server/DC username key) so predicates and inline-close
+		// comparisons work on both deployment types. This mirrors
+		// auth.JiraUser.StableID() which prefers accountId over key.
+		if issue.Fields.Assignee.AccountID != "" {
+			snap.AssigneeAccountID = issue.Fields.Assignee.AccountID
+		} else {
+			snap.AssigneeAccountID = issue.Fields.Assignee.Name
+		}
 	}
 	if issue.Fields.Priority != nil {
 		snap.Priority = issue.Fields.Priority.Name

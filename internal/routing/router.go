@@ -1139,10 +1139,18 @@ func (r *Router) closeCheckJiraReassigned(evt domain.Event, entityID string) boo
 	if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {
 		return false
 	}
-	if r.users != nil && meta.AssigneeAccountID != "" {
-		localAccountID, _, err := r.users.GetJiraIdentity(context.Background(), runmode.LocalDefaultUserID)
-		if err == nil && localAccountID != "" && strings.EqualFold(meta.AssigneeAccountID, localAccountID) {
-			return false // assigned to me — not a reassignment-away
+	if r.users != nil {
+		localAccountID, localDisplayName, err := r.users.GetJiraIdentity(context.Background(), runmode.LocalDefaultUserID)
+		if err == nil {
+			if meta.AssigneeAccountID != "" && localAccountID != "" && strings.EqualFold(meta.AssigneeAccountID, localAccountID) {
+				return false // assigned to me — not a reassignment-away
+			}
+			// Legacy snapshots (pre-fix) or Server/DC with no accountId: fall
+			// back to a case-insensitive display-name comparison so we don't
+			// auto-close tasks that are still assigned to the local user.
+			if meta.AssigneeAccountID == "" && meta.Assignee != "" && localDisplayName != "" && strings.EqualFold(meta.Assignee, localDisplayName) {
+				return false // display-name fallback — not a reassignment-away
+			}
 		}
 	}
 
