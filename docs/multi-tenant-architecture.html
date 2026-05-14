@@ -924,7 +924,7 @@ footer.status {
         <tr data-decision-id="anthropic-billing"><td class="area">Anthropic billing</td><td class="pick">BYO Anthropic key per org</td><td class="why">Org admin pastes key, all teams use it. No metering/Stripe complexity for v1.</td><td><button class="dpill">— click to review</button></td></tr>
         <tr data-decision-id="github-integration"><td class="area">GitHub integration</td><td class="pick">v1 (multi): <strong>GitHub App is canonical</strong> — it&apos;s the agent&apos;s identity. PAT-borrow fallback for small orgs/B2C. Local: user&apos;s PAT.</td><td class="why">The bot acts on GitHub as itself: opens PRs, comments on reviews, pushes commits. An org-installed GitHub App gives the bot a real identity — audit log shows &quot;Triage Factory Bot did X&quot;, scoped permissions, App-bucket rate limits, survives any individual user leaving. The schema also accepts <code>agents.github_pat_user_id</code> pointing at a designated user whose PAT the bot borrows — used in local mode (one user, one PAT, trivially) and as a B2C/small-org/trial fallback in multi mode (with documented audit-log caveats). PAT-only-multi-mode is supported but not the recommended path; the org-admin UI surfaces &quot;install GitHub App (recommended)&quot; on top of &quot;use a member&apos;s PAT&quot;.</td><td><button class="dpill">— click to review</button></td></tr>
         <tr data-decision-id="volume-strategy"><td class="area">Volume strategy</td><td class="pick">Named Docker volume <code>/data/</code>, holds only <strong>operational state</strong> (git worktrees) per org. Source-of-truth content lives in Postgres.</td><td class="why">Volume mounts into <strong>agent-runner</strong> only — TF web tier never has <code>/data</code>. <code>/data/orgs/&lt;id&gt;/worktrees/</code> contains bare clones (shared across runs in the org) + per-run dirs (<code>run-&lt;uuid&gt;/</code>, gVisor-bind-mounted). Project knowledge bases, agent memories, takeover state — all live as Postgres rows with RLS, materialized into worktree <code>_scratch/</code> dirs at run start and ingested back at completion. Web tier accesses content via SQL, not via internal API into agent-runner.</td><td><button class="dpill">— click to review</button></td></tr>
-        <tr data-decision-id="agent-isolation"><td class="area">Agent isolation</td><td class="pick">gVisor <code>runsc</code> rootless subprocess (multi) · direct subprocess (local) · agent-runner service holds the sandbox</td><td class="why">SDK <code>--add-dir</code> is advisory; bash bypasses it. Without kernel-level isolation, a delegated agent can read other orgs' worktrees and exfil <code>TF_SESSION_KEY</code> via <code>/proc/&lt;tf-pid&gt;/environ</code> (compromising sessions; org secrets stay safe in Vault). <code>runsc do --rootless</code> spawns each delegation as a child process inside gVisor's userspace kernel — no Docker socket, no <code>/dev/kvm</code>, no privileged mode. Single mechanism across docker-compose self-host AND Railway hosted. Linux required for hosted (Mac users → local mode). Kata-RuntimeClass via K8s is the upgrade path when SaaS scale forces bare-metal.</td><td><button class="dpill">— click to review</button></td></tr>
+        <tr data-decision-id="agent-isolation"><td class="area">Agent isolation</td><td class="pick">gVisor <code>runsc run</code> against a per-delegation OCI bundle, with the spawner owning netns/veth/iptables setup (multi) · direct subprocess (local) · agent-runner service holds the sandbox</td><td class="why">SDK <code>--add-dir</code> is advisory; bash bypasses it. Without kernel-level isolation, a delegated agent can read other orgs' worktrees on the shared disk, exfil <code>TF_SESSION_KEY</code> + <code>ANTHROPIC_API_KEY</code> via <code>/proc/&lt;tf-pid&gt;/environ</code>, and connect to Postgres directly with harvested creds (bypassing RLS). Validated 2026-05-14 on Fly Machines: <code>runsc run</code> against a per-run OCI bundle with alpine rootfs + bind-mounted worktree at <code>/work</code>, sandbox network set up via pre-created netns + veth + iptables NAT (CNI pattern — <code>runsc do</code>'s convenience auto-setup isn't available for OCI-bundle invocations). Image bundles <code>runsc</code> + <code>iptables</code> + <code>iproute2</code> + <code>procps</code>. Single mechanism across docker-compose self-host AND Fly.io hosted; Railway is incompatible (its seccomp + AppArmor profiles block the <code>/proc/self/exe</code> re-exec at the heart of gVisor's sandbox setup, and neither knob is user-tunable on the PaaS). Linux required for hosted (Mac users → local mode). Kata-RuntimeClass via K8s is the upgrade path when SaaS scale forces bare-metal.</td><td><button class="dpill">— click to review</button></td></tr>
         <tr data-decision-id="secret-storage"><td class="area">Org secret storage</td><td class="pick">Supabase Vault (multi) via SECURITY INVOKER wrapper functions · OS keychain (local)</td><td class="why">Don't roll our own AES-GCM envelope for org-level secrets (PATs, API tokens, future GH App keys). <code>supabase_vault</code> ships with the <code>supabase/postgres</code> image, encrypts at rest via pgsodium, manages keys natively. Vault tables sit in the <code>vault</code> schema (inaccessible to PostgREST/SDK clients) — we add SECURITY INVOKER wrappers in <code>public</code> (<code>vault_put_org_secret</code>, <code>vault_get_org_secret</code>, <code>vault_delete_org_secret</code>) that org-prefix the secret name (<code>org/&lt;uuid&gt;/&lt;key&gt;</code>) and gate via grants to <code>tf_app</code> only. Pattern lifted from <code>~/Sky/skynet/src/skynet/services/vault.py</code>. <strong>Sessions stay app-layer-encrypted</strong> — too high-frequency for a vault function call per request.</td><td><button class="dpill">— click to review</button></td></tr>
         <tr data-decision-id="multi-takeover"><td class="area">Multi-mode takeover</td><td class="pick">v1: deferred · v2: same-sandbox handover via gVisor-wrapped web shell (D18)</td><td class="why">Conceptually, takeover is &quot;transfer the task&apos;s claim from the agent to a human&quot; — the same DB transition as any task reassignment, with the agent&apos;s in-flight sandbox handed over instead of torn down. Today&apos;s takeover hands the worktree to a human with raw shell access — fundamentally outside any sandbox. In multi mode that&apos;s an instant cross-tenant escape vector (user can <code>ls /data/orgs/</code> and see every other org&apos;s worktrees). v1 ships with takeover disabled in multi mode; runs that yield surface as <code>awaiting_input</code> with text-reply resume only. v2 adds a web shell (xterm.js + websocket) that <code>runsc exec</code>&apos;s bash into the <em>same gVisor sandbox</em> the agent was running in — user inherits the agent&apos;s isolation. Tarball/local-work model rejected (loses observability, breaks org-scoped GitHub App creds).</td><td><button class="dpill">— click to review</button></td></tr>
         <tr data-decision-id="auth-providers-v1"><td class="area">Auth providers</td><td class="pick">v1: GitHub OAuth signin only · v2: Entra SAML (D16) for enterprise rollout</td><td class="why">v1 ships with GitHub OAuth as the sole signin path (every dev has a GitHub account; covers self-host + early hosted use). SAML deferred — needed when corp IT requires SSO via their identity provider, but that's a v2 enterprise-rollout concern, not a v1-ship blocker.</td><td><button class="dpill">— click to review</button></td></tr>
@@ -1080,7 +1080,7 @@ footer.status {
         <tr><td class="area">Secrets</td><td>OS keychain (user&apos;s PAT)</td><td>Supabase Vault (org-scoped, App private key + fallback PAT material)</td></tr>
         <tr><td class="area">Worktree path</td><td><code>~/.triagefactory/worktrees/</code></td><td><code>/data/orgs/&lt;org_id&gt;/worktrees/</code></td></tr>
         <tr><td class="area">SDK</td><td>Runtime install on first run</td><td>Bundled at image build</td></tr>
-        <tr><td class="area">Sandboxing</td><td>Direct subprocess (no gVisor)</td><td><code>runsc do --rootless</code> per run</td></tr>
+        <tr><td class="area">Sandboxing</td><td>Direct subprocess (no gVisor)</td><td><code>runsc run</code> per delegation against an OCI bundle; spawner pre-creates the netns + veth + iptables NAT</td></tr>
         <tr><td class="area">Polling</td><td>Per-team using the agent&apos;s creds (= the user&apos;s PAT)</td><td>Per-org using the agent&apos;s App install</td></tr>
         <tr><td class="area">Concurrent runs</td><td>Unlimited</td><td>Per-org cap</td></tr>
         <tr><td class="area">Webhooks</td><td>Not applicable</td><td><code>/api/webhooks/*</code> (v2)</td></tr>
@@ -1319,7 +1319,7 @@ Set-Cookie: sid=<span class="num">a1b2c3d4-...</span>;     <span class="com">// 
   <h2>Service topology (multi mode)</h2>
   <p class="lede">Three required services in the default compose. Two optional services behind <code>--profile</code> flags. No Studio, no Kong, no Realtime in v1.</p>
 
-  <p class="lede" style="margin-bottom: 12px;">Hover a service to highlight its connections. <strong>agent-runner</strong> pulls queued delegations from <code>runs</code>, mounts <code>tf-data</code>, and spawns each delegation as a <code>runsc</code> rootless subprocess (gVisor) — kernel-level isolation without Docker-in-Docker or KVM. TF web tier never touches worktrees and has no privilege to spawn agents.</p>
+  <p class="lede" style="margin-bottom: 12px;">Hover a service to highlight its connections. <strong>agent-runner</strong> pulls queued delegations from <code>runs</code>, mounts <code>tf-data</code>, and spawns each delegation as a <code>runsc run</code> sandbox against a per-run OCI bundle — kernel-level isolation without Docker-in-Docker or KVM. Per-delegation netns + veth + iptables NAT is set up by the spawner before each run (CNI pattern). TF web tier never touches worktrees and has no privilege to spawn agents.</p>
 
   <div class="svg-diagram">
     <svg viewBox="0 0 920 580" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Service topology with gVisor agent runner" style="min-width: 760px;">
@@ -1355,7 +1355,7 @@ Set-Cookie: sid=<span class="num">a1b2c3d4-...</span>;     <span class="com">// 
         <text class="topo-node-desc" x="460" y="252" text-anchor="middle">queue puller · /data mounted</text>
         <!-- Inset: gVisor sandbox -->
         <rect x="356" y="262" width="208" height="22" rx="4" fill="rgba(244, 114, 182, 0.10)" stroke="rgba(244, 114, 182, 0.50)" stroke-dasharray="3 2"/>
-        <text class="topo-node-desc" x="460" y="277" text-anchor="middle" style="fill: rgba(244, 114, 182, 0.95); font-family: var(--mono); font-size: 10px;">runsc rootless · per delegation</text>
+        <text class="topo-node-desc" x="460" y="277" text-anchor="middle" style="fill: rgba(244, 114, 182, 0.95); font-family: var(--mono); font-size: 10px;">runsc run · OCI bundle · per delegation</text>
       </g>
 
       <!-- postgres -->
@@ -1553,7 +1553,7 @@ Set-Cookie: sid=<span class="num">a1b2c3d4-...</span>;     <span class="com">// 
   </div>
 
   <h3>Isolation boundary (multi mode only)</h3>
-  <p style="font-size: 13px; color: var(--muted);">In multi mode <code>/data/</code> is mounted into <strong>agent-runner only</strong>, not TF's web tier. When agent-runner claims a queued delegation, it spawns a <code>runsc do --rootless</code> child process. The agent's syscalls go through gVisor's userspace kernel — the host kernel never executes them directly. The sandboxed view:</p>
+  <p style="font-size: 13px; color: var(--muted);">In multi mode <code>/data/</code> is mounted into <strong>agent-runner only</strong>, not TF's web tier. When agent-runner claims a queued delegation, it builds a per-run OCI bundle (alpine minirootfs + spec) and invokes <code>runsc run</code> against it, after pre-creating the netns + veth + iptables NAT. The agent's syscalls go through gVisor's userspace kernel — the host kernel never executes them directly. The sandboxed view:</p>
 
   <pre class="tree" style="margin-top: 8px;">
 <span class="meta"># What the gVisor-sandboxed agent process sees:</span>
@@ -1565,20 +1565,31 @@ Set-Cookie: sid=<span class="num">a1b2c3d4-...</span>;     <span class="com">// 
 │   └── <span class="dir">project-knowledge/</span>       <span class="meta"># materialized KB (org-scoped, copied in by runner)</span>
 └── <span class="meta">…</span>
 
+<span class="dir">/bin/, /etc/, /usr/, ...</span>     <span class="meta"># alpine minirootfs (~5MB) baked into the bundle</span>
 <span class="dir">/tmp/</span>                          <span class="meta"># tmpfs, ephemeral, sandbox-private</span>
-<span class="dir">/opt/sdk/</span>                      <span class="meta"># read-only bind-mount of agent-runner's bundled SDK</span>
-                                <span class="meta"># NO other /data/orgs paths (mount-isolated to this run only)</span>
+                                <span class="meta"># NO host filesystem (rootfs is the bundle's, not the host's)</span>
+                                <span class="meta"># NO other /data/orgs paths (only /work is bind-mounted)</span>
                                 <span class="meta"># NO /proc/&lt;agent-runner-pid&gt;/environ (sandbox sees only its own /proc)</span>
-                                <span class="meta"># NO env vars from agent-runner (clean env on spawn)</span>
-                                <span class="meta"># NO network except: api.anthropic.com + api.github.com (iptables ACL)</span>
+                                <span class="meta"># NO env vars from agent-runner (OCI spec's process.env is explicit)</span>
+                                <span class="meta"># NO localhost reach to parent services (sandbox's lo ≠ parent's lo)</span>
+                                <span class="meta"># NO network except outbound NAT, filtered by iptables FORWARD rules</span>
   </pre>
 
   <div class="callout">
-    <strong>What this blocks:</strong> <code>find /</code>, <code>cat /proc/*/environ</code>, <code>nsenter</code>, kernel-CVE-based escapes — none of these reach the host kernel because gVisor intercepts every syscall in userspace. The <code>TF_SESSION_KEY</code> env var, other orgs' worktrees, the Vault-encrypted org secrets — all live outside the sandbox's namespace. Prompt-injection attacks aimed at exfiltration cap out at "what's already in this run's working directory."
+    <strong>What this blocks:</strong> <code>find /</code>, <code>cat /proc/*/environ</code>, <code>nsenter</code>, kernel-CVE-based escapes, <code>psql -h 127.0.0.1</code> against the parent's Postgres — none of these reach the host kernel or services because gVisor intercepts every syscall in userspace and the sandbox's netns is isolated from the parent's. The <code>TF_SESSION_KEY</code> env var, <code>ANTHROPIC_API_KEY</code>, other orgs' worktrees, the Vault-encrypted org secrets — all live outside the sandbox. Prompt-injection attacks aimed at exfiltration cap out at "what's already in this run's working directory and what the per-run scoped credentials can reach."
   </div>
 
-  <div class="callout callout--warn" style="margin-top: 8px;">
-    <strong>Pre-flight check:</strong> <code>runsc</code> rootless requires unprivileged user namespaces (<code>kernel.unprivileged_userns_clone=1</code>, no seccomp blocking <code>CLONE_NEWUSER</code>). Most modern Linux container runtimes allow this — verify on Railway with a 10-line smoke test before committing. If blocked, fall back path is documented in D10.
+  <div class="callout" style="margin-top: 8px;">
+    <strong>Validated 2026-05-14.</strong> Probe scripts and the full validation log live at <code>docs/specs/sky-254-runsc-validation/</code>. Key learnings:
+    <ul style="margin: 6px 0 0; padding-left: 18px; font-size: 13px;">
+      <li><strong>Hosted target:</strong> Fly.io. Railway is incompatible — its container seccomp + AppArmor profiles block <code>runsc</code>'s <code>/proc/self/exe</code> re-exec and neither knob is user-tunable on the PaaS.</li>
+      <li><strong>Fly Machines</strong> are Firecracker microVMs with <code>Seccomp: 0</code>, full <code>CapEff: 0x1ffffffffff</code>, and a dedicated kernel build. The Machine boundary IS the primary tenant-isolation layer; <code>runsc</code> inside is defense-in-depth.</li>
+      <li><strong>Invocation model:</strong> <code>runsc run</code> against a real OCI bundle, NOT <code>runsc do</code>. <code>runsc do</code> is convenience for ad-hoc testing; it inherits the host filesystem and is not production-safe.</li>
+      <li><strong>Caller owns network setup:</strong> unlike <code>runsc do</code>, <code>runsc run --network=sandbox</code> does not auto-create the veth/route inside the sandbox netns. The spawner pre-creates the netns + veth, configures it via <code>ip netns exec</code>, and sets up iptables MASQUERADE — standard CNI pattern. See <code>docs/specs/sky-254-runsc-validation/precns-test.sh</code> for the validated recipe.</li>
+      <li><strong>Required flags:</strong> <code>--ignore-cgroups</code> (Fly uses cgroup v2; runsc release default expects v1). DNS in the sandbox uses public resolvers (<code>1.1.1.1</code> / <code>8.8.8.8</code>) — Fly's internal <code>fdaa::3</code> isn't reachable through the sandbox's IPv4 NAT.</li>
+      <li><strong>Image deps:</strong> <code>runsc</code> binary + <code>iptables</code> + <code>iproute2</code> + <code>procps</code> (for <code>sysctl</code>).</li>
+      <li><strong>Host requirements (self-host):</strong> Linux kernel ≥ 5.4, user namespaces enabled (default everywhere), TF container needs <code>--cap-add SYS_ADMIN --cap-add NET_ADMIN --security-opt apparmor=unconfined --security-opt seccomp=unconfined</code>.</li>
+    </ul>
   </div>
 </section>
 
@@ -2777,12 +2788,21 @@ POST /admin/sso/providers
     </summary>
     <div class="domain__body">
       <h5>Why</h5>
-      <p>SDK <code>--add-dir</code> only restricts tool-mediated file access; bash bypasses it. In multi mode, an unsandboxed agent can read other orgs' worktrees, dump <code>TF_SESSION_KEY</code> from agent-runner's <code>/proc/&lt;pid&gt;/environ</code> (compromising every active session), and stream cross-tenant data into Anthropic's API via run logs. This domain installs gVisor's <code>runsc</code> rootless as the per-delegation kernel-isolation layer.</p>
+      <p>SDK <code>--add-dir</code> only restricts tool-mediated file access; bash bypasses it. In multi mode, an unsandboxed agent can read other orgs' worktrees on the shared host disk, dump <code>TF_SESSION_KEY</code> + <code>ANTHROPIC_API_KEY</code> + <code>TF_DATABASE_URL</code> from agent-runner's <code>/proc/&lt;pid&gt;/environ</code>, connect to Postgres directly with harvested credentials (bypassing RLS), and stream cross-tenant data into Anthropic's API via run logs. This domain installs gVisor's <code>runsc</code> as the per-delegation kernel-isolation layer.</p>
+
+      <h5>Validated 2026-05-14</h5>
+      <p>The full validation log (Dockerfile, fly.toml, probe scripts, recipe) lives at <code>docs/specs/sky-254-runsc-validation/</code>. Summary:</p>
+      <ul>
+        <li><strong>Hosted target:</strong> Fly.io. Railway is incompatible — its seccomp + AppArmor profiles block <code>runsc</code>'s <code>/proc/self/exe</code> re-exec, and neither knob is user-tunable on the PaaS. Fly Machines are themselves Firecracker microVMs (<code>Seccomp: 0</code>, full caps, dedicated kernel) — gVisor inside a Machine works as documented.</li>
+        <li><strong>Invocation:</strong> <code>runsc run</code> against a real OCI bundle, NOT <code>runsc do</code>. <code>runsc do</code> inherits the host filesystem and is convenience only. The bundle ships its own rootfs (alpine minirootfs, ~5MB) and bind-mounts only the per-run worktree at <code>/work</code>.</li>
+        <li><strong>Caller owns network setup:</strong> <code>runsc run --network=sandbox</code> does NOT auto-create the veth like <code>runsc do</code> does. The spawner pre-creates the netns + veth + iptables NAT (CNI pattern) and points the OCI spec at the pre-created netns via <code>linux.namespaces[].path</code>.</li>
+        <li><strong>Required flags:</strong> <code>--ignore-cgroups</code> (Fly uses cgroup v2; runsc release default expects v1). Public DNS resolvers in the sandbox (<code>1.1.1.1</code> / <code>8.8.8.8</code>) — Fly's internal <code>fdaa::3</code> isn't reachable through the sandbox's IPv4 NAT.</li>
+      </ul>
 
       <h5>Why this approach (gVisor over alternatives)</h5>
-      <p>One sandbox mechanism that runs everywhere we deploy:</p>
       <ul>
-        <li><strong>No Docker socket needed</strong> — Railway / managed PaaS don't allow it</li>
+        <li><strong>Single mechanism across hosted + self-host</strong> — Fly Machines and customer Linux hosts both run the same image; nested gVisor works in both</li>
+        <li><strong>No Docker-in-Docker</strong> — no Docker socket required at runtime</li>
         <li><strong>No <code>/dev/kvm</code> needed</strong> — Kata + Firecracker would force bare-metal-only deployments</li>
         <li><strong>No external sandbox service</strong> — keeps customer data inside the deployment (corp VPN won't tolerate Modal/E2B), avoids per-second pricing at SaaS scale</li>
         <li><strong>Tier 3 isolation</strong> — agent's syscalls go through gVisor's userspace kernel; host kernel CVEs don't apply to most paths</li>
@@ -2790,36 +2810,60 @@ POST /admin/sso/providers
       </ul>
       <p>Cost: ~10–30% syscall overhead on syscall-heavy code. For our workload (mostly waiting on Anthropic API responses), net delegation slowdown ≈ 5–8%.</p>
 
-      <h5>Pre-flight validation (do this first)</h5>
-      <p><strong>Spike:</strong> deploy a 10-line Railway service whose Dockerfile installs <code>runsc</code> and runs <code>runsc do --rootless -- echo hello</code> as its entrypoint. If it succeeds, the architecture is committed. If Railway blocks unprivileged user namespaces (<code>EPERM</code> on <code>clone(CLONE_NEWUSER)</code>), the contingency is to add a Modal backend specifically for the hosted SaaS deployment — but this should not block self-host or VPN deployments either way.</p>
+      <h5>Per-delegation pipeline (12 steps)</h5>
+      <p>The spawner runs all of this per-delegation. In Go: ~200-300 LOC using <code>github.com/vishvananda/netlink</code>. See <code>docs/specs/sky-254-runsc-validation/precns-test.sh</code> for the validated shell-script equivalent.</p>
+      <pre class="tree" style="margin-top: 8px;">
+<span class="meta"># Per-delegation setup (in order):</span>
+1.  Create per-run worktree dir          <span class="meta"># exists today; no change</span>
+2.  ip netns add tf-&lt;run_id&gt;
+3.  ip link add vh-&lt;id&gt; type veth peer name vs-&lt;id&gt;
+4.  ip link set vs-&lt;id&gt; netns tf-&lt;run_id&gt;
+5.  Host-side veth: addr + up
+6.  Sandbox-side: addr + route + lo up   <span class="meta"># via `ip netns exec`</span>
+7.  Write /var/run/netns/tf-&lt;run_id&gt;/etc/resolv.conf → 1.1.1.1 / 8.8.8.8
+8.  iptables -t nat -A POSTROUTING -s &lt;subnet&gt; -o eth0 -j MASQUERADE
+9.  iptables -A FORWARD -s &lt;subnet&gt; -d &lt;internal-services&gt; -j DROP
+10. Generate OCI bundle: rootfs (alpine) + spec with linux.namespaces[].path=/var/run/netns/tf-&lt;run_id&gt;
+11. runsc --ignore-cgroups --network=sandbox run --bundle &lt;dir&gt; &lt;id&gt;
+12. On exit: cleanup netns + veth + iptables + worktree
+      </pre>
 
-      <h5>What changes</h5>
+      <h5>What changes (Go side)</h5>
       <ul>
-        <li>New compose service: <code>agent-runner</code>. Same Dockerfile as TF web tier with a different entrypoint plus <code>runsc</code> bundled. <code>tf-data</code> volume mounts into this service only — TF web tier has no <code>/data</code>.</li>
+        <li>New compose service: <code>agent-runner</code>. Same Dockerfile as TF web tier with a different entrypoint plus <code>runsc</code>, <code>iptables</code>, <code>iproute2</code>, <code>procps</code> bundled. <code>tf-data</code> volume mounts into this service only — TF web tier has no <code>/data</code>.</li>
+        <li>New package <code>internal/sandbox</code>:
+          <ul>
+            <li><code>Prepare(runID, subnet, blocklist) (*Sandbox, error)</code> — runs steps 2-9</li>
+            <li><code>Spawn(s *Sandbox, bundle Bundle, env []string, args []string) (*exec.Cmd, error)</code> — generates OCI spec + invokes <code>runsc run</code></li>
+            <li><code>Cleanup(s *Sandbox)</code> — runs step 12; idempotent</li>
+          </ul>
+        </li>
         <li>Queue-pull dispatch: agent-runner replicas poll <code>runs</code> with <code>SELECT … FROM runs WHERE status='queued' FOR UPDATE SKIP LOCKED LIMIT N</code>. No HTTP API between TF and runner — postgres IS the queue.</li>
         <li>Bare-cache management: agent-runner ensures <code>/data/orgs/&lt;org&gt;/worktrees/&lt;repo&gt;.git</code> exists (lazy <code>git clone --mirror</code> on first run for that repo); a background sync runs <code>git remote update</code> periodically.</li>
         <li>Per-delegation prep: <code>git clone /data/orgs/&lt;org&gt;/worktrees/&lt;repo&gt;.git /data/orgs/&lt;org&gt;/worktrees/run-&lt;id&gt; &amp;&amp; git checkout &lt;branch&gt;</code> — local-to-local, ~1–2s for typical PRs. Per-run clone has a self-contained <code>.git</code>.</li>
-        <li>Per-delegation spawn: <code>runsc do --rootless --network=host --bind=/data/orgs/&lt;org&gt;/worktrees/run-&lt;id&gt;:/work --bind=/opt/triagefactory/sdk:/opt/sdk:ro -- node /opt/sdk/wrapper.mjs …</code></li>
-        <li>Refactor <code>internal/agentproc.Run()</code>: when <code>TF_MODE=multi</code>, prefix the existing argv with <code>runsc do --rootless</code> + bind args. When <code>TF_MODE=local</code>, no prefix — direct subprocess as today. ~30 LOC delta.</li>
-        <li>Egress allowlist: iptables (or nftables) on agent-runner restricts outbound to <code>api.anthropic.com</code> + per-run-injected GitHub App host. Block everything else.</li>
-        <li>Per-run credentials: agent-runner mints a scoped GitHub App installation token (D11), injects via the runsc subprocess's env vars only. agent-runner's own env never holds per-run creds.</li>
-        <li>Concurrency cap: each replica handles up to <code>N</code> concurrent runsc subprocesses (env-tuned, default 5). Memory budget = (replica memory) / N.</li>
-        <li>Cleanup: <code>runsc</code> exits → agent-runner removes <code>/data/orgs/&lt;org&gt;/worktrees/run-&lt;id&gt;/</code>. Startup-time orphan reaper handles crashed-replica leftovers.</li>
+        <li>Refactor <code>internal/agentproc.Run()</code>: when <code>runmode.Current() == ModeMulti</code>, route through <code>internal/sandbox</code>. When local, direct subprocess as today. ~30 LOC delta.</li>
+        <li>Egress allowlist: iptables FORWARD rules on agent-runner restrict outbound to <code>api.anthropic.com</code> + per-run-injected GitHub App host. Block everything else (including parent's internal IPs for Postgres / GoTrue admin).</li>
+        <li>Per-run credentials: spawner mints a scoped GitHub App installation token (D11), injects via the OCI spec's <code>process.env</code> only. Spawner's own env never leaks via inheritance — explicit env, no propagation.</li>
+        <li>Concurrency cap: each replica handles up to <code>N</code> concurrent runsc sandboxes (env-tuned, default 5). Memory budget = (replica memory) / N.</li>
+        <li>Cleanup: <code>runsc</code> exits → spawner removes netns, veth, iptables rules, and <code>/data/orgs/&lt;org&gt;/worktrees/run-&lt;id&gt;/</code>. Startup-time orphan reaper scans <code>/var/run/netns/tf-*</code> for crashed-replica leftovers.</li>
       </ul>
 
-      <h5>Future: scale path</h5>
-      <p>If/when we outgrow Railway-on-gVisor (multi-cloud SaaS, much higher concurrency, or specific compliance asks): migrate the hosted deployment to bare-metal K8s, change <code>runsc do --rootless</code> to a Pod with <code>runtimeClassName: kata-containers</code>. Same agent-runner code; one-line manifest change. Self-host deployments continue on docker-compose + gVisor as before.</p>
+      <h5>Future: scale paths</h5>
+      <ul>
+        <li><strong>Ephemeral Fly Machine per delegation.</strong> Spawn a fresh Firecracker microVM per agent run via the Fly Machines API. ~300ms boot per Fly docs. Stronger isolation, more orchestration complexity. The <code>internal/sandbox</code> interface abstracts so we can swap the per-delegation backend without touching agent code.</li>
+        <li><strong>Kata Containers via K8s</strong> for self-host customers who want hypervisor-level isolation. Same agent-runner code; deployment manifest swap.</li>
+      </ul>
 
       <h5>Acceptance</h5>
       <ul>
-        <li><strong>Pre-flight:</strong> Railway smoke test passes — <code>runsc do --rootless</code> runs under Railway's container runtime</li>
-        <li><strong>Filesystem escape:</strong> agent doing <code>find /</code> sees <code>/work</code>, <code>/tmp</code>, <code>/opt/sdk</code>, gVisor's synthetic <code>/proc</code> — nothing else from the host</li>
-        <li><strong>Env leak:</strong> <code>cat /proc/1/environ</code> from inside the sandbox shows only the per-run injected env (no <code>TF_SESSION_KEY</code>, no <code>TF_DATABASE_URL</code>, no agent-runner-side secrets)</li>
-        <li><strong>Cross-tenant:</strong> two parallel runs in different orgs cannot reach each other's worktrees even with hand-crafted bash escape attempts</li>
-        <li><strong>Egress:</strong> <code>curl example.com</code> fails; <code>curl api.anthropic.com</code> succeeds</li>
-        <li><strong>Kernel-CVE simulation:</strong> a syscall that exploits a known kernel-namespace bug returns <code>EPERM</code> from gVisor (the host kernel never sees it)</li>
-        <li><strong>Cleanup:</strong> SIGTERM to agent-runner kills all child runsc processes within 5s; orphan worktree dirs reaped at next startup</li>
-        <li><strong>Performance:</strong> end-to-end delegation wall-clock time within 10% of local-mode baseline (CPU-bound work; I/O-heavy delegations should be closer to 5%)</li>
+        <li><strong>Filesystem escape:</strong> agent doing <code>find /</code> sees <code>/work</code> + alpine rootfs + gVisor's synthetic <code>/proc</code> — nothing else from the host. <em>Validated.</em></li>
+        <li><strong>Env leak:</strong> <code>cat /proc/1/environ</code> from inside the sandbox shows only the per-run injected env (no <code>TF_SESSION_KEY</code>, no <code>TF_DATABASE_URL</code>, no <code>ANTHROPIC_API_KEY</code>). <em>Validated via <code>env -i</code> curation in the OCI spec.</em></li>
+        <li><strong>Cross-tenant:</strong> two parallel runs in different orgs cannot reach each other's worktrees even with hand-crafted bash escape attempts.</li>
+        <li><strong>Localhost isolation:</strong> sandbox cannot reach parent's <code>127.0.0.1:5432</code> (Postgres) or any other parent loopback service. <em>Validated.</em></li>
+        <li><strong>Egress allowlist:</strong> sandbox can reach <code>api.anthropic.com</code> + <code>api.github.com</code>; cannot reach attacker-controlled hosts.</li>
+        <li><strong>Kernel-CVE simulation:</strong> a syscall that exploits a known kernel-namespace bug returns <code>EPERM</code> from gVisor (the host kernel never sees it).</li>
+        <li><strong>Cleanup:</strong> SIGTERM to agent-runner kills all child runsc processes within 5s; orphan netns + worktree dirs reaped at next startup.</li>
+        <li><strong>Performance:</strong> end-to-end delegation wall-clock time within 10% of local-mode baseline (CPU-bound work; I/O-heavy delegations should be closer to 5%).</li>
       </ul>
     </div>
   </details>

@@ -1,0 +1,17 @@
+# Fly App for the runsc-on-Fly-Machines probe. Mirrors the Railway test
+# (same Dockerfile + probe.sh) but lands on a Firecracker microVM
+# instead of a shared-host container, so we expect runsc to actually
+# work here.
+
+app = "tf-runsc-probe-39b851"
+primary_region = "iad"   # us-east, low-latency from most CI / dev networks
+
+[build]
+  dockerfile = "Dockerfile"
+
+# Worker Machine — no HTTP service, no public IP needed.
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+  cpus = 1
