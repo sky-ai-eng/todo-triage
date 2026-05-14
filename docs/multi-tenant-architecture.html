@@ -1565,7 +1565,7 @@ Set-Cookie: sid=<span class="num">a1b2c3d4-...</span>;     <span class="com">// 
 │   └── <span class="dir">project-knowledge/</span>       <span class="meta"># materialized KB (org-scoped, copied in by runner)</span>
 └── <span class="meta">…</span>
 
-<span class="dir">/bin/, /etc/, /usr/, ...</span>     <span class="meta"># alpine minirootfs (~5MB) baked into the bundle</span>
+<span class="dir">/bin/, /etc/, /usr/, ...</span>     <span class="meta"># alpine minirootfs (~5MB), extracted into the bundle rootfs at run time per delegation</span>
 <span class="dir">/tmp/</span>                          <span class="meta"># tmpfs, ephemeral, sandbox-private</span>
                                 <span class="meta"># NO host filesystem (rootfs is the bundle's, not the host's)</span>
                                 <span class="meta"># NO other /data/orgs paths (only /work is bind-mounted)</span>
