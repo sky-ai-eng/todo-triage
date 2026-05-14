@@ -221,14 +221,24 @@ func ensureTrailingNewline(f *os.File) error {
 const usage = `triagefactory jwk-init — generate the GoTrue RS256 signing key.
 
 USAGE
-  triagefactory jwk-init                       print JWKS to stdout (pretty)
-  triagefactory jwk-init --write-env .env      append GOTRUE_JWT_KEYS=<jwks> to .env
+  triagefactory jwk-init                       print JWKS + a fresh random
+                                               GOTRUE_JWT_SECRET to stdout
+  triagefactory jwk-init --write-env .env      append GOTRUE_JWT_KEYS=<jwks>
+                                               AND GOTRUE_JWT_SECRET=<hex>
+                                               to .env (both are required by
+                                               GoTrue's config validation)
   triagefactory jwk-init --verify              read JWT from stdin; verify
                                                against TF_GOTRUE_JWKS_URL +
                                                TF_GOTRUE_ISSUER; print claims
 
 NOTES
   The JWKS contains private material — treat the output like a secret. Only
-  the public side is published by GoTrue at /.well-known/jwks.json.
-  Re-running rotates the key; restart GoTrue to pick up the new value.
+  the public side is published by GoTrue at /.well-known/jwks.json. The
+  GOTRUE_JWT_SECRET is the legacy HS256 fallback that GoTrue config
+  validation still requires even under RS256; the value isn't used for
+  signing but is required to be non-empty.
+
+  Re-running rotates the key; recreate the GoTrue container
+  (docker compose up -d gotrue — NOT docker compose start) to pick up the
+  new env.
 `

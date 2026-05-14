@@ -1,11 +1,16 @@
 // Package verify wraps a GoTrue JWKS endpoint and verifies access tokens
 // produced by it.
 //
-// Multi-mode only. Local-mode (TF_MODE=local) never constructs a Verifier —
-// see runmode in main.go for the gate. The package deliberately does not
-// import anything from internal/auth (keychain) since the concerns are
-// orthogonal: keychain stores credentials the operator owns; this verifies
-// tokens GoTrue mints for end-users.
+// The server-side auth path is multi-mode only — local-mode (TF_MODE=local)
+// boots without a GoTrue dependency and the request-handler middleware never
+// constructs a Verifier. The `triagefactory jwk-init --verify` CLI smoke
+// helper does construct one regardless of mode (against an explicitly
+// configured TF_GOTRUE_JWKS_URL); that path exists purely for operator
+// debugging and doesn't touch the local server.
+//
+// The package deliberately does not import anything from internal/auth
+// (keychain) since the concerns are orthogonal: keychain stores credentials
+// the operator owns; this verifies tokens GoTrue mints for end-users.
 package verify
 
 import (

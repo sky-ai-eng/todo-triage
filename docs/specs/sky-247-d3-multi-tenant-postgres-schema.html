@@ -524,11 +524,13 @@ $$;
   avatar_url      <span class="kw">TEXT</span>,
   timezone        <span class="kw">TEXT NOT NULL DEFAULT</span> <span class="str">'UTC'</span>,
   default_org_id  <span class="kw">UUID REFERENCES</span> orgs(id) <span class="kw">ON DELETE SET NULL</span>,
-  external_id     <span class="kw">TEXT</span>,  <span class="com">-- IdP NameID/sub for SAML/OIDC users; NULL for non-SSO</span>
+  <span class="com">-- NOTE: no external_id column. SAML/OIDC identity mapping is owned by GoTrue's</span>
+  <span class="com">-- auth.identities table (provider + provider_id per user). SCIM externalId is</span>
+  <span class="com">-- per-provisioning-client = per-org, so it belongs on org_memberships when D17</span>
+  <span class="com">-- lands — not here. See multi-tenant-architecture.html §11 (SCIM).</span>
   created_at      <span class="kw">TIMESTAMPTZ NOT NULL DEFAULT</span> now(),
   updated_at      <span class="kw">TIMESTAMPTZ NOT NULL DEFAULT</span> now()
 );
-<span class="kw">CREATE UNIQUE INDEX</span> users_external_id_idx <span class="kw">ON</span> users(external_id) <span class="kw">WHERE</span> external_id <span class="kw">IS NOT NULL</span>;
 
 <span class="kw">CREATE TABLE</span> orgs (
   id               <span class="kw">UUID PRIMARY KEY DEFAULT</span> gen_random_uuid(),

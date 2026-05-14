@@ -12,8 +12,14 @@
 # Prerequisites — see docs/self-host-setup.md:
 #   1. Create a GitHub OAuth app with callback ${TF_PUBLIC_URL}/auth/v1/callback
 #   2. cp .env.example .env, fill in the placeholders
-#   3. ./triagefactory jwk-init --write-env .env   (one-shot; rotates if re-run)
+#   3. ./triagefactory jwk-init --write-env .env   (writes GOTRUE_JWT_KEYS + GOTRUE_JWT_SECRET)
 #   4. docker compose up -d
+#
+# To rotate the JWT signing key after first boot: remove the existing
+# GOTRUE_JWT_KEYS / GOTRUE_JWT_SECRET lines from .env, re-run jwk-init,
+# then `docker compose up -d gotrue` (NOT `docker compose start gotrue` —
+# the start subcommand reuses the existing container's cached env and the
+# new keys would not load).
 #
 # D6 ships the substrate (gotrue + JWKS verify). D7 (SKY-251) adds the
 # OAuth handlers, /api/me, sessions + /auth/v1/* reverse proxy. D13
@@ -36,7 +42,9 @@ services:
     # role that TF's RLS app pool will use.
     image: supabase/postgres:15.14.1.121
     environment:
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # `${VAR:?msg}` makes compose fail-fast if .env wasn't filled in,
+      # so the stack never boots with empty/placeholder passwords.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?missing POSTGRES_PASSWORD (see .env.example)}
     volumes:
       - pg-data:/var/lib/postgresql/data
     healthcheck:
@@ -60,8 +68,8 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
     environment:
-      PGPASSWORD: ${POSTGRES_PASSWORD}
-      SUPABASE_AUTH_ADMIN_PASSWORD: ${SUPABASE_AUTH_ADMIN_PASSWORD}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?missing POSTGRES_PASSWORD (see .env.example)}
+      SUPABASE_AUTH_ADMIN_PASSWORD: ${SUPABASE_AUTH_ADMIN_PASSWORD:?missing SUPABASE_AUTH_ADMIN_PASSWORD (see .env.example)}
     entrypoint: ["sh", "-c"]
     # The heredoc with a quoted delimiter ('SQL') skips outer-shell
     # expansion; psql sees the raw \set + backtick-echo, runs the echo
@@ -92,10 +100,10 @@ services:
       # must use a URL-safe charset — see .env.example and self-host-setup.md
       # for the recommended generator. Reserved URL characters (`/`, `?`, `#`,
       # `@`) in the password will break parsing.
-      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${SUPABASE_AUTH_ADMIN_PASSWORD}@postgres:5432/postgres?search_path=auth
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${SUPABASE_AUTH_ADMIN_PASSWORD:?missing SUPABASE_AUTH_ADMIN_PASSWORD (see .env.example)}@postgres:5432/postgres?search_path=auth
       GOTRUE_API_HOST: 0.0.0.0
       GOTRUE_API_PORT: 9999
-      API_EXTERNAL_URL: ${TF_PUBLIC_URL}/auth/v1
+      API_EXTERNAL_URL: ${TF_PUBLIC_URL:?missing TF_PUBLIC_URL (see .env.example)}/auth/v1
       GOTRUE_JWT_ALGORITHM: RS256
       # GOTRUE_JWT_KEYS (JWKS w/ private+public) is the actual signing
       # material when ALGORITHM=RS256. GOTRUE_JWT_SECRET is still required
@@ -103,8 +111,8 @@ services:
       # fallback), so do not hard-code it here; load a generated value from
       # `.env` instead. Generated once via
       # `./triagefactory jwk-init --write-env .env` — re-running rotates.
-      GOTRUE_JWT_KEYS: ${GOTRUE_JWT_KEYS}
-      GOTRUE_JWT_SECRET: ${GOTRUE_JWT_SECRET}
+      GOTRUE_JWT_KEYS: ${GOTRUE_JWT_KEYS:?missing GOTRUE_JWT_KEYS (run ./triagefactory jwk-init --write-env .env)}
+      GOTRUE_JWT_SECRET: ${GOTRUE_JWT_SECRET:?missing GOTRUE_JWT_SECRET (run ./triagefactory jwk-init --write-env .env)}
       GOTRUE_JWT_AUD: authenticated
       GOTRUE_JWT_ISSUER: ${TF_PUBLIC_URL}/auth/v1
       GOTRUE_SITE_URL: ${TF_PUBLIC_URL}
@@ -118,8 +126,8 @@ services:
       # the password-signup path.
       GOTRUE_MAILER_AUTOCONFIRM: "true"
       GOTRUE_EXTERNAL_GITHUB_ENABLED: "true"
-      GOTRUE_EXTERNAL_GITHUB_CLIENT_ID: ${GH_CLIENT_ID}
-      GOTRUE_EXTERNAL_GITHUB_SECRET: ${GH_CLIENT_SECRET}
+      GOTRUE_EXTERNAL_GITHUB_CLIENT_ID: ${GH_CLIENT_ID:?missing GH_CLIENT_ID (see .env.example step 1)}
+      GOTRUE_EXTERNAL_GITHUB_SECRET: ${GH_CLIENT_SECRET:?missing GH_CLIENT_SECRET (see .env.example step 1)}
       # GitHub's own redirect target — must match the OAuth app's
       # authorized-callback config exactly. This is GoTrue's /callback,
       # *not* the TF callback handler (which D7 sets per-request via the

@@ -93,11 +93,10 @@ You should see the parsed claims printed as JSON (`Subject`, `Email`, `Provider`
 
 The current tooling supports **single-key replacement** only:
 
-1. Stop GoTrue: `docker compose stop gotrue`
-2. Remove the existing `GOTRUE_JWT_KEYS=` line from `.env`
-3. `./triagefactory jwk-init --write-env .env`
-4. Restart GoTrue: `docker compose start gotrue`
+1. Remove the existing `GOTRUE_JWT_KEYS=` and `GOTRUE_JWT_SECRET=` lines from `.env`
+2. `./triagefactory jwk-init --write-env .env`
+3. Recreate GoTrue so it picks up the new env: `docker compose up -d gotrue`
 
-The Verifier picks up the new key automatically on the next unknown-`kid` lookup — no TF restart needed.
+`docker compose up -d` (without `stop`/`start`) detects the env diff against the existing container and recreates it. `docker compose start gotrue` would reuse the cached env from container creation and the new key would NOT be loaded — this is a common foot-gun. The Verifier picks up the new key automatically on the next unknown-`kid` lookup — no TF restart needed.
 
 **Caveat:** any access tokens still in flight that were signed by the old key will fail verification as soon as GoTrue restarts. GoTrue's default access-token lifetime is 1 hour, so the practical impact is "users with active sessions need to re-authenticate." For zero-downtime overlap rotation (publish both old and new keys, switch the signing kid, wait for the old to expire, drop the old) you'd need to maintain a multi-key `GOTRUE_JWT_KEYS` array by hand — our `jwk-init` doesn't currently support merge semantics. Planned for a future ticket; for now, rotate during low-traffic windows or treat each rotation as a forced re-auth event.
