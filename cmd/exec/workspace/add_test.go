@@ -284,6 +284,55 @@ func TestMaterializeWorkspace_RejectsGitHubPRRun(t *testing.T) {
 	}
 }
 
+func TestValidateEntityKey(t *testing.T) {
+	cases := []struct {
+		in     string
+		wantOK bool
+	}{
+		{"SKY-220", true},
+		{"sky-220", true},
+		{"PROJ/sub.task_1", true},
+		{"a", true},
+
+		{"", false},
+		{"-foo", false}, // leading dash → could be git flag
+		{"--upload-pack=evil", false},
+		{"foo;bar", false},
+		{"foo bar", false},
+		{"foo..bar", false}, // path-traversal / illegal refname
+		{"foo\nbar", false},
+		{"$(whoami)", false},
+		{"foo:bar", false},
+		{strings.Repeat("a", 200), false}, // length cap
+	}
+	for _, c := range cases {
+		t.Run(c.in, func(t *testing.T) {
+			err := validateEntityKey(c.in)
+			if c.wantOK && err != nil {
+				t.Errorf("validateEntityKey(%q) = %v, want nil", c.in, err)
+			}
+			if !c.wantOK && err == nil {
+				t.Errorf("validateEntityKey(%q) = nil, want error", c.in)
+			}
+		})
+	}
+}
+
+func TestMaterializeWorkspace_RejectsInjectionEntityKey(t *testing.T) {
+	database := newTestDB(t)
+	seedJiraRun(t, database, "r1", "--upload-pack=evil")
+	seedRepoProfile(t, database, "sky", "core", "https://x", "main")
+	stub := &stubCalls{}
+
+	_, err := materializeWorkspace(database, "r1", "sky/core", stub.deps())
+	if !errors.Is(err, errInvalidEntityKey) {
+		t.Errorf("err = %v, want errInvalidEntityKey", err)
+	}
+	if stub.createCalls != 0 {
+		t.Errorf("createWorktree called with injection-shaped key")
+	}
+}
+
 func TestMaterializeWorkspace_RepoNotConfigured(t *testing.T) {
 	database := newTestDB(t)
 	seedJiraRun(t, database, "r1", "SKY-1")
