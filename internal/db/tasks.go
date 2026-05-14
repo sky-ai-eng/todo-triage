@@ -717,27 +717,61 @@ func TasksByStatus(db *sql.DB, status string) ([]domain.Task, error) {
 // CountConsecutiveFailedRuns counts consecutive non-success auto-runs at the
 // tail of runs for (entity_id, prompt_id), stopping at the first 'completed'
 // row. Used by the router to check the breaker threshold.
+//
+// Chain prompts: when promptID is a chain, leaf step runs carry the leaf
+// prompt id on runs.prompt_id (per-step stats stay accurate). The breaker
+// should still count one tick per failed *chain instance*, not per failed
+// step, otherwise a chain that has 3 steps would count 3x against the
+// threshold every fire. We achieve this by also matching runs whose
+// chain_run_id resolves to a chain_runs row pointing at the same chain
+// prompt id — and crucially, we collapse runs in the same chain instance
+// to a single representative row (the first step) so multi-step chains
+// don't inflate the count.
 func CountConsecutiveFailedRuns(db *sql.DB, entityID, promptID string) (int, error) {
 	var count int
 	err := db.QueryRow(`
 		WITH recent AS (
-			SELECT r.status, r.started_at
+			SELECT
+				CASE
+					WHEN r.chain_run_id IS NULL THEN 'leaf'
+					ELSE 'chain'
+				END AS kind,
+				r.chain_run_id,
+				-- For chain steps, terminal status = the chain instance's
+				-- terminal status (taken from chain_runs). For leaf runs,
+				-- it's the run's own status.
+				COALESCE(cr.status, r.status) AS status,
+				COALESCE(cr.started_at, r.started_at) AS started_at,
+				ROW_NUMBER() OVER (
+					PARTITION BY COALESCE(r.chain_run_id, r.id)
+					ORDER BY r.started_at ASC
+				) AS step_rank
 			FROM runs r
 			JOIN tasks t ON r.task_id = t.id
+			LEFT JOIN chain_runs cr ON cr.id = r.chain_run_id
 			WHERE t.entity_id = ?
-				AND r.prompt_id = ?
+				AND (
+					(r.chain_run_id IS NULL AND r.prompt_id = ?)
+					OR (cr.chain_prompt_id = ?)
+				)
 				AND r.trigger_type = 'event'
-			ORDER BY r.started_at DESC
+		),
+		dedup AS (
+			-- Collapse multi-step chain instances to one representative row.
+			SELECT status, started_at
+			FROM recent
+			WHERE step_rank = 1
+			ORDER BY started_at DESC
 			LIMIT 20
 		)
 		SELECT COUNT(*)
-		FROM recent
-		WHERE status IN ('failed', 'task_unsolvable')
+		FROM dedup
+		WHERE status IN ('failed', 'task_unsolvable', 'aborted')
 			AND started_at > (
 				SELECT COALESCE(MAX(started_at), '1970-01-01')
-				FROM recent WHERE status = 'completed'
+				FROM dedup WHERE status = 'completed'
 			)
-	`, entityID, promptID).Scan(&count)
+	`, entityID, promptID, promptID).Scan(&count)
 	return count, err
 }
 

@@ -44,6 +44,12 @@ type Stores struct {
 	// on every routed event; handlers do full CRUD per kind.
 	EventHandlers EventHandlerStore
 
+	// Chains owns prompt_chain_steps + chain_runs, plus the
+	// kind='chain:verdict' slice of run_artifacts. Read by the chain
+	// HTTP handlers; written by the delegate spawner and the exec
+	// verdict subcommand.
+	Chains ChainStore
+
 	// Agents owns the agents table — the org's workload identity.
 	// One row per org. Bootstrap-only Create (admin pool in Postgres);
 	// reads + admin-gated updates run on the app pool. See SKY-260.
@@ -81,6 +87,7 @@ type TxStores struct {
 	Dashboard     DashboardStore
 	Secrets       SecretStore
 	EventHandlers EventHandlerStore
+	Chains        ChainStore
 	Agents        AgentStore
 	TeamAgents    TeamAgentStore
 	Users         UsersStore

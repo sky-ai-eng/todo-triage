@@ -37,6 +37,7 @@ func (s *Store) WithTx(ctx context.Context, orgID, userID string, fn func(db.TxS
 		Dashboard:     newDashboardStore(tx),
 		Secrets:       newSecretStore(),
 		EventHandlers: newEventHandlerStore(tx, users),
+		Chains:        newChainStore(tx),
 		Agents:        newAgentStore(tx),
 		TeamAgents:    newTeamAgentStore(tx),
 		Users:         users,

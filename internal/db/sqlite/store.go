@@ -35,6 +35,7 @@ func New(conn *sql.DB) db.Stores {
 		Dashboard:     newDashboardStore(conn),
 		Secrets:       newSecretStore(),
 		EventHandlers: newEventHandlerStore(conn, users),
+		Chains:        newChainStore(conn),
 		Agents:        newAgentStore(conn),
 		TeamAgents:    newTeamAgentStore(conn),
 		Users:         users,

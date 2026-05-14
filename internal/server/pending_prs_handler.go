@@ -10,6 +10,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentmeta"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -270,14 +271,27 @@ func (s *Server) handlePendingPRSubmit(w http.ResponseWriter, r *http.Request) {
 		if _, err := s.db.Exec(`UPDATE runs SET status = 'completed' WHERE id = ? AND status = 'pending_approval'`, pr.RunID); err != nil {
 			log.Printf("[pending-prs] warning: failed to update run %s status: %v", pr.RunID, err)
 		}
-		if _, err := s.db.Exec(`UPDATE tasks SET status = 'done' WHERE id = (SELECT task_id FROM runs WHERE id = ?)`, pr.RunID); err != nil {
-			log.Printf("[pending-prs] warning: failed to update task status for run %s: %v", pr.RunID, err)
+		// Skip the blanket task-mark-done for chain steps; terminateChain
+		// owns task closure so the chain_runs row finalizes first.
+		chainRun, _, chainLookupErr := s.chains.GetRunForRun(r.Context(), runmode.LocalDefaultOrg, pr.RunID)
+		if chainLookupErr != nil {
+			// Don't blindly close the task — if this turns out to be a
+			// chain step, closing it would race with terminateChain. Leave
+			// the task open for human follow-up and skip the resume hook.
+			log.Printf("[pending-prs] warning: chain lookup failed for run %s; skipping task closure: %v", pr.RunID, chainLookupErr)
+		} else if chainRun == nil {
+			if _, err := s.db.Exec(`UPDATE tasks SET status = 'done' WHERE id = (SELECT task_id FROM runs WHERE id = ?)`, pr.RunID); err != nil {
+				log.Printf("[pending-prs] warning: failed to update task status for run %s: %v", pr.RunID, err)
+			}
 		}
 		s.ws.Broadcast(websocket.Event{
 			Type:  "agent_run_update",
 			RunID: pr.RunID,
 			Data:  map[string]string{"status": "completed"},
 		})
+		if chainRun != nil && s.spawner != nil {
+			s.spawner.ResumeChainAfterApproval(pr.RunID)
+		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{

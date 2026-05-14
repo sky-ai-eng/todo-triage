@@ -8,6 +8,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentmeta"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -154,15 +155,29 @@ func (s *Server) handleReviewSubmit(w http.ResponseWriter, r *http.Request) {
 		if _, err := s.db.Exec(`UPDATE runs SET status = 'completed' WHERE id = ? AND status = 'pending_approval'`, review.RunID); err != nil {
 			log.Printf("[reviews] warning: failed to update run %s status: %v", review.RunID, err)
 		}
-		// Also mark the task as done
-		if _, err := s.db.Exec(`UPDATE tasks SET status = 'done' WHERE id = (SELECT task_id FROM runs WHERE id = ?)`, review.RunID); err != nil {
-			log.Printf("[reviews] warning: failed to update task status for run %s: %v", review.RunID, err)
+		// Mark the task as done — except for chain steps, where the chain
+		// orchestrator owns task closure (single closer guarantees the
+		// chain_runs row terminates first, so the UI never shows a "done"
+		// task with a still-running chain).
+		chainRun, _, chainLookupErr := s.chains.GetRunForRun(r.Context(), runmode.LocalDefaultOrg, review.RunID)
+		if chainLookupErr != nil {
+			// Don't blindly close the task — if this turns out to be a
+			// chain step, closing it would race with terminateChain. Leave
+			// the task open for human follow-up and skip the resume hook.
+			log.Printf("[reviews] warning: chain lookup failed for run %s; skipping task closure: %v", review.RunID, chainLookupErr)
+		} else if chainRun == nil {
+			if _, err := s.db.Exec(`UPDATE tasks SET status = 'done' WHERE id = (SELECT task_id FROM runs WHERE id = ?)`, review.RunID); err != nil {
+				log.Printf("[reviews] warning: failed to update task status for run %s: %v", review.RunID, err)
+			}
 		}
 		s.ws.Broadcast(websocket.Event{
 			Type:  "agent_run_update",
 			RunID: review.RunID,
 			Data:  map[string]string{"status": "completed"},
 		})
+		if chainRun != nil && s.spawner != nil {
+			s.spawner.ResumeChainAfterApproval(review.RunID)
+		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{

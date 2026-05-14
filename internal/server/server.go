@@ -32,6 +32,7 @@ type Server struct {
 	agents             db.AgentStore     // SKY-261 D-Claims: resolves the org's agent for claim stamps
 	teamAgents         db.TeamAgentStore // SKY-261 D-Claims: re-checks team_agents.enabled on swipe-delegate / factory-delegate
 	users              db.UsersStore     // SKY-264: github_username + display_name on the synthetic local user row
+	chains             db.ChainStore
 	mux                *http.ServeMux
 	static             fs.FS
 	ws                 *websocket.Hub
@@ -129,7 +130,7 @@ func (s *Server) agentEnabledForLocalTeam(ctx context.Context) (*domain.Agent, b
 // argument list grows one store at a time as their callers migrate;
 // raw *sql.DB stays available for handlers that haven't been ported
 // to a store yet.
-func New(database *sql.DB, prompts db.PromptStore, swipes db.SwipeStore, dashboard db.DashboardStore, eventHandlers db.EventHandlerStore, agents db.AgentStore, teamAgents db.TeamAgentStore, users db.UsersStore) *Server {
+func New(database *sql.DB, prompts db.PromptStore, swipes db.SwipeStore, dashboard db.DashboardStore, eventHandlers db.EventHandlerStore, agents db.AgentStore, teamAgents db.TeamAgentStore, users db.UsersStore, chains db.ChainStore) *Server {
 	s := &Server{
 		db:            database,
 		prompts:       prompts,
@@ -139,6 +140,7 @@ func New(database *sql.DB, prompts db.PromptStore, swipes db.SwipeStore, dashboa
 		agents:        agents,
 		teamAgents:    teamAgents,
 		users:         users,
+		chains:        chains,
 		mux:           http.NewServeMux(),
 		ws:            websocket.NewHub(),
 	}
@@ -275,6 +277,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /api/prompts/{id}", s.handlePromptPut)
 	s.mux.HandleFunc("DELETE /api/prompts/{id}", s.handlePromptDelete)
 	s.mux.HandleFunc("GET /api/prompts/{id}/stats", s.handlePromptStats)
+	s.mux.HandleFunc("GET /api/prompts/{id}/chain-steps", s.handleChainStepsGet)
+	s.mux.HandleFunc("PUT /api/prompts/{id}/chain-steps", s.handleChainStepsPut)
+	s.mux.HandleFunc("GET /api/chain-runs/{id}", s.handleChainRunGet)
+	s.mux.HandleFunc("POST /api/chain-runs/{id}/cancel", s.handleChainRunCancel)
 
 	// Frontend: serve embedded SPA, with fallback to index.html for client-side routing
 	s.mux.HandleFunc("/", s.handleFrontend)

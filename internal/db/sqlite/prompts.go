@@ -156,7 +156,7 @@ func (s *promptStore) List(ctx context.Context, orgID string) ([]domain.Prompt, 
 		return nil, err
 	}
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT id, name, body, source, allowed_tools, model, usage_count, created_at, updated_at
+		SELECT id, name, body, source, kind, allowed_tools, model, usage_count, created_at, updated_at
 		FROM prompts WHERE hidden = 0 ORDER BY updated_at DESC
 	`)
 	if err != nil {
@@ -167,7 +167,7 @@ func (s *promptStore) List(ctx context.Context, orgID string) ([]domain.Prompt, 
 	var prompts []domain.Prompt
 	for rows.Next() {
 		var p domain.Prompt
-		if err := rows.Scan(&p.ID, &p.Name, &p.Body, &p.Source, &p.AllowedTools, &p.Model, &p.UsageCount, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.Body, &p.Source, &p.Kind, &p.AllowedTools, &p.Model, &p.UsageCount, &p.CreatedAt, &p.UpdatedAt); err != nil {
 			return nil, err
 		}
 		prompts = append(prompts, p)
@@ -181,9 +181,9 @@ func (s *promptStore) Get(ctx context.Context, orgID string, id string) (*domain
 	}
 	var p domain.Prompt
 	err := s.q.QueryRowContext(ctx, `
-		SELECT id, name, body, source, allowed_tools, model, usage_count, created_at, updated_at
+		SELECT id, name, body, source, kind, allowed_tools, model, usage_count, created_at, updated_at
 		FROM prompts WHERE id = ?
-	`, id).Scan(&p.ID, &p.Name, &p.Body, &p.Source, &p.AllowedTools, &p.Model, &p.UsageCount, &p.CreatedAt, &p.UpdatedAt)
+	`, id).Scan(&p.ID, &p.Name, &p.Body, &p.Source, &p.Kind, &p.AllowedTools, &p.Model, &p.UsageCount, &p.CreatedAt, &p.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -225,20 +225,27 @@ func (s *promptStore) Create(ctx context.Context, orgID string, p domain.Prompt)
 		creatorUserID = nil
 		visibility = "org"
 	}
+	kind := p.Kind
+	if kind == "" {
+		kind = domain.PromptKindLeaf
+	}
 	_, err := s.q.ExecContext(ctx, `
-		INSERT INTO prompts (id, name, body, source, allowed_tools, model, usage_count, team_id, creator_user_id, visibility, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
-	`, p.ID, p.Name, p.Body, p.Source, p.AllowedTools, p.Model, runmode.LocalDefaultTeamID, creatorUserID, visibility, now, now)
+		INSERT INTO prompts (id, name, body, source, kind, allowed_tools, model, usage_count, team_id, creator_user_id, visibility, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
+	`, p.ID, p.Name, p.Body, p.Source, kind, p.AllowedTools, p.Model, runmode.LocalDefaultTeamID, creatorUserID, visibility, now, now)
 	return err
 }
 
-func (s *promptStore) Update(ctx context.Context, orgID string, id, name, body, model string) error {
+func (s *promptStore) Update(ctx context.Context, orgID string, id, name, body, kind, model string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
+	if kind == "" {
+		kind = string(domain.PromptKindLeaf)
+	}
 	_, err := s.q.ExecContext(ctx, `
-		UPDATE prompts SET name = ?, body = ?, model = ?, user_modified = 1, updated_at = ? WHERE id = ?
-	`, name, body, model, time.Now().UTC(), id)
+		UPDATE prompts SET name = ?, body = ?, kind = ?, model = ?, user_modified = 1, updated_at = ? WHERE id = ?
+	`, name, body, kind, model, time.Now().UTC(), id)
 	return err
 }
 
@@ -274,6 +281,18 @@ func (s *promptStore) Unhide(ctx context.Context, orgID string, id string) error
 	}
 	_, err := s.q.ExecContext(ctx, `UPDATE prompts SET hidden = 0 WHERE id = ?`, id)
 	return err
+}
+
+func (s *promptStore) CountRunReferences(ctx context.Context, orgID, id string) (int, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return 0, err
+	}
+	var n int
+	err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM runs WHERE prompt_id = ?`, id).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count run references: %w", err)
+	}
+	return n, nil
 }
 
 func (s *promptStore) IncrementUsage(ctx context.Context, orgID string, id string) error {

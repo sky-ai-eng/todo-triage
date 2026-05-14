@@ -303,7 +303,7 @@ func main() {
 		openBrowser(fmt.Sprintf("http://localhost%s", addr))
 	}
 
-	srv := server.New(database, stores.Prompts, stores.Swipes, stores.Dashboard, stores.EventHandlers, stores.Agents, stores.TeamAgents, stores.Users)
+	srv := server.New(database, stores.Prompts, stores.Swipes, stores.Dashboard, stores.EventHandlers, stores.Agents, stores.TeamAgents, stores.Users, stores.Chains)
 
 	distFS, err := frontendDist()
 	if err != nil {
@@ -561,7 +561,7 @@ func main() {
 	}
 
 	// Create spawner once — credentials are hot-swapped in place
-	spawner := delegate.NewSpawner(database, stores.Prompts, stores.Agents, nil, wsHub, "")
+	spawner := delegate.NewSpawner(database, stores.Prompts, stores.Agents, stores.Chains, nil, wsHub, "")
 	srv.SetSpawner(spawner)
 
 	// SKY-220: wire the classifier wait into the spawner's setup path.

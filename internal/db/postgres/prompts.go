@@ -265,11 +265,14 @@ func (s *promptStore) Create(ctx context.Context, orgID string, p domain.Prompt)
 	return err
 }
 
-func (s *promptStore) Update(ctx context.Context, orgID string, id, name, body, model string) error {
+func (s *promptStore) Update(ctx context.Context, orgID string, id, name, body, kind, model string) error {
+	if kind == "" {
+		kind = string(domain.PromptKindLeaf)
+	}
 	_, err := s.app.ExecContext(ctx, `
-		UPDATE prompts SET name = $1, body = $2, model = $3, user_modified = TRUE, updated_at = now()
-		WHERE org_id = $4 AND id = $5
-	`, name, body, model, orgID, id)
+		UPDATE prompts SET name = $1, body = $2, kind = $3, model = $4, user_modified = TRUE, updated_at = now()
+		WHERE org_id = $5 AND id = $6
+	`, name, body, kind, model, orgID, id)
 	return err
 }
 
@@ -294,6 +297,17 @@ func (s *promptStore) Hide(ctx context.Context, orgID string, id string) error {
 func (s *promptStore) Unhide(ctx context.Context, orgID string, id string) error {
 	_, err := s.app.ExecContext(ctx, `UPDATE prompts SET hidden = FALSE WHERE org_id = $1 AND id = $2`, orgID, id)
 	return err
+}
+
+func (s *promptStore) CountRunReferences(ctx context.Context, orgID, id string) (int, error) {
+	var n int
+	err := s.app.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM runs WHERE org_id = $1 AND prompt_id = $2`, orgID, id,
+	).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count run references: %w", err)
+	}
+	return n, nil
 }
 
 func (s *promptStore) IncrementUsage(ctx context.Context, orgID string, id string) error {
