@@ -92,12 +92,13 @@ services:
       API_EXTERNAL_URL: ${TF_PUBLIC_URL}/auth/v1
       GOTRUE_JWT_ALGORITHM: RS256
       # GOTRUE_JWT_KEYS (JWKS w/ private+public) is the actual signing
-      # material when ALGORITHM=RS256. GOTRUE_JWT_SECRET is required by
-      # config validation even in asymmetric mode (legacy HS256 fallback);
-      # GoTrue prefers KEYS when both are set. Generated once via
+      # material when ALGORITHM=RS256. GOTRUE_JWT_SECRET is still required
+      # by config validation even in asymmetric mode (legacy HS256
+      # fallback), so do not hard-code it here; load a generated value from
+      # `.env` instead. Generated once via
       # `./triagefactory jwk-init --write-env .env` — re-running rotates.
       GOTRUE_JWT_KEYS: ${GOTRUE_JWT_KEYS}
-      GOTRUE_JWT_SECRET: unused-asymmetric-mode-uses-jwt-keys-above
+      GOTRUE_JWT_SECRET: ${GOTRUE_JWT_SECRET}
       GOTRUE_JWT_AUD: authenticated
       GOTRUE_JWT_ISSUER: ${TF_PUBLIC_URL}/auth/v1
       GOTRUE_SITE_URL: ${TF_PUBLIC_URL}
