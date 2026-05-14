@@ -44,6 +44,14 @@ type Server struct {
 	scorerTrigger   func() // invoked after non-poll task creation (e.g. carry-over) to kick scoring immediately
 	lifetimeCounter *db.LifetimeDistinctCounter
 
+	// authDeps groups the multi-mode-only auth stack (JWKS verifier +
+	// session store + gotrue HTTP client). Nil in local mode; checked
+	// by middleware before any session lookup so local-mode boots
+	// without dragging GoTrue into the dependency graph.
+	authDeps  *authDeps
+	authCfg   *authConfig
+	authProxy http.Handler // /auth/v1/* → gotrue:9999/*
+
 	// Jira poll readiness — used by /api/jira/stock to decide whether the
 	// poller has completed its first cycle after a restart. Carry-over reads
 	// from the DB and needs snapshots to be populated before showing tickets.
@@ -157,6 +165,32 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/auth/status", s.handleAuthStatus)
 	s.mux.HandleFunc("DELETE /api/auth", s.handleAuthDelete)
 	s.mux.HandleFunc("DELETE /api/auth/jira", s.handleAuthDeleteJira)
+
+	// Multi-mode OAuth flow. Handlers 404 themselves when authDeps is
+	// nil (local mode), so unconditional mount is safe — the routes
+	// are inert until SetAuthDeps wires them.
+	s.mux.HandleFunc("GET /api/auth/oauth/{provider}", s.handleOAuthStart)
+	s.mux.HandleFunc("GET /api/auth/callback", s.handleOAuthCallback)
+	s.mux.HandleFunc("POST /api/auth/logout", s.handleLogout)
+	// /api/me is the session-protected identity endpoint. withSession
+	// passes through in local mode (no authDeps), so a local-mode
+	// /api/me hit would reach the handler with nil claims and write
+	// 401. The frontend in local mode shouldn't be calling this; D8
+	// handles the conditional mount on the SPA side.
+	s.mux.Handle("GET /api/me", s.withSession(http.HandlerFunc(s.handleMe)))
+
+	// /auth/v1/* reverse-proxy to gotrue, wired lazily inside
+	// SetAuthDeps. The closure here re-reads s.authProxy each
+	// request so local-mode (where it stays nil) returns 404
+	// rather than panicking, and multi-mode picks up the proxy
+	// once SetAuthDeps completes.
+	s.mux.Handle("/auth/v1/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.authProxy == nil {
+			http.NotFound(w, r)
+			return
+		}
+		s.authProxy.ServeHTTP(w, r)
+	}))
 
 	s.mux.HandleFunc("GET /api/queue", s.handleQueue)
 	s.mux.HandleFunc("GET /api/tasks", s.handleTasks)
