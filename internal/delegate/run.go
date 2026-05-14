@@ -7,6 +7,8 @@ package delegate
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -16,6 +18,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
@@ -35,6 +38,9 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 				// head-<n> for push. SweepStaleForkPRConfig reclaims
 				// that config on the next bootstrap once the takeover
 				// dir is gone.
+				return
+			}
+			if cfg.isChainStep {
 				return
 			}
 			// Capture the RemoveAt error rather than discarding it.
@@ -66,6 +72,9 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		// the gate is defensive rather than load-bearing.
 		defer func() {
 			if s.wasTakenOver(runID) {
+				return
+			}
+			if cfg.isChainStep {
 				return
 			}
 			rows, err := db.GetRunWorktrees(s.database, runID)
@@ -101,6 +110,9 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	// is the conversation state the resumed `claude --resume` reads.
 	defer func() {
 		if s.wasTakenOver(runID) {
+			return
+		}
+		if cfg.isChainStep {
 			return
 		}
 		worktree.RemoveClaudeProjectDir(claudeCwd)
@@ -171,6 +183,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		MaxTurns:     100,
 		ExtraEnv:     extraEnv,
 		TraceID:      runID,
+		SystemPrompt: cfg.appendSysPrompt,
 	}, newRunSink(s, runID))
 
 	// If Takeover() flipped the takenOver flag while we were streaming,
@@ -306,6 +319,19 @@ func (s *Spawner) processCompletion(
 		// approves via the UI and the server flips back to completed.
 		// Frontend distinguishes by which side-table has a row (the
 		// /api/agent/runs/{id} response carries pending_kind).
+		//
+		// Non-final chain steps must not submit reviews/PRs (the wrapper
+		// prompt forbids it) UNLESS they recorded a --final verdict, which
+		// is the explicit early-exit channel: the step is allowed one
+		// terminal external action (e.g., a SKIP review) and the action
+		// still flows through this same human-approval gate.
+		//
+		// If a non-final step creates a pending artifact without recording
+		// --final, the agent mislabelled its verdict: the pending artifact
+		// IS the chain's terminal external action. Auto-promote to --final
+		// (writing a synthetic verdict that supersedes the agent's) so the
+		// chain terminates at this step on human approval instead of
+		// advancing past stale handoff narrative into a no-op step.
 		hasPending := false
 		if pendingReview, _ := db.PendingReviewByRunID(s.database, runID); pendingReview != nil {
 			hasPending = true
@@ -313,6 +339,23 @@ func (s *Spawner) processCompletion(
 			hasPending = true
 		}
 		if hasPending {
+			if s.isNonFinalChainStep(runID) {
+				verdict, _ := s.chains.GetLatestVerdict(ctx, runmode.LocalDefaultOrg, runID)
+				if verdict == nil || verdict.Outcome != domain.ChainVerdictFinal {
+					synthetic := domain.ChainVerdict{
+						Outcome:   domain.ChainVerdictFinal,
+						Reason:    "auto-promoted: non-final step submitted external action without --final",
+						Synthetic: true,
+					}
+					if payload, err := json.Marshal(synthetic); err == nil {
+						if insertErr := s.chains.InsertVerdict(ctx, runmode.LocalDefaultOrg, runID, string(payload)); insertErr != nil {
+							log.Printf("[delegate] warning: insert synthetic --final verdict for run %s: %v", runID, insertErr)
+						} else {
+							log.Printf("[delegate] run %s: non-final chain step submitted pending artifact; auto-promoted verdict to --final", runID)
+						}
+					}
+				}
+			}
 			status = "pending_approval"
 			if _, err := s.database.Exec(`UPDATE runs SET status = ? WHERE id = ?`, status, runID); err != nil {
 				log.Printf("[delegate] warning: failed to set pending_approval for run %s: %v", runID, err)
@@ -321,8 +364,37 @@ func (s *Spawner) processCompletion(
 	}
 
 	if status == "completed" {
-		if _, err := s.database.Exec(`UPDATE tasks SET status = 'done' WHERE id = ?`, task.ID); err != nil {
-			log.Printf("[delegate] warning: failed to update task %s to done: %v", task.ID, err)
+		// Two guards prevent a stale completion from flipping the task:
+		//
+		// 1. Chain step: the chain orchestrator owns task lifecycle —
+		//    individual step completions must not close the task.
+		//
+		// 2. Re-delegation race: a newer run already exists on this task
+		//    (the user re-delegated while this run was in flight). The
+		//    newer run's CreateAgentRun row is already in the DB by the
+		//    time the old run reaches processCompletion, so the EXISTS
+		//    check is deterministic. Chain step runs are excluded from
+		//    the active-run check because the chain orchestrator creates
+		//    them sequentially (step N+1's row doesn't exist yet when
+		//    step N completes).
+		var chainRunID sql.NullString
+		_ = s.database.QueryRow(`SELECT chain_run_id FROM runs WHERE id = ?`, runID).Scan(&chainRunID)
+		if chainRunID.Valid {
+			// Chain step — skip; terminateChain handles task closure.
+		} else {
+			var hasOtherActiveRun bool
+			_ = s.database.QueryRow(`
+				SELECT EXISTS(
+					SELECT 1 FROM runs
+					WHERE task_id = ? AND id != ?
+					AND status NOT IN ('completed','failed','cancelled','task_unsolvable','taken_over','pending_approval')
+				)
+			`, task.ID, runID).Scan(&hasOtherActiveRun)
+			if !hasOtherActiveRun {
+				if _, err := s.database.Exec(`UPDATE tasks SET status = 'done' WHERE id = ?`, task.ID); err != nil {
+					log.Printf("[delegate] warning: failed to update task %s to done: %v", task.ID, err)
+				}
+			}
 		}
 	}
 	s.broadcastRunUpdate(runID, status)

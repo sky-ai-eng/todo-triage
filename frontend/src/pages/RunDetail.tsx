@@ -5,6 +5,7 @@ import type { AgentRun } from '../types'
 import { useRunDetail } from '../hooks/useRunDetail'
 import { formatDurationMs, formatElapsed, isActiveRun, statusDisplay } from '../lib/runStatus'
 import Transcript, { type ViewMode } from '../components/Transcript'
+import ChainStepsRail from '../components/ChainStepsRail'
 import SourceBadge from '../components/SourceBadge'
 import TakeoverModal, { type TakeoverInfo } from '../components/TakeoverModal'
 import { toast } from '../components/Toast/toastStore'
@@ -31,6 +32,7 @@ export default function RunDetail() {
   const { runID } = useParams<{ runID: string }>()
   const navigate = useNavigate()
   const { run, task, messages, loading, notFound, error } = useRunDetail(runID)
+  const [chainSteps, setChainSteps] = useState<AgentRun[] | null>(null)
   const [mode, setMode] = useState<ViewMode>(() => loadInitialMode())
   const [now, setNow] = useState(() => Date.now())
   const [takeoverInfo, setTakeoverInfo] = useState<TakeoverInfo | null>(null)
@@ -110,6 +112,46 @@ export default function RunDetail() {
     }
     if (top < prev) setPinned(false)
   }, [])
+
+  // Load chain steps if this run is part of a chain. Pads missing
+  // steps with synthetic "pending" placeholders so the rail can render
+  // the full length of the chain before later steps have spawned.
+  useEffect(() => {
+    if (!run?.chain_run_id) {
+      setChainSteps(null)
+      return
+    }
+    let cancelled = false
+    fetch(`/api/chain-runs/${run.chain_run_id}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then(
+        (
+          data: {
+            steps?: Array<{ step: { step_index: number }; run?: AgentRun | null }>
+          } | null,
+        ) => {
+          if (cancelled || !data?.steps) return
+          const padded: AgentRun[] = data.steps.map((s, i) => {
+            if (s.run) return s.run
+            return {
+              ID: `__pending-${run.chain_run_id}-${i}`,
+              TaskID: run.TaskID,
+              Status: 'pending',
+              Model: '',
+              StartedAt: '',
+              ResultSummary: '',
+              chain_run_id: run.chain_run_id,
+              chain_step_index: i,
+            } as unknown as AgentRun
+          })
+          setChainSteps(padded)
+        },
+      )
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [run?.chain_run_id, run?.TaskID])
 
   // Keyboard shortcuts: Esc → back, 1/2 → modes, t → take over.
   // handleTakeover is declared below; capture via ref so the listener
@@ -330,6 +372,12 @@ export default function RunDetail() {
             )}
           </div>
         </div>
+
+        {chainSteps && chainSteps.length > 1 && (
+          <div className="mt-3 max-w-md">
+            <ChainStepsRail steps={chainSteps} currentRunID={run.ID} linkable />
+          </div>
+        )}
       </div>
 
       {/* Body */}

@@ -43,6 +43,7 @@ type Spawner struct {
 	database *sql.DB
 	prompts  db.PromptStore
 	agents   db.AgentStore // SKY-261: resolves actor for run.actor_agent_id stamping
+	chains   db.ChainStore
 	wsHub    *websocket.Hub
 
 	mu                    sync.Mutex
@@ -51,22 +52,25 @@ type Spawner struct {
 	cancels               map[string]context.CancelFunc              // runID → cancel the entire run
 	drainer               QueueDrainer                               // nil-safe; set post-construction via SetQueueDrainer
 	takenOver             map[string]bool                            // runIDs claimed by Takeover. Sticky-on for the rest of the goroutine's lifetime even after rollback — clearing the entry would let late-firing goroutine gates race the takeover/abort lifecycle. Suppresses every cleanup path in runAgent so Takeover/abortTakeover own the row's terminal state.
+	chainRunIDs           map[string]bool                            // chain_run IDs whose setup phase reuses the per-run status helpers but is not backed by a runs row. broadcastRunUpdate skips wsHub emission for these so clients don't fetch /api/runs/{id} and 404.
 	waitForClassification func(ctx context.Context, entityID string) // SKY-220 hook: blocks until the project classifier has decided this entity, or a timeout/ctx-cancel elapses. Nil-safe (test setups skip it). Wired in main.go via SetWaitForClassification — keeps internal/delegate from importing internal/projectclassify.
 
 	agentToolsOnce  sync.Once
 	agentToolsCache string
 }
 
-func NewSpawner(database *sql.DB, prompts db.PromptStore, agents db.AgentStore, ghClient *ghclient.Client, wsHub *websocket.Hub, model string) *Spawner {
+func NewSpawner(database *sql.DB, prompts db.PromptStore, agents db.AgentStore, chains db.ChainStore, ghClient *ghclient.Client, wsHub *websocket.Hub, model string) *Spawner {
 	return &Spawner{
-		database:  database,
-		prompts:   prompts,
-		agents:    agents,
-		ghClient:  ghClient,
-		wsHub:     wsHub,
-		model:     model,
-		cancels:   make(map[string]context.CancelFunc),
-		takenOver: make(map[string]bool),
+		database:    database,
+		prompts:     prompts,
+		agents:      agents,
+		chains:      chains,
+		ghClient:    ghClient,
+		wsHub:       wsHub,
+		model:       model,
+		cancels:     make(map[string]context.CancelFunc),
+		takenOver:   make(map[string]bool),
+		chainRunIDs: make(map[string]bool),
 	}
 }
 
@@ -172,8 +176,34 @@ func (s *Spawner) updateBreakerCounter(taskID, triggerType, status string) {
 	// See internal/routing/router.go and internal/db/tasks.go.
 }
 
+// markChainRunID flags a chain_run id so broadcastRunUpdate skips
+// wsHub emission for it. The setup phase of a chain reuses the per-run
+// status helpers with the chain_run id (the first step's runs row
+// doesn't exist yet) — those UPDATEs are harmless no-ops, but the
+// matching WS event causes clients to fetch /api/runs/{id} and 404.
+func (s *Spawner) markChainRunID(id string) {
+	s.mu.Lock()
+	s.chainRunIDs[id] = true
+	s.mu.Unlock()
+}
+
+func (s *Spawner) unmarkChainRunID(id string) {
+	s.mu.Lock()
+	delete(s.chainRunIDs, id)
+	s.mu.Unlock()
+}
+
+func (s *Spawner) isChainRunID(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.chainRunIDs[id]
+}
+
 func (s *Spawner) broadcastRunUpdate(runID, status string) {
 	if s.wsHub == nil {
+		return
+	}
+	if s.isChainRunID(runID) {
 		return
 	}
 	s.wsHub.Broadcast(websocket.Event{

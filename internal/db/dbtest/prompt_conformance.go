@@ -91,7 +91,7 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		if err := store.SeedOrUpdate(ctx, orgID, domain.Prompt{ID: "system-y", Name: "Y", Body: "v1", Source: "system"}); err != nil {
 			t.Fatalf("seed v1: %v", err)
 		}
-		if err := store.Update(ctx, orgID, "system-y", "Custom", "custom body", ""); err != nil {
+		if err := store.Update(ctx, orgID, "system-y", "Custom", "custom body", "leaf", ""); err != nil {
 			t.Fatalf("user update: %v", err)
 		}
 		// Re-seed with new shipped content — must NOT overwrite the
@@ -158,7 +158,7 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 			t.Fatalf("allowed_tools=%q want Read,Write", got.AllowedTools)
 		}
 		// Update
-		if err := store.Update(ctx, orgID, "user-1", "Mine v2", "body v2", "opus"); err != nil {
+		if err := store.Update(ctx, orgID, "user-1", "Mine v2", "body v2", "leaf", "opus"); err != nil {
 			t.Fatalf("update: %v", err)
 		}
 		got2, _ := store.Get(ctx, orgID, "user-1")

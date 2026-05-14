@@ -27,6 +27,10 @@ CREATE TABLE prompts (
     body            TEXT NOT NULL,
     source          TEXT NOT NULL DEFAULT 'user'
                         CHECK (source IN ('system', 'user', 'imported')),
+    -- kind = 'leaf' (single-prompt, today's default) or 'chain'
+    -- (an ordered list of leaf steps in prompt_chain_steps). Triggers
+    -- fire prompts by id regardless of kind; only the spawner branches.
+    kind            TEXT NOT NULL DEFAULT 'leaf',
     usage_count     INTEGER DEFAULT 0,
     hidden          BOOLEAN DEFAULT 0,
     created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -431,6 +435,11 @@ CREATE TABLE runs (
     visibility      TEXT NOT NULL DEFAULT 'team'
                        CHECK (visibility IN ('private','team','org')),
     actor_agent_id  TEXT REFERENCES agents(id) ON DELETE SET NULL,
+    -- chain_run_id / chain_step_index link a step run back to its
+    -- parent chain instance. NULL on stand-alone (kind='leaf') runs.
+    -- See the Prompt chains section below for the parent table.
+    chain_run_id     TEXT REFERENCES chain_runs(id),
+    chain_step_index INTEGER,
     -- Pair trigger_type with creator_user_id nullability so the
     -- seeder can't drift back to lying.
     CONSTRAINT runs_creator_matches_trigger_type CHECK (
@@ -448,6 +457,44 @@ CREATE INDEX        idx_runs_trigger        ON runs(trigger_id);
 CREATE INDEX        idx_runs_status         ON runs(status);
 CREATE UNIQUE INDEX runs_id_org_unique      ON runs (id, org_id);
 CREATE INDEX        runs_actor_agent_idx    ON runs(actor_agent_id) WHERE actor_agent_id IS NOT NULL;
+CREATE INDEX        idx_runs_chain          ON runs(chain_run_id, chain_step_index);
+
+-- === Prompt chains =======================================================
+-- Linear sequences of prompt steps that share one worktree. Each step
+-- runs as a fresh Claude session in the same worktree; adjacent steps
+-- communicate via a handoff file and record proceed/abort verdicts on
+-- run_artifacts(kind='chain:verdict'). Per-step runtime state stays on
+-- runs (linked via runs.chain_run_id); chain-wide abort/complete state
+-- lives on chain_runs.
+
+CREATE TABLE prompt_chain_steps (
+    chain_prompt_id TEXT NOT NULL REFERENCES prompts(id) ON DELETE CASCADE,
+    step_index      INTEGER NOT NULL,           -- 0-based; densely packed by ReplaceChainSteps
+    step_prompt_id  TEXT NOT NULL REFERENCES prompts(id) ON DELETE RESTRICT,
+    -- Author-supplied one-liner shown in the wrapper user prompt and
+    -- in the run-detail UI. Falls back to step_prompt.name when empty.
+    brief           TEXT NOT NULL DEFAULT '',
+    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (chain_prompt_id, step_index)
+);
+CREATE INDEX idx_prompt_chain_steps_step_prompt ON prompt_chain_steps(step_prompt_id);
+
+CREATE TABLE chain_runs (
+    id              TEXT PRIMARY KEY,
+    chain_prompt_id TEXT NOT NULL REFERENCES prompts(id),
+    task_id         TEXT NOT NULL REFERENCES tasks(id),
+    trigger_type    TEXT NOT NULL DEFAULT 'manual',
+    trigger_id      TEXT REFERENCES event_handlers(id),
+    -- 'running' | 'completed' | 'aborted' | 'failed' | 'cancelled'
+    status          TEXT NOT NULL DEFAULT 'running',
+    abort_reason    TEXT,
+    aborted_at_step INTEGER,
+    worktree_path   TEXT NOT NULL,
+    started_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at    DATETIME
+);
+CREATE INDEX idx_chain_runs_task   ON chain_runs(task_id);
+CREATE INDEX idx_chain_runs_status ON chain_runs(status);
 
 -- === Task <-> event mapping + firing queue ===============================
 CREATE TABLE task_events (

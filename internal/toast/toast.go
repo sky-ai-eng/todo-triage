@@ -78,7 +78,7 @@ func isNilBroadcaster(hub Broadcaster) bool {
 		return true
 	}
 	v := reflect.ValueOf(hub)
-	return v.Kind() == reflect.Ptr && v.IsNil()
+	return v.Kind() == reflect.Pointer && v.IsNil()
 }
 
 // Convenience helpers — the common case has no title.
