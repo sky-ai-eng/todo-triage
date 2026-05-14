@@ -51,7 +51,15 @@ func badRequest(w http.ResponseWriter, msg string) {
 // v must be a pointer. Anonymous-struct request shapes are supported by
 // passing &req where req is the local var.
 func decodeJSON(w http.ResponseWriter, r *http.Request, v any, msg string) bool {
-	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(v); err != nil {
+		if msg == "" {
+			msg = "invalid request body"
+		}
+		badRequest(w, msg)
+		return false
+	}
+	if dec.More() {
 		if msg == "" {
 			msg = "invalid request body"
 		}

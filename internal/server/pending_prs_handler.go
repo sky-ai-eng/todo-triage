@@ -36,7 +36,7 @@ func (s *Server) handlePendingPRGet(w http.ResponseWriter, r *http.Request) {
 
 	pr, err := db.GetPendingPR(s.db, id)
 	if err != nil {
-		internalError(w, "pending_prs", err)
+		internalError(w, "pending-prs", err)
 		return
 	}
 	if pr == nil {
@@ -54,7 +54,7 @@ func (s *Server) handleRunPendingPR(w http.ResponseWriter, r *http.Request) {
 
 	pr, err := db.PendingPRByRunID(s.db, runID)
 	if err != nil {
-		internalError(w, "pending_prs", err)
+		internalError(w, "pending-prs", err)
 		return
 	}
 	if pr == nil {
@@ -82,7 +82,7 @@ func (s *Server) handlePendingPRUpdate(w http.ResponseWriter, r *http.Request) {
 
 	pr, err := db.GetPendingPR(s.db, id)
 	if err != nil {
-		internalError(w, "pending_prs", err)
+		internalError(w, "pending-prs", err)
 		return
 	}
 	if pr == nil {
@@ -117,7 +117,7 @@ func (s *Server) handlePendingPRUpdate(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "this PR is already being submitted — your edit didn't apply"})
 			return
 		}
-		internalError(w, "pending_prs", err)
+		internalError(w, "pending-prs", err)
 		return
 	}
 
@@ -134,7 +134,7 @@ func (s *Server) handlePendingPRDiff(w http.ResponseWriter, r *http.Request) {
 
 	pr, err := db.GetPendingPR(s.db, id)
 	if err != nil {
-		internalError(w, "pending_prs", err)
+		internalError(w, "pending-prs", err)
 		return
 	}
 	if pr == nil {
@@ -200,7 +200,7 @@ func (s *Server) handlePendingPRSubmit(w http.ResponseWriter, r *http.Request) {
 
 	pr, err := db.GetPendingPR(s.db, id)
 	if err != nil {
-		internalError(w, "pending_prs", err)
+		internalError(w, "pending-prs", err)
 		return
 	}
 	if pr == nil {
@@ -218,7 +218,7 @@ func (s *Server) handlePendingPRSubmit(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "another submit is in flight or has already completed"})
 			return
 		}
-		internalError(w, "pending_prs", err)
+		internalError(w, "pending-prs", err)
 		return
 	}
 	if !winner {

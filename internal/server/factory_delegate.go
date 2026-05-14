@@ -65,7 +65,7 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	// contract at routing/router.go.
 	entity, err := db.GetEntity(s.db, req.EntityID)
 	if err != nil {
-		internalError(w, "factory_delegate", err)
+		internalError(w, "factory", err)
 		return
 	}
 	if entity == nil {
@@ -88,7 +88,7 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	// an anchor.
 	primaryEvent, err := db.LatestEventForEntityTypeAndDedupKey(s.db, req.EntityID, req.EventType, req.DedupKey)
 	if err != nil {
-		internalError(w, "factory_delegate", err)
+		internalError(w, "factory", err)
 		return
 	}
 	if primaryEvent == nil {
@@ -120,7 +120,7 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	schema, schemaOK := events.Get(req.EventType)
 	handlers, err := s.eventHandlers.GetEnabledForEvent(r.Context(), runmode.LocalDefaultOrg, req.EventType)
 	if err != nil {
-		internalError(w, "factory_delegate", err)
+		internalError(w, "factory", err)
 		return
 	}
 	for _, h := range handlers {
@@ -150,7 +150,7 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 
 	task, created, err := db.FindOrCreateTask(s.db, req.EntityID, req.EventType, req.DedupKey, primaryEvent.ID, defaultPriority)
 	if err != nil {
-		internalError(w, "factory_delegate", err)
+		internalError(w, "factory", err)
 		return
 	}
 

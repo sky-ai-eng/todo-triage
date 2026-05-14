@@ -13,7 +13,7 @@ import (
 // generic integrity-violation that the per-kind CHECK constraints would
 // otherwise produce.
 //
-// Used by both the SQLite and Postgres EventHandlerStore.Create paths.
+// Used by both the SQLite and Postgres EventHandlerStore.Create and Update paths.
 // Mutates h.TriggerType to normalize an empty value to the v1 default.
 func ValidateEventHandlerForCreate(h *domain.EventHandler) error {
 	switch h.Kind {
