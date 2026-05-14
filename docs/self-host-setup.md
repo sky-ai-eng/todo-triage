@@ -21,7 +21,7 @@ cp .env.example .env
 
 Fill in:
 - `POSTGRES_PASSWORD` — superuser password. Used for migrations and admin tasks. Generate with `openssl rand -base64 32`.
-- `SUPABASE_AUTH_ADMIN_PASSWORD` — distinct password for the role GoTrue connects as. Keeping it separate from the superuser means a GoTrue compromise doesn't surrender full DB access. Generate with `openssl rand -base64 32`.
+- `SUPABASE_AUTH_ADMIN_PASSWORD` — distinct password for the role GoTrue connects as. Keeping it separate from the superuser means a GoTrue compromise doesn't surrender full DB access. Generate with a URL-safe character set, for example `openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 32; echo`, because this value is interpolated directly into `GOTRUE_DB_DATABASE_URL`. If you use a password containing reserved URL characters such as `/`, percent-encode it before Compose uses it in the URL.
 - `TF_PUBLIC_URL` — your public URL (no trailing slash)
 - `GH_CLIENT_ID` / `GH_CLIENT_SECRET` — from step 1
 
