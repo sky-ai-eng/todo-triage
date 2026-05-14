@@ -133,7 +133,9 @@ func generateGoTrueKeys() ([]map[string]any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("rsa generate: %w", err)
 	}
-	priv.Precompute()
+	if err := priv.Precompute(); err != nil {
+		return nil, fmt.Errorf("rsa precompute: %w", err)
+	}
 
 	kid := uuid.NewString()
 	jwk := map[string]any{
