@@ -35,7 +35,7 @@ Leave `TF_SESSION_KEY` empty for now (D7 wires it).
 ./triagefactory jwk-init --write-env .env
 ```
 
-This generates a fresh RS256 keypair, formats it as a JWKS containing both private and public material, and appends `GOTRUE_JWT_KEYS=<json>` to `.env`. The private side stays in `.env` (read only by GoTrue); only the public side is published at GoTrue's `/.well-known/jwks.json` endpoint.
+This generates a fresh RS256 keypair, formats it as a JWKS containing both private and public material, and appends both `GOTRUE_JWT_KEYS=<json>` and `GOTRUE_JWT_SECRET=...` to `.env`. The private side stays in `.env` (read only by GoTrue); only the public side is published at GoTrue's `/.well-known/jwks.json` endpoint. The generated `GOTRUE_JWT_SECRET` is also required by the compose stack, so if you manage these values manually, do not omit it.
 
 Re-running `jwk-init --write-env .env` appends a *second* line, which works (GoTrue picks the last one) but is messy — clear the existing line first if you're rotating.
 
