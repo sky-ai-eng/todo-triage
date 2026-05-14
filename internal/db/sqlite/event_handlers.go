@@ -213,7 +213,7 @@ func (s *eventHandlerStore) ListForPrompt(ctx context.Context, orgID, promptID s
 }
 
 func (s *eventHandlerStore) Create(ctx context.Context, orgID string, h domain.EventHandler) error {
-	if err := validateForCreateSQLite(&h); err != nil {
+	if err := db.ValidateEventHandlerForCreate(&h); err != nil {
 		return err
 	}
 	var pred any
@@ -266,7 +266,7 @@ func (s *eventHandlerStore) Create(ctx context.Context, orgID string, h domain.E
 }
 
 func (s *eventHandlerStore) Update(ctx context.Context, orgID string, h domain.EventHandler) error {
-	if err := validateForCreateSQLite(&h); err != nil {
+	if err := db.ValidateEventHandlerForCreate(&h); err != nil {
 		return err
 	}
 	var pred any
@@ -436,40 +436,6 @@ func scanEventHandlerFromAnySQLite(scanFn func(dst ...any) error) (domain.EventH
 		h.TriggerType = domain.TriggerTypeEvent
 	}
 	return h, nil
-}
-
-func validateForCreateSQLite(h *domain.EventHandler) error {
-	switch h.Kind {
-	case domain.EventHandlerKindRule:
-		if h.Name == "" {
-			return errors.New("event_handlers Create: rule requires name")
-		}
-		if h.DefaultPriority == nil || h.SortOrder == nil {
-			return errors.New("event_handlers Create: rule requires default_priority and sort_order")
-		}
-		if h.PromptID != "" || h.BreakerThreshold != nil || h.MinAutonomySuitability != nil {
-			return errors.New("event_handlers Create: rule must not populate trigger-only fields")
-		}
-	case domain.EventHandlerKindTrigger:
-		if h.PromptID == "" {
-			return errors.New("event_handlers Create: trigger requires prompt_id")
-		}
-		if h.BreakerThreshold == nil || h.MinAutonomySuitability == nil {
-			return errors.New("event_handlers Create: trigger requires breaker_threshold and min_autonomy_suitability")
-		}
-		if h.DefaultPriority != nil || h.SortOrder != nil || h.Name != "" {
-			return errors.New("event_handlers Create: trigger must not populate rule-only fields")
-		}
-		if h.TriggerType == "" {
-			h.TriggerType = domain.TriggerTypeEvent
-		}
-		if h.TriggerType != domain.TriggerTypeEvent {
-			return fmt.Errorf("event_handlers Create: unsupported trigger_type %q", h.TriggerType)
-		}
-	default:
-		return fmt.Errorf("event_handlers Create: unknown kind %q", h.Kind)
-	}
-	return nil
 }
 
 func derefFloat(p *float64) float64 {

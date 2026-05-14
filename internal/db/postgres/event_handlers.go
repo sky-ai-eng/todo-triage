@@ -201,7 +201,7 @@ func (s *eventHandlerStore) ListForPrompt(ctx context.Context, orgID, promptID s
 }
 
 func (s *eventHandlerStore) Create(ctx context.Context, orgID string, h domain.EventHandler) error {
-	if err := validateForCreate(&h); err != nil {
+	if err := db.ValidateEventHandlerForCreate(&h); err != nil {
 		return err
 	}
 	var pred any
@@ -278,7 +278,7 @@ func (s *eventHandlerStore) Update(ctx context.Context, orgID string, h domain.E
 	if !isValidUUID(h.ID) {
 		return nil
 	}
-	if err := validateForCreate(&h); err != nil {
+	if err := db.ValidateEventHandlerForCreate(&h); err != nil {
 		return err
 	}
 	var pred any
@@ -522,49 +522,9 @@ func scanEventHandlerFromAny(scanFn func(dst ...any) error) (domain.EventHandler
 	return h, nil
 }
 
-// validateForCreate ensures the incoming handler satisfies its kind's
-// shape contract before the DB sees it — provides a clearer error
-// than the CHECK-constraint failure (which surfaces as a generic
-// integrity-violation).
-func validateForCreate(h *domain.EventHandler) error {
-	switch h.Kind {
-	case domain.EventHandlerKindRule:
-		if h.Name == "" {
-			return errors.New("event_handlers Create: rule requires name")
-		}
-		if h.DefaultPriority == nil || h.SortOrder == nil {
-			return errors.New("event_handlers Create: rule requires default_priority and sort_order")
-		}
-		if h.PromptID != "" || h.BreakerThreshold != nil || h.MinAutonomySuitability != nil {
-			return errors.New("event_handlers Create: rule must not populate trigger-only fields")
-		}
-	case domain.EventHandlerKindTrigger:
-		if h.PromptID == "" {
-			return errors.New("event_handlers Create: trigger requires prompt_id")
-		}
-		if h.BreakerThreshold == nil || h.MinAutonomySuitability == nil {
-			return errors.New("event_handlers Create: trigger requires breaker_threshold and min_autonomy_suitability")
-		}
-		if h.DefaultPriority != nil || h.SortOrder != nil || h.Name != "" {
-			return errors.New("event_handlers Create: trigger must not populate rule-only fields")
-		}
-		// Normalize trigger_type — v1 only supports 'event'. Callers
-		// can leave it blank; we coerce here.
-		if h.TriggerType == "" {
-			h.TriggerType = domain.TriggerTypeEvent
-		}
-		if h.TriggerType != domain.TriggerTypeEvent {
-			return fmt.Errorf("event_handlers Create: unsupported trigger_type %q", h.TriggerType)
-		}
-	default:
-		return fmt.Errorf("event_handlers Create: unknown kind %q", h.Kind)
-	}
-	return nil
-}
-
 // derefFloat / derefInt unwrap nullable domain fields for INSERTs that
-// have already passed validateForCreate (guaranteed non-nil for the
-// kind's required fields).
+// have already passed db.ValidateEventHandlerForCreate (guaranteed non-nil
+// for the kind's required fields).
 func derefFloat(p *float64) float64 {
 	if p == nil {
 		return 0

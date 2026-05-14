@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -34,8 +33,7 @@ type setupResponse struct {
 
 func (s *Server) handleAuthSetup(w http.ResponseWriter, r *http.Request) {
 	var req setupRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+	if !decodeJSON(w, r, &req, "") {
 		return
 	}
 
@@ -178,7 +176,7 @@ func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAuthDelete(w http.ResponseWriter, r *http.Request) {
 	if err := auth.Clear(); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "auth", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "cleared"})
@@ -187,7 +185,7 @@ func (s *Server) handleAuthDelete(w http.ResponseWriter, r *http.Request) {
 // DELETE /api/auth/jira — clears Jira credentials only, preserving GitHub.
 func (s *Server) handleAuthDeleteJira(w http.ResponseWriter, r *http.Request) {
 	if err := auth.ClearJira(); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "auth", err)
 		return
 	}
 	// Stop the Jira poller and clear the in-memory client so it doesn't

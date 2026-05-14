@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -62,8 +61,7 @@ type patchProjectRequest struct {
 
 func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 	var req createProjectRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+	if !decodeJSON(w, r, &req, "") {
 		return
 	}
 	name := strings.TrimSpace(req.Name)
@@ -125,7 +123,7 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 		SpecAuthorshipPromptID: specPromptID,
 	})
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "projects", err)
 		return
 	}
 	created, err := db.GetProject(s.db, id)
@@ -139,7 +137,7 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleProjectList(w http.ResponseWriter, _ *http.Request) {
 	projects, err := db.ListProjects(s.db)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "projects", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, projects)
@@ -149,11 +147,11 @@ func (s *Server) handleProjectGet(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	project, err := db.GetProject(s.db, id)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "projects", err)
 		return
 	}
 	if project == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "project not found"})
+		notFound(w, "project")
 		return
 	}
 	writeJSON(w, http.StatusOK, project)
@@ -186,10 +184,10 @@ func (s *Server) handleProjectExportPreview(w http.ResponseWriter, r *http.Reque
 	preview, err := projectbundle.Preview(r.Context(), s.db, id)
 	if err != nil {
 		if errors.Is(err, projectbundle.ErrProjectNotFound) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "project not found"})
+			notFound(w, "project")
 			return
 		}
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "projects", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, preview)
@@ -199,20 +197,20 @@ func (s *Server) handleProjectExport(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	project, err := db.GetProject(s.db, id)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "projects", err)
 		return
 	}
 	if project == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "project not found"})
+		notFound(w, "project")
 		return
 	}
 	stream, err := projectbundle.Export(r.Context(), s.db, id)
 	if err != nil {
 		if errors.Is(err, projectbundle.ErrProjectNotFound) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "project not found"})
+			notFound(w, "project")
 			return
 		}
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "projects", err)
 		return
 	}
 	defer stream.Close()
@@ -282,7 +280,7 @@ func (s *Server) handleProjectImport(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "projects", err)
 		return
 	}
 
@@ -322,8 +320,7 @@ func projectBundleFilename(name string) string {
 func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var req patchProjectRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+	if !decodeJSON(w, r, &req, "") {
 		return
 	}
 
@@ -341,11 +338,11 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 
 	existing, err := db.GetProject(s.db, id)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "projects", err)
 		return
 	}
 	if existing == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "project not found"})
+		notFound(w, "project")
 		return
 	}
 
@@ -443,7 +440,7 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := db.UpdateProject(s.db, updated); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "projects", err)
 		return
 	}
 
@@ -514,10 +511,10 @@ func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 
 	if err := db.DeleteProject(s.db, id); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "project not found"})
+			notFound(w, "project")
 			return
 		}
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "projects", err)
 		return
 	}
 
@@ -834,7 +831,7 @@ func (s *Server) handleProjectKnowledge(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if project == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "project not found"})
+		notFound(w, "project")
 		return
 	}
 	root, err := curator.KnowledgeDir(id)
@@ -1112,7 +1109,7 @@ func (s *Server) handleProjectKnowledgeFile(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if project == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "project not found"})
+		notFound(w, "project")
 		return
 	}
 	_, full, status, errMsg := resolveKnowledgePath(id, r.PathValue("path"))
@@ -1123,7 +1120,7 @@ func (s *Server) handleProjectKnowledgeFile(w http.ResponseWriter, r *http.Reque
 	linfo, err := os.Lstat(full)
 	if err != nil {
 		if os.IsNotExist(err) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+			notFound(w, "file")
 			return
 		}
 		log.Printf("[projects] knowledge fetch: lstat %s: %v", full, err)
@@ -1143,7 +1140,7 @@ func (s *Server) handleProjectKnowledgeFile(w http.ResponseWriter, r *http.Reque
 	f, err := openNoFollow(full)
 	if err != nil {
 		if os.IsNotExist(err) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+			notFound(w, "file")
 			return
 		}
 		// Distinguish ELOOP (symlink rejected by O_NOFOLLOW) from
@@ -1213,7 +1210,7 @@ func (s *Server) handleProjectKnowledgeUpload(w http.ResponseWriter, r *http.Req
 		return
 	}
 	if project == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "project not found"})
+		notFound(w, "project")
 		return
 	}
 	root, err := curator.KnowledgeDir(id)
@@ -1418,7 +1415,7 @@ func (s *Server) handleProjectKnowledgeDelete(w http.ResponseWriter, r *http.Req
 		return
 	}
 	if project == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "project not found"})
+		notFound(w, "project")
 		return
 	}
 	_, full, status, errMsg := resolveKnowledgePath(id, r.PathValue("path"))
@@ -1428,7 +1425,7 @@ func (s *Server) handleProjectKnowledgeDelete(w http.ResponseWriter, r *http.Req
 	}
 	if err := os.Remove(full); err != nil {
 		if os.IsNotExist(err) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+			notFound(w, "file")
 			return
 		}
 		log.Printf("[projects] knowledge delete: remove %s: %v", full, err)

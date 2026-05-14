@@ -44,7 +44,7 @@ func (s *Server) handleEventHandlersList(w http.ResponseWriter, r *http.Request)
 	}
 	handlers, err := s.eventHandlers.List(r.Context(), runmode.LocalDefaultOrg, kind)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "event_handlers", err)
 		return
 	}
 	if handlers == nil {
@@ -86,8 +86,7 @@ type createEventHandlerRequest struct {
 
 func (s *Server) handleEventHandlerCreate(w http.ResponseWriter, r *http.Request) {
 	var req createEventHandlerRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+	if !decodeJSON(w, r, &req, "") {
 		return
 	}
 	if req.Kind != domain.EventHandlerKindRule && req.Kind != domain.EventHandlerKindTrigger {
@@ -155,11 +154,11 @@ func (s *Server) handleEventHandlerCreate(w http.ResponseWriter, r *http.Request
 		// integrity error.
 		prompt, err := s.prompts.Get(r.Context(), runmode.LocalDefaultOrg, req.PromptID)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			internalError(w, "event_handlers", err)
 			return
 		}
 		if prompt == nil {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "prompt not found"})
+			notFound(w, "prompt")
 			return
 		}
 		h.PromptID = req.PromptID
@@ -241,18 +240,17 @@ func (s *Server) handleEventHandlerUpdate(w http.ResponseWriter, r *http.Request
 	id := r.PathValue("id")
 
 	var req patchEventHandlerRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+	if !decodeJSON(w, r, &req, "") {
 		return
 	}
 
 	existing, err := s.eventHandlers.Get(r.Context(), runmode.LocalDefaultOrg, id)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "event_handlers", err)
 		return
 	}
 	if existing == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "event handler not found"})
+		notFound(w, "event handler")
 		return
 	}
 
@@ -331,7 +329,7 @@ func (s *Server) handleEventHandlerUpdate(w http.ResponseWriter, r *http.Request
 	}
 
 	if err := s.eventHandlers.Update(r.Context(), runmode.LocalDefaultOrg, updated); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "event_handlers", err)
 		return
 	}
 	fresh, _ := s.eventHandlers.Get(r.Context(), runmode.LocalDefaultOrg, id)
@@ -352,17 +350,17 @@ func (s *Server) handleEventHandlerDelete(w http.ResponseWriter, r *http.Request
 
 	existing, err := s.eventHandlers.Get(r.Context(), runmode.LocalDefaultOrg, id)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "event_handlers", err)
 		return
 	}
 	if existing == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "event handler not found"})
+		notFound(w, "event handler")
 		return
 	}
 
 	if existing.Source == domain.EventHandlerSourceSystem {
 		if err := s.eventHandlers.SetEnabled(r.Context(), runmode.LocalDefaultOrg, id, false); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			internalError(w, "event_handlers", err)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{
@@ -373,7 +371,7 @@ func (s *Server) handleEventHandlerDelete(w http.ResponseWriter, r *http.Request
 	}
 
 	if err := s.eventHandlers.Delete(r.Context(), runmode.LocalDefaultOrg, id); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "event_handlers", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
@@ -385,21 +383,20 @@ func (s *Server) handleEventHandlerToggle(w http.ResponseWriter, r *http.Request
 	var req struct {
 		Enabled bool `json:"enabled"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+	if !decodeJSON(w, r, &req, "") {
 		return
 	}
 	existing, err := s.eventHandlers.Get(r.Context(), runmode.LocalDefaultOrg, id)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "event_handlers", err)
 		return
 	}
 	if existing == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "event handler not found"})
+		notFound(w, "event handler")
 		return
 	}
 	if err := s.eventHandlers.SetEnabled(r.Context(), runmode.LocalDefaultOrg, id, req.Enabled); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "event_handlers", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "enabled": req.Enabled})
@@ -422,8 +419,7 @@ func (s *Server) handleEventHandlerPromote(w http.ResponseWriter, r *http.Reques
 	id := r.PathValue("id")
 
 	var req promoteEventHandlerRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+	if !decodeJSON(w, r, &req, "") {
 		return
 	}
 	if req.PromptID == "" {
@@ -437,11 +433,11 @@ func (s *Server) handleEventHandlerPromote(w http.ResponseWriter, r *http.Reques
 
 	existing, err := s.eventHandlers.Get(r.Context(), runmode.LocalDefaultOrg, id)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "event_handlers", err)
 		return
 	}
 	if existing == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "event handler not found"})
+		notFound(w, "event handler")
 		return
 	}
 	if existing.Kind != domain.EventHandlerKindRule {
@@ -451,11 +447,11 @@ func (s *Server) handleEventHandlerPromote(w http.ResponseWriter, r *http.Reques
 
 	prompt, err := s.prompts.Get(r.Context(), runmode.LocalDefaultOrg, req.PromptID)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "event_handlers", err)
 		return
 	}
 	if prompt == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "prompt not found"})
+		notFound(w, "prompt")
 		return
 	}
 
@@ -481,7 +477,7 @@ func (s *Server) handleEventHandlerPromote(w http.ResponseWriter, r *http.Reques
 		ScopePredicateJSON:     predicate,
 	}
 	if err := s.eventHandlers.Promote(r.Context(), runmode.LocalDefaultOrg, id, target); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "event_handlers", err)
 		return
 	}
 	fresh, _ := s.eventHandlers.Get(r.Context(), runmode.LocalDefaultOrg, id)
@@ -494,8 +490,7 @@ func (s *Server) handleEventHandlerPromote(w http.ResponseWriter, r *http.Reques
 // store (sort_order is rule-only by CHECK constraint).
 func (s *Server) handleEventHandlerReorder(w http.ResponseWriter, r *http.Request) {
 	var ids []string
-	if err := json.NewDecoder(r.Body).Decode(&ids); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "expected array of handler IDs"})
+	if !decodeJSON(w, r, &ids, "expected array of handler IDs") {
 		return
 	}
 	if len(ids) == 0 {
@@ -503,7 +498,7 @@ func (s *Server) handleEventHandlerReorder(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if err := s.eventHandlers.Reorder(r.Context(), runmode.LocalDefaultOrg, ids); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "event_handlers", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "reordered"})

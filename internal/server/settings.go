@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -286,8 +285,7 @@ type settingsUpdateRequest struct {
 
 func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 	var req settingsUpdateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+	if !decodeJSON(w, r, &req, "") {
 		return
 	}
 
@@ -598,8 +596,7 @@ func (s *Server) handleJiraConnect(w http.ResponseWriter, r *http.Request) {
 		URL string `json:"url"`
 		PAT string `json:"pat"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+	if !decodeJSON(w, r, &req, "") {
 		return
 	}
 	if req.URL == "" || req.PAT == "" {

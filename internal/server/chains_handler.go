@@ -1,7 +1,6 @@
 package server
 
 import (
-	"encoding/json"
 	"net/http"
 	"strconv"
 
@@ -19,17 +18,17 @@ func (s *Server) handleChainStepsGet(w http.ResponseWriter, r *http.Request) {
 
 	prompt, err := s.prompts.Get(r.Context(), runmode.LocalDefaultOrg, id)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "chains", err)
 		return
 	}
 	if prompt == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "prompt not found"})
+		notFound(w, "prompt")
 		return
 	}
 
 	steps, err := s.chains.ListSteps(r.Context(), runmode.LocalDefaultOrg, id)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "chains", err)
 		return
 	}
 	if steps == nil {
@@ -55,11 +54,11 @@ func (s *Server) handleChainStepsPut(w http.ResponseWriter, r *http.Request) {
 
 	prompt, err := s.prompts.Get(r.Context(), runmode.LocalDefaultOrg, id)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "chains", err)
 		return
 	}
 	if prompt == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "prompt not found"})
+		notFound(w, "prompt")
 		return
 	}
 	if prompt.Kind != domain.PromptKindChain {
@@ -70,8 +69,7 @@ func (s *Server) handleChainStepsPut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req chainStepsPutRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+	if !decodeJSON(w, r, &req, "") {
 		return
 	}
 
@@ -93,7 +91,7 @@ func (s *Server) handleChainStepsPut(w http.ResponseWriter, r *http.Request) {
 		}
 		stepPrompt, err := s.prompts.Get(r.Context(), runmode.LocalDefaultOrg, step.StepPromptID)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			internalError(w, "chains", err)
 			return
 		}
 		if stepPrompt == nil {
@@ -122,7 +120,7 @@ func (s *Server) handleChainStepsPut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.chains.ReplaceSteps(r.Context(), runmode.LocalDefaultOrg, id, stepIDs, briefs); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "chains", err)
 		return
 	}
 
@@ -148,23 +146,23 @@ func (s *Server) handleChainRunGet(w http.ResponseWriter, r *http.Request) {
 
 	cr, err := s.chains.GetRun(r.Context(), runmode.LocalDefaultOrg, id)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "chains", err)
 		return
 	}
 	if cr == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "chain run not found"})
+		notFound(w, "chain run")
 		return
 	}
 
 	steps, err := s.chains.ListSteps(r.Context(), runmode.LocalDefaultOrg, cr.ChainPromptID)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "chains", err)
 		return
 	}
 
 	stepRuns, err := s.chains.RunsForChain(r.Context(), runmode.LocalDefaultOrg, id)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "chains", err)
 		return
 	}
 	runByStep := map[int]*domain.AgentRun{}
@@ -178,7 +176,7 @@ func (s *Server) handleChainRunGet(w http.ResponseWriter, r *http.Request) {
 
 	verdictsByRun, err := s.chains.LatestVerdictsForRuns(r.Context(), runmode.LocalDefaultOrg, runIDs)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "chains", err)
 		return
 	}
 
@@ -204,11 +202,11 @@ func (s *Server) handleChainRunCancel(w http.ResponseWriter, r *http.Request) {
 
 	cr, err := s.chains.GetRun(r.Context(), runmode.LocalDefaultOrg, id)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "chains", err)
 		return
 	}
 	if cr == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "chain run not found"})
+		notFound(w, "chain run")
 		return
 	}
 
@@ -220,7 +218,7 @@ func (s *Server) handleChainRunCancel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.spawner.CancelChain(id); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "chains", err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "cancelling"})

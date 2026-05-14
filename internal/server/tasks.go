@@ -1,7 +1,6 @@
 package server
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -85,7 +84,7 @@ func taskToJSON(t domain.Task) taskJSON {
 func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 	tasks, err := db.QueuedTasks(s.db)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "tasks", err)
 		return
 	}
 	result := make([]taskJSON, len(tasks))
@@ -105,7 +104,7 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 		tasks, err = db.QueuedTasks(s.db)
 	}
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "tasks", err)
 		return
 	}
 	result := make([]taskJSON, len(tasks))
@@ -119,11 +118,11 @@ func (s *Server) handleTaskGet(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	task, err := db.GetTask(s.db, id)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "tasks", err)
 		return
 	}
 	if task == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "task not found"})
+		notFound(w, "task")
 		return
 	}
 	writeJSON(w, http.StatusOK, taskToJSON(*task))
@@ -139,8 +138,7 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
 	var req swipeRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+	if !decodeJSON(w, r, &req, "") {
 		return
 	}
 
@@ -182,7 +180,7 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if task == nil {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "task not found"})
+			notFound(w, "task")
 			return
 		}
 		// Terminal-status refusal: claim transitions on done/
@@ -298,7 +296,7 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if task == nil {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "task not found"})
+			notFound(w, "task")
 			return
 		}
 		if task.Status == "done" || task.Status == "dismissed" {
@@ -500,8 +498,7 @@ func (s *Server) handleSnooze(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
 	var req snoozeRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+	if !decodeJSON(w, r, &req, "") {
 		return
 	}
 
@@ -519,17 +516,17 @@ func (s *Server) handleSnooze(w http.ResponseWriter, r *http.Request) {
 	// involved.
 	task, err := db.GetTask(s.db, id)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "tasks", err)
 		return
 	}
 	if task == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "task not found"})
+		notFound(w, "task")
 		return
 	}
 
 	ok, err := s.swipes.SnoozeTask(r.Context(), runmode.LocalDefaultOrg, id, until, req.HesitationMs)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "tasks", err)
 		return
 	}
 	if !ok {
@@ -576,16 +573,16 @@ func (s *Server) handleUndo(w http.ResponseWriter, r *http.Request) {
 	// implementation detail and confusing legitimate 404 callers.
 	task, err := db.GetTask(s.db, id)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "tasks", err)
 		return
 	}
 	if task == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "task not found"})
+		notFound(w, "task")
 		return
 	}
 
 	if err := s.swipes.UndoLastSwipe(r.Context(), runmode.LocalDefaultOrg, id); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "tasks", err)
 		return
 	}
 
@@ -613,21 +610,21 @@ func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
 
 	task, err := db.GetTask(s.db, id)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "tasks", err)
 		return
 	}
 	if task == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "task not found"})
+		notFound(w, "task")
 		return
 	}
 
 	ok, err := s.swipes.RequeueTask(r.Context(), runmode.LocalDefaultOrg, id)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "tasks", err)
 		return
 	}
 	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "task not found"})
+		notFound(w, "task")
 		return
 	}
 

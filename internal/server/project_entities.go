@@ -41,7 +41,7 @@ func (s *Server) handleProjectEntities(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if project == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "project not found"})
+		notFound(w, "project")
 		return
 	}
 
