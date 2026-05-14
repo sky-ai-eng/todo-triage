@@ -218,9 +218,12 @@ func (m *Manager) startJira(cfg config.Config, creds auth.Credentials) {
 	m.jiraStop = stop
 	m.mu.Unlock()
 
+	projects := toTrackerJiraRules(cfg.Jira.Projects)
+	projectKeys := cfg.Jira.ProjectKeys()
+
 	go func() {
 		// Initial poll
-		if _, err := m.tracker.RefreshJira(client, creds.JiraURL, cfg.Jira.Projects, cfg.Jira.Pickup.Members, cfg.Jira.Done.Members, creds.JiraDisplayName); err != nil {
+		if _, err := m.tracker.RefreshJira(client, creds.JiraURL, projects, creds.JiraDisplayName); err != nil {
 			log.Printf("[jira] tracker error: %v", err)
 			m.reportError("jira", err)
 		}
@@ -230,7 +233,7 @@ func (m *Manager) startJira(cfg config.Config, creds auth.Credentials) {
 		for {
 			select {
 			case <-ticker.C:
-				if _, err := m.tracker.RefreshJira(client, creds.JiraURL, cfg.Jira.Projects, cfg.Jira.Pickup.Members, cfg.Jira.Done.Members, creds.JiraDisplayName); err != nil {
+				if _, err := m.tracker.RefreshJira(client, creds.JiraURL, projects, creds.JiraDisplayName); err != nil {
 					log.Printf("[jira] tracker error: %v", err)
 					m.reportError("jira", err)
 				}
@@ -240,5 +243,21 @@ func (m *Manager) startJira(cfg config.Config, creds auth.Credentials) {
 		}
 	}()
 
-	log.Printf("[jira] tracker started (interval: %s, projects: %v)", interval, cfg.Jira.Projects)
+	log.Printf("[jira] tracker started (interval: %s, projects: %v)", interval, projectKeys)
+}
+
+// toTrackerJiraRules converts the config-layer per-project rule slice
+// to the tracker-local view. Kept narrow on purpose — the tracker
+// package doesn't import internal/config so the two shapes stay
+// decoupled.
+func toTrackerJiraRules(projects []config.JiraProjectConfig) tracker.JiraRules {
+	out := make(tracker.JiraRules, 0, len(projects))
+	for _, p := range projects {
+		out = append(out, tracker.JiraProjectRules{
+			Key:           p.Key,
+			PickupMembers: p.Pickup.Members,
+			DoneMembers:   p.Done.Members,
+		})
+	}
+	return out
 }

@@ -567,7 +567,7 @@ func TestProjectPatch_PaddedSlugsStoredTrimmed(t *testing.T) {
 // project from the Settings-curated list.
 func TestValidateTrackerKeys_AcceptsConfigured(t *testing.T) {
 	cfg := config.Default()
-	cfg.Jira.Projects = []string{"SKY", "OPS"}
+	cfg.Jira.Projects = []config.JiraProjectConfig{{Key: "SKY"}, {Key: "OPS"}}
 	jira, linear, errMsg := validateTrackerKeys(cfg, "SKY", "")
 	if errMsg != "" {
 		t.Fatalf("expected no error, got %q", errMsg)
@@ -586,7 +586,7 @@ func TestValidateTrackerKeys_AcceptsConfigured(t *testing.T) {
 // after pinning) and curl users both hit this path.
 func TestValidateTrackerKeys_RejectsUnconfigured(t *testing.T) {
 	cfg := config.Default()
-	cfg.Jira.Projects = []string{"SKY"}
+	cfg.Jira.Projects = []config.JiraProjectConfig{{Key: "SKY"}}
 	_, _, errMsg := validateTrackerKeys(cfg, "OPS", "")
 	if errMsg == "" {
 		t.Fatal("expected error for unconfigured Jira key")
@@ -632,7 +632,7 @@ func TestValidateTrackerKeys_EmptyAcceptsBoth(t *testing.T) {
 // in normalized form rather than getting stored padded.
 func TestValidateTrackerKeys_TrimsWhitespace(t *testing.T) {
 	cfg := config.Default()
-	cfg.Jira.Projects = []string{"SKY"}
+	cfg.Jira.Projects = []config.JiraProjectConfig{{Key: "SKY"}}
 	jira, _, errMsg := validateTrackerKeys(cfg, "  SKY  ", "")
 	if errMsg != "" {
 		t.Fatalf("padded input should validate, got %q", errMsg)
@@ -1194,7 +1194,7 @@ func TestProjectCreate_AcceptsTrackerKeys(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	s := newTestServer(t)
 	cfg := config.Default()
-	cfg.Jira.Projects = []string{"SKY"}
+	cfg.Jira.Projects = []config.JiraProjectConfig{validProject("SKY")}
 	if err := config.Save(cfg); err != nil {
 		t.Fatalf("save config: %v", err)
 	}

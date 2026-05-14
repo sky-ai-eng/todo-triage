@@ -4,7 +4,9 @@ import { Link } from 'react-router-dom'
 interface SettingsResponse {
   jira: {
     enabled: boolean
-    projects: string[]
+    // SKY-272: per-project objects. Only the key is needed at this
+    // surface — the picker doesn't care about the rules.
+    projects: { key: string }[]
   }
 }
 
@@ -56,9 +58,9 @@ export default function TrackerProjectPickers({
         }
         const data: SettingsResponse = await res.json()
         if (controller.signal.aborted) return
-        const projects = data.jira.projects || []
-        setJiraEnabled(data.jira.enabled || projects.length > 0)
-        setJiraProjects(projects)
+        const keys = (data.jira.projects || []).map((p) => p.key)
+        setJiraEnabled(data.jira.enabled || keys.length > 0)
+        setJiraProjects(keys)
       } catch (err) {
         // Network failure / abort — quietly fall through to the
         // disabled state. Without this catch, an unmount mid-flight

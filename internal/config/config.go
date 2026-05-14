@@ -19,6 +19,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -46,17 +47,22 @@ type GitHubConfig struct {
 	CloneProtocol string `json:"clone_protocol,omitempty"`
 }
 
+// JiraConfig holds the per-team Jira settings. Projects is the source of
+// truth for "which Jira projects this team tracks" and what status rules
+// each project uses — teams with multiple projects whose workflows differ
+// ("Backlog/Selected/InProgress/Done" vs "New/Triage/Active/Resolved")
+// store one entry per project rather than collapsing to a unified
+// superset.
 type JiraConfig struct {
-	BaseURL      string        `json:"base_url"`
-	PollInterval time.Duration `json:"poll_interval"`
-	Projects     []string      `json:"projects"`
-	// Pickup/InProgress/Done are team-wide in local mode: the same
-	// rule applies to every Jira project the team works on. Persisted
-	// to jira_project_status_rules (team-keyed) with one row per
-	// project_key, all sharing identical values. Multi-mode admins
-	// can edit per-project values directly via the admin UI through
-	// a separate handler path — do not route those edits through
-	// config.Save() or they collapse back to one shared value.
+	BaseURL      string              `json:"base_url"`
+	PollInterval time.Duration       `json:"poll_interval"`
+	Projects     []JiraProjectConfig `json:"projects"`
+}
+
+// JiraProjectConfig is the per-project status configuration. Key is the
+// Jira project_key (e.g. "SKY") used to match events to rules.
+type JiraProjectConfig struct {
+	Key        string         `json:"key"`
 	Pickup     JiraStatusRule `json:"pickup"`
 	InProgress JiraStatusRule `json:"in_progress"`
 	Done       JiraStatusRule `json:"done"`
@@ -79,6 +85,60 @@ func (r JiraStatusRule) Contains(status string) bool {
 		}
 	}
 	return false
+}
+
+// ProjectKeys returns the list of project keys in order, with empty
+// keys filtered out. Helpful for callers that just need the names
+// (poller dispatch, JQL queries, validation).
+func (c JiraConfig) ProjectKeys() []string {
+	keys := make([]string, 0, len(c.Projects))
+	for _, p := range c.Projects {
+		if p.Key != "" {
+			keys = append(keys, p.Key)
+		}
+	}
+	return keys
+}
+
+// RuleForProject returns the per-project rules for the given key, or
+// nil when no project with that key is configured. Callers should
+// degrade gracefully on a nil return — typically by treating the event
+// as if "no rules configured" (no terminal check, no transitions).
+func (c JiraConfig) RuleForProject(key string) *JiraProjectConfig {
+	for i := range c.Projects {
+		if c.Projects[i].Key == key {
+			return &c.Projects[i]
+		}
+	}
+	return nil
+}
+
+// AllPickupMembers returns the union of every project's Pickup.Members
+// — used by JQL queries that span the team's full project list. Each
+// member is returned once; ordering follows first-seen project order.
+func (c JiraConfig) AllPickupMembers() []string {
+	return c.unionMembers(func(p JiraProjectConfig) []string { return p.Pickup.Members })
+}
+
+// AllDoneMembers returns the union of every project's Done.Members. Used
+// by JQL queries that exclude terminal tickets across the team's full
+// project list.
+func (c JiraConfig) AllDoneMembers() []string {
+	return c.unionMembers(func(p JiraProjectConfig) []string { return p.Done.Members })
+}
+
+func (c JiraConfig) unionMembers(pick func(JiraProjectConfig) []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0)
+	for _, p := range c.Projects {
+		for _, m := range pick(p) {
+			if !seen[m] {
+				seen[m] = true
+				out = append(out, m)
+			}
+		}
+	}
+	return out
 }
 
 type ServerConfig struct {
@@ -122,28 +182,16 @@ func (c GitHubConfig) Ready(pat, url string) bool {
 	return pat != "" && url != ""
 }
 
-// Ready returns true if Jira is fully configured: credentials, at least one
-// project, AND all three status rules populated. The rule check is deliberate
-// — after a config-shape upgrade old YAML keys silently drop out, leaving the
-// new Pickup/InProgress/Done rules empty. Without this gate the poller would
-// still start and emit degraded events (no terminal check, failing claims on
-// the server), which violates the "full re-setup on upgrade" contract.
-// Pickup only needs members (TF never writes to pickup); InProgress and Done
-// additionally need a canonical write target.
+// Ready returns true if Jira is fully configured: credentials present
+// and at least one tracked project. Per-project rule completeness is
+// guaranteed by the jpsr_*_populated CHECK constraints on
+// jira_project_status_rules — any row that landed in cfg.Jira.Projects
+// has non-empty Pickup/InProgress/Done members + canonicals for the
+// two write-target rules. The HTTP handler's validateProjectRules is
+// the user-facing gate; the DB CHECK is belt-and-suspenders against
+// any other write path.
 func (c JiraConfig) Ready(pat, url string) bool {
-	if pat == "" || url == "" || len(c.Projects) == 0 {
-		return false
-	}
-	if len(c.Pickup.Members) == 0 {
-		return false
-	}
-	if c.InProgress.Canonical == "" || len(c.InProgress.Members) == 0 {
-		return false
-	}
-	if c.Done.Canonical == "" || len(c.Done.Members) == 0 {
-		return false
-	}
-	return true
+	return pat != "" && url != "" && len(c.Projects) > 0
 }
 
 // Default returns a Config with sensible defaults matching the spec.
@@ -274,10 +322,15 @@ func Load() (Config, error) {
 		cfg.Jira.PollInterval = d
 	}
 
-	// team_settings (jira_projects + AI thresholds). The AI columns
-	// ship NOT NULL DEFAULT in both backends, so scanning directly
-	// into int is safe — the schema invariant holds whether the row
-	// was inserted by Save() or by any future admin path.
+	// team_settings (AI thresholds). The AI columns ship NOT NULL DEFAULT
+	// in both backends, so scanning directly into int is safe — the schema
+	// invariant holds whether the row was inserted by Save() or by any
+	// future admin path.
+	//
+	// jira_projects is read for compatibility but not used as the source
+	// of truth — jira_project_status_rules is. The column stays in sync
+	// on every Save() as a fast path for "which projects to poll" without
+	// joining, but Load assembles cfg.Jira.Projects from the rules table.
 	var projectsJSON string
 	var aiThreshold, aiInterval int
 	switch err := db.QueryRowContext(ctx, `
@@ -289,11 +342,6 @@ func Load() (Config, error) {
 	case err != nil:
 		return loadFail(fmt.Errorf("read team_settings: %w", err))
 	default:
-		var projects []string
-		if err := json.Unmarshal([]byte(projectsJSON), &projects); err != nil {
-			return loadFail(fmt.Errorf("unmarshal team_settings.jira_projects: %w", err))
-		}
-		cfg.Jira.Projects = projects
 		cfg.AI.ReprioritizeThreshold = aiThreshold
 		cfg.AI.PreferenceUpdateInterval = aiInterval
 	}
@@ -314,21 +362,14 @@ func Load() (Config, error) {
 		cfg.AI.AutoDelegateEnabled = aiAutoDelegate
 	}
 
-	// jira_project_status_rules (Pickup / InProgress / Done)
-	//
-	// Team-keyed (different teams within an org can have different
-	// status rules for the same Jira project). Local mode treats all
-	// projects uniformly — all rows for the LocalDefaultTeam share the
-	// same values. Read the first row to populate the team-wide rule.
-	// Returns ErrNoRows when no projects have been configured yet,
-	// which keeps Default()'s empty rules.
-	if rule, err := loadJiraStatusRules(ctx, db, runmode.LocalDefaultTeamID); err != nil {
+	// jira_project_status_rules — one row per project key, each carrying
+	// its own Pickup/InProgress/Done. Iterated in project_key order so
+	// the in-memory slice is stable across reads.
+	projects, err := loadJiraProjectConfigs(ctx, db, runmode.LocalDefaultTeamID)
+	if err != nil {
 		return loadFail(fmt.Errorf("read jira_project_status_rules: %w", err))
-	} else if rule != nil {
-		cfg.Jira.Pickup = rule.Pickup
-		cfg.Jira.InProgress = rule.InProgress
-		cfg.Jira.Done = rule.Done
 	}
+	cfg.Jira.Projects = projects
 
 	return cfg, nil
 }
@@ -343,48 +384,49 @@ func loadFail(err error) (Config, error) {
 	return Default(), err
 }
 
-// jiraStatusRules bundles the three rules read from a single
-// jira_project_status_rules row.
-type jiraStatusRules struct {
-	Pickup     JiraStatusRule
-	InProgress JiraStatusRule
-	Done       JiraStatusRule
-}
-
-func loadJiraStatusRules(ctx context.Context, db *sql.DB, teamID string) (*jiraStatusRules, error) {
-	var pickupJSON, inProgressJSON, doneJSON string
-	var inProgressCanon, doneCanon sql.NullString
-	err := db.QueryRowContext(ctx, `
-		SELECT pickup_members, in_progress_members, in_progress_canonical,
+func loadJiraProjectConfigs(ctx context.Context, db *sql.DB, teamID string) ([]JiraProjectConfig, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT project_key,
+		       pickup_members, in_progress_members, in_progress_canonical,
 		       done_members, done_canonical
 		FROM jira_project_status_rules
 		WHERE team_id = ?
 		ORDER BY project_key
-		LIMIT 1
-	`, teamID).Scan(&pickupJSON, &inProgressJSON, &inProgressCanon, &doneJSON, &doneCanon)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
+	`, teamID)
 	if err != nil {
 		return nil, err
 	}
-	var rules jiraStatusRules
-	if err := json.Unmarshal([]byte(pickupJSON), &rules.Pickup.Members); err != nil {
-		return nil, fmt.Errorf("unmarshal pickup_members: %w", err)
+	defer rows.Close()
+
+	var out []JiraProjectConfig
+	for rows.Next() {
+		var key, pickupJSON, inProgressJSON, doneJSON string
+		var inProgressCanon, doneCanon sql.NullString
+		if err := rows.Scan(&key, &pickupJSON, &inProgressJSON, &inProgressCanon, &doneJSON, &doneCanon); err != nil {
+			return nil, err
+		}
+		p := JiraProjectConfig{Key: key}
+		if err := json.Unmarshal([]byte(pickupJSON), &p.Pickup.Members); err != nil {
+			return nil, fmt.Errorf("unmarshal pickup_members for %s: %w", key, err)
+		}
+		if err := json.Unmarshal([]byte(inProgressJSON), &p.InProgress.Members); err != nil {
+			return nil, fmt.Errorf("unmarshal in_progress_members for %s: %w", key, err)
+		}
+		if err := json.Unmarshal([]byte(doneJSON), &p.Done.Members); err != nil {
+			return nil, fmt.Errorf("unmarshal done_members for %s: %w", key, err)
+		}
+		if inProgressCanon.Valid {
+			p.InProgress.Canonical = inProgressCanon.String
+		}
+		if doneCanon.Valid {
+			p.Done.Canonical = doneCanon.String
+		}
+		out = append(out, p)
 	}
-	if err := json.Unmarshal([]byte(inProgressJSON), &rules.InProgress.Members); err != nil {
-		return nil, fmt.Errorf("unmarshal in_progress_members: %w", err)
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
-	if err := json.Unmarshal([]byte(doneJSON), &rules.Done.Members); err != nil {
-		return nil, fmt.Errorf("unmarshal done_members: %w", err)
-	}
-	if inProgressCanon.Valid {
-		rules.InProgress.Canonical = inProgressCanon.String
-	}
-	if doneCanon.Valid {
-		rules.Done.Canonical = doneCanon.String
-	}
-	return &rules, nil
+	return out, nil
 }
 
 // ErrInvalidConfig is returned by Save when the supplied Config
@@ -396,9 +438,9 @@ var ErrInvalidConfig = errors.New("config: invalid Config — fields must be pop
 
 // Save upserts the five settings tables for the local sentinels.
 // Jira project rules are materialized one row per project in
-// cfg.Jira.Projects, all sharing identical Pickup/InProgress/Done
-// values (local mode). Projects no longer in the list have their
-// rules row deleted so the table stays clean.
+// cfg.Jira.Projects, each carrying its own Pickup/InProgress/Done.
+// Rules for projects no longer in the list have their rows deleted
+// so the table stays clean.
 //
 // Required contract: cfg must come from Load() or Default(), then
 // be mutated — building a Config struct from scratch and calling
@@ -463,12 +505,14 @@ func Save(cfg Config) error {
 		return fmt.Errorf("upsert org_settings: %w", err)
 	}
 
-	// team_settings
-	projects := cfg.Jira.Projects
-	if projects == nil {
-		projects = []string{}
+	// team_settings — jira_projects is a denormalized fast path for
+	// "which projects to poll" without joining; jira_project_status_rules
+	// is the source of truth. Keep them in sync on every save.
+	keys := cfg.Jira.ProjectKeys()
+	if keys == nil {
+		keys = []string{}
 	}
-	projectsJSON, err := json.Marshal(projects)
+	projectsJSON, err := json.Marshal(keys)
 	if err != nil {
 		return fmt.Errorf("marshal jira_projects: %w", err)
 	}
@@ -508,54 +552,71 @@ func Save(cfg Config) error {
 		return fmt.Errorf("upsert user_settings: %w", err)
 	}
 
-	// jira_project_status_rules — one row per project in
-	// cfg.Jira.Projects, all sharing the same values. Drop rules
-	// for projects no longer in the list.
-	//
-	// Empty cfg.Jira.Projects intentionally wipes every row: rules
-	// are scoped to projects, so "no projects tracked" means "no
-	// rules to keep". Re-adding a project later attaches whatever
-	// Pickup/InProgress/Done the user has in the form at that point
-	// (which may be empty if they cleared everything). SKY-272
-	// replaces this whole flow with per-project rule editing in the
-	// FE; until then, callers that need to preserve rules through a
-	// projects-empty save must keep at least one project key in the
-	// list.
-	pickupJSON, err := json.Marshal(orEmpty(cfg.Jira.Pickup.Members))
-	if err != nil {
-		return fmt.Errorf("marshal pickup_members: %w", err)
-	}
-	inProgressJSON, err := json.Marshal(orEmpty(cfg.Jira.InProgress.Members))
-	if err != nil {
-		return fmt.Errorf("marshal in_progress_members: %w", err)
-	}
-	doneJSON, err := json.Marshal(orEmpty(cfg.Jira.Done.Members))
-	if err != nil {
-		return fmt.Errorf("marshal done_members: %w", err)
-	}
-	// DELETE+INSERT scoped to the local team. In multi mode an admin UI
-	// (SKY-257 D14) edits per-project rows directly through its own
-	// handlers — it must NOT route through this code path, or per-project
-	// Canonical/members differences would collapse to one shared value.
-	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM jira_project_status_rules WHERE team_id = ?`,
-		runmode.LocalDefaultTeamID,
-	); err != nil {
-		return fmt.Errorf("clear jira_project_status_rules: %w", err)
-	}
-	for _, key := range projects {
+	// jira_project_status_rules — upsert one row per project, then
+	// drop rows for projects no longer in the list. Per-project values
+	// are persisted independently so two projects with different
+	// workflows can coexist on the same team.
+	for _, p := range cfg.Jira.Projects {
+		if p.Key == "" {
+			continue
+		}
+		pickupJSON, err := json.Marshal(orEmpty(p.Pickup.Members))
+		if err != nil {
+			return fmt.Errorf("marshal pickup_members for %s: %w", p.Key, err)
+		}
+		inProgressJSON, err := json.Marshal(orEmpty(p.InProgress.Members))
+		if err != nil {
+			return fmt.Errorf("marshal in_progress_members for %s: %w", p.Key, err)
+		}
+		doneJSON, err := json.Marshal(orEmpty(p.Done.Members))
+		if err != nil {
+			return fmt.Errorf("marshal done_members for %s: %w", p.Key, err)
+		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO jira_project_status_rules (
 				team_id, project_key,
 				pickup_members, in_progress_members, in_progress_canonical,
 				done_members, done_canonical, updated_at
 			) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+			ON CONFLICT(team_id, project_key) DO UPDATE SET
+				pickup_members = excluded.pickup_members,
+				in_progress_members = excluded.in_progress_members,
+				in_progress_canonical = excluded.in_progress_canonical,
+				done_members = excluded.done_members,
+				done_canonical = excluded.done_canonical,
+				updated_at = CURRENT_TIMESTAMP
 		`,
-			runmode.LocalDefaultTeamID, key,
-			string(pickupJSON), string(inProgressJSON), nullIfEmpty(cfg.Jira.InProgress.Canonical),
-			string(doneJSON), nullIfEmpty(cfg.Jira.Done.Canonical),
+			runmode.LocalDefaultTeamID, p.Key,
+			string(pickupJSON), string(inProgressJSON), nullIfEmpty(p.InProgress.Canonical),
+			string(doneJSON), nullIfEmpty(p.Done.Canonical),
 		); err != nil {
-			return fmt.Errorf("upsert jira_project_status_rules[%s]: %w", key, err)
+			return fmt.Errorf("upsert jira_project_status_rules[%s]: %w", p.Key, err)
+		}
+	}
+
+	// Delete rows for projects no longer in the config. Build the
+	// placeholder list dynamically — SQLite has no array binding.
+	if len(keys) == 0 {
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM jira_project_status_rules WHERE team_id = ?`,
+			runmode.LocalDefaultTeamID,
+		); err != nil {
+			return fmt.Errorf("clear jira_project_status_rules: %w", err)
+		}
+	} else {
+		placeholders := make([]string, len(keys))
+		args := make([]any, 0, len(keys)+1)
+		args = append(args, runmode.LocalDefaultTeamID)
+		for i, k := range keys {
+			placeholders[i] = "?"
+			args = append(args, k)
+		}
+		query := fmt.Sprintf(
+			`DELETE FROM jira_project_status_rules WHERE team_id = ? AND project_key NOT IN (%s)`,
+			strings.Join(placeholders, ", "),
+		)
+		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+			return fmt.Errorf("prune jira_project_status_rules: %w", err)
 		}
 	}
 

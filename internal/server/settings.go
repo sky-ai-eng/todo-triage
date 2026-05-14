@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"regexp"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
@@ -17,27 +19,54 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
-// validateStatusRule enforces the shape invariants for a JiraStatusRule.
-// hasWriteTarget distinguishes the two roles:
-//   - true (InProgress/Done): TF transitions into this state, so Canonical
-//     must be set whenever Members is non-empty, and must itself be a member.
-//   - false (Pickup): TF only reads this state, it never writes tickets back
-//     to it — Canonical must be empty. A non-empty Canonical is rejected even
-//     if it happens to be in Members, because storing it would let stale
-//     config drift through and later mislead readers ("why does Pickup have
-//     a canonical?").
-func validateStatusRule(name string, r config.JiraStatusRule, hasWriteTarget bool) error {
-	if !hasWriteTarget {
-		if r.Canonical != "" {
-			return fmt.Errorf("jira %s: canonical must be empty — this rule has no write target", name)
+// jiraProjectKeyRe matches Jira's standard project-key rule: a
+// leading uppercase letter followed by uppercase letters or digits.
+// Keys arriving through the API are uppercased before matching so
+// users typing "sky" land on the same canonical form as Jira's
+// wire-side "SKY-123".
+var jiraProjectKeyRe = regexp.MustCompile(`^[A-Z][A-Z0-9]*$`)
+
+// normalizeJiraProjectKey trims whitespace and uppercases. Used at
+// the HTTP boundary in handleSettingsPost (the write path) and in
+// validateTrackerKeys (the read/compare path) so lookups match
+// regardless of how the user typed the key.
+func normalizeJiraProjectKey(s string) string {
+	return strings.ToUpper(strings.TrimSpace(s))
+}
+
+// validateProjectRules enforces the per-project invariant that every
+// persisted project carries fully-populated Pickup/InProgress/Done
+// rules. The jpsr_*_populated CHECK constraints in the baseline are
+// the DB-level mirror; this is the user-facing gate that surfaces a
+// readable error instead of a constraint violation.
+//
+// Pickup: members required, canonical must be empty (TF never writes
+// to pickup). InProgress/Done: members + canonical required, and the
+// canonical must itself be a member (PG CHECK can't subquery, so this
+// check stays in Go).
+func validateProjectRules(p config.JiraProjectConfig) error {
+	if len(p.Pickup.Members) == 0 {
+		return fmt.Errorf("project %s: pickup members are required", p.Key)
+	}
+	if p.Pickup.Canonical != "" {
+		return fmt.Errorf("project %s: pickup canonical must be empty — TF never writes tickets back to pickup", p.Key)
+	}
+	for _, r := range []struct {
+		name string
+		rule config.JiraStatusRule
+	}{
+		{"in_progress", p.InProgress},
+		{"done", p.Done},
+	} {
+		if len(r.rule.Members) == 0 {
+			return fmt.Errorf("project %s: %s members are required", p.Key, r.name)
 		}
-		return nil
-	}
-	if r.Canonical != "" && !slices.Contains(r.Members, r.Canonical) {
-		return fmt.Errorf("jira %s: canonical status %q is not in members", name, r.Canonical)
-	}
-	if len(r.Members) > 0 && r.Canonical == "" {
-		return fmt.Errorf("jira %s: canonical status is required when members are set", name)
+		if r.rule.Canonical == "" {
+			return fmt.Errorf("project %s: %s canonical is required", p.Key, r.name)
+		}
+		if !slices.Contains(r.rule.Members, r.rule.Canonical) {
+			return fmt.Errorf("project %s: %s canonical %q is not in members", p.Key, r.name, r.rule.Canonical)
+		}
 	}
 	return nil
 }
@@ -55,6 +84,54 @@ func normalizeMembers(members []string) []string {
 func ruleEqual(a, b config.JiraStatusRule) bool {
 	return a.Canonical == b.Canonical &&
 		slices.Equal(normalizeMembers(a.Members), normalizeMembers(b.Members))
+}
+
+// cloneJiraProjects returns a deep copy so the pre-change snapshot
+// stays stable while the handler mutates cfg.Jira.Projects. The
+// per-project Members slices share backing arrays with the originals
+// otherwise, which silently makes the "did this change?" diff a
+// no-op against itself.
+func cloneJiraProjects(in []config.JiraProjectConfig) []config.JiraProjectConfig {
+	out := make([]config.JiraProjectConfig, len(in))
+	for i, p := range in {
+		out[i] = config.JiraProjectConfig{
+			Key: p.Key,
+			Pickup: config.JiraStatusRule{
+				Members:   slices.Clone(p.Pickup.Members),
+				Canonical: p.Pickup.Canonical,
+			},
+			InProgress: config.JiraStatusRule{
+				Members:   slices.Clone(p.InProgress.Members),
+				Canonical: p.InProgress.Canonical,
+			},
+			Done: config.JiraStatusRule{
+				Members:   slices.Clone(p.Done.Members),
+				Canonical: p.Done.Canonical,
+			},
+		}
+	}
+	return out
+}
+
+// jiraProjectsEqual compares two per-project lists by value, treating
+// order as significant (the user-facing UI keeps projects in the order
+// they were added; reordering counts as a change worth restarting the
+// poller for). Rules are compared with set-equality on Members.
+func jiraProjectsEqual(a, b []config.JiraProjectConfig) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Key != b[i].Key {
+			return false
+		}
+		if !ruleEqual(a[i].Pickup, b[i].Pickup) ||
+			!ruleEqual(a[i].InProgress, b[i].InProgress) ||
+			!ruleEqual(a[i].Done, b[i].Done) {
+			return false
+		}
+	}
+	return true
 }
 
 // defaultedCloneProtocol normalizes a stored CloneProtocol value for the
@@ -91,10 +168,18 @@ type jiraSettings struct {
 	BaseURL      string                `json:"base_url"`
 	HasToken     bool                  `json:"has_token"`
 	PollInterval string                `json:"poll_interval"`
-	Projects     []string              `json:"projects"`
-	Pickup       config.JiraStatusRule `json:"pickup"`
-	InProgress   config.JiraStatusRule `json:"in_progress"`
-	Done         config.JiraStatusRule `json:"done"`
+	Projects     []jiraProjectSettings `json:"projects"`
+}
+
+// jiraProjectSettings is the per-project wire shape. Mirrors
+// config.JiraProjectConfig but with explicit empty-slice
+// initialization so the JSON response always carries members:[] rather
+// than members:null.
+type jiraProjectSettings struct {
+	Key        string                `json:"key"`
+	Pickup     config.JiraStatusRule `json:"pickup"`
+	InProgress config.JiraStatusRule `json:"in_progress"`
+	Done       config.JiraStatusRule `json:"done"`
 }
 
 type serverSettings struct {
@@ -129,10 +214,7 @@ func (s *Server) handleSettingsGet(w http.ResponseWriter, r *http.Request) {
 			BaseURL:      creds.JiraURL,
 			HasToken:     creds.JiraPAT != "",
 			PollInterval: cfg.Jira.PollInterval.String(),
-			Projects:     cfg.Jira.Projects,
-			Pickup:       cfg.Jira.Pickup,
-			InProgress:   cfg.Jira.InProgress,
-			Done:         cfg.Jira.Done,
+			Projects:     toJiraProjectSettings(cfg.Jira.Projects),
 		},
 		Server: serverSettings{
 			Port: cfg.Server.Port,
@@ -146,19 +228,36 @@ func (s *Server) handleSettingsGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if resp.Jira.Projects == nil {
-		resp.Jira.Projects = []string{}
-	}
-	if resp.Jira.Pickup.Members == nil {
-		resp.Jira.Pickup.Members = []string{}
-	}
-	if resp.Jira.InProgress.Members == nil {
-		resp.Jira.InProgress.Members = []string{}
-	}
-	if resp.Jira.Done.Members == nil {
-		resp.Jira.Done.Members = []string{}
+		resp.Jira.Projects = []jiraProjectSettings{}
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// toJiraProjectSettings converts the persisted Config view into the
+// wire shape, normalizing nil Members slices to empty slices so the
+// JSON response is friendly to FE consumers (no `members:null`).
+func toJiraProjectSettings(in []config.JiraProjectConfig) []jiraProjectSettings {
+	out := make([]jiraProjectSettings, 0, len(in))
+	for _, p := range in {
+		out = append(out, jiraProjectSettings{
+			Key:        p.Key,
+			Pickup:     normalizeRule(p.Pickup),
+			InProgress: normalizeRule(p.InProgress),
+			Done:       normalizeRule(p.Done),
+		})
+	}
+	return out
+}
+
+// normalizeRule replaces a nil Members slice with an empty one so the
+// JSON encoding is `[]` rather than `null`. Canonical and other fields
+// pass through unchanged.
+func normalizeRule(r config.JiraStatusRule) config.JiraStatusRule {
+	if r.Members == nil {
+		r.Members = []string{}
+	}
+	return r
 }
 
 type settingsUpdateRequest struct {
@@ -171,16 +270,15 @@ type settingsUpdateRequest struct {
 	JiraPAT       string `json:"jira_pat"` // empty means "keep existing"
 
 	// Config
-	GitHubPollInterval  string   `json:"github_poll_interval"`
-	GitHubCloneProtocol string   `json:"github_clone_protocol"` // "ssh" | "https" | "" (don't touch)
-	JiraPollInterval    string   `json:"jira_poll_interval"`
-	JiraProjects        []string `json:"jira_projects"`
-	// JiraPickup/InProgress/Done are pointers so the request can distinguish
-	// "don't touch" (nil) from "clear" ({Members:[], Canonical:""}). Empty
-	// members + non-empty canonical is a validation error.
-	JiraPickup     *config.JiraStatusRule `json:"jira_pickup,omitempty"`
-	JiraInProgress *config.JiraStatusRule `json:"jira_in_progress,omitempty"`
-	JiraDone       *config.JiraStatusRule `json:"jira_done,omitempty"`
+	GitHubPollInterval  string `json:"github_poll_interval"`
+	GitHubCloneProtocol string `json:"github_clone_protocol"` // "ssh" | "https" | "" (don't touch)
+	JiraPollInterval    string `json:"jira_poll_interval"`
+	// JiraProjects is a pointer so the request can distinguish "don't
+	// touch" (nil) from "wipe to empty" ([]). When non-nil, the slice
+	// is the full new project list — each entry carries its own
+	// Pickup/InProgress/Done rules. SKY-272 collapsed the previous
+	// global rule fields into this per-project shape.
+	JiraProjects   *[]jiraProjectSettings `json:"jira_projects,omitempty"`
 	AIModel        string                 `json:"ai_model"`
 	AIAutoDelegate *bool                  `json:"ai_auto_delegate_enabled"` // pointer to distinguish absent from false
 	ServerPort     int                    `json:"server_port"`
@@ -208,10 +306,7 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 	prevGHCloneProtocol := cfg.GitHub.CloneProtocol
 	prevJiraURL := creds.JiraURL
 	prevJiraPAT := creds.JiraPAT
-	prevJiraProjects := cfg.Jira.Projects
-	prevJiraPickup := cfg.Jira.Pickup
-	prevJiraInProgress := cfg.Jira.InProgress
-	prevJiraDone := cfg.Jira.Done
+	prevJiraProjects := cloneJiraProjects(cfg.Jira.Projects)
 	prevJiraPollInterval := cfg.Jira.PollInterval
 
 	// --- Handle GitHub ---
@@ -359,31 +454,46 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 			cfg.Jira.PollInterval = d
 		}
 	}
+	// JiraProjects carries the full per-project array. Validation runs
+	// over each entry's rules before any mutation — one bad rule rejects
+	// the whole request so cfg never lands in a partial state. Keys are
+	// normalized (trim + uppercase) and regex-validated against Jira's
+	// own project-key shape; duplicates after normalization are rejected
+	// so "SKY" and "sky" can't both land. Rule completeness is enforced
+	// by validateProjectRules — partial saves are not a supported state.
 	if req.JiraProjects != nil {
-		cfg.Jira.Projects = req.JiraProjects
-	}
-	// Validate rule shapes before touching cfg — reject the whole request if
-	// any rule has canonical outside members. Pickup has no canonical to check.
-	if req.JiraInProgress != nil {
-		if err := validateStatusRule("in_progress", *req.JiraInProgress, true); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
+		seen := map[string]bool{}
+		next := make([]config.JiraProjectConfig, 0, len(*req.JiraProjects))
+		for _, p := range *req.JiraProjects {
+			key := normalizeJiraProjectKey(p.Key)
+			if key == "" {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "jira_projects: project key must not be empty"})
+				return
+			}
+			if !jiraProjectKeyRe.MatchString(key) {
+				writeJSON(w, http.StatusBadRequest, map[string]string{
+					"error": "jira_projects: invalid project key " + key + " (must match Jira's format: a leading uppercase letter followed by uppercase letters, digits, or underscores)",
+				})
+				return
+			}
+			if seen[key] {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "jira_projects: duplicate project key " + key})
+				return
+			}
+			seen[key] = true
+			normalized := config.JiraProjectConfig{
+				Key:        key,
+				Pickup:     p.Pickup,
+				InProgress: p.InProgress,
+				Done:       p.Done,
+			}
+			if err := validateProjectRules(normalized); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				return
+			}
+			next = append(next, normalized)
 		}
-		cfg.Jira.InProgress = *req.JiraInProgress
-	}
-	if req.JiraDone != nil {
-		if err := validateStatusRule("done", *req.JiraDone, true); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		cfg.Jira.Done = *req.JiraDone
-	}
-	if req.JiraPickup != nil {
-		if err := validateStatusRule("pickup", *req.JiraPickup, false); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		cfg.Jira.Pickup = *req.JiraPickup
+		cfg.Jira.Projects = next
 	}
 	if req.AIModel != "" {
 		cfg.AI.Model = req.AIModel
@@ -443,10 +553,7 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 
 	jiraChanged := creds.JiraURL != prevJiraURL ||
 		creds.JiraPAT != prevJiraPAT ||
-		!slices.Equal(cfg.Jira.Projects, prevJiraProjects) ||
-		!ruleEqual(cfg.Jira.Pickup, prevJiraPickup) ||
-		!ruleEqual(cfg.Jira.InProgress, prevJiraInProgress) ||
-		!ruleEqual(cfg.Jira.Done, prevJiraDone) ||
+		!jiraProjectsEqual(cfg.Jira.Projects, prevJiraProjects) ||
 		cfg.Jira.PollInterval != prevJiraPollInterval
 
 	// Mark Jira restarted synchronously before launching the async callback so
@@ -538,7 +645,7 @@ func (s *Server) handleJiraStatuses(w http.ResponseWriter, r *http.Request) {
 	projects := r.URL.Query()["project"]
 	if len(projects) == 0 {
 		cfg, _ := config.Load()
-		projects = cfg.Jira.Projects
+		projects = cfg.Jira.ProjectKeys()
 	}
 	if len(projects) == 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no projects specified"})

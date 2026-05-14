@@ -11,7 +11,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/config"
 	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
@@ -24,27 +23,26 @@ import (
 
 // Server is the main HTTP server for Triage Factory.
 type Server struct {
-	db                 *sql.DB
-	prompts            db.PromptStore
-	swipes             db.SwipeStore
-	dashboard          db.DashboardStore
-	eventHandlers      db.EventHandlerStore
-	agents             db.AgentStore     // SKY-261 D-Claims: resolves the org's agent for claim stamps
-	teamAgents         db.TeamAgentStore // SKY-261 D-Claims: re-checks team_agents.enabled on swipe-delegate / factory-delegate
-	users              db.UsersStore     // SKY-264: github_username + display_name on the synthetic local user row
-	chains             db.ChainStore
-	mux                *http.ServeMux
-	static             fs.FS
-	ws                 *websocket.Hub
-	spawner            *delegate.Spawner
-	curator            *curator.Curator
-	ghClient           *ghclient.Client
-	jiraClient         *jira.Client
-	jiraInProgressRule config.JiraStatusRule // full rule — Members for guards, Canonical for writes
-	onGitHubChanged    func()                // GitHub creds/repos changed — full restart + re-profile
-	onJiraChanged      func()                // Jira config changed — restart Jira poller only
-	scorerTrigger      func()                // invoked after non-poll task creation (e.g. carry-over) to kick scoring immediately
-	lifetimeCounter    *db.LifetimeDistinctCounter
+	db              *sql.DB
+	prompts         db.PromptStore
+	swipes          db.SwipeStore
+	dashboard       db.DashboardStore
+	eventHandlers   db.EventHandlerStore
+	agents          db.AgentStore     // SKY-261 D-Claims: resolves the org's agent for claim stamps
+	teamAgents      db.TeamAgentStore // SKY-261 D-Claims: re-checks team_agents.enabled on swipe-delegate / factory-delegate
+	users           db.UsersStore     // SKY-264: github_username + display_name on the synthetic local user row
+	chains          db.ChainStore
+	mux             *http.ServeMux
+	static          fs.FS
+	ws              *websocket.Hub
+	spawner         *delegate.Spawner
+	curator         *curator.Curator
+	ghClient        *ghclient.Client
+	jiraClient      *jira.Client
+	onGitHubChanged func() // GitHub creds/repos changed — full restart + re-profile
+	onJiraChanged   func() // Jira config changed — restart Jira poller only
+	scorerTrigger   func() // invoked after non-poll task creation (e.g. carry-over) to kick scoring immediately
+	lifetimeCounter *db.LifetimeDistinctCounter
 
 	// Jira poll readiness — used by /api/jira/stock to decide whether the
 	// poller has completed its first cycle after a restart. Carry-over reads
@@ -363,13 +361,12 @@ func (s *Server) SetGitHubClient(client *ghclient.Client) {
 	s.ghClient = client
 }
 
-// SetJiraClient sets the Jira client and the in-progress rule used by claim
-// and undo handlers. The rule carries both Members (for guards — is the
-// ticket already in *any* in-progress variant?) and Canonical (the status
-// we actually transition into when claiming).
-func (s *Server) SetJiraClient(client *jira.Client, inProgressRule config.JiraStatusRule) {
+// SetJiraClient sets the Jira client used by claim and undo handlers.
+// Per-project in-progress rules are looked up via config.Load() at the
+// use site (tasks.go) — projects can have different workflows and the
+// right rule depends on the ticket's project_key.
+func (s *Server) SetJiraClient(client *jira.Client) {
 	s.jiraClient = client
-	s.jiraInProgressRule = inProgressRule
 }
 
 // MarkJiraRestarted records the moment the Jira poller was restarted. Clears

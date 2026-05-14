@@ -703,7 +703,24 @@ CREATE TABLE public.jira_project_status_rules (
     in_progress_canonical text,
     done_members text[] DEFAULT '{}'::text[] NOT NULL,
     done_canonical text,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    -- Mirror of the SQLite CHECKs: every persisted row is fully
+    -- configured. HTTP handler is the user-facing gate; these are
+    -- defense-in-depth against any other write path (admin UI in
+    -- multi mode, direct SQL, restore). "canonical is in members"
+    -- stays in the HTTP validator because PG CHECK can't have
+    -- subqueries.
+    CONSTRAINT jpsr_pickup_populated CHECK (
+        cardinality(pickup_members) > 0
+    ),
+    CONSTRAINT jpsr_in_progress_populated CHECK (
+        cardinality(in_progress_members) > 0
+        AND in_progress_canonical IS NOT NULL AND in_progress_canonical <> ''
+    ),
+    CONSTRAINT jpsr_done_populated CHECK (
+        cardinality(done_members) > 0
+        AND done_canonical IS NOT NULL AND done_canonical <> ''
+    )
 );
 
 
@@ -947,6 +964,7 @@ CREATE TABLE public.prompts (
     name text NOT NULL,
     body text NOT NULL,
     source text DEFAULT 'user'::text NOT NULL,
+    kind text DEFAULT 'leaf'::text NOT NULL,
     usage_count integer DEFAULT 0 NOT NULL,
     hidden boolean DEFAULT false NOT NULL,
     user_modified boolean DEFAULT false NOT NULL,
@@ -1101,6 +1119,8 @@ CREATE TABLE public.runs (
     num_turns integer,
     total_cost_usd real,
     actor_agent_id uuid,
+    chain_run_id uuid,
+    chain_step_index integer,
     CONSTRAINT runs_creator_matches_trigger_type CHECK ((((trigger_type = 'manual'::text) AND (creator_user_id IS NOT NULL)) OR ((trigger_type = 'event'::text) AND (creator_user_id IS NULL)))),
     CONSTRAINT runs_team_visibility_requires_team CHECK (((visibility <> 'team'::text) OR (team_id IS NOT NULL))),
     CONSTRAINT runs_visibility_check CHECK ((visibility = ANY (ARRAY['private'::text, 'team'::text, 'org'::text])))
@@ -4676,6 +4696,120 @@ INSERT INTO events_catalog (id, source, category, label, description) VALUES
   ('system:delegation:failed',           'system', 'delegation', 'Delegation Failed',   'Agent delegation run failed'),
   ('system:prompt:auto_suspended',       'system', 'delegation', 'Prompt Auto-suspended', 'Per-(entity, prompt) breaker tripped after repeated failures'),
   ('system:task:delegation_blocked_by_subtasks', 'system', 'delegation', 'Delegation Blocked: Subtasks', 'Auto-delegation skipped because parent has open subtasks');
+
+
+--
+-- Prompt chains
+--
+-- Linear sequences of prompt steps that share one worktree. Each step
+-- runs as a fresh Claude session in the same worktree; adjacent steps
+-- communicate via a handoff file and record proceed/abort verdicts on
+-- run_artifacts(kind='chain:verdict'). Per-step runtime state stays on
+-- runs (linked via runs.chain_run_id); chain-wide abort/complete state
+-- lives on chain_runs.
+--
+-- Multi-tenant pattern matches the rest of the baseline: composite FKs
+-- against (id, org_id) on every parent ref, RLS gated on
+-- tf.current_org_id() with EXISTS guards against same-id cross-tenant
+-- access (prompts.id is text and can collide across orgs).
+--
+
+CREATE TABLE public.prompt_chain_steps (
+    org_id uuid NOT NULL,
+    chain_prompt_id text NOT NULL,
+    step_index integer NOT NULL,
+    step_prompt_id text NOT NULL,
+    brief text DEFAULT ''::text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+CREATE TABLE public.chain_runs (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    org_id uuid NOT NULL,
+    creator_user_id uuid NOT NULL,
+    chain_prompt_id text NOT NULL,
+    task_id uuid NOT NULL,
+    trigger_type text NOT NULL,
+    trigger_id uuid,
+    status text DEFAULT 'running'::text NOT NULL,
+    abort_reason text,
+    aborted_at_step integer,
+    worktree_path text NOT NULL,
+    started_at timestamp with time zone DEFAULT now() NOT NULL,
+    completed_at timestamp with time zone,
+    CONSTRAINT chain_runs_status_check CHECK ((status = ANY (ARRAY['running'::text, 'completed'::text, 'aborted'::text, 'failed'::text, 'cancelled'::text])))
+);
+
+ALTER TABLE ONLY public.prompt_chain_steps
+    ADD CONSTRAINT prompt_chain_steps_pkey PRIMARY KEY (org_id, chain_prompt_id, step_index);
+
+ALTER TABLE ONLY public.chain_runs
+    ADD CONSTRAINT chain_runs_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.chain_runs
+    ADD CONSTRAINT chain_runs_id_org_id_key UNIQUE (id, org_id);
+
+CREATE INDEX idx_prompt_chain_steps_step_prompt ON public.prompt_chain_steps (step_prompt_id, org_id);
+CREATE INDEX idx_chain_runs_task   ON public.chain_runs (task_id, org_id);
+CREATE INDEX idx_chain_runs_status ON public.chain_runs (status) WHERE (status = 'running'::text);
+CREATE INDEX idx_runs_chain        ON public.runs (chain_run_id, chain_step_index) WHERE (chain_run_id IS NOT NULL);
+
+ALTER TABLE ONLY public.prompt_chain_steps
+    ADD CONSTRAINT prompt_chain_steps_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.prompt_chain_steps
+    ADD CONSTRAINT prompt_chain_steps_chain_prompt_fkey FOREIGN KEY (chain_prompt_id, org_id) REFERENCES public.prompts(id, org_id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.prompt_chain_steps
+    ADD CONSTRAINT prompt_chain_steps_step_prompt_fkey  FOREIGN KEY (step_prompt_id,  org_id) REFERENCES public.prompts(id, org_id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY public.chain_runs
+    ADD CONSTRAINT chain_runs_org_id_fkey          FOREIGN KEY (org_id)          REFERENCES public.orgs(id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.chain_runs
+    ADD CONSTRAINT chain_runs_creator_user_id_fkey FOREIGN KEY (creator_user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.chain_runs
+    ADD CONSTRAINT chain_runs_chain_prompt_fkey    FOREIGN KEY (chain_prompt_id, org_id) REFERENCES public.prompts(id, org_id);
+ALTER TABLE ONLY public.chain_runs
+    ADD CONSTRAINT chain_runs_task_fkey            FOREIGN KEY (task_id, org_id)         REFERENCES public.tasks(id, org_id);
+ALTER TABLE ONLY public.chain_runs
+    ADD CONSTRAINT chain_runs_trigger_fkey         FOREIGN KEY (trigger_id, org_id)      REFERENCES public.event_handlers(id, org_id);
+
+ALTER TABLE ONLY public.runs
+    ADD CONSTRAINT runs_chain_run_fkey FOREIGN KEY (chain_run_id, org_id) REFERENCES public.chain_runs(id, org_id);
+
+ALTER TABLE public.prompt_chain_steps ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.chain_runs         ENABLE ROW LEVEL SECURITY;
+
+-- prompt_chain_steps inherits the chain prompt's visibility — if the
+-- caller can't see the parent prompt, they can't see its step list.
+-- prompts RLS already applies creator + team/org visibility rules.
+-- The EXISTS subquery joins on p.org_id = prompt_chain_steps.org_id
+-- because prompts.id is text and can collide across orgs.
+CREATE POLICY prompt_chain_steps_all ON public.prompt_chain_steps FOR ALL
+  USING      ((org_id = tf.current_org_id())
+              AND (EXISTS (SELECT 1 FROM public.prompts p
+                           WHERE p.id = prompt_chain_steps.chain_prompt_id
+                             AND p.org_id = prompt_chain_steps.org_id)))
+  WITH CHECK ((org_id = tf.current_org_id())
+              AND (EXISTS (SELECT 1 FROM public.prompts p
+                           WHERE p.id = prompt_chain_steps.chain_prompt_id
+                             AND p.org_id = prompt_chain_steps.org_id)));
+
+-- chain_runs are creator-scoped, same as runs/tasks.
+CREATE POLICY chain_runs_select ON public.chain_runs FOR SELECT
+  USING ((org_id = tf.current_org_id())
+         AND tf.user_has_org_access(org_id)
+         AND (creator_user_id = tf.current_user_id()));
+
+CREATE POLICY chain_runs_modify ON public.chain_runs FOR ALL
+  USING ((org_id = tf.current_org_id())
+         AND tf.user_has_org_access(org_id)
+         AND (creator_user_id = tf.current_user_id()))
+  WITH CHECK ((org_id = tf.current_org_id())
+              AND (creator_user_id = tf.current_user_id())
+              AND tf.user_has_org_access(org_id));
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.prompt_chain_steps TO tf_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.chain_runs         TO tf_app;
+
 
 -- +goose Down
 SELECT 'down not supported';

@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { ChevronDown, ChevronRight, Trash2 } from 'lucide-react'
 import JiraStatusRule, { type JiraStatusRuleValue } from '../components/JiraStatusRule'
 import { toast } from '../components/Toast/toastStore'
 import { readError } from '../lib/api'
@@ -7,6 +8,17 @@ import { getStoredTheme, setTheme, type ThemeMode } from '../lib/theme'
 interface JiraStatus {
   id: string
   name: string
+}
+
+// JiraProjectConfig mirrors the backend wire shape for a single
+// project's rules. SKY-272 collapsed three global rule fields into
+// this per-project array so teams with heterogeneous workflows can
+// configure each project independently.
+interface JiraProjectConfig {
+  key: string
+  pickup: JiraStatusRuleValue
+  in_progress: JiraStatusRuleValue
+  done: JiraStatusRuleValue
 }
 
 interface SettingsData {
@@ -22,10 +34,7 @@ interface SettingsData {
     base_url: string
     has_token: boolean
     poll_interval: string
-    projects: string[]
-    pickup: JiraStatusRuleValue
-    in_progress: JiraStatusRuleValue
-    done: JiraStatusRuleValue
+    projects: JiraProjectConfig[]
   }
   server: { port: number }
   ai: {
@@ -35,6 +44,21 @@ interface SettingsData {
     auto_delegate_enabled: boolean
   }
 }
+
+const emptyProject = (key = ''): JiraProjectConfig => ({
+  key,
+  pickup: { members: [] },
+  in_progress: { members: [] },
+  done: { members: [] },
+})
+
+const projectIsComplete = (p: JiraProjectConfig): boolean =>
+  p.key.trim() !== '' &&
+  p.pickup.members.length > 0 &&
+  p.in_progress.members.length > 0 &&
+  !!p.in_progress.canonical &&
+  p.done.members.length > 0 &&
+  !!p.done.canonical
 
 export default function Settings() {
   const [data, setData] = useState<SettingsData | null>(null)
@@ -48,10 +72,7 @@ export default function Settings() {
     github_poll_interval: string
     github_clone_protocol: 'ssh' | 'https'
     jira_poll_interval: string
-    jira_projects: string
-    jira_pickup: JiraStatusRuleValue
-    jira_in_progress: JiraStatusRuleValue
-    jira_done: JiraStatusRuleValue
+    jira_projects: JiraProjectConfig[]
     ai_model: string
     ai_auto_delegate_enabled: boolean
     server_port: number
@@ -65,17 +86,23 @@ export default function Settings() {
     github_poll_interval: '5m0s',
     github_clone_protocol: 'ssh',
     jira_poll_interval: '5m0s',
-    jira_projects: '',
-    jira_pickup: { members: [] },
-    jira_in_progress: { members: [] },
-    jira_done: { members: [] },
+    jira_projects: [],
     ai_model: 'sonnet',
     ai_auto_delegate_enabled: true,
     server_port: 3000,
   })
   const [saving, setSaving] = useState(false)
-  const [jiraStatuses, setJiraStatuses] = useState<JiraStatus[]>([])
+  // Statuses keyed by project key so each project's picker pulls from
+  // the right per-project status list. The "Fetch Statuses" button
+  // refreshes the union for all configured projects.
+  const [jiraStatusesByProject, setJiraStatusesByProject] = useState<Record<string, JiraStatus[]>>(
+    {},
+  )
   const [statusesLoading, setStatusesLoading] = useState(false)
+  // Per-project expand/collapse state. For the common N=1 case the
+  // first project stays expanded so the UX matches the pre-SKY-272
+  // flow; additional projects start collapsed.
+  const [expandedKeys, setExpandedKeys] = useState<Record<string, boolean>>({})
   const [jiraConnected, setJiraConnected] = useState(false)
   const [jiraConnecting, setJiraConnecting] = useState(false)
   const [jiraConnectError, setJiraConnectError] = useState<string | null>(null)
@@ -112,6 +139,7 @@ export default function Settings() {
       .then((r) => r.json())
       .then((d: SettingsData) => {
         setData(d)
+        const projects = d.jira.projects && d.jira.projects.length > 0 ? d.jira.projects : []
         setForm({
           github_enabled: true,
           github_url: d.github.base_url || '',
@@ -122,42 +150,54 @@ export default function Settings() {
           github_poll_interval: d.github.poll_interval,
           github_clone_protocol: d.github.clone_protocol === 'https' ? 'https' : 'ssh',
           jira_poll_interval: d.jira.poll_interval,
-          jira_projects: (d.jira.projects || []).join(', '),
-          jira_pickup: d.jira.pickup || { members: [] },
-          jira_in_progress: d.jira.in_progress || { members: [] },
-          jira_done: d.jira.done || { members: [] },
+          jira_projects: projects,
           ai_model: d.ai.model,
           ai_auto_delegate_enabled: d.ai.auto_delegate_enabled,
           server_port: d.server.port,
         })
+        // N=1: expand the only project so existing single-project
+        // users see no UX regression. N>1: collapse all so the page
+        // doesn't render a wall of pickers — the spec's "collapsed
+        // by default" rule.
+        const initialExpanded: Record<string, boolean> = {}
+        if (projects.length === 1) {
+          initialExpanded[projects[0].key] = true
+        }
+        setExpandedKeys(initialExpanded)
         if (d.jira.has_token && d.jira.base_url) {
           setJiraConnected(true)
-          if (d.jira.projects?.length > 0) {
-            fetchJiraStatuses(d.jira.projects)
+          const keys = projects.map((p) => p.key).filter(Boolean)
+          if (keys.length > 0) {
+            fetchJiraStatuses(keys)
           }
         }
       })
     // fetchJiraStatuses intentionally omitted — this effect is a one-shot
-    // mount loader, and the call always passes projects explicitly so no
-    // closure staleness is possible.
+    // mount loader.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const fetchJiraStatuses = async (projects?: string[]) => {
+  // fetchJiraStatuses queries the backend for statuses across the
+  // given project list. The backend intersects across projects, so
+  // the returned list is the safe set to offer in EVERY project's
+  // picker (a status not in every project would fail TransitionTo).
+  // Mirrors today's behavior — per-project status autocomplete is v2.
+  const fetchJiraStatuses = async (projectKeys?: string[]) => {
     setStatusesLoading(true)
     try {
-      const projectList =
-        projects ||
-        form.jira_projects
-          .split(',')
-          .map((s) => s.trim())
-          .filter(Boolean)
-      if (projectList.length === 0) return
-      const params = projectList.map((p) => `project=${encodeURIComponent(p)}`).join('&')
+      const keys = projectKeys || form.jira_projects.map((p) => p.key.trim()).filter(Boolean)
+      if (keys.length === 0) return
+      const params = keys.map((p) => `project=${encodeURIComponent(p)}`).join('&')
       const res = await fetch(`/api/jira/statuses?${params}`)
       if (res.ok) {
         const statuses: JiraStatus[] = await res.json()
-        setJiraStatuses(statuses)
+        // Same status list applies to every queried project; mirror
+        // it under each key so the per-project pickers can read by key.
+        const next: Record<string, JiraStatus[]> = {}
+        for (const k of keys) {
+          next[k] = statuses
+        }
+        setJiraStatusesByProject((current) => ({ ...current, ...next }))
       }
     } catch {
       // Non-critical
@@ -185,12 +225,9 @@ export default function Settings() {
         setForm((f) => ({
           ...f,
           jira_pat: '',
-          jira_projects: '',
-          jira_pickup: { members: [] },
-          jira_in_progress: { members: [] },
-          jira_done: { members: [] },
+          jira_projects: [],
         }))
-        setJiraStatuses([])
+        setJiraStatusesByProject({})
       } else {
         setForm((f) => ({ ...f, jira_pat: '' }))
       }
@@ -222,30 +259,97 @@ export default function Settings() {
       return
     }
     setJiraConnected(false)
-    setJiraStatuses([])
+    setJiraStatusesByProject({})
     setForm((f) => ({
       ...f,
       jira_enabled: false,
       jira_url: '',
       jira_pat: '',
-      jira_projects: '',
-      jira_pickup: { members: [] },
-      jira_in_progress: { members: [] },
-      jira_done: { members: [] },
+      jira_projects: [],
     }))
   }
 
   const update = (field: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
     setForm((f) => ({ ...f, [field]: e.target.value }))
 
+  // updateProject swaps the project at index i with the produced patch.
+  // Centralized so each picker doesn't re-derive the splice.
+  const updateProject = (i: number, patch: Partial<JiraProjectConfig>) => {
+    setForm((f) => {
+      const next = f.jira_projects.slice()
+      next[i] = { ...next[i], ...patch }
+      return { ...f, jira_projects: next }
+    })
+  }
+
+  const addProject = () => {
+    // New section is appended at index === current length, so we stamp
+    // idx_${length} into expandedKeys — that's the same key isExpanded
+    // will read on the next render. Using a synthesized __new_... token
+    // would never be reached by isExpanded and the new section would
+    // render collapsed (the bug this comment guards against).
+    const newIndex = form.jira_projects.length
+    setForm((f) => ({ ...f, jira_projects: [...f.jira_projects, emptyProject('')] }))
+    setExpandedKeys((m) => ({ ...m, [`idx_${newIndex}`]: true }))
+  }
+
+  const removeProject = (i: number) => {
+    setForm((f) => {
+      const next = f.jira_projects.slice()
+      next.splice(i, 1)
+      return { ...f, jira_projects: next }
+    })
+    // Shift expandedKeys down for every index above the removed slot —
+    // otherwise idx_${i} still maps to the entry that was at i+1, which
+    // is now at i. Drop the highest-index entry since it no longer
+    // exists.
+    setExpandedKeys((m) => {
+      const next: Record<string, boolean> = {}
+      for (const [k, v] of Object.entries(m)) {
+        if (!k.startsWith('idx_')) {
+          next[k] = v
+          continue
+        }
+        const idx = Number(k.slice('idx_'.length))
+        if (Number.isNaN(idx)) {
+          next[k] = v
+        } else if (idx < i) {
+          next[k] = v
+        } else if (idx > i) {
+          next[`idx_${idx - 1}`] = v
+        }
+        // idx === i: dropped along with the removed project.
+      }
+      return next
+    })
+  }
+
+  // Section expansion uses the project's index because the key field
+  // is user-editable during the same render and would otherwise lose
+  // its open/closed state every keystroke.
+  const toggleExpanded = (i: number) => {
+    const id = `idx_${i}`
+    setExpandedKeys((m) => ({ ...m, [id]: !m[id] }))
+  }
+
+  const isExpanded = (i: number): boolean => {
+    const id = `idx_${i}`
+    if (id in expandedKeys) return expandedKeys[id]
+    // Fallback for projects that came from initial load: keyed by
+    // project.key.
+    const key = form.jira_projects[i]?.key
+    return key ? expandedKeys[key] === true : false
+  }
+
   const save = async (e: React.FormEvent) => {
     e.preventDefault()
     setSaving(true)
 
+    // Trim project keys before sending. Empty-key entries are
+    // dropped — the user added a section but never typed a key.
     const projects = form.jira_projects
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean)
+      .map((p) => ({ ...p, key: p.key.trim() }))
+      .filter((p) => p.key !== '')
 
     try {
       const res = await fetch('/api/settings', {
@@ -262,9 +366,6 @@ export default function Settings() {
           github_clone_protocol: form.github_clone_protocol,
           jira_poll_interval: form.jira_poll_interval,
           jira_projects: projects,
-          jira_pickup: form.jira_pickup,
-          jira_in_progress: form.jira_in_progress,
-          jira_done: form.jira_done,
           ai_model: form.ai_model,
           ai_auto_delegate_enabled: form.ai_auto_delegate_enabled,
           server_port: form.server_port,
@@ -290,6 +391,15 @@ export default function Settings() {
       </div>
     )
   }
+
+  // Save button is disabled when Jira is connected but any tracked
+  // project has incomplete rules — same gating as the pre-SKY-272
+  // form, just applied per project.
+  const incompleteProjects = jiraConnected
+    ? form.jira_projects.filter((p) => p.key.trim() !== '' && !projectIsComplete(p)).length
+    : 0
+  const hasAnyValidProject =
+    !jiraConnected || form.jira_projects.some((p) => p.key.trim() !== '' && projectIsComplete(p))
 
   return (
     <div className="max-w-2xl mx-auto">
@@ -459,7 +569,7 @@ export default function Settings() {
               </button>
             </div>
           ) : (
-            /* Stage 2: Configure projects & statuses */
+            /* Stage 2: Configure projects & statuses (per-project) */
             <div className="space-y-3">
               <div className="flex items-center gap-2 rounded-xl bg-claim/[0.06] border border-claim/15 px-4 py-2.5">
                 <div className="w-1.5 h-1.5 rounded-full bg-claim shrink-0" />
@@ -479,55 +589,116 @@ export default function Settings() {
                   <option value="5m0s">5 minutes</option>
                 </select>
               </Field>
-              <Field label="Projects (comma-separated)">
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    placeholder="PROJ, INFRA"
-                    value={form.jira_projects}
-                    onChange={update('jira_projects')}
-                    className={inputClass + ' flex-1'}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => fetchJiraStatuses()}
-                    disabled={statusesLoading || !form.jira_projects.trim()}
-                    className="shrink-0 text-[11px] text-accent hover:text-accent/80 disabled:opacity-40 border border-accent/20 rounded-xl px-3 py-2 transition-colors"
-                  >
-                    {statusesLoading ? 'Loading...' : 'Fetch Statuses'}
-                  </button>
-                </div>
-              </Field>
-              {jiraStatuses.length > 0 && (
-                <div className="space-y-4 pt-2">
-                  <JiraStatusRule
-                    label="Pickup"
-                    description="Poll for unassigned tickets in these states."
-                    allStatuses={jiraStatuses}
-                    value={form.jira_pickup}
-                    onChange={(v) => setForm((f) => ({ ...f, jira_pickup: v }))}
-                    requireCanonical={false}
-                  />
-                  <JiraStatusRule
-                    label="In progress"
-                    description="Count as actively being worked on."
-                    allStatuses={jiraStatuses}
-                    value={form.jira_in_progress}
-                    onChange={(v) => setForm((f) => ({ ...f, jira_in_progress: v }))}
-                    requireCanonical={true}
-                    canonicalPrompt="Claim →"
-                  />
-                  <JiraStatusRule
-                    label="Done"
-                    description="Count as complete (add every variant — e.g. Resolved + Verified)."
-                    allStatuses={jiraStatuses}
-                    value={form.jira_done}
-                    onChange={(v) => setForm((f) => ({ ...f, jira_done: v }))}
-                    requireCanonical={true}
-                    canonicalPrompt="Complete →"
-                  />
-                </div>
-              )}
+
+              {/* Per-project sections. Each carries its own rules. */}
+              <div className="space-y-2">
+                {form.jira_projects.length === 0 && (
+                  <p className="text-[12px] text-text-tertiary italic">
+                    No Jira projects configured. Click &ldquo;Add project&rdquo; to start.
+                  </p>
+                )}
+                {form.jira_projects.map((project, i) => {
+                  const statuses = jiraStatusesByProject[project.key] || []
+                  const complete = projectIsComplete(project)
+                  const expanded = isExpanded(i)
+                  return (
+                    <div key={i} className="rounded-xl border border-border-subtle bg-white/40">
+                      <div className="flex items-center gap-2 px-3 py-2">
+                        <button
+                          type="button"
+                          onClick={() => toggleExpanded(i)}
+                          className="text-text-tertiary hover:text-text-secondary"
+                          aria-label={expanded ? 'Collapse project' : 'Expand project'}
+                        >
+                          {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                        </button>
+                        <input
+                          type="text"
+                          placeholder="PROJ"
+                          value={project.key}
+                          onChange={(e) => updateProject(i, { key: e.target.value })}
+                          className="flex-1 bg-transparent border-0 focus:outline-none text-[13px] font-medium text-text-primary placeholder-text-tertiary"
+                        />
+                        {project.key.trim() !== '' && (
+                          <span
+                            className={`text-[10px] uppercase tracking-wide ${
+                              complete ? 'text-claim' : 'text-snooze'
+                            }`}
+                          >
+                            {complete ? 'Ready' : 'Needs rules'}
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => removeProject(i)}
+                          className="text-text-tertiary hover:text-dismiss"
+                          aria-label="Remove project"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+
+                      {expanded && (
+                        <div className="px-4 pb-4 pt-1 space-y-3">
+                          <div className="flex items-center justify-between">
+                            <p className="text-[11px] text-text-tertiary">
+                              {statuses.length > 0
+                                ? `${statuses.length} statuses available`
+                                : 'Click Fetch Statuses to load options'}
+                            </p>
+                            <button
+                              type="button"
+                              onClick={() => fetchJiraStatuses([project.key].filter(Boolean))}
+                              disabled={statusesLoading || !project.key.trim()}
+                              className="shrink-0 text-[11px] text-accent hover:text-accent/80 disabled:opacity-40 border border-accent/20 rounded-xl px-3 py-1 transition-colors"
+                            >
+                              {statusesLoading ? 'Loading...' : 'Fetch Statuses'}
+                            </button>
+                          </div>
+
+                          {statuses.length > 0 && (
+                            <div className="space-y-4 pt-1">
+                              <JiraStatusRule
+                                label="Pickup"
+                                description="Poll for unassigned tickets in these states."
+                                allStatuses={statuses}
+                                value={project.pickup}
+                                onChange={(v) => updateProject(i, { pickup: v })}
+                                requireCanonical={false}
+                              />
+                              <JiraStatusRule
+                                label="In progress"
+                                description="Count as actively being worked on."
+                                allStatuses={statuses}
+                                value={project.in_progress}
+                                onChange={(v) => updateProject(i, { in_progress: v })}
+                                requireCanonical={true}
+                                canonicalPrompt="Claim →"
+                              />
+                              <JiraStatusRule
+                                label="Done"
+                                description="Count as complete (add every variant — e.g. Resolved + Verified)."
+                                allStatuses={statuses}
+                                value={project.done}
+                                onChange={(v) => updateProject(i, { done: v })}
+                                requireCanonical={true}
+                                canonicalPrompt="Complete →"
+                              />
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+                <button
+                  type="button"
+                  onClick={addProject}
+                  className="w-full text-[12px] text-accent hover:text-accent/80 border border-dashed border-accent/30 rounded-xl px-3 py-2 transition-colors"
+                >
+                  + Add project
+                </button>
+              </div>
             </div>
           )}
         </Section>
@@ -602,16 +773,7 @@ export default function Settings() {
 
         <button
           type="submit"
-          disabled={
-            saving ||
-            (jiraConnected &&
-              (!form.jira_projects.trim() ||
-                form.jira_pickup.members.length === 0 ||
-                form.jira_in_progress.members.length === 0 ||
-                !form.jira_in_progress.canonical ||
-                form.jira_done.members.length === 0 ||
-                !form.jira_done.canonical))
-          }
+          disabled={saving || (jiraConnected && (!hasAnyValidProject || incompleteProjects > 0))}
           className="w-full bg-accent hover:bg-accent/90 disabled:opacity-40 text-white font-medium rounded-xl px-4 py-2.5 text-[13px] transition-colors"
         >
           {saving ? 'Saving...' : 'Save Settings'}
