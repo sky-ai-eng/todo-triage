@@ -703,7 +703,24 @@ CREATE TABLE public.jira_project_status_rules (
     in_progress_canonical text,
     done_members text[] DEFAULT '{}'::text[] NOT NULL,
     done_canonical text,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    -- Mirror of the SQLite CHECKs: every persisted row is fully
+    -- configured. HTTP handler is the user-facing gate; these are
+    -- defense-in-depth against any other write path (admin UI in
+    -- multi mode, direct SQL, restore). "canonical is in members"
+    -- stays in the HTTP validator because PG CHECK can't have
+    -- subqueries.
+    CONSTRAINT jpsr_pickup_populated CHECK (
+        cardinality(pickup_members) > 0
+    ),
+    CONSTRAINT jpsr_in_progress_populated CHECK (
+        cardinality(in_progress_members) > 0
+        AND in_progress_canonical IS NOT NULL AND in_progress_canonical <> ''
+    ),
+    CONSTRAINT jpsr_done_populated CHECK (
+        cardinality(done_members) > 0
+        AND done_canonical IS NOT NULL AND done_canonical <> ''
+    )
 );
 
 

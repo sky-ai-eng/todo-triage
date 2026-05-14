@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -18,27 +19,54 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
-// validateStatusRule enforces the shape invariants for a JiraStatusRule.
-// hasWriteTarget distinguishes the two roles:
-//   - true (InProgress/Done): TF transitions into this state, so Canonical
-//     must be set whenever Members is non-empty, and must itself be a member.
-//   - false (Pickup): TF only reads this state, it never writes tickets back
-//     to it — Canonical must be empty. A non-empty Canonical is rejected even
-//     if it happens to be in Members, because storing it would let stale
-//     config drift through and later mislead readers ("why does Pickup have
-//     a canonical?").
-func validateStatusRule(name string, r config.JiraStatusRule, hasWriteTarget bool) error {
-	if !hasWriteTarget {
-		if r.Canonical != "" {
-			return fmt.Errorf("jira %s: canonical must be empty — this rule has no write target", name)
+// jiraProjectKeyRe matches Jira's own project-key rule: a leading
+// uppercase letter followed by uppercase letters, digits, or
+// underscores. Keys arriving through the API are uppercased before
+// matching so users typing "sky" land on the same canonical form as
+// Jira's wire-side "SKY-123".
+var jiraProjectKeyRe = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
+
+// normalizeJiraProjectKey trims whitespace and uppercases. Used at
+// the HTTP boundary in handleSettingsPost (the write path) and in
+// validateTrackerKeys (the read/compare path) so lookups match
+// regardless of how the user typed the key.
+func normalizeJiraProjectKey(s string) string {
+	return strings.ToUpper(strings.TrimSpace(s))
+}
+
+// validateProjectRules enforces the per-project invariant that every
+// persisted project carries fully-populated Pickup/InProgress/Done
+// rules. The jpsr_*_populated CHECK constraints in the baseline are
+// the DB-level mirror; this is the user-facing gate that surfaces a
+// readable error instead of a constraint violation.
+//
+// Pickup: members required, canonical must be empty (TF never writes
+// to pickup). InProgress/Done: members + canonical required, and the
+// canonical must itself be a member (PG CHECK can't subquery, so this
+// check stays in Go).
+func validateProjectRules(p config.JiraProjectConfig) error {
+	if len(p.Pickup.Members) == 0 {
+		return fmt.Errorf("project %s: pickup members are required", p.Key)
+	}
+	if p.Pickup.Canonical != "" {
+		return fmt.Errorf("project %s: pickup canonical must be empty — TF never writes tickets back to pickup", p.Key)
+	}
+	for _, r := range []struct {
+		name string
+		rule config.JiraStatusRule
+	}{
+		{"in_progress", p.InProgress},
+		{"done", p.Done},
+	} {
+		if len(r.rule.Members) == 0 {
+			return fmt.Errorf("project %s: %s members are required", p.Key, r.name)
 		}
-		return nil
-	}
-	if r.Canonical != "" && !slices.Contains(r.Members, r.Canonical) {
-		return fmt.Errorf("jira %s: canonical status %q is not in members", name, r.Canonical)
-	}
-	if len(r.Members) > 0 && r.Canonical == "" {
-		return fmt.Errorf("jira %s: canonical status is required when members are set", name)
+		if r.rule.Canonical == "" {
+			return fmt.Errorf("project %s: %s canonical is required", p.Key, r.name)
+		}
+		if !slices.Contains(r.rule.Members, r.rule.Canonical) {
+			return fmt.Errorf("project %s: %s canonical %q is not in members", p.Key, r.name, r.rule.Canonical)
+		}
 	}
 	return nil
 }
@@ -428,16 +456,24 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 	}
 	// JiraProjects carries the full per-project array. Validation runs
 	// over each entry's rules before any mutation — one bad rule rejects
-	// the whole request so cfg never lands in a partial state. Empty
-	// keys and duplicate keys are also rejected here: the rules table
-	// keys on project_key and a duplicate would silently last-write-win.
+	// the whole request so cfg never lands in a partial state. Keys are
+	// normalized (trim + uppercase) and regex-validated against Jira's
+	// own project-key shape; duplicates after normalization are rejected
+	// so "SKY" and "sky" can't both land. Rule completeness is enforced
+	// by validateProjectRules — partial saves are not a supported state.
 	if req.JiraProjects != nil {
 		seen := map[string]bool{}
 		next := make([]config.JiraProjectConfig, 0, len(*req.JiraProjects))
 		for _, p := range *req.JiraProjects {
-			key := strings.TrimSpace(p.Key)
+			key := normalizeJiraProjectKey(p.Key)
 			if key == "" {
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "jira_projects: project key must not be empty"})
+				return
+			}
+			if !jiraProjectKeyRe.MatchString(key) {
+				writeJSON(w, http.StatusBadRequest, map[string]string{
+					"error": "jira_projects: invalid project key " + key + " (must match Jira's format: a leading uppercase letter followed by uppercase letters, digits, or underscores)",
+				})
 				return
 			}
 			if seen[key] {
@@ -445,24 +481,17 @@ func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			seen[key] = true
-			if err := validateStatusRule("pickup ("+key+")", p.Pickup, false); err != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-				return
-			}
-			if err := validateStatusRule("in_progress ("+key+")", p.InProgress, true); err != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-				return
-			}
-			if err := validateStatusRule("done ("+key+")", p.Done, true); err != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-				return
-			}
-			next = append(next, config.JiraProjectConfig{
+			normalized := config.JiraProjectConfig{
 				Key:        key,
 				Pickup:     p.Pickup,
 				InProgress: p.InProgress,
 				Done:       p.Done,
-			})
+			}
+			if err := validateProjectRules(normalized); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				return
+			}
+			next = append(next, normalized)
 		}
 		cfg.Jira.Projects = next
 	}

@@ -649,9 +649,10 @@ func validatePinnedRepos(database *sql.DB, repos []string) ([]string, string) {
 // independently. Each is optional; when non-empty, jira_project_key
 // must be present in cfg.Jira.Projects (the user-curated list set up
 // in Settings) and linear_project_key is rejected outright until the
-// Linear integration ships. Both fields are normalized via
-// strings.TrimSpace before the existence check so a value padded with
-// stray whitespace doesn't pass validation but get stored unmatched.
+// Linear integration ships. The Jira key is normalized via
+// normalizeJiraProjectKey (TrimSpace + ToUpper) to match the canonical
+// form persisted by handleSettingsPost — without ToUpper, a stored
+// "SKY" would silently fail to match an inbound "sky".
 //
 // Takes cfg as a parameter rather than calling config.Load() directly
 // so the function is testable in isolation and so a single PATCH/POST
@@ -661,7 +662,7 @@ func validatePinnedRepos(database *sql.DB, repos []string) ([]string, string) {
 // Returns the normalized values and an empty error string on success,
 // or two empty strings and an error message on failure.
 func validateTrackerKeys(cfg config.Config, jiraKey, linearKey string) (string, string, string) {
-	jiraNorm := strings.TrimSpace(jiraKey)
+	jiraNorm := normalizeJiraProjectKey(jiraKey)
 	linearNorm := strings.TrimSpace(linearKey)
 
 	if linearNorm != "" {

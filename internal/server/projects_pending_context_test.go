@@ -228,9 +228,11 @@ func TestProjectPatch_QueuesJiraChange(t *testing.T) {
 	id, _ := seedProjectWithSessionForPatch(t, s)
 
 	// Seed a configured Jira project so validateTrackerKeys accepts
-	// the value when the PATCH handler does its config.Load().
+	// the value when the PATCH handler does its config.Load(). The
+	// jpsr_*_populated CHECK constraints require fully-populated
+	// rules — the test fixture mirrors the handler's strict shape.
 	cfg := config.Default()
-	cfg.Jira.Projects = []config.JiraProjectConfig{{Key: "SKY"}}
+	cfg.Jira.Projects = []config.JiraProjectConfig{validProject("SKY")}
 	if err := config.Save(cfg); err != nil {
 		t.Fatalf("save config: %v", err)
 	}

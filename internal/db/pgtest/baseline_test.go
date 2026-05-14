@@ -144,6 +144,107 @@ func TestSeedData(t *testing.T) {
 	}
 }
 
+// TestBaseline_JiraStatusRulesPopulated_CHECKsFire pins the three
+// jpsr_*_populated CHECK constraints. The HTTP handler's
+// validateProjectRules is the user-facing gate; these CHECKs are
+// defense-in-depth so any path that bypasses validation (admin UI in
+// multi mode, direct SQL, restore from backup) still can't persist a
+// partial row. Each subtest writes one minimally-broken row and
+// asserts the matching CHECK fires; the happy-path full insert is
+// implicit in TestRLS_SettingsAdminOnly already.
+func TestBaseline_JiraStatusRulesPopulated_CHECKsFire(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	// Need a team_id to satisfy the FK. Use the same seed helpers as
+	// the rest of the suite so org bootstrap stays consistent.
+	owner := seedUser(t, h, "check-owner")
+	orgID := seedOrg(t, h, "check-org", owner)
+	teamID := seedTeam(t, h, orgID, "check-team")
+	_ = orgID // referenced only for FK chain
+
+	cases := []struct {
+		name       string
+		insert     string
+		wantSubstr string
+	}{
+		{
+			name: "pickup_members empty",
+			insert: `INSERT INTO jira_project_status_rules
+				(team_id, project_key, pickup_members,
+				 in_progress_members, in_progress_canonical,
+				 done_members, done_canonical)
+				VALUES ($1, 'SKY', ARRAY[]::text[],
+				        ARRAY['In Progress'], 'In Progress',
+				        ARRAY['Done'], 'Done')`,
+			wantSubstr: "jpsr_pickup_populated",
+		},
+		{
+			name: "in_progress_members empty",
+			insert: `INSERT INTO jira_project_status_rules
+				(team_id, project_key, pickup_members,
+				 in_progress_members, in_progress_canonical,
+				 done_members, done_canonical)
+				VALUES ($1, 'SKY', ARRAY['To Do'],
+				        ARRAY[]::text[], 'In Progress',
+				        ARRAY['Done'], 'Done')`,
+			wantSubstr: "jpsr_in_progress_populated",
+		},
+		{
+			name: "in_progress_canonical null",
+			insert: `INSERT INTO jira_project_status_rules
+				(team_id, project_key, pickup_members,
+				 in_progress_members, in_progress_canonical,
+				 done_members, done_canonical)
+				VALUES ($1, 'SKY', ARRAY['To Do'],
+				        ARRAY['In Progress'], NULL,
+				        ARRAY['Done'], 'Done')`,
+			wantSubstr: "jpsr_in_progress_populated",
+		},
+		{
+			name: "done_members empty",
+			insert: `INSERT INTO jira_project_status_rules
+				(team_id, project_key, pickup_members,
+				 in_progress_members, in_progress_canonical,
+				 done_members, done_canonical)
+				VALUES ($1, 'SKY', ARRAY['To Do'],
+				        ARRAY['In Progress'], 'In Progress',
+				        ARRAY[]::text[], 'Done')`,
+			wantSubstr: "jpsr_done_populated",
+		},
+		{
+			name: "done_canonical null",
+			insert: `INSERT INTO jira_project_status_rules
+				(team_id, project_key, pickup_members,
+				 in_progress_members, in_progress_canonical,
+				 done_members, done_canonical)
+				VALUES ($1, 'SKY', ARRAY['To Do'],
+				        ARRAY['In Progress'], 'In Progress',
+				        ARRAY['Done'], NULL)`,
+			wantSubstr: "jpsr_done_populated",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := h.AdminDB.Exec(tc.insert, teamID)
+			if err == nil {
+				t.Fatalf("expected CHECK violation for %q, got nil", tc.name)
+			}
+			var pgErr *pgconn.PgError
+			if !errors.As(err, &pgErr) {
+				t.Fatalf("expected pg error, got %T: %v", err, err)
+			}
+			if pgErr.Code != "23514" { // check_violation
+				t.Errorf("expected SQLSTATE 23514, got %s: %v", pgErr.Code, err)
+			}
+			if !strings.Contains(pgErr.Message, tc.wantSubstr) && !strings.Contains(pgErr.ConstraintName, tc.wantSubstr) {
+				t.Errorf("expected CHECK %q in error, got: %v (constraint=%s)", tc.wantSubstr, pgErr.Message, pgErr.ConstraintName)
+			}
+		})
+	}
+}
+
 // TestRLS_AdminConnectionBypassesRLS pins the harness contract: tests
 // run through AdminDB see all rows regardless of RLS policies. If
 // this ever fails, it means tf_app or some other role's BYPASSRLS bit
@@ -1128,11 +1229,18 @@ func TestRLS_SettingsAdminOnly(t *testing.T) {
 	}
 
 	// Bob cannot INSERT a jira rule — WITH CHECK fails. (jira rules
-	// are team-keyed; bob is a team member but not a team admin.)
+	// are team-keyed; bob is a team member but not a team admin.) Use
+	// fully-populated values so we surface the RLS error rather than
+	// the jpsr_*_populated CHECK constraints.
 	err = h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
 		_, err := tx.Exec(`
-			INSERT INTO jira_project_status_rules (team_id, project_key)
-			VALUES ($1, 'SKY')
+			INSERT INTO jira_project_status_rules (
+				team_id, project_key,
+				pickup_members, in_progress_members, in_progress_canonical,
+				done_members, done_canonical
+			) VALUES ($1, 'SKY',
+				ARRAY['To Do'], ARRAY['In Progress'], 'In Progress',
+				ARRAY['Done'], 'Done')
 		`, teamA)
 		return err
 	})
@@ -1151,8 +1259,13 @@ func TestRLS_SettingsAdminOnly(t *testing.T) {
 	// admin on every team in the org.
 	err = h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
 		_, err := tx.Exec(`
-			INSERT INTO jira_project_status_rules (team_id, project_key)
-			VALUES ($1, 'SKY')
+			INSERT INTO jira_project_status_rules (
+				team_id, project_key,
+				pickup_members, in_progress_members, in_progress_canonical,
+				done_members, done_canonical
+			) VALUES ($1, 'SKY',
+				ARRAY['To Do'], ARRAY['In Progress'], 'In Progress',
+				ARRAY['Done'], 'Done')
 		`, teamA)
 		return err
 	})

@@ -19,6 +19,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -181,33 +182,16 @@ func (c GitHubConfig) Ready(pat, url string) bool {
 	return pat != "" && url != ""
 }
 
-// Ready returns true if Jira is fully configured: credentials, at least one
-// project, AND every project has its three status rules populated. The rule
-// check is deliberate — after a config-shape upgrade old rule entries silently
-// drop out, leaving the new Pickup/InProgress/Done rules empty. Without this
-// gate the poller would still start and emit degraded events (no terminal
-// check, failing claims on the server), which violates the "full re-setup on
-// upgrade" contract. Pickup only needs members (TF never writes to pickup);
-// InProgress and Done additionally need a canonical write target.
+// Ready returns true if Jira is fully configured: credentials present
+// and at least one tracked project. Per-project rule completeness is
+// guaranteed by the jpsr_*_populated CHECK constraints on
+// jira_project_status_rules — any row that landed in cfg.Jira.Projects
+// has non-empty Pickup/InProgress/Done members + canonicals for the
+// two write-target rules. The HTTP handler's validateProjectRules is
+// the user-facing gate; the DB CHECK is belt-and-suspenders against
+// any other write path.
 func (c JiraConfig) Ready(pat, url string) bool {
-	if pat == "" || url == "" || len(c.Projects) == 0 {
-		return false
-	}
-	for _, p := range c.Projects {
-		if p.Key == "" {
-			return false
-		}
-		if len(p.Pickup.Members) == 0 {
-			return false
-		}
-		if p.InProgress.Canonical == "" || len(p.InProgress.Members) == 0 {
-			return false
-		}
-		if p.Done.Canonical == "" || len(p.Done.Members) == 0 {
-			return false
-		}
-	}
-	return true
+	return pat != "" && url != "" && len(c.Projects) > 0
 }
 
 // Default returns a Config with sensible defaults matching the spec.
@@ -629,7 +613,7 @@ func Save(cfg Config) error {
 		}
 		query := fmt.Sprintf(
 			`DELETE FROM jira_project_status_rules WHERE team_id = ? AND project_key NOT IN (%s)`,
-			joinPlaceholders(placeholders),
+			strings.Join(placeholders, ", "),
 		)
 		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
 			return fmt.Errorf("prune jira_project_status_rules: %w", err)
@@ -637,19 +621,6 @@ func Save(cfg Config) error {
 	}
 
 	return tx.Commit()
-}
-
-// joinPlaceholders concatenates "?" placeholders with commas. Inlined
-// rather than pulled from strings to avoid the import for one call.
-func joinPlaceholders(p []string) string {
-	out := ""
-	for i, s := range p {
-		if i > 0 {
-			out += ", "
-		}
-		out += s
-	}
-	return out
 }
 
 // defaultedCloneProtocol substitutes "ssh" when the field is empty —

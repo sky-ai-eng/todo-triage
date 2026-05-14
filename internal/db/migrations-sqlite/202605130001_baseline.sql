@@ -193,7 +193,26 @@ CREATE TABLE jira_project_status_rules (
     done_members          TEXT NOT NULL DEFAULT '[]',
     done_canonical        TEXT,
     updated_at            TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (team_id, project_key)
+    PRIMARY KEY (team_id, project_key),
+    -- A row is the team's commitment to track this Jira project. The
+    -- HTTP handler rejects partial saves, and these CHECKs are the
+    -- belt-and-suspenders guarantee that any persisted row carries a
+    -- non-empty pickup set + members + canonical for both write-target
+    -- rules. The "canonical is in members" check is enforced at the
+    -- HTTP layer (subqueries-in-CHECK aren't portable to PG) — a row
+    -- that bypasses validation with a stale canonical would surface
+    -- as a TransitionTo failure at runtime, visible rather than silent.
+    CONSTRAINT jpsr_pickup_populated CHECK (
+        pickup_members <> '' AND pickup_members <> '[]'
+    ),
+    CONSTRAINT jpsr_in_progress_populated CHECK (
+        in_progress_members <> '' AND in_progress_members <> '[]'
+        AND in_progress_canonical IS NOT NULL AND in_progress_canonical <> ''
+    ),
+    CONSTRAINT jpsr_done_populated CHECK (
+        done_members <> '' AND done_members <> '[]'
+        AND done_canonical IS NOT NULL AND done_canonical <> ''
+    )
 );
 
 -- === Agents ==============================================================
