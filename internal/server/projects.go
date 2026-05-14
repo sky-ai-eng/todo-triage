@@ -677,7 +677,7 @@ func validateTrackerKeys(cfg config.Config, jiraKey, linearKey string) (string, 
 		return "", "", ""
 	}
 	for _, p := range cfg.Jira.Projects {
-		if p == jiraNorm {
+		if p.Key == jiraNorm {
 			return jiraNorm, "", ""
 		}
 	}

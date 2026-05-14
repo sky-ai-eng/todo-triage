@@ -126,11 +126,12 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 			parentURL = strings.TrimRight(cfg.Jira.BaseURL, "/") + "/browse/" + snap.ParentKey
 		}
 
+		projectKey := projectFromKey(snap.Key)
 		baseTicket := stockTicket{
 			IssueKey:  snap.Key,
 			Summary:   snap.Summary,
 			Status:    snap.Status,
-			Project:   projectFromKey(snap.Key),
+			Project:   projectKey,
 			IssueType: snap.IssueType,
 			Priority:  snap.Priority,
 			ParentKey: snap.ParentKey,
@@ -138,23 +139,33 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 			URL:       snap.URL,
 		}
 
+		// Per-project rule lookup. nil means the ticket's project_key
+		// has no row — degrade like "no rules configured": skip the
+		// available bucket entirely (we can't classify pickup status)
+		// and leave prefilled actions empty for assigned tickets.
+		projectRule := cfg.Jira.RuleForProject(projectKey)
+
 		isSelf := snap.Assignee == creds.JiraDisplayName
 		isUnassigned := snap.Assignee == ""
 
 		switch {
 		case isSelf:
 			baseTicket.Bucket = "assigned"
-			baseTicket.PrefilledAction = prefillForAssigned(cfg.Jira, snap.Status)
+			baseTicket.PrefilledAction = prefillForAssigned(projectRule, snap.Status)
 			assigned = append(assigned, scored{baseTicket, snap.CreatedAt, e.CreatedAt.Format("2006-01-02T15:04:05Z07:00")})
 
-		case isUnassigned && cfg.Jira.Pickup.Contains(snap.Status):
+		case isUnassigned && projectRule != nil && projectRule.Pickup.Contains(snap.Status):
 			baseTicket.Bucket = "available"
 			baseTicket.PrefilledAction = "" // user decides
 			available = append(available, scored{baseTicket, snap.CreatedAt, e.CreatedAt.Format("2006-01-02T15:04:05Z07:00")})
 
 		default:
-			// Assigned to someone else, or unassigned but not in Pickup
-			// (in-progress orphan, stale Done) — no action in carry-over.
+			// Assigned to someone else, unassigned but not in Pickup
+			// (in-progress orphan, stale Done), or project has no
+			// configured rules — no action in carry-over.
+			if projectRule == nil {
+				log.Printf("[stock] skipping %s: project %q has no configured status rules", snap.Key, projectKey)
+			}
 			continue
 		}
 	}
@@ -208,13 +219,20 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 // status should always be offered for closure, even if the user has
 // overlapping rule membership). Pickup is checked last so the "new work"
 // case is the default for simply-assigned-to-you tickets.
-func prefillForAssigned(cfg config.JiraConfig, status string) string {
+//
+// A nil project rule (the ticket's project_key has no configured rules)
+// returns "" — user picks the action manually, matching the "no rules
+// configured" degrade-cleanly contract.
+func prefillForAssigned(rule *config.JiraProjectConfig, status string) string {
+	if rule == nil {
+		return ""
+	}
 	switch {
-	case cfg.Done.Contains(status):
+	case rule.Done.Contains(status):
 		return "done"
-	case cfg.InProgress.Contains(status):
+	case rule.InProgress.Contains(status):
 		return "claim"
-	case cfg.Pickup.Contains(status):
+	case rule.Pickup.Contains(status):
 		return "queue"
 	default:
 		return ""
@@ -321,9 +339,16 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
+		// Per-project rule lookup. Tickets whose project_key has no
+		// configured rules fall through every branch below — there's
+		// no terminal check, no available bucket — so the only action
+		// they support is "queue" on an assigned ticket (the
+		// synthesized event doesn't depend on status rules).
+		projectRule := cfg.Jira.RuleForProject(projectFromKey(snap.Key))
+
 		isSelf := snap.Assignee == creds.JiraDisplayName
 		isUnassigned := snap.Assignee == ""
-		isAvailable := isUnassigned && cfg.Jira.Pickup.Contains(snap.Status)
+		isAvailable := isUnassigned && projectRule != nil && projectRule.Pickup.Contains(snap.Status)
 
 		if !isSelf && !isAvailable {
 			failed = append(failed, stockFailure{a.IssueKey, a.Action, "ticket is not assigned to you and not in the available pickup queue"})
@@ -355,7 +380,7 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 		// the "done" action (no-op guard skips the Jira transition when the
 		// status is already a Done member); queue/claim on an already-done
 		// ticket is pointless, so reject those outright.
-		if isSelf && cfg.Jira.Done.Contains(snap.Status) && a.Action != "done" {
+		if isSelf && projectRule != nil && projectRule.Done.Contains(snap.Status) && a.Action != "done" {
 			failed = append(failed, stockFailure{a.IssueKey, a.Action, "ticket is already in a done status — only the done action is valid"})
 			continue
 		}
@@ -390,8 +415,8 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 			queued++
 
 		case "claim":
-			if cfg.Jira.InProgress.Canonical == "" {
-				failed = append(failed, stockFailure{a.IssueKey, a.Action, "in_progress canonical status not configured"})
+			if projectRule == nil || projectRule.InProgress.Canonical == "" {
+				failed = append(failed, stockFailure{a.IssueKey, a.Action, "in_progress canonical status not configured for this project"})
 				continue
 			}
 
@@ -411,12 +436,12 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 			}
-			if state == nil || !cfg.Jira.InProgress.Contains(state.StatusName) {
-				if err := client.TransitionTo(a.IssueKey, cfg.Jira.InProgress.Canonical); err != nil {
+			if state == nil || !projectRule.InProgress.Contains(state.StatusName) {
+				if err := client.TransitionTo(a.IssueKey, projectRule.InProgress.Canonical); err != nil {
 					failed = append(failed, stockFailure{a.IssueKey, a.Action, "transition: " + err.Error()})
 					continue
 				}
-				snap.Status = cfg.Jira.InProgress.Canonical
+				snap.Status = projectRule.InProgress.Canonical
 			} else {
 				snap.Status = state.StatusName
 			}
@@ -461,8 +486,8 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 			claimed++
 
 		case "done":
-			if cfg.Jira.Done.Canonical == "" {
-				failed = append(failed, stockFailure{a.IssueKey, a.Action, "done canonical status not configured"})
+			if projectRule == nil || projectRule.Done.Canonical == "" {
+				failed = append(failed, stockFailure{a.IssueKey, a.Action, "done canonical status not configured for this project"})
 				continue
 			}
 			// Skip the transition when the ticket is already in any Done
@@ -471,8 +496,8 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 			// perspective; transitioning to Resolved would be a no-op at best
 			// and a workflow violation at worst.
 			state := client.GetClaimState(a.IssueKey)
-			if state == nil || !cfg.Jira.Done.Contains(state.StatusName) {
-				if err := client.TransitionTo(a.IssueKey, cfg.Jira.Done.Canonical); err != nil {
+			if state == nil || !projectRule.Done.Contains(state.StatusName) {
+				if err := client.TransitionTo(a.IssueKey, projectRule.Done.Canonical); err != nil {
 					failed = append(failed, stockFailure{a.IssueKey, a.Action, "transition: " + err.Error()})
 					continue
 				}

@@ -224,10 +224,21 @@ export default function Setup() {
     setError('')
     setLoading(true)
     try {
+      // Setup configures all listed projects with the same rule
+      // triple — heterogeneous workflows are configured later in
+      // Settings (SKY-272). For the common single-project setup
+      // flow this still works fine: one project gets the rules the
+      // user just picked.
       const projects = jiraForm.projects
         .split(',')
         .map((s) => s.trim())
         .filter(Boolean)
+        .map((key) => ({
+          key,
+          pickup: jiraForm.pickup,
+          in_progress: jiraForm.in_progress,
+          done: jiraForm.done,
+        }))
       const res = await fetch('/api/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -236,9 +247,6 @@ export default function Setup() {
           github_enabled: true,
           jira_enabled: true,
           jira_projects: projects,
-          jira_pickup: jiraForm.pickup,
-          jira_in_progress: jiraForm.in_progress,
-          jira_done: jiraForm.done,
         }),
       })
       if (!res.ok) {

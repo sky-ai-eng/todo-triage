@@ -415,22 +415,86 @@ func isReviewerMatch(reviewers []string, username string, userTeams []string) bo
 
 // --- Jira ---
 
-// RefreshJira runs the full tracking cycle for Jira issues. doneStatuses is
-// the configured Done.Members set — used to decide whether a newly-discovered
-// or reopened issue should be marked closed, and passed through to the diff
-// pass for jira:issue:completed emission.
-func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, projects, pickupStatuses, doneStatuses []string, username string) (int, error) {
+// JiraProjectRules is the tracker-local per-project view of the user's
+// Jira status configuration. Mirrors the slice from config.JiraConfig
+// but kept independent so the tracker doesn't depend on internal/config
+// — call sites in the poller manager convert at the boundary.
+type JiraProjectRules struct {
+	Key           string
+	PickupMembers []string
+	DoneMembers   []string
+}
+
+// JiraRules is a slice of per-project rules with lookup helpers.
+type JiraRules []JiraProjectRules
+
+// ForKey returns the rules for the given project key, or nil when no
+// matching project is configured. Callers should degrade gracefully on
+// a nil return — typically by treating the event as "no rules
+// configured" (no terminal check, log a warning).
+func (r JiraRules) ForKey(key string) *JiraProjectRules {
+	for i := range r {
+		if r[i].Key == key {
+			return &r[i]
+		}
+	}
+	return nil
+}
+
+// AllDoneMembers returns the deduplicated union of every project's
+// DoneMembers. Useful for subtask classification when the parent and
+// subtasks may live in different projects.
+func (r JiraRules) AllDoneMembers() []string {
+	return r.unionMembers(func(p JiraProjectRules) []string { return p.DoneMembers })
+}
+
+func (r JiraRules) unionMembers(pick func(JiraProjectRules) []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0)
+	for _, p := range r {
+		for _, m := range pick(p) {
+			if !seen[m] {
+				seen[m] = true
+				out = append(out, m)
+			}
+		}
+	}
+	return out
+}
+
+// doneMembersForKey resolves the Done.Members for an issue key by
+// looking up the project. Falls back to the union of all configured
+// done members when the project is unknown — preserves the today
+// behavior of "treat any known done status as terminal" without
+// silently flipping unrelated tickets through their own workflows.
+func (r JiraRules) doneMembersForKey(issueKey string) []string {
+	if rule := r.ForKey(extractProject(issueKey)); rule != nil {
+		return rule.DoneMembers
+	}
+	return r.AllDoneMembers()
+}
+
+// RefreshJira runs the full tracking cycle for Jira issues. projects is
+// the team's full per-project rule set; the tracker dispatches discovery
+// JQL per project and looks up terminal-status sets by the issue's
+// project_key. Tickets whose project_key has no row degrade silently
+// — no terminal check, no pickup discovery.
+func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, projects JiraRules, username string) (int, error) {
 	startedAt := time.Now()
-	terminal := func(s string) bool {
-		for _, d := range doneStatuses {
-			if d == s {
+	terminal := func(snap domain.JiraSnapshot) bool {
+		rule := projects.ForKey(extractProject(snap.Key))
+		if rule == nil {
+			return false
+		}
+		for _, d := range rule.DoneMembers {
+			if d == snap.Status {
 				return true
 			}
 		}
 		return false
 	}
 	// Phase 1: Discovery
-	discovered, err := t.discoverJira(client, baseURL, projects, pickupStatuses, doneStatuses)
+	discovered, err := t.discoverJira(client, baseURL, projects)
 	if err != nil {
 		log.Printf("[tracker] Jira discovery error: %v", err)
 	}
@@ -453,7 +517,7 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 					log.Printf("[tracker] failed to seed description for %s: %v", snap.Key, err)
 				}
 			}
-			if terminal(snap.Status) {
+			if terminal(snap) {
 				if err := db.MarkEntityClosed(t.database, entity.ID); err != nil {
 					log.Printf("[tracker] failed to mark entity %s closed on discovery: %v", snap.Key, err)
 				}
@@ -466,7 +530,7 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 				_ = db.UpdateEntityDescription(t.database, entity.ID, state.Description)
 			}
 			// Reactivate if a previously-closed issue reappears as open.
-			if !terminal(snap.Status) && entity.State == "closed" {
+			if !terminal(snap) && entity.State == "closed" {
 				if reactivated, err := db.ReactivateEntity(t.database, entity.ID); err != nil {
 					log.Printf("[tracker] error reactivating %s: %v", snap.Key, err)
 				} else if reactivated {
@@ -493,7 +557,7 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 		keys[i] = e.SourceID
 	}
 
-	refreshed, err := t.batchFetchJira(client, baseURL, keys, doneStatuses)
+	refreshed, err := t.batchFetchJira(client, baseURL, keys, projects)
 	if err != nil {
 		return 0, fmt.Errorf("batch fetch jira: %w", err)
 	}
@@ -517,7 +581,11 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 			}
 		}
 
-		events := DiffJiraSnapshots(prevSnap, newSnap, e.ID, username, doneStatuses)
+		// Per-project Done.Members for this entity's project_key. Falls
+		// back to the union across all projects when the entity is in
+		// a project that's no longer configured (defensive — terminal
+		// detection still works for previously-known done statuses).
+		events := DiffJiraSnapshots(prevSnap, newSnap, e.ID, username, projects.doneMembersForKey(newSnap.Key))
 
 		snapJSON, _ := json.Marshal(newSnap)
 		if err := db.UpdateEntitySnapshot(t.database, e.ID, string(snapJSON)); err != nil {
@@ -551,43 +619,66 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 	return eventsEmitted, nil
 }
 
-// discoverJira runs JQL queries to find new issues. doneStatuses is the
-// configured Done.Members set — used to exclude terminal tickets from the
-// assigned-user discovery query. Hardcoding the exclusion list would mean
-// any user-defined "done" variant (e.g. "Verified") stayed eligible for
-// rediscovery on every poll, churning the DB and contradicting the
-// per-deployment-workflow contract.
-func (t *Tracker) discoverJira(client *jiraclient.Client, baseURL string, projects, pickupStatuses, doneStatuses []string) ([]jiraIssueState, error) {
+// discoverJira runs JQL queries to find new issues. Each project gets
+// its own JQL pair — one Pickup query against the project's
+// PickupMembers and one assigned-to-me query that excludes the
+// project's DoneMembers. Per-project iteration is required because
+// status names rarely overlap across heterogeneous workflows
+// ("Backlog/Selected" vs "New/Triage"); a unified `status IN
+// (union)` query would surface tickets the user never wants to pick
+// up.
+//
+// Subtask classification uses the union of every project's
+// DoneMembers — subtasks can live in projects other than the parent's,
+// and the union matches today's "treat any known done status as
+// terminal" behavior across heterogeneous projects.
+func (t *Tracker) discoverJira(client *jiraclient.Client, baseURL string, projects JiraRules) ([]jiraIssueState, error) {
 	if len(projects) == 0 {
 		return nil, nil
 	}
 
-	projectList := strings.Join(projects, ", ")
-	var queries []string
-
-	if len(pickupStatuses) > 0 {
-		quoted := make([]string, len(pickupStatuses))
-		for i, s := range pickupStatuses {
-			quoted[i] = fmt.Sprintf("%q", s)
-		}
-		queries = append(queries, fmt.Sprintf(
-			`project IN (%s) AND status IN (%s) AND assignee IS EMPTY`, projectList, strings.Join(quoted, ", ")))
+	type queryWithDone struct {
+		jql         string
+		doneMembers []string // for subtask classification on issues returned by this query
 	}
+	var queries []queryWithDone
 
-	// Assigned-to-me query, with terminal statuses excluded via the user's
-	// Done.Members set. If empty (defensive — Ready() gates the poller on
-	// non-empty Done.Members, so we shouldn't hit this in practice), the
-	// NOT IN clause is dropped entirely rather than falling back to a
-	// hardcoded list that would contradict the user's workflow.
-	assignedJQL := fmt.Sprintf(`project IN (%s) AND assignee = currentUser()`, projectList)
-	if len(doneStatuses) > 0 {
-		quoted := make([]string, len(doneStatuses))
-		for i, s := range doneStatuses {
-			quoted[i] = fmt.Sprintf("%q", s)
+	allDone := projects.AllDoneMembers()
+
+	for _, p := range projects {
+		if p.Key == "" {
+			continue
 		}
-		assignedJQL += fmt.Sprintf(` AND status NOT IN (%s)`, strings.Join(quoted, ", "))
+
+		if len(p.PickupMembers) > 0 {
+			quoted := make([]string, len(p.PickupMembers))
+			for i, s := range p.PickupMembers {
+				quoted[i] = fmt.Sprintf("%q", s)
+			}
+			queries = append(queries, queryWithDone{
+				jql: fmt.Sprintf(
+					`project = %q AND status IN (%s) AND assignee IS EMPTY`,
+					p.Key, strings.Join(quoted, ", ")),
+				doneMembers: allDone,
+			})
+		}
+
+		// Assigned-to-me query, with terminal statuses excluded via the
+		// project's Done.Members set. If empty (defensive — Ready()
+		// gates the poller on non-empty Done.Members, so we shouldn't
+		// hit this in practice), the NOT IN clause is dropped entirely
+		// rather than falling back to a hardcoded list that would
+		// contradict the user's workflow.
+		assignedJQL := fmt.Sprintf(`project = %q AND assignee = currentUser()`, p.Key)
+		if len(p.DoneMembers) > 0 {
+			quoted := make([]string, len(p.DoneMembers))
+			for i, s := range p.DoneMembers {
+				quoted[i] = fmt.Sprintf("%q", s)
+			}
+			assignedJQL += fmt.Sprintf(` AND status NOT IN (%s)`, strings.Join(quoted, ", "))
+		}
+		queries = append(queries, queryWithDone{jql: assignedJQL, doneMembers: allDone})
 	}
-	queries = append(queries, assignedJQL)
 
 	seen := map[string]bool{}
 	var all []jiraIssueState
@@ -599,8 +690,8 @@ func (t *Tracker) discoverJira(client *jiraclient.Client, baseURL string, projec
 	// DefaultSearchFields.
 	fields := []string{"summary", "description", "status", "assignee", "priority", "labels", "issuetype", "parent", "comment", "subtasks", "created", "updated"}
 
-	for _, jql := range queries {
-		issues, err := client.SearchIssues(jql, fields, 100)
+	for _, q := range queries {
+		issues, err := client.SearchIssues(q.jql, fields, 100)
 		if err != nil {
 			log.Printf("[tracker] Jira discovery query failed: %v", err)
 			continue
@@ -608,7 +699,7 @@ func (t *Tracker) discoverJira(client *jiraclient.Client, baseURL string, projec
 		for _, issue := range issues {
 			if !seen[issue.Key] {
 				seen[issue.Key] = true
-				all = append(all, issueToState(issue, baseURL, doneStatuses))
+				all = append(all, issueToState(issue, baseURL, q.doneMembers))
 			}
 		}
 	}
@@ -624,11 +715,13 @@ func (t *Tracker) discoverJira(client *jiraclient.Client, baseURL string, projec
 // that stop matching discovery's JQL (e.g. reassigned to someone else) stay
 // pinned at their last-captured value. Acceptable — description relevance
 // drops fast once a ticket is off the user's plate.
-func (t *Tracker) batchFetchJira(client *jiraclient.Client, baseURL string, keys []string, doneStatuses []string) (map[string]jiraIssueState, error) {
+func (t *Tracker) batchFetchJira(client *jiraclient.Client, baseURL string, keys []string, projects JiraRules) (map[string]jiraIssueState, error) {
 	results := make(map[string]jiraIssueState, len(keys))
 	// "updated" is required for the diff layer's source-time fallback.
 	// See the comment on the discovery field list for context.
 	fields := []string{"summary", "status", "assignee", "priority", "labels", "issuetype", "parent", "comment", "subtasks", "created", "updated"}
+
+	allDone := projects.AllDoneMembers()
 
 	for i := 0; i < len(keys); i += jiraBatchSize {
 		end := i + jiraBatchSize
@@ -644,7 +737,10 @@ func (t *Tracker) batchFetchJira(client *jiraclient.Client, baseURL string, keys
 		}
 
 		for _, issue := range issues {
-			results[issue.Key] = issueToState(issue, baseURL, doneStatuses)
+			// Subtask classification uses the union of every project's
+			// done members — subtasks can live in projects other than
+			// the parent's.
+			results[issue.Key] = issueToState(issue, baseURL, allDone)
 		}
 	}
 

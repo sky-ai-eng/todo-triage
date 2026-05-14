@@ -435,33 +435,38 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 	// the in-progress rule — if the user (or an earlier claim) moved it to
 	// "In Review" while canonical is "In Progress", transitioning back to the
 	// canonical would be a spurious status change that would confuse watchers.
-	rule := s.jiraInProgressRule
-	if req.Action == "claim" && s.jiraClient != nil && rule.Canonical != "" {
+	if req.Action == "claim" && s.jiraClient != nil {
 		task, err := db.GetTask(s.db, id)
 		if err == nil && task != nil && task.EntitySource == "jira" {
-			go func(issueKey string, rule config.JiraStatusRule) {
-				state := s.jiraClient.GetClaimState(issueKey)
+			cfg, _ := config.Load()
+			rule := cfg.Jira.RuleForProject(projectFromKey(task.EntitySourceID))
+			if rule != nil && rule.InProgress.Canonical != "" {
+				go func(issueKey string, ipRule config.JiraStatusRule) {
+					state := s.jiraClient.GetClaimState(issueKey)
 
-				needAssign := state == nil || !state.AssignedToSelf
-				needTransition := state == nil || !rule.Contains(state.StatusName)
+					needAssign := state == nil || !state.AssignedToSelf
+					needTransition := state == nil || !ipRule.Contains(state.StatusName)
 
-				if !needAssign && !needTransition {
-					log.Printf("[jira] claim guard: %s already assigned to self and already in in-progress (%q), skipping", issueKey, state.StatusName)
-					return
-				}
-
-				if needAssign {
-					if err := s.jiraClient.AssignToSelf(issueKey); err != nil {
-						log.Printf("[jira] failed to assign %s: %v", issueKey, err)
+					if !needAssign && !needTransition {
+						log.Printf("[jira] claim guard: %s already assigned to self and already in in-progress (%q), skipping", issueKey, state.StatusName)
 						return
 					}
-				}
-				if needTransition {
-					if err := s.jiraClient.TransitionTo(issueKey, rule.Canonical); err != nil {
-						log.Printf("[jira] failed to transition %s to %q: %v", issueKey, rule.Canonical, err)
+
+					if needAssign {
+						if err := s.jiraClient.AssignToSelf(issueKey); err != nil {
+							log.Printf("[jira] failed to assign %s: %v", issueKey, err)
+							return
+						}
 					}
-				}
-			}(task.EntitySourceID, rule)
+					if needTransition {
+						if err := s.jiraClient.TransitionTo(issueKey, ipRule.Canonical); err != nil {
+							log.Printf("[jira] failed to transition %s to %q: %v", issueKey, ipRule.Canonical, err)
+						}
+					}
+				}(task.EntitySourceID, rule.InProgress)
+			} else {
+				log.Printf("[jira] claim guard: no in_progress rule configured for project of %s, skipping transition", task.EntitySourceID)
+			}
 		}
 	}
 
@@ -880,7 +885,13 @@ func (s *Server) revertJiraStateIfApplicable(task *domain.Task) {
 	if task == nil || task.EntitySource != "jira" || task.SourceStatus == "" || s.jiraClient == nil {
 		return
 	}
-	go func(issueKey, originalStatus string) {
+	cfg, _ := config.Load()
+	rule := cfg.Jira.RuleForProject(projectFromKey(task.EntitySourceID))
+	var inProgressMembers []string
+	if rule != nil {
+		inProgressMembers = rule.InProgress.Members
+	}
+	go func(issueKey, originalStatus string, ipMembers []string) {
 		state := s.jiraClient.GetClaimState(issueKey)
 
 		// Three assignee cases:
@@ -897,9 +908,18 @@ func (s *Server) revertJiraStateIfApplicable(task *domain.Task) {
 		// than strict-canonical match, because a user moving Claim →
 		// "In Review" is still "working on it on my plate" and the
 		// requeue should still unwind to the original status.
-		if state != nil && len(s.jiraInProgressRule.Members) > 0 && !s.jiraInProgressRule.Contains(state.StatusName) {
-			log.Printf("[jira] requeue guard: %s status is %q (not in in-progress members %v), skipping", issueKey, state.StatusName, s.jiraInProgressRule.Members)
-			return
+		if state != nil && len(ipMembers) > 0 {
+			contains := false
+			for _, m := range ipMembers {
+				if m == state.StatusName {
+					contains = true
+					break
+				}
+			}
+			if !contains {
+				log.Printf("[jira] requeue guard: %s status is %q (not in in-progress members %v), skipping", issueKey, state.StatusName, ipMembers)
+				return
+			}
 		}
 
 		if state == nil || state.AssignedToSelf {
@@ -910,7 +930,7 @@ func (s *Server) revertJiraStateIfApplicable(task *domain.Task) {
 		if err := s.jiraClient.TransitionTo(issueKey, originalStatus); err != nil {
 			log.Printf("[jira] failed to transition %s back to %q on requeue: %v", issueKey, originalStatus, err)
 		}
-	}(task.EntitySourceID, task.SourceStatus)
+	}(task.EntitySourceID, task.SourceStatus, inProgressMembers)
 }
 
 func parseSnoozeUntil(s string) (time.Time, error) {

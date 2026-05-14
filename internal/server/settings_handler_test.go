@@ -109,20 +109,43 @@ func TestValidateStatusRule_WriteTarget_CanonicalNotInMembers_Rejected(t *testin
 // auth.ClearGitHub / auth.ClearJira — real keychain writes). Validation
 // short-circuits before any persistence on the rejection path.
 
-func settingsPostBody(jiraField string, rule config.JiraStatusRule) map[string]any {
+// settingsPostBodyWithProject builds a request that exercises validation
+// of a single project's rules. The SKY-272 wire shape collapses Pickup,
+// InProgress, and Done into the per-project array.
+func settingsPostBodyWithProject(key string, pickup, inProgress, done config.JiraStatusRule) map[string]any {
 	return map[string]any{
 		"github_enabled": true,
 		"jira_enabled":   true,
-		jiraField:        rule,
+		"jira_projects": []map[string]any{
+			{
+				"key":         key,
+				"pickup":      pickup,
+				"in_progress": inProgress,
+				"done":        done,
+			},
+		},
 	}
+}
+
+func validInProgress() config.JiraStatusRule {
+	return config.JiraStatusRule{Members: []string{"In Progress"}, Canonical: "In Progress"}
+}
+
+func validDone() config.JiraStatusRule {
+	return config.JiraStatusRule{Members: []string{"Done"}, Canonical: "Done"}
+}
+
+func validPickup() config.JiraStatusRule {
+	return config.JiraStatusRule{Members: []string{"To Do"}}
 }
 
 func TestSettingsPost_PickupCanonical_Rejected(t *testing.T) {
 	s := newTestServer(t)
-	body := settingsPostBody("jira_pickup", config.JiraStatusRule{
-		Members:   []string{"To Do"},
-		Canonical: "To Do", // invalid: pickup has no write target
-	})
+	body := settingsPostBodyWithProject("SKY",
+		config.JiraStatusRule{Members: []string{"To Do"}, Canonical: "To Do"}, // invalid pickup
+		validInProgress(),
+		validDone(),
+	)
 	rec := doJSON(t, s, "POST", "/api/settings", body)
 
 	if rec.Code != http.StatusBadRequest {
@@ -139,10 +162,11 @@ func TestSettingsPost_PickupCanonical_Rejected(t *testing.T) {
 
 func TestSettingsPost_InProgressCanonicalNotInMembers_Rejected(t *testing.T) {
 	s := newTestServer(t)
-	body := settingsPostBody("jira_in_progress", config.JiraStatusRule{
-		Members:   []string{"In Progress"},
-		Canonical: "Doing", // invalid: not a member
-	})
+	body := settingsPostBodyWithProject("SKY",
+		validPickup(),
+		config.JiraStatusRule{Members: []string{"In Progress"}, Canonical: "Doing"}, // invalid
+		validDone(),
+	)
 	rec := doJSON(t, s, "POST", "/api/settings", body)
 
 	if rec.Code != http.StatusBadRequest {
@@ -157,9 +181,11 @@ func TestSettingsPost_InProgressCanonicalNotInMembers_Rejected(t *testing.T) {
 
 func TestSettingsPost_InProgressMembersWithoutCanonical_Rejected(t *testing.T) {
 	s := newTestServer(t)
-	body := settingsPostBody("jira_in_progress", config.JiraStatusRule{
-		Members: []string{"In Progress"}, // invalid: missing canonical
-	})
+	body := settingsPostBodyWithProject("SKY",
+		validPickup(),
+		config.JiraStatusRule{Members: []string{"In Progress"}}, // invalid: missing canonical
+		validDone(),
+	)
 	rec := doJSON(t, s, "POST", "/api/settings", body)
 
 	if rec.Code != http.StatusBadRequest {
@@ -174,10 +200,11 @@ func TestSettingsPost_InProgressMembersWithoutCanonical_Rejected(t *testing.T) {
 
 func TestSettingsPost_DoneCanonicalNotInMembers_Rejected(t *testing.T) {
 	s := newTestServer(t)
-	body := settingsPostBody("jira_done", config.JiraStatusRule{
-		Members:   []string{"Resolved", "Verified"},
-		Canonical: "Done", // invalid: not a member
-	})
+	body := settingsPostBodyWithProject("SKY",
+		validPickup(),
+		validInProgress(),
+		config.JiraStatusRule{Members: []string{"Resolved", "Verified"}, Canonical: "Done"}, // invalid
+	)
 	rec := doJSON(t, s, "POST", "/api/settings", body)
 
 	if rec.Code != http.StatusBadRequest {
@@ -187,5 +214,111 @@ func TestSettingsPost_DoneCanonicalNotInMembers_Rejected(t *testing.T) {
 	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
 	if !strings.Contains(resp["error"], "not in members") {
 		t.Errorf("error should mention canonical not in members, got: %q", resp["error"])
+	}
+}
+
+// TestSettingsPost_PerProjectRules_RoundTrip verifies the core SKY-272
+// contract: two projects in the same team can carry different rules,
+// and Save → Load preserves each project's rules independently. Exercises
+// the config layer directly (the HTTP handler's keychain write isn't
+// available in the test env).
+func TestSettingsPost_PerProjectRules_RoundTrip(t *testing.T) {
+	_ = newTestServer(t) // sets up config.Init against an in-memory DB
+	cfg := config.Default()
+	cfg.Jira.Projects = []config.JiraProjectConfig{
+		{
+			Key:        "SKY",
+			Pickup:     config.JiraStatusRule{Members: []string{"Backlog", "Selected"}},
+			InProgress: config.JiraStatusRule{Members: []string{"In Progress"}, Canonical: "In Progress"},
+			Done:       config.JiraStatusRule{Members: []string{"Done"}, Canonical: "Done"},
+		},
+		{
+			Key:        "OPS",
+			Pickup:     config.JiraStatusRule{Members: []string{"New", "Triage"}},
+			InProgress: config.JiraStatusRule{Members: []string{"Active"}, Canonical: "Active"},
+			Done:       config.JiraStatusRule{Members: []string{"Resolved", "Verified"}, Canonical: "Resolved"},
+		},
+	}
+	if err := config.Save(cfg); err != nil {
+		t.Fatalf("config.Save: %v", err)
+	}
+	got, err := config.Load()
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	if r := got.Jira.RuleForProject("SKY"); r == nil || r.InProgress.Canonical != "In Progress" || !r.Pickup.Contains("Backlog") {
+		t.Errorf("SKY rules round-trip: %+v", r)
+	}
+	if r := got.Jira.RuleForProject("OPS"); r == nil || r.Done.Canonical != "Resolved" || !r.Pickup.Contains("Triage") {
+		t.Errorf("OPS rules round-trip: %+v", r)
+	}
+
+	// Edit only SKY's rules; OPS must stay untouched.
+	cfg = got
+	for i, p := range cfg.Jira.Projects {
+		if p.Key == "SKY" {
+			cfg.Jira.Projects[i].Pickup = config.JiraStatusRule{Members: []string{"Ready"}}
+		}
+	}
+	if err := config.Save(cfg); err != nil {
+		t.Fatalf("config.Save (edit SKY): %v", err)
+	}
+	got, err = config.Load()
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	if r := got.Jira.RuleForProject("SKY"); r == nil || !r.Pickup.Contains("Ready") || r.Pickup.Contains("Backlog") {
+		t.Errorf("SKY edit didn't apply: %+v", r)
+	}
+	if r := got.Jira.RuleForProject("OPS"); r == nil || !r.Pickup.Contains("Triage") || r.Done.Canonical != "Resolved" {
+		t.Errorf("OPS untouched check failed: %+v", r)
+	}
+
+	// Drop SKY from the config — the rules row for SKY should vanish
+	// while OPS persists.
+	kept := make([]config.JiraProjectConfig, 0, len(cfg.Jira.Projects))
+	for _, p := range cfg.Jira.Projects {
+		if p.Key != "SKY" {
+			kept = append(kept, p)
+		}
+	}
+	cfg.Jira.Projects = kept
+	if err := config.Save(cfg); err != nil {
+		t.Fatalf("config.Save (drop SKY): %v", err)
+	}
+	got, err = config.Load()
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	if r := got.Jira.RuleForProject("SKY"); r != nil {
+		t.Errorf("SKY rules should be gone after drop, got: %+v", r)
+	}
+	if r := got.Jira.RuleForProject("OPS"); r == nil || r.Done.Canonical != "Resolved" {
+		t.Errorf("OPS rules should persist after dropping SKY: %+v", r)
+	}
+}
+
+// TestSettingsPost_DuplicateProjectKey_Rejected verifies that the
+// handler rejects two entries with the same key — the rules table
+// keys on (team_id, project_key) and a duplicate would silently
+// last-write-win.
+func TestSettingsPost_DuplicateProjectKey_Rejected(t *testing.T) {
+	s := newTestServer(t)
+	body := map[string]any{
+		"github_enabled": true,
+		"jira_enabled":   true,
+		"jira_projects": []map[string]any{
+			{"key": "SKY", "pickup": validPickup(), "in_progress": validInProgress(), "done": validDone()},
+			{"key": "SKY", "pickup": validPickup(), "in_progress": validInProgress(), "done": validDone()},
+		},
+	}
+	rec := doJSON(t, s, "POST", "/api/settings", body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 on duplicate project key, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]string
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if !strings.Contains(resp["error"], "duplicate project key") {
+		t.Errorf("error should mention duplicate, got: %q", resp["error"])
 	}
 }

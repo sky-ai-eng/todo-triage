@@ -230,7 +230,7 @@ func TestProjectPatch_QueuesJiraChange(t *testing.T) {
 	// Seed a configured Jira project so validateTrackerKeys accepts
 	// the value when the PATCH handler does its config.Load().
 	cfg := config.Default()
-	cfg.Jira.Projects = []string{"SKY"}
+	cfg.Jira.Projects = []config.JiraProjectConfig{{Key: "SKY"}}
 	if err := config.Save(cfg); err != nil {
 		t.Fatalf("save config: %v", err)
 	}
