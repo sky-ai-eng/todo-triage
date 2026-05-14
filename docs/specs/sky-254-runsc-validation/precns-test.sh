@@ -23,8 +23,14 @@ ip netns exec tf-test ip link set lo up
 ip netns exec tf-test ip route add default via 192.168.99.1
 
 # Outbound NAT
+# Discover the host's upstream interface from the default route instead of
+# hardcoding eth0. Fly Machines expose eth0 today, but self-hosted Linux
+# environments often use names like ens3, enp0s*, or bond0. Any future port
+# of this validated recipe should discover/configure this interface too.
 sysctl -w net.ipv4.ip_forward=1
-iptables -t nat -A POSTROUTING -s 192.168.99.0/24 -o eth0 -j MASQUERADE 2>&1 || true
+UPSTREAM_IF="$(ip route show default 2>/dev/null | awk '/default/ {for (i = 1; i <= NF; i++) if ($i == "dev") {print $(i+1); exit}}')"
+test -n "$UPSTREAM_IF"
+iptables -t nat -A POSTROUTING -s 192.168.99.0/24 -o "$UPSTREAM_IF" -j MASQUERADE 2>&1 || true
 
 # resolv.conf for the sandbox. Don't copy the host's — Fly's
 # fdaa::3 resolver is IPv6 internal-only and unreachable from the
