@@ -58,6 +58,9 @@ func (s *Spawner) delegateChain(task domain.Task, chainPrompt *domain.Prompt, tr
 	s.mu.Lock()
 	s.cancels[chainRunID] = cancel
 	s.mu.Unlock()
+	// Mark this id as a chain_run so the setup phase's status helpers
+	// don't broadcast agent_run_update events for a non-existent runs row.
+	s.markChainRunID(chainRunID)
 
 	go func() {
 		startTime := time.Now()
@@ -66,6 +69,7 @@ func (s *Spawner) delegateChain(task domain.Task, chainPrompt *domain.Prompt, tr
 			delete(s.cancels, chainRunID)
 			s.mu.Unlock()
 			cancel()
+			s.unmarkChainRunID(chainRunID)
 		}()
 
 		// Build the shared worktree exactly once. The same setupGitHub /
@@ -500,6 +504,13 @@ func (s *Spawner) CancelChain(chainRunID string) error {
 	// run_id; we sweep all active step runs and cancel them. We also
 	// cancel the chain's own ctx so the setup phase and inter-step
 	// checks see the cancellation.
+	//
+	// anyActive tracks whether at least one orchestrator-owned context
+	// got canceled. If nothing was active — the chain is paused on a
+	// pending_approval or awaiting_input step — the orchestrator
+	// goroutine has already exited, so no later path will run cleanup.
+	// In that case we drive terminateChain ourselves below.
+	var anyActive bool
 	rows, err := s.database.Query(`SELECT id FROM runs WHERE chain_run_id = ? AND status NOT IN
 		('completed','failed','cancelled','task_unsolvable','pending_approval','taken_over','awaiting_input')`,
 		chainRunID)
@@ -511,18 +522,43 @@ func (s *Spawner) CancelChain(chainRunID string) error {
 			if err := rows.Scan(&runID); err == nil {
 				if cancel, ok := s.cancels[runID]; ok {
 					cancel()
+					anyActive = true
 				}
 			}
 		}
 		// Also cancel the chain-level context registered at delegateChain.
 		if chainCancel, ok := s.cancels[chainRunID]; ok {
 			chainCancel()
+			anyActive = true
 		}
 		s.mu.Unlock()
 	}
 
-	_, err = s.chains.MarkRunStatus(context.Background(), runmode.LocalDefaultOrg, chainRunID, domain.ChainRunStatusCancelled, "user_cancelled", nil)
-	return err
+	if anyActive {
+		// Orchestrator goroutine is still alive — it will observe the
+		// cancellation, the step's runAgent will return, and the loop
+		// will call terminateChain (which marks the chain cancelled and
+		// runs cleanup). Avoid double-marking here so terminateChain's
+		// MarkRunStatus succeeds.
+		return nil
+	}
+
+	// Paused chain: rebuild just enough cfg for terminateChain's worktree
+	// cleanup (mirrors ResumeChainAfterApproval — owner/repo/prNumber
+	// aren't persisted on chain_runs, so CleanupPRConfig is skipped).
+	task, err := db.GetTask(s.database, cr.TaskID)
+	if err != nil || task == nil {
+		log.Printf("[chain] CancelChain: load task for paused chain_run %s: %v", chainRunID, err)
+		_, markErr := s.chains.MarkRunStatus(context.Background(), runmode.LocalDefaultOrg, chainRunID, domain.ChainRunStatusCancelled, "user_cancelled", nil)
+		return markErr
+	}
+	cfg := runConfig{wtPath: cr.WorktreePath}
+	if task.EntitySource == "github" {
+		cfg.hasWT = true
+	}
+	s.terminateChain(cr.ID, cr.TaskID, string(cr.TriggerType), cr.StartedAt, cfg,
+		domain.ChainRunStatusCancelled, "user_cancelled", nil, false)
+	return nil
 }
 
 // ResumeChainAfterYield re-enters the orchestrator loop for the

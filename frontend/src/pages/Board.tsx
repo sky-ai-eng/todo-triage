@@ -94,7 +94,7 @@ export default function Board() {
           ID: `__pending-${chainRunID}-${i}`,
           Status: 'pending',
           chain_run_id: chainRunID,
-          ChainStepIndex: i,
+          chain_step_index: i,
         } as unknown as AgentRun
       })
       setChainStepRuns((prev) => ({ ...prev, [taskID]: padded }))

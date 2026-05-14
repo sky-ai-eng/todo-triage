@@ -177,20 +177,30 @@ func (s *Server) handlePromptPut(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		} else {
-			// Reject leaf→chain if triggers or runs reference this prompt.
+			// Reject leaf→chain if triggers, runs, or *other* chains
+			// reference this prompt. The chain-step check matters because
+			// existing chains that embed this prompt as a step would
+			// suddenly point at a chain-kind prompt; the chain-step API
+			// explicitly rejects nested chains, so the chain would fail
+			// at delegate time instead of definition time.
 			triggers, err := s.eventHandlers.ListForPrompt(r.Context(), runmode.LocalDefaultOrg, id)
 			if err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 				return
 			}
-			runCount, err := db.CountPromptRunReferences(s.db, id)
+			runCount, err := s.prompts.CountRunReferences(r.Context(), runmode.LocalDefaultOrg, id)
 			if err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 				return
 			}
-			if len(triggers) > 0 || runCount > 0 {
+			stepRefs, err := s.chains.CountStepReferences(r.Context(), runmode.LocalDefaultOrg, id)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+				return
+			}
+			if len(triggers) > 0 || runCount > 0 || stepRefs > 0 {
 				writeJSON(w, http.StatusConflict, map[string]string{
-					"error": fmt.Sprintf("cannot change kind: prompt is referenced by %d trigger(s) and %d run(s)", len(triggers), runCount),
+					"error": fmt.Sprintf("cannot change kind: prompt is referenced by %d trigger(s), %d run(s), and %d chain step(s)", len(triggers), runCount, stepRefs),
 				})
 				return
 			}

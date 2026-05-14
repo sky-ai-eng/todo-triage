@@ -87,9 +87,20 @@ ALTER TABLE chain_runs         ENABLE ROW LEVEL SECURITY;
 -- prompt_chain_steps inherits the chain prompt's visibility — if the
 -- caller can't see the parent prompt, they can't see its step list.
 -- prompts RLS already applies creator + team/org visibility rules.
+--
+-- Tenancy: prompts.id is TEXT (not UUID) and can collide across orgs,
+-- so the EXISTS subquery joins on p.org_id = prompt_chain_steps.org_id
+-- to prevent a same-id prompt in a different org from satisfying the
+-- check. The outer org_id = tf.current_org_id() is defense-in-depth.
 CREATE POLICY prompt_chain_steps_all ON prompt_chain_steps FOR ALL
-  USING      (EXISTS (SELECT 1 FROM prompts p WHERE p.id = prompt_chain_steps.chain_prompt_id))
-  WITH CHECK (EXISTS (SELECT 1 FROM prompts p WHERE p.id = prompt_chain_steps.chain_prompt_id));
+  USING      (org_id = tf.current_org_id()
+              AND EXISTS (SELECT 1 FROM prompts p
+                          WHERE p.id = prompt_chain_steps.chain_prompt_id
+                            AND p.org_id = prompt_chain_steps.org_id))
+  WITH CHECK (org_id = tf.current_org_id()
+              AND EXISTS (SELECT 1 FROM prompts p
+                          WHERE p.id = prompt_chain_steps.chain_prompt_id
+                            AND p.org_id = prompt_chain_steps.org_id));
 
 -- chain_runs are creator-scoped, same as runs/tasks. Org membership +
 -- being the creator gates both read and write.

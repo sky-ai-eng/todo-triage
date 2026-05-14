@@ -273,8 +273,13 @@ func (s *Server) handlePendingPRSubmit(w http.ResponseWriter, r *http.Request) {
 		}
 		// Skip the blanket task-mark-done for chain steps; terminateChain
 		// owns task closure so the chain_runs row finalizes first.
-		chainRun, _, _ := s.chains.GetRunForRun(r.Context(), runmode.LocalDefaultOrg, pr.RunID)
-		if chainRun == nil {
+		chainRun, _, chainLookupErr := s.chains.GetRunForRun(r.Context(), runmode.LocalDefaultOrg, pr.RunID)
+		if chainLookupErr != nil {
+			// Don't blindly close the task — if this turns out to be a
+			// chain step, closing it would race with terminateChain. Leave
+			// the task open for human follow-up and skip the resume hook.
+			log.Printf("[pending-prs] warning: chain lookup failed for run %s; skipping task closure: %v", pr.RunID, chainLookupErr)
+		} else if chainRun == nil {
 			if _, err := s.db.Exec(`UPDATE tasks SET status = 'done' WHERE id = (SELECT task_id FROM runs WHERE id = ?)`, pr.RunID); err != nil {
 				log.Printf("[pending-prs] warning: failed to update task status for run %s: %v", pr.RunID, err)
 			}

@@ -2,25 +2,11 @@ package db
 
 import (
 	"context"
-	"database/sql"
-	"fmt"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 //go:generate go run github.com/vektra/mockery/v2 --name=PromptStore --output=./mocks --case=underscore --with-expecter
-
-// CountPromptRunReferences returns the number of runs rows that reference
-// the given prompt. Used by the update handler to block kind changes when
-// the prompt has execution history.
-func CountPromptRunReferences(database *sql.DB, promptID string) (int, error) {
-	var n int
-	err := database.QueryRow(`SELECT COUNT(*) FROM runs WHERE prompt_id = ?`, promptID).Scan(&n)
-	if err != nil {
-		return 0, fmt.Errorf("count run references: %w", err)
-	}
-	return n, nil
-}
 
 // PromptStore owns prompts + the system_prompt_versions sidecar that
 // tracks shipped-content hashes. Three audiences:
@@ -100,6 +86,11 @@ type PromptStore interface {
 
 	// Unhide reverses Hide.
 	Unhide(ctx context.Context, orgID string, id string) error
+
+	// CountRunReferences returns the number of runs rows that reference
+	// the given prompt. The update handler uses this to block kind
+	// changes when the prompt already has execution history.
+	CountRunReferences(ctx context.Context, orgID string, id string) (int, error)
 
 	// IncrementUsage bumps usage_count by 1. Called from the
 	// delegate spawner when a run picks the prompt; the count

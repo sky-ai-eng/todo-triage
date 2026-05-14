@@ -299,6 +299,17 @@ func (s *promptStore) Unhide(ctx context.Context, orgID string, id string) error
 	return err
 }
 
+func (s *promptStore) CountRunReferences(ctx context.Context, orgID, id string) (int, error) {
+	var n int
+	err := s.app.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM runs WHERE org_id = $1 AND prompt_id = $2`, orgID, id,
+	).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count run references: %w", err)
+	}
+	return n, nil
+}
+
 func (s *promptStore) IncrementUsage(ctx context.Context, orgID string, id string) error {
 	_, err := s.app.ExecContext(ctx, `
 		UPDATE prompts SET usage_count = usage_count + 1

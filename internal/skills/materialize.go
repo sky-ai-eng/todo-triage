@@ -1,6 +1,7 @@
 package skills
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,15 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
+
+// yamlQuoteString emits a YAML 1.2 double-quoted flow scalar by way of
+// JSON encoding. YAML 1.2 is a strict superset of JSON, so a JSON-encoded
+// string is always a valid YAML scalar — this handles embedded colons,
+// hashes, quotes, and newlines safely without a YAML dependency.
+func yamlQuoteString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
 
 // SlugForChainStep produces the directory name used under
 // `<wt>/.claude/skills/` for a chain step. Including the step index
@@ -124,7 +134,7 @@ func synthesizeSkillFile(slug, promptName, body, brief string) string {
 	b.WriteString(slug)
 	b.WriteString("\n")
 	b.WriteString("description: ")
-	b.WriteString(desc)
+	b.WriteString(yamlQuoteString(desc))
 	b.WriteString("\n---\n\n")
 	if strings.TrimSpace(promptName) != "" {
 		b.WriteString("<!-- Sourced from prompt: ")

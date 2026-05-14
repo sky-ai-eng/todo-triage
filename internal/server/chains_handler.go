@@ -196,6 +196,10 @@ func (s *Server) handleChainRunGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleChainRunCancel(w http.ResponseWriter, r *http.Request) {
+	if s.spawner == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "delegation not configured"})
+		return
+	}
 	id := r.PathValue("id")
 
 	cr, err := s.chains.GetRun(r.Context(), runmode.LocalDefaultOrg, id)

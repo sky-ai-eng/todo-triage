@@ -159,8 +159,13 @@ func (s *Server) handleReviewSubmit(w http.ResponseWriter, r *http.Request) {
 		// orchestrator owns task closure (single closer guarantees the
 		// chain_runs row terminates first, so the UI never shows a "done"
 		// task with a still-running chain).
-		chainRun, _, _ := s.chains.GetRunForRun(r.Context(), runmode.LocalDefaultOrg, review.RunID)
-		if chainRun == nil {
+		chainRun, _, chainLookupErr := s.chains.GetRunForRun(r.Context(), runmode.LocalDefaultOrg, review.RunID)
+		if chainLookupErr != nil {
+			// Don't blindly close the task — if this turns out to be a
+			// chain step, closing it would race with terminateChain. Leave
+			// the task open for human follow-up and skip the resume hook.
+			log.Printf("[reviews] warning: chain lookup failed for run %s; skipping task closure: %v", review.RunID, chainLookupErr)
+		} else if chainRun == nil {
 			if _, err := s.db.Exec(`UPDATE tasks SET status = 'done' WHERE id = (SELECT task_id FROM runs WHERE id = ?)`, review.RunID); err != nil {
 				log.Printf("[reviews] warning: failed to update task status for run %s: %v", review.RunID, err)
 			}
