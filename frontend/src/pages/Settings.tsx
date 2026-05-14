@@ -283,12 +283,14 @@ export default function Settings() {
   }
 
   const addProject = () => {
-    // Each new section starts with a placeholder key the user has to
-    // fill in. Track expansion by index — keys can be empty/duplicate
-    // during editing so the index is the only stable identifier.
-    const newKey = `__new_${form.jira_projects.length}_${Date.now()}`
+    // New section is appended at index === current length, so we stamp
+    // idx_${length} into expandedKeys — that's the same key isExpanded
+    // will read on the next render. Using a synthesized __new_... token
+    // would never be reached by isExpanded and the new section would
+    // render collapsed (the bug this comment guards against).
+    const newIndex = form.jira_projects.length
     setForm((f) => ({ ...f, jira_projects: [...f.jira_projects, emptyProject('')] }))
-    setExpandedKeys((m) => ({ ...m, [newKey]: true }))
+    setExpandedKeys((m) => ({ ...m, [`idx_${newIndex}`]: true }))
   }
 
   const removeProject = (i: number) => {
@@ -296,6 +298,29 @@ export default function Settings() {
       const next = f.jira_projects.slice()
       next.splice(i, 1)
       return { ...f, jira_projects: next }
+    })
+    // Shift expandedKeys down for every index above the removed slot —
+    // otherwise idx_${i} still maps to the entry that was at i+1, which
+    // is now at i. Drop the highest-index entry since it no longer
+    // exists.
+    setExpandedKeys((m) => {
+      const next: Record<string, boolean> = {}
+      for (const [k, v] of Object.entries(m)) {
+        if (!k.startsWith('idx_')) {
+          next[k] = v
+          continue
+        }
+        const idx = Number(k.slice('idx_'.length))
+        if (Number.isNaN(idx)) {
+          next[k] = v
+        } else if (idx < i) {
+          next[k] = v
+        } else if (idx > i) {
+          next[`idx_${idx - 1}`] = v
+        }
+        // idx === i: dropped along with the removed project.
+      }
+      return next
     })
   }
 

@@ -107,8 +107,13 @@ func TestNormalizeJiraProjectKey(t *testing.T) {
 }
 
 func TestJiraProjectKeyRe(t *testing.T) {
-	valid := []string{"SKY", "SKY1", "A", "PROJ_2024", "X_Y_Z"}
-	invalid := []string{"", "1SKY", "_SKY", "sky", "SKY-X", "SKY.X", "SK Y"}
+	// Matches the canonical Jira project-key shape: a leading uppercase
+	// letter followed by uppercase letters or digits. Underscores are
+	// not in Jira's allowed set even though some forks of the spec
+	// claim otherwise — rejecting them keeps storage aligned with
+	// what Jira's own UI would let you create.
+	valid := []string{"SKY", "SKY1", "A", "PROJ2024", "XYZ"}
+	invalid := []string{"", "1SKY", "_SKY", "sky", "SKY-X", "SKY.X", "SK Y", "PROJ_2024"}
 	for _, k := range valid {
 		if !jiraProjectKeyRe.MatchString(k) {
 			t.Errorf("expected %q to match jiraProjectKeyRe", k)

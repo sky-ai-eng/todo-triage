@@ -463,15 +463,25 @@ func (r JiraRules) unionMembers(pick func(JiraProjectRules) []string) []string {
 }
 
 // doneMembersForKey resolves the Done.Members for an issue key by
-// looking up the project. Falls back to the union of all configured
-// done members when the project is unknown — preserves the today
-// behavior of "treat any known done status as terminal" without
-// silently flipping unrelated tickets through their own workflows.
+// looking up the project. Returns nil when the project isn't in the
+// configured rule set — typically because the user removed the project
+// from Settings while its entities are still active in the DB (entities
+// aren't auto-deleted on settings change). Nil matches the closure in
+// RefreshJira's terminal() (which returns false on unknown project)
+// so discovery's "should I mark this entity closed" and the diff
+// layer's "did this transition complete it" stay consistent.
+//
+// An earlier version fell back to the union of every configured
+// project's done members, but that misclassifies entities from removed
+// projects whose status happens to coincide with another project's
+// "done" word (e.g. OLD-1 transitioning to "Resolved" when NEW project
+// also uses "Resolved" as Done) — emits a spurious jira:issue:completed
+// for an entity whose actual workflow has nothing to do with NEW's.
 func (r JiraRules) doneMembersForKey(issueKey string) []string {
 	if rule := r.ForKey(extractProject(issueKey)); rule != nil {
 		return rule.DoneMembers
 	}
-	return r.AllDoneMembers()
+	return nil
 }
 
 // RefreshJira runs the full tracking cycle for Jira issues. projects is

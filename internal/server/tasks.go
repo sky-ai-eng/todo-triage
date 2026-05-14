@@ -438,6 +438,11 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 	if req.Action == "claim" && s.jiraClient != nil {
 		task, err := db.GetTask(s.db, id)
 		if err == nil && task != nil && task.EntitySource == "jira" {
+			// config.Load() on the swipe hot path: bounded by O(projects)
+			// settings rows, paced by human swipe rate — sub-millisecond
+			// cost in practice. If profiling ever shows this as a real
+			// hot spot, cache the per-project rules on Server (refreshed
+			// from onJiraChanged where the poller already restarts).
 			cfg, _ := config.Load()
 			rule := cfg.Jira.RuleForProject(projectFromKey(task.EntitySourceID))
 			if rule != nil && rule.InProgress.Canonical != "" {
@@ -885,6 +890,9 @@ func (s *Server) revertJiraStateIfApplicable(task *domain.Task) {
 	if task == nil || task.EntitySource != "jira" || task.SourceStatus == "" || s.jiraClient == nil {
 		return
 	}
+	// Same hot-path note as handleSwipe: requeue/undo is human-paced and
+	// Load is O(projects). If a future profile shows real cost, cache
+	// the per-project rules on Server and refresh from onJiraChanged.
 	cfg, _ := config.Load()
 	rule := cfg.Jira.RuleForProject(projectFromKey(task.EntitySourceID))
 	var inProgressMembers []string
