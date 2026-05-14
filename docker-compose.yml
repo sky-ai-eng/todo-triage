@@ -22,33 +22,71 @@
 
 services:
   postgres:
-    # Plain postgres for D6. D5 (SKY-249, secret store) swaps this to
-    # supabase/postgres for the Vault extension. The supabase image
-    # ships opinionated user setup (postgres-superuser + supabase-specific
-    # roles + supabase_map peer-auth) that would force changes here for
-    # zero benefit until Vault is actually in use.
-    image: postgres:15-alpine
+    # supabase/postgres ships:
+    #   - the `auth` schema + supabase_auth_admin role GoTrue connects as
+    #   - vault, pgsodium, pgcrypto, pgvector, pg_graphql extensions
+    #     (vault is what D5 / SKY-249 uses for per-org secrets)
+    #   - the authenticator / anon / authenticated / service_role pattern
+    #     for D9's RLS app pool to lean on
+    # Two distinct passwords by design:
+    #   POSTGRES_PASSWORD            -> `postgres` superuser (migrations, admin)
+    #   SUPABASE_AUTH_ADMIN_PASSWORD -> GoTrue's DB user (auth.* CRUD only)
+    # Keeping them separate means a GoTrue compromise doesn't surrender
+    # superuser credentials. D9 adds a third password for the `authenticator`
+    # role that TF's RLS app pool will use.
+    image: supabase/postgres:15.14.1.121
     environment:
-      POSTGRES_USER: tf
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: triagefactory
     volumes:
       - pg-data:/var/lib/postgresql/data
-      # Pre-creates the `auth` schema GoTrue migrates into. Only runs on
-      # a fresh data volume (postgres init-script semantics); subsequent
-      # boots reuse the existing schema.
-      - ./scripts/postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U tf"]
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
       timeout: 3s
       retries: 10
+
+  # Reconciles SUPABASE_AUTH_ADMIN_PASSWORD on every `docker compose up`.
+  # ALTER USER is idempotent — re-running with the same value is a no-op;
+  # editing .env and `up`ing again rotates the password without wiping
+  # the volume. Adds ~200ms to boot.
+  #
+  # Connects as `supabase_admin` (the image's real superuser; `postgres`
+  # is demoted by the image's migrations and supautils blocks non-supers
+  # from modifying "reserved" roles like supabase_auth_admin).
+  # supabase_admin shares POSTGRES_PASSWORD by image convention — set
+  # at initdb, NOT rotatable in-place. See docs/self-host-setup.md.
+  postgres-postinit:
+    image: supabase/postgres:15.14.1.121
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      SUPABASE_AUTH_ADMIN_PASSWORD: ${SUPABASE_AUTH_ADMIN_PASSWORD}
+    entrypoint: ["sh", "-c"]
+    # The heredoc with a quoted delimiter ('SQL') skips outer-shell
+    # expansion; psql sees the raw \set + backtick-echo, runs the echo
+    # in its own sub-shell against the container env (where we placed
+    # SUPABASE_AUTH_ADMIN_PASSWORD), and :'auth_admin_password' applies
+    # SQL-safe quoting. Equivalent to the official supabase roles.sql.
+    command:
+      - |
+        set -eu
+        psql -h postgres -U supabase_admin -d postgres -v ON_ERROR_STOP=1 <<-'SQL'
+        \set auth_admin_password `echo "$SUPABASE_AUTH_ADMIN_PASSWORD"`
+        ALTER USER supabase_auth_admin WITH LOGIN PASSWORD :'auth_admin_password';
+        SQL
+    restart: "no"
 
   gotrue:
     image: supabase/gotrue:v2.189.0
     environment:
       GOTRUE_DB_DRIVER: postgres
-      GOTRUE_DB_DATABASE_URL: postgres://tf:${POSTGRES_PASSWORD}@postgres:5432/triagefactory?search_path=auth
+      # supabase_auth_admin is pre-provisioned by the supabase/postgres
+      # image and already owns the auth schema. Least-privilege fit:
+      # GoTrue gets exactly the auth.* CRUD it needs, nothing else.
+      # Distinct from POSTGRES_PASSWORD so a GoTrue compromise doesn't
+      # also surrender superuser access.
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${SUPABASE_AUTH_ADMIN_PASSWORD}@postgres:5432/postgres?search_path=auth
       GOTRUE_API_HOST: 0.0.0.0
       GOTRUE_API_PORT: 9999
       API_EXTERNAL_URL: ${TF_PUBLIC_URL}/auth/v1
@@ -86,6 +124,9 @@ services:
       - "9999:9999"
     depends_on:
       postgres: { condition: service_healthy }
+      # Wait for the password reconciler so GoTrue's first connection
+      # attempt doesn't race against an old/missing password.
+      postgres-postinit: { condition: service_completed_successfully }
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:9999/health"]
       interval: 5s

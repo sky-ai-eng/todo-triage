@@ -20,11 +20,14 @@ cp .env.example .env
 ```
 
 Fill in:
-- `POSTGRES_PASSWORD` — any strong value
+- `POSTGRES_PASSWORD` — superuser password. Used for migrations and admin tasks. Generate with `openssl rand -base64 32`.
+- `SUPABASE_AUTH_ADMIN_PASSWORD` — distinct password for the role GoTrue connects as. Keeping it separate from the superuser means a GoTrue compromise doesn't surrender full DB access. Generate with `openssl rand -base64 32`.
 - `TF_PUBLIC_URL` — your public URL (no trailing slash)
 - `GH_CLIENT_ID` / `GH_CLIENT_SECRET` — from step 1
 
-Leave `GOTRUE_JWT_KEYS` and `TF_SESSION_KEY` empty for now.
+Leave `TF_SESSION_KEY` empty for now (D7 wires it).
+
+> **Rotating passwords:** edit `.env` and re-run `docker compose up -d`. A short-lived `postgres-postinit` sidecar runs on every boot and reapplies `ALTER USER` for the non-superuser roles, so password changes propagate without wiping the data volume. Rotating `POSTGRES_PASSWORD` itself requires more care — that's the superuser's password and Postgres only honors the env var on first init, so changing it means `ALTER USER postgres WITH PASSWORD '...'` by hand inside the running container.
 
 ## 3. Generate the JWT signing key
 
@@ -42,11 +45,12 @@ Re-running `jwk-init --write-env .env` appends a *second* line, which works (GoT
 docker compose up -d
 ```
 
-This starts Postgres + GoTrue. The Triage Factory binary itself runs from the host (D13 will package it as a container image):
+This starts Postgres + GoTrue. The Postgres image is `supabase/postgres`, which pre-provisions the `auth` schema, the `supabase_auth_admin` role GoTrue connects as, and the vault / pgsodium / pgvector extensions D5+ will use.
+
+The Triage Factory binary itself runs from the host (D13 will package it as a container image; D9 will wire its own DB connection):
 
 ```sh
 TF_MODE=multi \
-  TF_DATABASE_URL=postgres://tf:${POSTGRES_PASSWORD}@localhost:5432/triagefactory \
   TF_GOTRUE_URL=http://localhost:9999 \
   TF_GOTRUE_JWKS_URL=http://localhost:9999/.well-known/jwks.json \
   TF_GOTRUE_ISSUER=${TF_PUBLIC_URL}/auth/v1 \
