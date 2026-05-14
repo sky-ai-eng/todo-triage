@@ -1,7 +1,6 @@
 package server
 
 import (
-	"encoding/json"
 	"log"
 	"net/http"
 
@@ -48,8 +47,7 @@ type factoryDelegateResponse struct {
 // 'dismissed') — concurrent drops resolve to the same task.
 func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	var req factoryDelegateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+	if !decodeJSON(w, r, &req, "") {
 		return
 	}
 	if req.EntityID == "" || req.EventType == "" || req.PromptID == "" {
@@ -67,11 +65,11 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	// contract at routing/router.go.
 	entity, err := db.GetEntity(s.db, req.EntityID)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "factory_delegate", err)
 		return
 	}
 	if entity == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "entity not found"})
+		notFound(w, "entity")
 		return
 	}
 	if entity.State != "active" {
@@ -90,7 +88,7 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	// an anchor.
 	primaryEvent, err := db.LatestEventForEntityTypeAndDedupKey(s.db, req.EntityID, req.EventType, req.DedupKey)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "factory_delegate", err)
 		return
 	}
 	if primaryEvent == nil {
@@ -122,7 +120,7 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	schema, schemaOK := events.Get(req.EventType)
 	handlers, err := s.eventHandlers.GetEnabledForEvent(r.Context(), runmode.LocalDefaultOrg, req.EventType)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "factory_delegate", err)
 		return
 	}
 	for _, h := range handlers {
@@ -152,7 +150,7 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 
 	task, created, err := db.FindOrCreateTask(s.db, req.EntityID, req.EventType, req.DedupKey, primaryEvent.ID, defaultPriority)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "factory_delegate", err)
 		return
 	}
 

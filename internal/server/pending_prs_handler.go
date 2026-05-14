@@ -1,7 +1,6 @@
 package server
 
 import (
-	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
@@ -37,11 +36,11 @@ func (s *Server) handlePendingPRGet(w http.ResponseWriter, r *http.Request) {
 
 	pr, err := db.GetPendingPR(s.db, id)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "pending_prs", err)
 		return
 	}
 	if pr == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "pending PR not found"})
+		notFound(w, "pending PR")
 		return
 	}
 
@@ -55,7 +54,7 @@ func (s *Server) handleRunPendingPR(w http.ResponseWriter, r *http.Request) {
 
 	pr, err := db.PendingPRByRunID(s.db, runID)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "pending_prs", err)
 		return
 	}
 	if pr == nil {
@@ -77,18 +76,17 @@ func (s *Server) handlePendingPRUpdate(w http.ResponseWriter, r *http.Request) {
 		Title *string `json:"title"`
 		Body  *string `json:"body"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+	if !decodeJSON(w, r, &req, "") {
 		return
 	}
 
 	pr, err := db.GetPendingPR(s.db, id)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "pending_prs", err)
 		return
 	}
 	if pr == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "pending PR not found"})
+		notFound(w, "pending PR")
 		return
 	}
 
@@ -119,7 +117,7 @@ func (s *Server) handlePendingPRUpdate(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "this PR is already being submitted — your edit didn't apply"})
 			return
 		}
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "pending_prs", err)
 		return
 	}
 
@@ -136,11 +134,11 @@ func (s *Server) handlePendingPRDiff(w http.ResponseWriter, r *http.Request) {
 
 	pr, err := db.GetPendingPR(s.db, id)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "pending_prs", err)
 		return
 	}
 	if pr == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "pending PR not found"})
+		notFound(w, "pending PR")
 		return
 	}
 
@@ -195,19 +193,18 @@ func (s *Server) handlePendingPRSubmit(w http.ResponseWriter, r *http.Request) {
 		Draft *bool `json:"draft"`
 	}
 	if r.ContentLength > 0 {
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		if !decodeJSON(w, r, &req, "") {
 			return
 		}
 	}
 
 	pr, err := db.GetPendingPR(s.db, id)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "pending_prs", err)
 		return
 	}
 	if pr == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "pending PR not found"})
+		notFound(w, "pending PR")
 		return
 	}
 
@@ -221,7 +218,7 @@ func (s *Server) handlePendingPRSubmit(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "another submit is in flight or has already completed"})
 			return
 		}
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "pending_prs", err)
 		return
 	}
 	if !winner {

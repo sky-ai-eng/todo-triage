@@ -40,7 +40,7 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRepoProfiles(w http.ResponseWriter, r *http.Request) {
 	profiles, err := db.GetAllRepoProfiles(s.db)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "repos", err)
 		return
 	}
 	if profiles == nil {
@@ -105,8 +105,7 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		BaseBranch json.RawMessage `json:"base_branch,omitempty"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+	if !decodeJSON(w, r, &req, "") {
 		return
 	}
 
@@ -119,7 +118,7 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := db.UpdateRepoBaseBranch(s.db, repoID, branch); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			internalError(w, "repos", err)
 			return
 		}
 	}
@@ -161,8 +160,7 @@ func (s *Server) handleReposSave(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Repos []string `json:"repos"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+	if !decodeJSON(w, r, &req, "") {
 		return
 	}
 	if len(req.Repos) == 0 {
@@ -171,7 +169,7 @@ func (s *Server) handleReposSave(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := db.SetConfiguredRepos(s.db, req.Repos); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "repos", err)
 		return
 	}
 

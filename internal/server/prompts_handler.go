@@ -1,7 +1,6 @@
 package server
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -16,7 +15,7 @@ import (
 func (s *Server) handleEventTypes(w http.ResponseWriter, r *http.Request) {
 	types, err := db.ListEventTypes(s.db)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "prompts", err)
 		return
 	}
 	if types == nil {
@@ -28,7 +27,7 @@ func (s *Server) handleEventTypes(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handlePromptsList(w http.ResponseWriter, r *http.Request) {
 	prompts, err := s.prompts.List(r.Context(), runmode.LocalDefaultOrg)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "prompts", err)
 		return
 	}
 	if prompts == nil {
@@ -41,11 +40,11 @@ func (s *Server) handlePromptGet(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	prompt, err := s.prompts.Get(r.Context(), runmode.LocalDefaultOrg, id)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "prompts", err)
 		return
 	}
 	if prompt == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "prompt not found"})
+		notFound(w, "prompt")
 		return
 	}
 
@@ -83,8 +82,7 @@ func invalidPromptModelError() string {
 
 func (s *Server) handlePromptCreate(w http.ResponseWriter, r *http.Request) {
 	var req createPromptRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+	if !decodeJSON(w, r, &req, "") {
 		return
 	}
 	kind := normalizePromptKind(req.Kind)
@@ -115,7 +113,7 @@ func (s *Server) handlePromptCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.prompts.Create(r.Context(), runmode.LocalDefaultOrg, prompt); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "prompts", err)
 		return
 	}
 
@@ -134,8 +132,7 @@ func (s *Server) handlePromptPut(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
 	var req updatePromptRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+	if !decodeJSON(w, r, &req, "") {
 		return
 	}
 	kind := normalizePromptKind(req.Kind)
@@ -154,11 +151,11 @@ func (s *Server) handlePromptPut(w http.ResponseWriter, r *http.Request) {
 
 	existing, err := s.prompts.Get(r.Context(), runmode.LocalDefaultOrg, id)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "prompts", err)
 		return
 	}
 	if existing == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "prompt not found"})
+		notFound(w, "prompt")
 		return
 	}
 
@@ -167,7 +164,7 @@ func (s *Server) handlePromptPut(w http.ResponseWriter, r *http.Request) {
 			// Reject chain→leaf if any chain steps exist.
 			steps, err := s.chains.ListSteps(r.Context(), runmode.LocalDefaultOrg, id)
 			if err != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+				internalError(w, "prompts", err)
 				return
 			}
 			if len(steps) > 0 {
@@ -185,17 +182,17 @@ func (s *Server) handlePromptPut(w http.ResponseWriter, r *http.Request) {
 			// at delegate time instead of definition time.
 			triggers, err := s.eventHandlers.ListForPrompt(r.Context(), runmode.LocalDefaultOrg, id)
 			if err != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+				internalError(w, "prompts", err)
 				return
 			}
 			runCount, err := s.prompts.CountRunReferences(r.Context(), runmode.LocalDefaultOrg, id)
 			if err != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+				internalError(w, "prompts", err)
 				return
 			}
 			stepRefs, err := s.chains.CountStepReferences(r.Context(), runmode.LocalDefaultOrg, id)
 			if err != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+				internalError(w, "prompts", err)
 				return
 			}
 			if len(triggers) > 0 || runCount > 0 || stepRefs > 0 {
@@ -208,7 +205,7 @@ func (s *Server) handlePromptPut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.prompts.Update(r.Context(), runmode.LocalDefaultOrg, id, req.Name, req.Body, string(kind), req.Model); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "prompts", err)
 		return
 	}
 
@@ -232,11 +229,11 @@ func (s *Server) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
 
 	prompt, err := s.prompts.Get(r.Context(), runmode.LocalDefaultOrg, id)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "prompts", err)
 		return
 	}
 	if prompt == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "prompt not found"})
+		notFound(w, "prompt")
 		return
 	}
 
@@ -245,7 +242,7 @@ func (s *Server) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
 	// ListForPrompt returns only those.
 	triggers, err := s.eventHandlers.ListForPrompt(r.Context(), runmode.LocalDefaultOrg, id)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "prompts", err)
 		return
 	}
 	if len(triggers) > 0 {
@@ -260,7 +257,7 @@ func (s *Server) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
 	// anyway; we surface a friendlier message and the count of chains.
 	chainRefs, err := s.chains.CountStepReferences(r.Context(), runmode.LocalDefaultOrg, id)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "prompts", err)
 		return
 	}
 	if chainRefs > 0 {
@@ -273,7 +270,7 @@ func (s *Server) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
 	// System and imported prompts are soft-deleted (hidden), user prompts are hard-deleted
 	if prompt.Source == "system" || prompt.Source == "imported" {
 		if err := s.prompts.Hide(r.Context(), runmode.LocalDefaultOrg, id); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			internalError(w, "prompts", err)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "hidden"})
@@ -281,7 +278,7 @@ func (s *Server) handlePromptDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.prompts.Delete(r.Context(), runmode.LocalDefaultOrg, id); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "prompts", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
@@ -291,7 +288,7 @@ func (s *Server) handlePromptStats(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	stats, err := s.prompts.Stats(r.Context(), runmode.LocalDefaultOrg, id)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "prompts", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, stats)

@@ -2,7 +2,6 @@ package server
 
 import (
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -19,11 +18,11 @@ func (s *Server) handleAgentStatus(w http.ResponseWriter, r *http.Request) {
 	runID := r.PathValue("runID")
 	run, err := db.GetAgentRun(s.db, runID)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "agent", err)
 		return
 	}
 	if run == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "run not found"})
+		notFound(w, "run")
 		return
 	}
 	writeJSON(w, http.StatusOK, runResponse(s.db, run))
@@ -79,7 +78,7 @@ func (s *Server) handleAgentMessages(w http.ResponseWriter, r *http.Request) {
 	runID := r.PathValue("runID")
 	messages, err := db.MessagesForRun(s.db, runID)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "agent", err)
 		return
 	}
 	if messages == nil {
@@ -191,7 +190,7 @@ func releaseErrorStatus(err error) int {
 func (s *Server) handleHeldTakeovers(w http.ResponseWriter, r *http.Request) {
 	runs, err := db.ListTakenOverRunsForResume(s.db)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "agent", err)
 		return
 	}
 	out := make([]map[string]any, 0, len(runs))
@@ -236,7 +235,7 @@ func (s *Server) handleAgentRuns(w http.ResponseWriter, r *http.Request) {
 	}
 	runs, err := db.AgentRunsForTask(s.db, taskID)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "agent", err)
 		return
 	}
 	if runs == nil {
@@ -283,18 +282,17 @@ func (s *Server) handleAgentRespond(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var resp domain.YieldResponse
-	if err := json.NewDecoder(r.Body).Decode(&resp); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+	if !decodeJSON(w, r, &resp, "") {
 		return
 	}
 
 	run, err := db.GetAgentRun(s.db, runID)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "agent", err)
 		return
 	}
 	if run == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "run not found"})
+		notFound(w, "run")
 		return
 	}
 	if run.Status != "awaiting_input" {

@@ -1,7 +1,6 @@
 package server
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -48,17 +47,16 @@ func (s *Server) handleCuratorSend(w http.ResponseWriter, r *http.Request) {
 	projectID := r.PathValue("id")
 	project, err := db.GetProject(s.db, projectID)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "curator", err)
 		return
 	}
 	if project == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "project not found"})
+		notFound(w, "project")
 		return
 	}
 
 	var req curatorSendRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+	if !decodeJSON(w, r, &req, "") {
 		return
 	}
 	content := strings.TrimSpace(req.Content)
@@ -69,7 +67,7 @@ func (s *Server) handleCuratorSend(w http.ResponseWriter, r *http.Request) {
 
 	requestID, err := s.curator.SendMessage(projectID, content)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "curator", err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, curatorSendResponse{RequestID: requestID})
@@ -79,17 +77,17 @@ func (s *Server) handleCuratorHistory(w http.ResponseWriter, r *http.Request) {
 	projectID := r.PathValue("id")
 	project, err := db.GetProject(s.db, projectID)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "curator", err)
 		return
 	}
 	if project == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "project not found"})
+		notFound(w, "project")
 		return
 	}
 
 	requests, err := db.ListCuratorRequestsByProject(s.db, projectID)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "curator", err)
 		return
 	}
 
@@ -103,7 +101,7 @@ func (s *Server) handleCuratorHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	messagesByRequest, err := db.ListCuratorMessagesByRequestIDs(s.db, requestIDs)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "curator", err)
 		return
 	}
 
@@ -133,17 +131,17 @@ func (s *Server) handleCuratorCancel(w http.ResponseWriter, r *http.Request) {
 	projectID := r.PathValue("id")
 	project, err := db.GetProject(s.db, projectID)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "curator", err)
 		return
 	}
 	if project == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "project not found"})
+		notFound(w, "project")
 		return
 	}
 
 	inFlight, err := db.InFlightCuratorRequestForProject(s.db, projectID)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "curator", err)
 		return
 	}
 	if inFlight == nil {
@@ -160,7 +158,7 @@ func (s *Server) handleCuratorCancel(w http.ResponseWriter, r *http.Request) {
 	// a no-op.
 	s.curator.Cancel(projectID)
 	if _, err := db.MarkCuratorRequestCancelledIfActive(s.db, inFlight.ID, "user cancelled"); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "curator", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -180,11 +178,11 @@ func (s *Server) handleCuratorReset(w http.ResponseWriter, r *http.Request) {
 	projectID := r.PathValue("id")
 	project, err := db.GetProject(s.db, projectID)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "curator", err)
 		return
 	}
 	if project == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "project not found"})
+		notFound(w, "project")
 		return
 	}
 
@@ -195,7 +193,7 @@ func (s *Server) handleCuratorReset(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "curator", err)
 		return
 	}
 

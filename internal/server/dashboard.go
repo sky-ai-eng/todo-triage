@@ -32,7 +32,7 @@ func (s *Server) handleDashboardStats(w http.ResponseWriter, r *http.Request) {
 
 	stats, err := s.dashboard.Stats(r.Context(), runmode.LocalDefaultOrg, username, 30)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "dashboard", err)
 		return
 	}
 
@@ -54,7 +54,7 @@ func (s *Server) handleDashboardPRs(w http.ResponseWriter, r *http.Request) {
 
 	prs, err := s.dashboard.PRs(r.Context(), runmode.LocalDefaultOrg, username)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "dashboard", err)
 		return
 	}
 	if prs == nil {
@@ -98,7 +98,7 @@ func (s *Server) handleDashboardPRStatus(w http.ResponseWriter, r *http.Request)
 	client := ghclient.NewClient(baseURL, creds.GitHubPAT)
 	status, err := client.GetPRStatus(parts[0], parts[1], number)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "dashboard", err)
 		return
 	}
 
@@ -123,8 +123,7 @@ func (s *Server) handleDashboardPRDraft(w http.ResponseWriter, r *http.Request) 
 	var body struct {
 		Draft bool `json:"draft"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+	if !decodeJSON(w, r, &body, "") {
 		return
 	}
 
@@ -142,7 +141,7 @@ func (s *Server) handleDashboardPRDraft(w http.ResponseWriter, r *http.Request) 
 		err = client.MarkPRReady(parts[0], parts[1], number)
 	}
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "dashboard", err)
 		return
 	}
 

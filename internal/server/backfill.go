@@ -2,7 +2,6 @@ package server
 
 import (
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
@@ -55,7 +54,7 @@ func (s *Server) handleBackfillCandidates(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if project == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "project not found"})
+		notFound(w, "project")
 		return
 	}
 
@@ -153,13 +152,12 @@ func (s *Server) handleBackfill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if project == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "project not found"})
+		notFound(w, "project")
 		return
 	}
 
 	var req backfillRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+	if !decodeJSON(w, r, &req, "") {
 		return
 	}
 	if len(req.EntityIDs) == 0 {

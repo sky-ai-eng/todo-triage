@@ -201,12 +201,12 @@ func (s *Server) handleFactorySnapshot(w http.ResponseWriter, r *http.Request) {
 	// --- Throughput counters ------------------------------------------------
 	eventCounts, err := db.EventCountsByTypeSince(s.db, since)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "factory", err)
 		return
 	}
 	taskCounts, err := db.TaskCountsByEventTypeSince(s.db, since)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "factory", err)
 		return
 	}
 	// Lifetime distinct-entity counts come from the in-memory aggregate
@@ -221,7 +221,7 @@ func (s *Server) handleFactorySnapshot(w http.ResponseWriter, r *http.Request) {
 	// --- Active runs --------------------------------------------------------
 	activeRuns, err := db.ListFactoryActiveRuns(s.db)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "factory", err)
 		return
 	}
 
@@ -281,7 +281,7 @@ func (s *Server) handleFactorySnapshot(w http.ResponseWriter, r *http.Request) {
 	// --- Active entities ----------------------------------------------------
 	entityRows, err := db.ListFactoryEntities(s.db, factoryEntityLimit)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "factory", err)
 		return
 	}
 
@@ -291,7 +291,7 @@ func (s *Server) handleFactorySnapshot(w http.ResponseWriter, r *http.Request) {
 	}
 	recentByEntity, err := db.ListRecentEventsByEntity(s.db, entityIDs, factoryRecentEventsPerEntity)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "factory", err)
 		return
 	}
 
@@ -303,7 +303,7 @@ func (s *Server) handleFactorySnapshot(w http.ResponseWriter, r *http.Request) {
 	// snapshot_json json_extract on every poll.
 	pendingTasks, err := db.ListActiveTaskRefsForEntities(s.db, entityIDs)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "factory", err)
 		return
 	}
 	pendingByEntity := map[string]map[string][]pendingTaskRef{}
@@ -321,7 +321,7 @@ func (s *Server) handleFactorySnapshot(w http.ResponseWriter, r *http.Request) {
 
 	awaitingByEntity, err := db.EntitiesWithAwaitingInputRuns(s.db, entityIDs)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "factory", err)
 		return
 	}
 

@@ -1,7 +1,6 @@
 package server
 
 import (
-	"encoding/json"
 	"log"
 	"net/http"
 
@@ -39,17 +38,17 @@ func (s *Server) handleReviewGet(w http.ResponseWriter, r *http.Request) {
 
 	review, err := db.GetPendingReview(s.db, reviewID)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "reviews", err)
 		return
 	}
 	if review == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "review not found"})
+		notFound(w, "review")
 		return
 	}
 
 	comments, err := db.ListPendingReviewComments(s.db, reviewID)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "reviews", err)
 		return
 	}
 
@@ -89,11 +88,11 @@ func (s *Server) handleReviewSubmit(w http.ResponseWriter, r *http.Request) {
 
 	review, err := db.GetPendingReview(s.db, reviewID)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "reviews", err)
 		return
 	}
 	if review == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "review not found"})
+		notFound(w, "review")
 		return
 	}
 	if review.ReviewEvent == "" {
@@ -104,7 +103,7 @@ func (s *Server) handleReviewSubmit(w http.ResponseWriter, r *http.Request) {
 	// Load comments (potentially edited by the user)
 	comments, err := db.ListPendingReviewComments(s.db, reviewID)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "reviews", err)
 		return
 	}
 
@@ -193,7 +192,7 @@ func (s *Server) handleRunReview(w http.ResponseWriter, r *http.Request) {
 
 	review, err := db.PendingReviewByRunID(s.db, runID)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "reviews", err)
 		return
 	}
 	if review == nil {
@@ -204,7 +203,7 @@ func (s *Server) handleRunReview(w http.ResponseWriter, r *http.Request) {
 	// Delegate to the full review GET which includes comments
 	comments, err := db.ListPendingReviewComments(s.db, review.ID)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "reviews", err)
 		return
 	}
 
@@ -241,18 +240,17 @@ func (s *Server) handleReviewUpdate(w http.ResponseWriter, r *http.Request) {
 		ReviewBody  *string `json:"review_body"`
 		ReviewEvent *string `json:"review_event"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+	if !decodeJSON(w, r, &req, "") {
 		return
 	}
 
 	review, err := db.GetPendingReview(s.db, reviewID)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "reviews", err)
 		return
 	}
 	if review == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "review not found"})
+		notFound(w, "review")
 		return
 	}
 
@@ -266,7 +264,7 @@ func (s *Server) handleReviewUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := db.SetPendingReviewSubmission(s.db, reviewID, body, event); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "reviews", err)
 		return
 	}
 
@@ -280,8 +278,7 @@ func (s *Server) handleReviewCommentUpdate(w http.ResponseWriter, r *http.Reques
 	var req struct {
 		Body string `json:"body"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+	if !decodeJSON(w, r, &req, "") {
 		return
 	}
 	if req.Body == "" {
@@ -320,11 +317,11 @@ func (s *Server) handleReviewDiff(w http.ResponseWriter, r *http.Request) {
 
 	review, err := db.GetPendingReview(s.db, reviewID)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		internalError(w, "reviews", err)
 		return
 	}
 	if review == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "review not found"})
+		notFound(w, "review")
 		return
 	}
 
