@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -103,15 +104,19 @@ func validClaimsFor(userID uuid.UUID) jwt.MapClaims {
 // ---------- test rig: server + JWKS + cleanup ----------
 
 type authRig struct {
-	t           *testing.T
-	h           *pgtest.Harness
-	srv         *Server
-	jwks        *httptest.Server
-	jwksMux     *jwksMux
-	signKey     testKey
-	masterKey   [32]byte
-	gotrueStub  *httptest.Server // optional; for refresh tests
-	refreshedTo string           // last new access token issued by the stub
+	t         *testing.T
+	h         *pgtest.Harness
+	srv       *Server
+	jwks      *httptest.Server
+	jwksMux   *jwksMux
+	signKey   testKey
+	masterKey [32]byte
+
+	// gotrueLogoutCalls records the access tokens passed to the
+	// gotrueLogout closure during the test. Lets logout tests assert
+	// "upstream was invoked with the right JWT" without standing up a
+	// real gotrue stub.
+	gotrueLogoutCalls []string
 }
 
 // newAuthRig boots the pg testcontainer, JWKS test server, verifier,
@@ -146,11 +151,16 @@ func newAuthRig(t *testing.T) *authRig {
 	// call methods.
 	s := New(h.AdminDB, nil, nil, nil, nil, nil, nil, nil, nil)
 
-	if err := s.SetAuthDeps(v, store, "http://gotrue.unused", "http://tf.test", masterKey); err != nil {
+	// Per-test context bound to t.Cleanup so the reaper goroutine
+	// spawned inside SetAuthDeps exits with the test rather than
+	// leaking across test runs.
+	rigCtx, rigCancel := context.WithCancel(context.Background())
+	t.Cleanup(rigCancel)
+	if err := s.SetAuthDeps(rigCtx, v, store, "http://gotrue.unused", "http://tf.test", masterKey); err != nil {
 		t.Fatalf("SetAuthDeps: %v", err)
 	}
 
-	return &authRig{
+	rig := &authRig{
 		t:         t,
 		h:         h,
 		srv:       s,
@@ -159,6 +169,17 @@ func newAuthRig(t *testing.T) *authRig {
 		signKey:   signKey,
 		masterKey: masterKey,
 	}
+
+	// Default gotrueLogout stub: record the access token and succeed.
+	// Tests that want to assert "upstream logout was called" inspect
+	// rig.gotrueLogoutCalls; tests that want to simulate a failure
+	// override authDeps.gotrueLogout themselves.
+	s.authDeps.gotrueLogout = func(ctx context.Context, accessToken string) error {
+		rig.gotrueLogoutCalls = append(rig.gotrueLogoutCalls, accessToken)
+		return nil
+	}
+
+	return rig
 }
 
 // seedUser inserts auth.users + public.users for a fresh UUID and
@@ -210,10 +231,10 @@ func (r *authRig) seedOrg(ownerID uuid.UUID, slug string) (orgID, teamID uuid.UU
 // signStateCookie returns a state cookie value usable in callback
 // requests. Mirrors handleOAuthStart's signing path without forcing
 // the test to drive the full redirect.
-func (r *authRig) signStateCookie(returnTo, csrf string) string {
+func (r *authRig) signStateCookie(returnTo, csrf, codeVerifier string) string {
 	r.t.Helper()
 	state := stateClaims{
-		ReturnTo: returnTo, CSRF: csrf,
+		ReturnTo: returnTo, CSRF: csrf, CodeVerifier: codeVerifier,
 		ExpiresAt: time.Now().Add(10 * time.Minute).Unix(),
 	}
 	cfg := r.srv.authCfg
@@ -224,47 +245,69 @@ func (r *authRig) signStateCookie(returnTo, csrf string) string {
 	return signed
 }
 
-// driveCallback fires the callback handler with the given access /
-// refresh tokens and returns the resulting response (including the
-// Set-Cookie sid value).
-func (r *authRig) driveCallback(accessToken, refreshToken string) *http.Response {
+// driveCallback completes the PKCE handshake server-side: stubs the
+// gotrue exchange closure to hand back a JWT minted by the test rig
+// for userID, then drives the /api/auth/callback handler with a code
+// query param. Returns the resulting response (including the sid
+// Set-Cookie).
+//
+// gotrueLogoutCalls captures any subsequent upstream-logout invocation
+// for assertion in logout tests.
+func (r *authRig) driveCallback(userID uuid.UUID) (resp *http.Response, accessToken string) {
 	r.t.Helper()
+	token := r.signKey.mintJWT(r.t, validClaimsFor(userID))
+	refresh := "refresh-" + uuid.NewString()
+
+	// Stub the exchange closure to return our minted tokens regardless
+	// of the auth_code value. The TF handler still verifies the JWT
+	// via the live Verifier, so an unsigned/wrong-issuer token would
+	// still 4xx — exactly what we want.
+	r.srv.authDeps.gotrueExchange = func(ctx context.Context, code, verifier string) (string, string, int64, error) {
+		return token, refresh, time.Now().Add(time.Hour).Unix(), nil
+	}
+
 	csrf := "test-csrf-" + uuid.NewString()
-	stateVal := r.signStateCookie("/dashboard", csrf)
+	stateVal := r.signStateCookie("/dashboard", csrf, "test-pkce-verifier")
 
 	q := url.Values{}
 	q.Set("state", csrf)
-	q.Set("access_token", accessToken)
-	q.Set("refresh_token", refreshToken)
-	q.Set("expires_in", "3600")
+	q.Set("code", "fake-auth-code-"+uuid.NewString())
 	req := httptest.NewRequest("GET", "/api/auth/callback?"+q.Encode(), nil)
 	req.AddCookie(&http.Cookie{Name: stateCookieName, Value: stateVal})
 
 	rec := httptest.NewRecorder()
 	r.srv.mux.ServeHTTP(rec, req)
-	return rec.Result()
+	return rec.Result(), token
 }
 
 // sidFromResp pulls the sid cookie from a callback response, fatal on miss.
-func sidFromResp(t *testing.T, resp *http.Response) string {
-	t.Helper()
+func (r *authRig) sidFromResp(resp *http.Response) string {
+	r.t.Helper()
+	want := r.srv.sidCookieName()
 	for _, c := range resp.Cookies() {
-		if c.Name == sessionCookieName {
+		if c.Name == want {
 			return c.Value
 		}
 	}
-	t.Fatalf("response had no %s cookie (status=%d, set-cookie=%v)",
-		sessionCookieName, resp.StatusCode, resp.Header["Set-Cookie"])
+	r.t.Fatalf("response had no %s cookie (status=%d, set-cookie=%v)",
+		want, resp.StatusCode, resp.Header["Set-Cookie"])
 	return ""
 }
 
-// requestWithSid fires a request to s.mux with the sid cookie set.
+// requestWithSid fires a request to s.mux with the sid cookie set
+// AND a same-origin Origin header (so the CSRF Origin check on
+// mutating endpoints passes — GETs ignore Origin anyway).
 func (r *authRig) requestWithSid(method, path, sid string) *http.Response {
 	r.t.Helper()
 	req := httptest.NewRequest(method, path, nil)
 	if sid != "" {
-		req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: sid})
+		req.AddCookie(&http.Cookie{Name: r.srv.sidCookieName(), Value: sid})
 	}
+	// Set Origin to the configured publicURL so withCSRFOriginCheck
+	// treats the request as same-origin. httptest.NewRequest sets no
+	// Origin by default, which the middleware also allows (no Origin
+	// = not a browser cross-site request), but explicit is clearer.
+	req.Header.Set("Origin", r.srv.authCfg.publicURL)
 	rec := httptest.NewRecorder()
 	r.srv.mux.ServeHTTP(rec, req)
 	return rec.Result()
@@ -279,14 +322,13 @@ func TestAuthFlow_LoginToMe(t *testing.T) {
 	userID := r.seedUser()
 	orgID, _ := r.seedOrg(userID, "alice-org")
 
-	token := r.signKey.mintJWT(t, validClaimsFor(userID))
-
-	// Drive callback: state cookie set, tokens supplied, expect 302 + sid cookie.
-	resp := r.driveCallback(token, "fake-refresh-token")
+	// PKCE flow: TF exchanges an auth code with gotrue for the JWT;
+	// the test stubs the exchange to return a JWT minted by signKey.
+	resp, _ := r.driveCallback(userID)
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("callback status=%d, want 302", resp.StatusCode)
 	}
-	sid := sidFromResp(t, resp)
+	sid := r.sidFromResp(resp)
 
 	// GET /api/me with the sid cookie.
 	meResp := r.requestWithSid("GET", "/api/me", sid)
@@ -329,9 +371,8 @@ func TestAuthFlow_LogoutFlipsRevoked(t *testing.T) {
 	userID := r.seedUser()
 	r.seedOrg(userID, "alice-org")
 
-	token := r.signKey.mintJWT(t, validClaimsFor(userID))
-	resp := r.driveCallback(token, "fake-refresh")
-	sid := sidFromResp(t, resp)
+	resp, _ := r.driveCallback(userID)
+	sid := r.sidFromResp(resp)
 
 	// Sanity: /api/me works before logout.
 	if got := r.requestWithSid("GET", "/api/me", sid).StatusCode; got != http.StatusOK {
@@ -373,9 +414,8 @@ func TestAuthFlow_ForceExpiryReturns401(t *testing.T) {
 	userID := r.seedUser()
 	r.seedOrg(userID, "alice-org")
 
-	token := r.signKey.mintJWT(t, validClaimsFor(userID))
-	resp := r.driveCallback(token, "fake-refresh")
-	sid := sidFromResp(t, resp)
+	resp, _ := r.driveCallback(userID)
+	sid := r.sidFromResp(resp)
 
 	// Backdate expires_at past now. Must also push created_at into the
 	// past to satisfy CHECK (expires_at > created_at).
@@ -423,9 +463,8 @@ func TestAuthFlow_OrgMiddleware_CrossOrg404AndMember200(t *testing.T) {
 	orgB, _ := r.seedOrg(userB, "bob-org")
 
 	// Sign User A in.
-	token := r.signKey.mintJWT(t, validClaimsFor(userA))
-	resp := r.driveCallback(token, "fake-refresh")
-	sid := sidFromResp(t, resp)
+	resp, _ := r.driveCallback(userA)
+	sid := r.sidFromResp(resp)
 
 	// User A → /api/orgs/{orgA}/probe = 200
 	gotA := r.requestWithSid("GET", "/api/orgs/"+orgA.String()+"/probe", sid).StatusCode
@@ -464,19 +503,105 @@ func TestAuthFlow_GarbageSidCookie_Returns401(t *testing.T) {
 	}
 }
 
+// Logout invokes the gotrue /logout endpoint with the access token
+// before flipping revoked_at locally. Defends against an exfiltrated
+// JWT continuing to refresh upstream after the user logs out.
+func TestAuthFlow_Logout_CallsGoTrueUpstream(t *testing.T) {
+	r := newAuthRig(t)
+	userID := r.seedUser()
+	r.seedOrg(userID, "alice-org")
+
+	resp, jwt := r.driveCallback(userID)
+	sid := r.sidFromResp(resp)
+
+	logoutResp := r.requestWithSid("POST", "/api/auth/logout", sid)
+	if logoutResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("logout status=%d, want 204", logoutResp.StatusCode)
+	}
+
+	if len(r.gotrueLogoutCalls) != 1 {
+		t.Fatalf("upstream logout calls = %d, want 1", len(r.gotrueLogoutCalls))
+	}
+	if r.gotrueLogoutCalls[0] != jwt {
+		t.Errorf("upstream logout token mismatch — got prefix %q, want prefix %q",
+			r.gotrueLogoutCalls[0][:20], jwt[:20])
+	}
+}
+
+// Upstream logout failure does NOT block local revoke. The session
+// still ends from the client's perspective; we lose only the
+// belt-and-suspenders upstream invalidation.
+func TestAuthFlow_Logout_UpstreamFailureStillLocallyRevokes(t *testing.T) {
+	r := newAuthRig(t)
+	userID := r.seedUser()
+	r.seedOrg(userID, "alice-org")
+
+	resp, _ := r.driveCallback(userID)
+	sid := r.sidFromResp(resp)
+
+	// Override the stub to fail.
+	r.srv.authDeps.gotrueLogout = func(ctx context.Context, accessToken string) error {
+		return errSimulated
+	}
+
+	logoutResp := r.requestWithSid("POST", "/api/auth/logout", sid)
+	if logoutResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("logout status=%d, want 204 (upstream failure must not block)", logoutResp.StatusCode)
+	}
+
+	// Local revocation still happened.
+	if got := r.requestWithSid("GET", "/api/me", sid).StatusCode; got != http.StatusUnauthorized {
+		t.Errorf("post-(failed-upstream)-logout /api/me = %d, want 401", got)
+	}
+}
+
+// CSRF Origin check rejects cross-origin POSTs to mutating endpoints.
+// SameSite=Lax alone permits top-level cross-site POSTs; the Origin
+// match closes that gap.
+func TestAuthFlow_Logout_CSRFOriginCheck(t *testing.T) {
+	r := newAuthRig(t)
+	userID := r.seedUser()
+	r.seedOrg(userID, "alice-org")
+	resp, _ := r.driveCallback(userID)
+	sid := r.sidFromResp(resp)
+
+	// Forge a cross-origin POST: same cookie + path, but Origin
+	// header points at an attacker site.
+	req := httptest.NewRequest("POST", "/api/auth/logout", nil)
+	req.AddCookie(&http.Cookie{Name: r.srv.sidCookieName(), Value: sid})
+	req.Header.Set("Origin", "https://evil.example")
+	rec := httptest.NewRecorder()
+	r.srv.mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("cross-origin logout = %d, want 403", rec.Code)
+	}
+
+	// The session must still be live (logout was blocked).
+	if got := r.requestWithSid("GET", "/api/me", sid).StatusCode; got != http.StatusOK {
+		t.Errorf("post-blocked-CSRF /api/me = %d, want 200 (session intact)", got)
+	}
+}
+
+// errSimulated is a sentinel used by tests that need to assert
+// failure-path handling without exporting a public error symbol.
+var errSimulated = errorString("simulated failure")
+
+type errorString string
+
+func (e errorString) Error() string { return string(e) }
+
 func TestAuthFlow_Callback_RejectsBadState(t *testing.T) {
 	r := newAuthRig(t)
 	userID := r.seedUser()
 	r.seedOrg(userID, "alice-org")
-	token := r.signKey.mintJWT(t, validClaimsFor(userID))
 
-	// Wrong CSRF in query vs cookie.
-	stateCookie := r.signStateCookie("/dashboard", "the-real-csrf")
+	// Wrong CSRF in query vs cookie. The PKCE code is unused — the
+	// CSRF check fires before the exchange call, so the request is
+	// rejected without contacting (the stubbed) gotrue.
+	stateCookie := r.signStateCookie("/dashboard", "the-real-csrf", "verifier")
 	q := url.Values{}
 	q.Set("state", "different-csrf")
-	q.Set("access_token", token)
-	q.Set("refresh_token", "ref")
-	q.Set("expires_in", "3600")
+	q.Set("code", "any-code")
 	req := httptest.NewRequest("GET", "/api/auth/callback?"+q.Encode(), nil)
 	req.AddCookie(&http.Cookie{Name: stateCookieName, Value: stateCookie})
 	rec := httptest.NewRecorder()
@@ -487,6 +612,52 @@ func TestAuthFlow_Callback_RejectsBadState(t *testing.T) {
 }
 
 // ---------- standalone tests: state cookie + return_to normalization ----------
+
+// Cookie names follow the deployment scheme: HTTPS uses the __Host-
+// prefix (browser-enforced Secure + Path=/ + no Domain), HTTP keeps
+// plain sid so local dev/tests work without TLS.
+func TestSidCookieName_DependsOnPublicURL(t *testing.T) {
+	// We can't easily re-run newAuthRig with a different publicURL
+	// without paying another pgtest boot cost. Instead, construct a
+	// minimal Server + authCfg by hand and probe sidCookieName.
+	cases := []struct {
+		publicURL string
+		want      string
+	}{
+		{"https://triagefactory.acme.com", "__Host-sid"},
+		{"http://localhost:3000", "sid"},
+		{"http://tf.test", "sid"},
+	}
+	for _, tc := range cases {
+		s := &Server{
+			authCfg: &authConfig{
+				publicURL:     tc.publicURL,
+				secureCookies: strings.HasPrefix(tc.publicURL, "https://"),
+			},
+		}
+		if got := s.sidCookieName(); got != tc.want {
+			t.Errorf("publicURL=%s: sidCookieName=%q, want %q", tc.publicURL, got, tc.want)
+		}
+	}
+
+	// Local mode (authCfg nil) → plain name.
+	bare := &Server{}
+	if got := bare.sidCookieName(); got != "sid" {
+		t.Errorf("nil authCfg: sidCookieName=%q, want sid", got)
+	}
+}
+
+// secureCookies=true (HTTPS deployment) forces Secure on every
+// auth-flow cookie, even when an individual request happens to land
+// over HTTP at the Go layer (e.g. behind a TLS-terminating reverse
+// proxy that doesn't set X-Forwarded-Proto).
+func TestCookieSecure_FromPublicURL(t *testing.T) {
+	s := &Server{authCfg: &authConfig{secureCookies: true}}
+	r := httptest.NewRequest("GET", "http://internal/auth", nil)
+	if !s.cookieSecure(r) {
+		t.Errorf("https publicURL: cookieSecure(plain-http req) = false, want true")
+	}
+}
 
 func TestStateCookie_Roundtrip(t *testing.T) {
 	var key [32]byte

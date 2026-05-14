@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"log"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
+	tfdb "github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/sessions"
 )
 
@@ -60,17 +62,28 @@ func OrgIDFrom(ctx context.Context) string {
 // Held by-pointer on the Server so a nil group cleanly signals
 // "local mode, no auth surface" without scattering individual nil
 // checks across every middleware/handler.
+//
+// The three gotrue* functions are abstracted as closures (not methods)
+// so the test harness can stub each independently — the integration
+// tests don't run a real gotrue, so the production HTTP calls become
+// in-process stubs that return canned shapes.
 type authDeps struct {
 	verifier *verify.Verifier
 	sessions *sessions.Store
-	// gotrueRefresh is called by SessionMiddleware to perform the
-	// refresh-token dance when a JWT is near expiry. Returns the
-	// new (accessToken, refreshToken, newJWTExpiresAtUnix).
-	//
-	// Modeled as a function so the test harness can stub it; the
-	// production wiring binds it to a method on *Server that hits
-	// the configured gotrue URL.
+
+	// gotrueRefresh performs the refresh-token dance when a JWT is
+	// near expiry. Returns (newJWT, newRefresh, jwtExpiresAtUnix).
 	gotrueRefresh func(ctx context.Context, refreshToken string) (newJWT string, newRefresh string, jwtExpiresAtUnix int64, err error)
+
+	// gotrueExchange performs the PKCE auth-code exchange after the
+	// provider dance. Returns (accessToken, refreshToken,
+	// jwtExpiresAtUnix). Called from handleOAuthCallback.
+	gotrueExchange func(ctx context.Context, authCode, codeVerifier string) (accessToken string, refreshToken string, jwtExpiresAtUnix int64, err error)
+
+	// gotrueLogout asks gotrue to invalidate the refresh-token family
+	// upstream. Called from handleLogout as best-effort — if it fails
+	// we still revoke the row locally and clear the cookie.
+	gotrueLogout func(ctx context.Context, accessToken string) error
 }
 
 // withSession wraps a handler in the session middleware. The check for
@@ -90,7 +103,7 @@ func (s *Server) withSession(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		cookie, err := r.Cookie(sessionCookieName)
+		cookie, err := r.Cookie(s.sidCookieName())
 		if err != nil {
 			writeUnauth(w)
 			return
@@ -192,20 +205,23 @@ func (s *Server) withOrg(next http.Handler) http.Handler {
 	})
 }
 
-// userHasOrgAccess answers the OrgMiddleware question via a direct
-// admin-pool query against org_memberships. Lives on the Server type
-// rather than under a store because it predates the per-resource
-// store work for org_memberships (D9 will likely move it).
+// userHasOrgAccess answers the OrgMiddleware question by delegating to
+// the tf.user_has_org_access SQL helper, which internally reads
+// request.jwt.claims via tf.current_user_id(). The claims-context
+// transaction means a missing/wrong claim → NULL → no membership,
+// even if a future bug allowed a wrong userID argument to land here.
+// Once D9 wires the app pool, the same query runs under RLS without
+// further edits.
 func (s *Server) userHasOrgAccess(ctx context.Context, userID, orgID string) (bool, error) {
-	var n int
-	err := s.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM org_memberships
-		 WHERE user_id = $1 AND org_id = $2
-	`, userID, orgID).Scan(&n)
-	if err != nil {
-		return false, err
-	}
-	return n > 0, nil
+	var ok bool
+	err := tfdb.WithTx(ctx, s.db, tfdb.Claims{Sub: userID},
+		func(tx *sql.Tx) error {
+			return tx.QueryRowContext(ctx,
+				`SELECT tf.user_has_org_access($1::uuid)`, orgID,
+			).Scan(&ok)
+		},
+	)
+	return ok, err
 }
 
 // needsRefresh is true when the JWT will expire within the refresh
@@ -241,7 +257,69 @@ func (s *Server) refreshSessionInline(ctx context.Context, sess *sessions.Sessio
 	return nil
 }
 
-const sessionCookieName = "sid"
+// withCSRFOriginCheck rejects mutating requests (POST/PUT/PATCH/DELETE)
+// whose Origin header doesn't match the configured publicURL. Browsers
+// always send Origin on cross-origin requests, so this catches the
+// gap that SameSite=Lax leaves (which permits top-level cross-site
+// POSTs to the request URL).
+//
+// Local mode (authCfg nil): pass-through. Local mode doesn't expose
+// session-cookie auth, so there's no CSRF surface to defend.
+//
+// Same-origin requests that omit Origin (rare; some old browsers,
+// fetch() in non-CORS modes) are allowed: a missing Origin can't
+// indicate cross-site since cross-site mutating requests must set it.
+func (s *Server) withCSRFOriginCheck(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.authCfg == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+		switch r.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions:
+			next.ServeHTTP(w, r)
+			return
+		}
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			// No Origin → not a cross-site browser request. Allow.
+			// (Server-to-server or curl without Origin lands here;
+			// those callers don't have CSRF as an attack vector
+			// since they're not cookie-authed-against-their-will.)
+			next.ServeHTTP(w, r)
+			return
+		}
+		if origin != s.authCfg.publicURL {
+			http.Error(w, "cross-origin request rejected", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// sidCookieName resolves at request time: __Host-sid for HTTPS
+// deployments (browser-enforced: Secure flag required, Path=/, no
+// Domain), plain sid otherwise. Local-dev / tests run over HTTP and
+// would have the browser silently drop a __Host- cookie that doesn't
+// also carry Secure.
+func (s *Server) sidCookieName() string {
+	if s.authCfg != nil && s.authCfg.secureCookies {
+		return "__Host-sid"
+	}
+	return "sid"
+}
+
+// cookieSecure derives whether to mark a cookie Secure. True if the
+// deployment is HTTPS (publicURL starts with https://) OR the
+// individual request arrived over TLS. The latter covers reverse-
+// proxy deployments where TLS termination happens upstream and the
+// Go server sees plain HTTP — X-Forwarded-Proto = https.
+func (s *Server) cookieSecure(r *http.Request) bool {
+	if s.authCfg != nil && s.authCfg.secureCookies {
+		return true
+	}
+	return isHTTPS(r)
+}
 
 func writeUnauth(w http.ResponseWriter) {
 	http.Error(w, "unauthenticated", http.StatusUnauthorized)

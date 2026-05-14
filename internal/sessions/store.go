@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/google/uuid"
@@ -208,6 +209,45 @@ func (s *Store) TouchLastSeen(ctx context.Context, sid uuid.UUID) error {
 		return fmt.Errorf("touch last_seen: %w", err)
 	}
 	return nil
+}
+
+// RunReaper drives ReapExpired on a ticker until ctx is cancelled.
+// Designed to be spawned as a goroutine from the server's auth-wiring
+// path (SetAuthDeps) so its lifetime matches the multi-mode session
+// surface — no host process to coordinate, no cron entry for the
+// operator to forget. Errors are logged but don't terminate the loop;
+// a transient DB blip shouldn't permanently leave revoked rows around.
+//
+// interval is the cadence between sweeps. retention is the age
+// threshold passed to ReapExpired. Both should be set wide enough
+// (e.g. 10m interval, 30d retention) that the work per tick stays
+// small.
+//
+// On shutdown: when ctx is cancelled the ticker is stopped and the
+// goroutine returns. A reap-in-progress finishes naturally — DELETE
+// honors the context, so a long-running sweep cancels at the next
+// row boundary.
+func (s *Store) RunReaper(ctx context.Context, interval, retention time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			n, err := s.ReapExpired(ctx, retention)
+			if err != nil && ctx.Err() == nil {
+				// Filter out ctx-cancelled errors (those are just
+				// shutdown noise). Real DB errors get logged for
+				// the operator to investigate.
+				log.Printf("[sessions] reaper: %v", err)
+				continue
+			}
+			if n > 0 {
+				log.Printf("[sessions] reaper: deleted %d rows", n)
+			}
+		}
+	}
 }
 
 // ReapExpired hard-deletes:

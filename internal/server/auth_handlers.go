@@ -22,8 +22,13 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
+	tfdb "github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/sessions"
 )
+
+// tfdb is aliased (rather than imported as `db`) to avoid colliding
+// with `db *sql.DB` parameter names inside this file.
+var _ = tfdb.Claims{}
 
 // authConfig holds the multi-mode auth flow's configuration. Loaded
 // once at startup and passed to SetAuthDeps; everything in here is
@@ -43,28 +48,42 @@ type authConfig struct {
 	publicURL string
 
 	// stateKey signs the short-lived state cookie that carries
-	// return_to + CSRF through the OAuth roundtrip. Derived from
-	// TF_SESSION_KEY via HMAC-SHA256 with domain separation, so the
-	// cookie-signing subkey and the AES-GCM master never share
-	// material directly.
+	// return_to + CSRF + PKCE verifier through the OAuth roundtrip.
+	// Derived from TF_SESSION_KEY via HMAC-SHA256 with domain
+	// separation, so the cookie-signing subkey and the AES-GCM master
+	// never share material directly.
 	stateKey [32]byte
+
+	// secureCookies hardens cookie attributes when the deployment is
+	// HTTPS. Derived from publicURL at SetAuthDeps time: if the URL
+	// starts with "https://", we use the __Host- cookie prefix
+	// (browser-enforced: Secure flag required, Path=/, no Domain)
+	// and force Secure=true. Local dev / tests with an http://
+	// publicURL get plain cookie names so the browser will accept
+	// them without TLS.
+	secureCookies bool
 }
 
 // SetAuthDeps wires the multi-mode auth dependencies into the server.
 // Local mode never calls this; multi-mode boot calls it once after
 // constructing the verifier + session store and before ListenAndServe.
 //
-// Also builds the /auth/v1/* reverse proxy and stashes it on the
-// server (read by the mux handler registered in routes()).
+// Also builds the /auth/v1/* reverse proxy and spawns the session
+// reaper goroutine. The goroutine's lifetime is bound to ctx — pass
+// the server's shutdown context so reaping exits cleanly. Tests pass
+// a context with t.Cleanup-bound cancel to avoid leaking goroutines.
 func (s *Server) SetAuthDeps(
+	ctx context.Context,
 	verifier *verify.Verifier,
 	sessionStore *sessions.Store,
 	gotrueURL, publicURL string,
 	masterKey [32]byte,
 ) error {
+	pub := strings.TrimRight(publicURL, "/")
 	cfg := &authConfig{
-		gotrueURL: strings.TrimRight(gotrueURL, "/"),
-		publicURL: strings.TrimRight(publicURL, "/"),
+		gotrueURL:     strings.TrimRight(gotrueURL, "/"),
+		publicURL:     pub,
+		secureCookies: strings.HasPrefix(pub, "https://"),
 	}
 	deriveStateKey(masterKey, &cfg.stateKey)
 
@@ -76,10 +95,19 @@ func (s *Server) SetAuthDeps(
 	s.authCfg = cfg
 	s.authProxy = proxy
 	s.authDeps = &authDeps{
-		verifier:      verifier,
-		sessions:      sessionStore,
-		gotrueRefresh: s.gotrueRefreshFunc(cfg),
+		verifier:       verifier,
+		sessions:       sessionStore,
+		gotrueRefresh:  s.gotrueRefreshFunc(cfg),
+		gotrueExchange: s.gotrueExchangeFunc(cfg),
+		gotrueLogout:   s.gotrueLogoutFunc(cfg),
 	}
+
+	// Spawn the session reaper. Cadence + retention follow the arch
+	// doc (10-minute tick, 30-day retention window); the goroutine
+	// exits when ctx is cancelled, so server shutdown / test cleanup
+	// drains it without further wiring.
+	go sessionStore.RunReaper(ctx, 10*time.Minute, 30*24*time.Hour)
+
 	return nil
 }
 
@@ -92,9 +120,16 @@ func deriveStateKey(master [32]byte, out *[32]byte) {
 	copy(out[:], mac.Sum(nil))
 }
 
-// handleOAuthStart redirects the browser to gotrue's /authorize. The
-// `return_to` query param is stashed in a short-lived signed cookie so
-// the callback handler can hop back to the right SPA route afterward.
+// handleOAuthStart redirects the browser to gotrue's /authorize with
+// the PKCE parameters set. The state cookie carries the CSRF token,
+// the PKCE code_verifier, and the return_to path through the OAuth
+// roundtrip so the callback handler can complete the dance with no
+// per-flow database row.
+//
+// PKCE (RFC 7636) means tokens never traverse the URL bar — gotrue
+// hands back an opaque `code`, which the callback exchanges via a
+// server-to-server POST. Tokens stay off referer headers, server
+// access logs, and browser history.
 //
 // GET /api/auth/oauth/{provider}?return_to=/some/path
 func (s *Server) handleOAuthStart(w http.ResponseWriter, r *http.Request) {
@@ -115,10 +150,17 @@ func (s *Server) handleOAuthStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	codeVerifier, err := generatePKCEVerifier()
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
 	state := stateClaims{
-		ReturnTo:  returnTo,
-		CSRF:      hex.EncodeToString(csrfRaw),
-		ExpiresAt: timeNow().Add(10 * time.Minute).Unix(),
+		ReturnTo:     returnTo,
+		CSRF:         hex.EncodeToString(csrfRaw),
+		CodeVerifier: codeVerifier,
+		ExpiresAt:    timeNow().Add(10 * time.Minute).Unix(),
 	}
 	signed, err := state.sign(s.authCfg.stateKey)
 	if err != nil {
@@ -130,32 +172,32 @@ func (s *Server) handleOAuthStart(w http.ResponseWriter, r *http.Request) {
 		Value:    signed,
 		Path:     "/api/auth/",
 		HttpOnly: true,
-		Secure:   isHTTPS(r),
+		Secure:   s.cookieSecure(r),
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   600,
 	})
 
 	q := url.Values{}
 	q.Set("provider", provider)
+	// PKCE wiring: gotrue accepts code_challenge + code_challenge_method
+	// and flow_type=pkce on /authorize. After the provider dance, gotrue
+	// redirects to redirect_to with ?code=<authcode>, which the callback
+	// trades for tokens via /token?grant_type=pkce.
+	q.Set("code_challenge", pkceChallenge(codeVerifier))
+	q.Set("code_challenge_method", "S256")
+	q.Set("flow_type", "pkce")
 	q.Set("redirect_to", s.authCfg.publicURL+"/api/auth/callback?state="+state.CSRF)
 	target := s.authCfg.publicURL + "/auth/v1/authorize?" + q.Encode()
 
 	http.Redirect(w, r, target, http.StatusFound)
 }
 
-// handleOAuthCallback completes the dance: validates state, accepts
-// access_token + refresh_token + expires_in from query params, verifies
-// the JWT, upserts public.users, creates an encrypted session, sets
-// the sid cookie, and redirects to return_to.
+// handleOAuthCallback completes the PKCE dance: validates state,
+// exchanges the auth code via server-side POST to gotrue's /token,
+// verifies the returned JWT, upserts public.users, creates an
+// encrypted session, sets the sid cookie, and redirects to return_to.
 //
-// Token delivery: GoTrue's default browser flow stuffs tokens into the
-// URL fragment, which doesn't reach servers. D8 ships a tiny SPA
-// bootstrap that catches the fragment and re-issues the redirect as
-// query-string parameters that this handler accepts. For integration
-// tests (D7), the test harness drives this handler directly with the
-// expected query-string shape — equivalent surface, simpler test rig.
-//
-// GET /api/auth/callback?state=<csrf>&access_token=...&refresh_token=...&expires_in=...
+// GET /api/auth/callback?state=<csrf>&code=<auth_code>
 func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	if s.authDeps == nil {
 		http.NotFound(w, r)
@@ -178,17 +220,29 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// State done — clear the cookie.
+	// State done — clear the cookie. (Cookie's secure-flag derivation
+	// must match the original SetCookie or the browser may keep both;
+	// see s.cookieSecure for the per-request resolution.)
 	http.SetCookie(w, &http.Cookie{
 		Name: stateCookieName, Value: "", Path: "/api/auth/",
-		MaxAge: -1, HttpOnly: true, Secure: isHTTPS(r), SameSite: http.SameSiteLaxMode,
+		MaxAge: -1, HttpOnly: true, Secure: s.cookieSecure(r), SameSite: http.SameSiteLaxMode,
 	})
 
-	accessToken := r.URL.Query().Get("access_token")
-	refreshToken := r.URL.Query().Get("refresh_token")
-	expiresInStr := r.URL.Query().Get("expires_in")
-	if accessToken == "" || refreshToken == "" {
-		http.Error(w, "missing tokens (frontend bootstrap not wired — D8)", http.StatusBadRequest)
+	authCode := r.URL.Query().Get("code")
+	if authCode == "" {
+		http.Error(w, "missing code", http.StatusBadRequest)
+		return
+	}
+
+	// Server-side code exchange. gotrue verifies code_verifier matches
+	// the code_challenge it stored against the auth code; if not, this
+	// returns an error before we ever see tokens. After this call the
+	// access_token + refresh_token exist only in this handler's memory
+	// and in the encrypted session row — never on the URL bar.
+	accessToken, refreshToken, _, err := s.authDeps.gotrueExchange(r.Context(), authCode, state.CodeVerifier)
+	if err != nil {
+		log.Printf("[auth] pkce exchange: %v", err)
+		http.Error(w, "token exchange failed", http.StatusBadRequest)
 		return
 	}
 
@@ -211,11 +265,10 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Trust the JWT's exp over the query-string expires_in — the
-	// signed claim is authoritative; query params are not.
+	// Trust the JWT's exp claim. The exchange response also carries
+	// expires_in, but the signed claim is authoritative and the
+	// closure already returns it via Verifier.Claims.ExpiresAt.
 	jwtExp := claims.ExpiresAt
-	// expires_in is logged-only — we don't use it as a source of truth.
-	_ = expiresInStr
 
 	sessExp := timeNow().Add(30 * 24 * time.Hour)
 	sess, err := s.authDeps.sessions.Create(r.Context(), userUUID,
@@ -229,11 +282,11 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookieName,
+		Name:     s.sidCookieName(),
 		Value:    sess.ID.String(),
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   isHTTPS(r),
+		Secure:   s.cookieSecure(r),
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int((30 * 24 * time.Hour).Seconds()),
 	})
@@ -241,8 +294,18 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, state.ReturnTo, http.StatusFound)
 }
 
-// handleLogout flips revoked_at on the current session and clears the
-// cookie. Idempotent — repeated logouts don't 4xx.
+// handleLogout invalidates the session both upstream (gotrue) and
+// locally (sessions row). Idempotent — repeated logouts don't 4xx.
+//
+// The gotrue call is best-effort: if it fails (network blip, gotrue
+// down), we still revoke locally and clear the cookie. Worst-case
+// outcome is an upstream refresh-token that lives ~30 days but has
+// no client to redeem it from — since the encrypted blob is gone
+// from public.sessions, an attacker would need both the master key
+// AND the gotrue session to exploit it.
+//
+// Wrapped at mount time in withCSRFOriginCheck; same-origin POSTs
+// only. SameSite=Lax alone doesn't block cross-site form POSTs.
 //
 // POST /api/auth/logout
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -250,17 +313,26 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	cookie, err := r.Cookie(sessionCookieName)
+	cookie, err := r.Cookie(s.sidCookieName())
 	if err == nil {
 		if sid, perr := uuid.Parse(cookie.Value); perr == nil {
+			// Look up the session so we have the access token for
+			// the upstream call. Lookup ignores revoked rows, so a
+			// double-logout naturally no-ops here.
+			if sess, lerr := s.authDeps.sessions.Lookup(r.Context(), sid); lerr == nil && sess != nil {
+				if uerr := s.authDeps.gotrueLogout(r.Context(), sess.JWT); uerr != nil {
+					log.Printf("[auth] upstream logout: %v", uerr)
+					// Continue — local revoke still happens.
+				}
+			}
 			if rerr := s.authDeps.sessions.Revoke(r.Context(), sid); rerr != nil {
-				log.Printf("[auth] revoke %s: %v", sid, rerr)
+				log.Printf("[auth] revoke session: %v", rerr)
 			}
 		}
 	}
 	http.SetCookie(w, &http.Cookie{
-		Name: sessionCookieName, Value: "", Path: "/",
-		MaxAge: -1, HttpOnly: true, Secure: isHTTPS(r), SameSite: http.SameSiteLaxMode,
+		Name: s.sidCookieName(), Value: "", Path: "/",
+		MaxAge: -1, HttpOnly: true, Secure: s.cookieSecure(r), SameSite: http.SameSiteLaxMode,
 	})
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -291,40 +363,55 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 
 	var resp response
 	resp.Orgs = []orgRow{}
-
-	err := s.db.QueryRowContext(r.Context(), `
-		SELECT id::text, COALESCE(display_name, ''), COALESCE(avatar_url, ''), COALESCE(github_username, '')
-		  FROM public.users
-		 WHERE id = $1
-	`, claims.Subject).Scan(&resp.ID, &resp.DisplayName, &resp.AvatarURL, &resp.GitHubUsername)
-	if err != nil {
-		log.Printf("[auth] /api/me user lookup %s: %v", claims.Subject, err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
 	resp.Email = claims.Email
 
-	rows, err := s.db.QueryContext(r.Context(), `
-		SELECT o.id::text, o.name, om.role
-		  FROM org_memberships om
-		  JOIN orgs o ON o.id = om.org_id
-		 WHERE om.user_id = $1
-		 ORDER BY o.name
-	`, claims.Subject)
+	// Wrap both reads in a single transaction with request.jwt.claims
+	// populated, so the queries source the identity from
+	// tf.current_user_id() rather than a $1 parameter. Defense-in-
+	// depth: if a future bug routes a request here with claim
+	// context pointing at a different user, the SQL helpers return
+	// that user's row — not "whatever ID the caller passes." Once
+	// D9 introduces the app pool with RLS enforcement, the same
+	// queries become RLS-defended end-to-end without further edits.
+	err := tfdb.WithTx(r.Context(), s.db,
+		tfdb.Claims{Sub: claims.Subject},
+		func(tx *sql.Tx) error {
+			if err := tx.QueryRowContext(r.Context(), `
+				SELECT id::text,
+				       COALESCE(display_name, ''),
+				       COALESCE(avatar_url, ''),
+				       COALESCE(github_username, '')
+				  FROM public.users
+				 WHERE id = tf.current_user_id()
+			`).Scan(&resp.ID, &resp.DisplayName, &resp.AvatarURL, &resp.GitHubUsername); err != nil {
+				return fmt.Errorf("user lookup: %w", err)
+			}
+
+			rows, err := tx.QueryContext(r.Context(), `
+				SELECT o.id::text, o.name, om.role
+				  FROM org_memberships om
+				  JOIN orgs o ON o.id = om.org_id
+				 WHERE om.user_id = tf.current_user_id()
+				 ORDER BY o.name
+			`)
+			if err != nil {
+				return fmt.Errorf("org list: %w", err)
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var o orgRow
+				if err := rows.Scan(&o.ID, &o.Name, &o.Role); err != nil {
+					return fmt.Errorf("org scan: %w", err)
+				}
+				resp.Orgs = append(resp.Orgs, o)
+			}
+			return rows.Err()
+		},
+	)
 	if err != nil {
-		log.Printf("[auth] /api/me org list %s: %v", claims.Subject, err)
+		log.Printf("[auth] /api/me sub=%s: %v", claims.Subject, err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var o orgRow
-		if err := rows.Scan(&o.ID, &o.Name, &o.Role); err != nil {
-			log.Printf("[auth] /api/me org scan: %v", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-		resp.Orgs = append(resp.Orgs, o)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -359,9 +446,7 @@ func upsertUserFromClaims(ctx context.Context, db *sql.DB, userID uuid.UUID, cla
 	return err
 }
 
-// gotrueRefreshFunc returns a closure that hits gotrue's /token endpoint
-// with grant_type=refresh_token. Bound to the server so tests can swap
-// it out without rebuilding the deps.
+// gotrueRefreshFunc — POST /token?grant_type=refresh_token.
 func (s *Server) gotrueRefreshFunc(cfg *authConfig) func(context.Context, string) (string, string, int64, error) {
 	return func(ctx context.Context, refreshToken string) (string, string, int64, error) {
 		body := strings.NewReader(url.Values{"refresh_token": {refreshToken}}.Encode())
@@ -371,29 +456,111 @@ func (s *Server) gotrueRefreshFunc(cfg *authConfig) func(context.Context, string
 			return "", "", 0, err
 		}
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		return decodeTokenResponse(ctx, req, "refresh")
+	}
+}
+
+// gotrueExchangeFunc — PKCE auth-code exchange.
+// POST /token?grant_type=pkce  body: auth_code, code_verifier.
+//
+// gotrue verifies that sha256(code_verifier) matches the
+// code_challenge it stored when the /authorize redirect happened.
+// On mismatch (replay, MITM tamper) the call returns 400. On
+// success, the response body carries access_token + refresh_token.
+func (s *Server) gotrueExchangeFunc(cfg *authConfig) func(context.Context, string, string) (string, string, int64, error) {
+	return func(ctx context.Context, authCode, codeVerifier string) (string, string, int64, error) {
+		body := strings.NewReader(url.Values{
+			"auth_code":     {authCode},
+			"code_verifier": {codeVerifier},
+		}.Encode())
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+			cfg.gotrueURL+"/token?grant_type=pkce", body)
+		if err != nil {
+			return "", "", 0, err
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		return decodeTokenResponse(ctx, req, "exchange")
+	}
+}
+
+// gotrueLogoutFunc — POST /logout with Authorization: Bearer.
+// Invalidates the refresh-token family upstream so a leaked access
+// token can't be silently refreshed indefinitely.
+func (s *Server) gotrueLogoutFunc(cfg *authConfig) func(context.Context, string) error {
+	return func(ctx context.Context, accessToken string) error {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+			cfg.gotrueURL+"/logout", nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", "Bearer "+accessToken)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
-			return "", "", 0, fmt.Errorf("refresh http: %w", err)
+			return fmt.Errorf("logout http: %w", err)
 		}
 		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
+		// gotrue returns 204 on success. Treat 4xx as "session already
+		// invalid upstream" — that's the desired end state, so not an
+		// error from our perspective.
+		if resp.StatusCode >= 500 {
 			b, _ := io.ReadAll(resp.Body)
-			return "", "", 0, fmt.Errorf("refresh http %d: %s", resp.StatusCode, bytes.TrimSpace(b))
+			return fmt.Errorf("logout http %d: %s", resp.StatusCode, bytes.TrimSpace(b))
 		}
-		var out struct {
-			AccessToken  string `json:"access_token"`
-			RefreshToken string `json:"refresh_token"`
-			ExpiresIn    int64  `json:"expires_in"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-			return "", "", 0, fmt.Errorf("refresh decode: %w", err)
-		}
-		if out.AccessToken == "" || out.RefreshToken == "" {
-			return "", "", 0, errors.New("refresh response missing tokens")
-		}
-		return out.AccessToken, out.RefreshToken,
-			timeNow().Add(time.Duration(out.ExpiresIn) * time.Second).Unix(), nil
+		return nil
 	}
+}
+
+// decodeTokenResponse handles the shared /token response shape used
+// by both refresh and PKCE-exchange. label distinguishes errors.
+func decodeTokenResponse(ctx context.Context, req *http.Request, label string) (string, string, int64, error) {
+	_ = ctx // req already carries the context
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", "", 0, fmt.Errorf("%s http: %w", label, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return "", "", 0, fmt.Errorf("%s http %d: %s", label, resp.StatusCode, bytes.TrimSpace(b))
+	}
+	var out struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		ExpiresIn    int64  `json:"expires_in"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", "", 0, fmt.Errorf("%s decode: %w", label, err)
+	}
+	if out.AccessToken == "" || out.RefreshToken == "" {
+		return "", "", 0, fmt.Errorf("%s response missing tokens", label)
+	}
+	return out.AccessToken, out.RefreshToken,
+		timeNow().Add(time.Duration(out.ExpiresIn) * time.Second).Unix(), nil
+}
+
+// ---- PKCE -----------------------------------------------------------------
+
+// generatePKCEVerifier returns a base64url-encoded 32-byte random
+// string. RFC 7636 allows 43-128 chars from the unreserved set;
+// base64url(32) is 43 chars — minimum acceptable size, maximum entropy
+// per byte.
+func generatePKCEVerifier() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// pkceChallenge computes the S256 challenge:
+//
+//	challenge = base64url(sha256(verifier))
+//
+// gotrue stores this on /authorize and validates against the verifier
+// supplied on /token exchange.
+func pkceChallenge(verifier string) string {
+	sum := sha256.Sum256([]byte(verifier))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
 // ---- state cookie ----------------------------------------------------------
@@ -401,9 +568,14 @@ func (s *Server) gotrueRefreshFunc(cfg *authConfig) func(context.Context, string
 const stateCookieName = "tf_oauth_state"
 
 type stateClaims struct {
-	ReturnTo  string `json:"return_to"`
-	CSRF      string `json:"csrf"`
-	ExpiresAt int64  `json:"exp"`
+	ReturnTo string `json:"return_to"`
+	CSRF     string `json:"csrf"`
+	// CodeVerifier carries the PKCE verifier from /authorize redirect
+	// to /callback exchange. Lives only in the HMAC-signed state cookie
+	// (HttpOnly, scoped to /api/auth/, 10-minute TTL). Never persisted
+	// server-side and never leaves the cookie.
+	CodeVerifier string `json:"cv"`
+	ExpiresAt    int64  `json:"exp"`
 }
 
 func (sc stateClaims) sign(key [32]byte) (string, error) {

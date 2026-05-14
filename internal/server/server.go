@@ -171,7 +171,11 @@ func (s *Server) routes() {
 	// are inert until SetAuthDeps wires them.
 	s.mux.HandleFunc("GET /api/auth/oauth/{provider}", s.handleOAuthStart)
 	s.mux.HandleFunc("GET /api/auth/callback", s.handleOAuthCallback)
-	s.mux.HandleFunc("POST /api/auth/logout", s.handleLogout)
+	// Logout is the only cookie-authed mutating endpoint in D7. Wrap
+	// in the Origin-check middleware so a cross-site form POST can't
+	// drive-by-log-the-user-out. D9 will apply the same wrapper to
+	// every retrofitted mutating endpoint.
+	s.mux.Handle("POST /api/auth/logout", s.withCSRFOriginCheck(http.HandlerFunc(s.handleLogout)))
 	// /api/me is the session-protected identity endpoint. withSession
 	// passes through in local mode (no authDeps), so a local-mode
 	// /api/me hit would reach the handler with nil claims and write
