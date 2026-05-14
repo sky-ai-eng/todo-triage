@@ -91,9 +91,14 @@ You should see the parsed claims printed as JSON (`Subject`, `Email`, `Provider`
 
 ## Rotating the signing key
 
-1. Stop GoTrue: `docker compose stop gotrue`
-2. Remove the existing `GOTRUE_JWT_KEYS=` line from `.env`
-3. `./triagefactory jwk-init --write-env .env`
-4. Restart GoTrue: `docker compose start gotrue`
+Do **not** use an in-place replacement as the normal rotation procedure. If you remove the old `GOTRUE_JWT_KEYS=` entry and replace it with a single new key, any still-valid access tokens signed by the old key will start failing verification as soon as the Verifier refreshes keys.
 
-The Verifier picks up the new key automatically on the next unknown-`kid` lookup — no TF restart needed.
+For a normal rotation, use an overlap/grace period:
+
+1. Generate a new key, but **keep the old key published for verification** in `GOTRUE_JWT_KEYS`.
+2. Configure GoTrue to start signing new tokens with the new `kid`, while still serving the old key in JWKS.
+3. Restart GoTrue so it begins issuing tokens with the new key.
+4. Wait at least as long as your maximum access-token lifetime so every token signed by the old key has expired.
+5. Remove the old key from `GOTRUE_JWT_KEYS` and restart GoTrue again.
+
+The Verifier picks up the new key automatically on the next unknown-`kid` lookup, so no TF restart is needed during the overlap. Only use a full single-key replacement if you intentionally want to force logout all existing sessions (for example, during an emergency key compromise).
