@@ -21,7 +21,7 @@ cp .env.example .env
 
 Fill in:
 - `POSTGRES_PASSWORD` — superuser password. Used for migrations and admin tasks. Generate with `openssl rand -base64 32`.
-- `SUPABASE_AUTH_ADMIN_PASSWORD` — distinct password for the role GoTrue connects as. Keeping it separate from the superuser means a GoTrue compromise doesn't surrender full DB access. Generate with a URL-safe character set, for example `openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 32; echo`, because this value is interpolated directly into `GOTRUE_DB_DATABASE_URL`. If you use a password containing reserved URL characters such as `/`, percent-encode it before Compose uses it in the URL.
+- `SUPABASE_AUTH_ADMIN_PASSWORD` — distinct password for the role GoTrue connects as. Keeping it separate from the superuser means a GoTrue compromise doesn't surrender full DB access. **Generate with `openssl rand -hex 32`** — GoTrue's DB library only accepts URL-form connection strings, so the password is interpolated into a `postgres://user:pass@host/...` URL. Plain hex avoids every URL-reserved character (`/`, `?`, `#`, `@`, `+`, `=`) by construction. Do *not* use `openssl rand -base64 32` — base64 includes `/` and `+` which break URL parsing.
 - `TF_PUBLIC_URL` — your public URL (no trailing slash)
 - `GH_CLIENT_ID` / `GH_CLIENT_SECRET` — from step 1
 
@@ -91,14 +91,13 @@ You should see the parsed claims printed as JSON (`Subject`, `Email`, `Provider`
 
 ## Rotating the signing key
 
-Do **not** use an in-place replacement as the normal rotation procedure. If you remove the old `GOTRUE_JWT_KEYS=` entry and replace it with a single new key, any still-valid access tokens signed by the old key will start failing verification as soon as the Verifier refreshes keys.
+The current tooling supports **single-key replacement** only:
 
-For a normal rotation, use an overlap/grace period:
+1. Stop GoTrue: `docker compose stop gotrue`
+2. Remove the existing `GOTRUE_JWT_KEYS=` line from `.env`
+3. `./triagefactory jwk-init --write-env .env`
+4. Restart GoTrue: `docker compose start gotrue`
 
-1. Generate a new key, but **keep the old key published for verification** in `GOTRUE_JWT_KEYS`.
-2. Configure GoTrue to start signing new tokens with the new `kid`, while still serving the old key in JWKS.
-3. Restart GoTrue so it begins issuing tokens with the new key.
-4. Wait at least as long as your maximum access-token lifetime so every token signed by the old key has expired.
-5. Remove the old key from `GOTRUE_JWT_KEYS` and restart GoTrue again.
+The Verifier picks up the new key automatically on the next unknown-`kid` lookup — no TF restart needed.
 
-The Verifier picks up the new key automatically on the next unknown-`kid` lookup, so no TF restart is needed during the overlap. Only use a full single-key replacement if you intentionally want to force logout all existing sessions (for example, during an emergency key compromise).
+**Caveat:** any access tokens still in flight that were signed by the old key will fail verification as soon as GoTrue restarts. GoTrue's default access-token lifetime is 1 hour, so the practical impact is "users with active sessions need to re-authenticate." For zero-downtime overlap rotation (publish both old and new keys, switch the signing kid, wait for the old to expire, drop the old) you'd need to maintain a multi-key `GOTRUE_JWT_KEYS` array by hand — our `jwk-init` doesn't currently support merge semantics. Planned for a future ticket; for now, rotate during low-traffic windows or treat each rotation as a forced re-auth event.

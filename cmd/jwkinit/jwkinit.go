@@ -23,6 +23,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -72,25 +73,46 @@ func runGenerate(writeEnvPath string) error {
 		return fmt.Errorf("marshal keys: %w", err)
 	}
 
+	// GoTrue's config validation still requires GOTRUE_JWT_SECRET to be non-empty
+	// even when ALGORITHM=RS256 (it's a legacy HS256 fallback that the asymmetric
+	// path doesn't actually exercise). Generate a random value alongside the
+	// JWKS so the operator install flow stays one command — and so the unused
+	// secret is at least cryptographically random rather than a sentinel string.
+	jwtSecret, err := randomHexSecret(32)
+	if err != nil {
+		return fmt.Errorf("generate jwt secret: %w", err)
+	}
+
 	if writeEnvPath == "" {
 		// Pretty-print stdout for human inspection; the .env form is compact.
 		pretty, _ := json.MarshalIndent(keys, "", "  ")
 		fmt.Println(string(pretty))
+		fmt.Println()
+		fmt.Println("# also set GOTRUE_JWT_SECRET (required by gotrue config; unused under RS256):")
+		fmt.Printf("GOTRUE_JWT_SECRET=%s\n", jwtSecret)
 		return nil
 	}
 
-	f, err := os.OpenFile(writeEnvPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	// O_RDWR (not O_WRONLY) so we can ReadAt the last byte before appending —
+	// otherwise an existing .env that doesn't end in \n could produce a
+	// `TF_SESSION_KEY=...GOTRUE_JWT_KEYS=...` smush on one line.
+	f, err := os.OpenFile(writeEnvPath, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return fmt.Errorf("open env file: %w", err)
 	}
 	defer f.Close()
+	// OpenFile's mode arg only applies on CREATE; explicit chmod handles the
+	// common case where .env already exists with looser perms.
 	if err := f.Chmod(0o600); err != nil {
 		return fmt.Errorf("chmod env file: %w", err)
 	}
-	if _, err := fmt.Fprintf(f, "GOTRUE_JWT_KEYS=%s\n", string(encoded)); err != nil {
-		return fmt.Errorf("write env line: %w", err)
+	if err := ensureTrailingNewline(f); err != nil {
+		return err
 	}
-	fmt.Fprintf(os.Stderr, "appended GOTRUE_JWT_KEYS to %s\n", writeEnvPath)
+	if _, err := fmt.Fprintf(f, "GOTRUE_JWT_KEYS=%s\nGOTRUE_JWT_SECRET=%s\n", string(encoded), jwtSecret); err != nil {
+		return fmt.Errorf("write env lines: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "appended GOTRUE_JWT_KEYS + GOTRUE_JWT_SECRET to %s\n", writeEnvPath)
 	return nil
 }
 
@@ -133,9 +155,7 @@ func generateGoTrueKeys() ([]map[string]any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("rsa generate: %w", err)
 	}
-	if err := priv.Precompute(); err != nil {
-		return nil, fmt.Errorf("rsa precompute: %w", err)
-	}
+	priv.Precompute()
 
 	kid := uuid.NewString()
 	jwk := map[string]any{
@@ -161,6 +181,42 @@ func generateGoTrueKeys() ([]map[string]any, error) {
 }
 
 func b64(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
+
+// randomHexSecret returns 2*nBytes hex chars from a crypto/rand source.
+// Hex avoids any shell-quoting concerns when the value gets exported into
+// a docker-compose env block.
+func randomHexSecret(nBytes int) (string, error) {
+	b := make([]byte, nBytes)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// ensureTrailingNewline checks the last byte of an O_APPEND-opened file and
+// writes a \n if it's missing. Required because an existing .env that the
+// operator hand-edited without a trailing newline would otherwise concatenate
+// our new line onto the previous one.
+func ensureTrailingNewline(f *os.File) error {
+	stat, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("stat env file: %w", err)
+	}
+	if stat.Size() == 0 {
+		return nil
+	}
+	last := make([]byte, 1)
+	if _, err := f.ReadAt(last, stat.Size()-1); err != nil {
+		return fmt.Errorf("read last byte of env file: %w", err)
+	}
+	if last[0] == '\n' {
+		return nil
+	}
+	if _, err := f.Write([]byte{'\n'}); err != nil {
+		return fmt.Errorf("write leading newline: %w", err)
+	}
+	return nil
+}
 
 const usage = `triagefactory jwk-init — generate the GoTrue RS256 signing key.
 
