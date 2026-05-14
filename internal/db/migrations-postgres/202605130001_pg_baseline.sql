@@ -1312,6 +1312,8 @@ CREATE TABLE public.users (
     default_org_id uuid,
     external_id text,
     github_username text,
+    jira_account_id text,
+    jira_display_name text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );

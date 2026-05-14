@@ -10,6 +10,12 @@ import "github.com/sky-ai-eng/triage-factory/internal/domain"
 // value in both metadata and the event's dedup_key — multiple concurrent
 // status-changed tasks can exist on the same issue when it transitions
 // through several states before being addressed.
+//
+// SKY-270: actor predicates moved from `*_is_self` booleans to `*_in`
+// allowlists of Atlassian account IDs. "Self" relative to a team is
+// N-valued, so the team-shared rule needs a slice of identifiers. The
+// metadata carries the *_account_id alongside the existing display-name
+// fields; the matcher compares account IDs via stringInSliceFold.
 
 // -----------------------------------------------------------------------------
 // issue:assigned — issue was assigned (possibly to someone else; predicates
@@ -17,32 +23,30 @@ import "github.com/sky-ai-eng/triage-factory/internal/domain"
 // -----------------------------------------------------------------------------
 
 type JiraIssueAssignedMetadata struct {
-	Assignee       string `json:"assignee"`
-	AssigneeIsSelf bool   `json:"assignee_is_self"`
-	Reporter       string `json:"reporter"`
-	ReporterIsSelf bool   `json:"reporter_is_self"`
-	IssueKey       string `json:"issue_key"` // "SKY-123"
-	Project        string `json:"project"`   // "SKY"
-	IssueType      string `json:"issue_type"`
-	Priority       string `json:"priority"`
-	Status         string `json:"status"`
-	Summary        string `json:"summary"`
+	Assignee          string `json:"assignee"`            // Jira display name
+	AssigneeAccountID string `json:"assignee_account_id"` // Atlassian stable identifier
+	Reporter          string `json:"reporter"`
+	ReporterAccountID string `json:"reporter_account_id"`
+	IssueKey          string `json:"issue_key"` // "SKY-123"
+	Project           string `json:"project"`   // "SKY"
+	IssueType         string `json:"issue_type"`
+	Priority          string `json:"priority"`
+	Status            string `json:"status"`
+	Summary           string `json:"summary"`
 }
 
 type JiraIssueAssignedPredicate struct {
-	AssigneeIsSelf *bool   `json:"assignee_is_self,omitempty" doc:"Match issues assigned to you."`
-	Assignee       *string `json:"assignee,omitempty" doc:"Exact-match on assignee account ID / email."`
-	ReporterIsSelf *bool   `json:"reporter_is_self,omitempty"`
-	Project        *string `json:"project,omitempty" doc:"Scope to a specific Jira project key."`
-	IssueType      *string `json:"issue_type,omitempty" doc:"Filter by issue type (Story, Bug, Task, ...)."`
-	Priority       *string `json:"priority,omitempty" doc:"Exact-match on priority name."`
-	Status         *string `json:"status,omitempty" doc:"Filter by the issue's current status (e.g. 'To Do', 'In Progress')."`
+	AssigneeIn []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Atlassian account IDs, case-insensitive)."`
+	ReporterIn []string `json:"reporter_in,omitempty" doc:"Match issues whose reporter is in this list (Atlassian account IDs)."`
+	Project    *string  `json:"project,omitempty" doc:"Scope to a specific Jira project key."`
+	IssueType  *string  `json:"issue_type,omitempty" doc:"Filter by issue type (Story, Bug, Task, ...)."`
+	Priority   *string  `json:"priority,omitempty" doc:"Exact-match on priority name."`
+	Status     *string  `json:"status,omitempty" doc:"Filter by the issue's current status (e.g. 'To Do', 'In Progress')."`
 }
 
 func (p JiraIssueAssignedPredicate) Matches(m JiraIssueAssignedMetadata) bool {
-	return boolEq(p.AssigneeIsSelf, m.AssigneeIsSelf) &&
-		strEq(p.Assignee, m.Assignee) &&
-		boolEq(p.ReporterIsSelf, m.ReporterIsSelf) &&
+	return stringInSliceFold(p.AssigneeIn, m.AssigneeAccountID) &&
+		stringInSliceFold(p.ReporterIn, m.ReporterAccountID) &&
 		strEq(p.Project, m.Project) &&
 		strEq(p.IssueType, m.IssueType) &&
 		strEq(p.Priority, m.Priority) &&
@@ -54,25 +58,27 @@ func (p JiraIssueAssignedPredicate) Matches(m JiraIssueAssignedMetadata) bool {
 // -----------------------------------------------------------------------------
 
 type JiraIssueAvailableMetadata struct {
-	Reporter       string `json:"reporter"`
-	ReporterIsSelf bool   `json:"reporter_is_self"`
-	IssueKey       string `json:"issue_key"`
-	Project        string `json:"project"`
-	IssueType      string `json:"issue_type"`
-	Priority       string `json:"priority"`
-	Status         string `json:"status"`
-	Summary        string `json:"summary"`
+	Reporter          string `json:"reporter"`
+	ReporterAccountID string `json:"reporter_account_id"`
+	IssueKey          string `json:"issue_key"`
+	Project           string `json:"project"`
+	IssueType         string `json:"issue_type"`
+	Priority          string `json:"priority"`
+	Status            string `json:"status"`
+	Summary           string `json:"summary"`
 }
 
 type JiraIssueAvailablePredicate struct {
-	Project   *string `json:"project,omitempty"`
-	IssueType *string `json:"issue_type,omitempty"`
-	Priority  *string `json:"priority,omitempty"`
-	Status    *string `json:"status,omitempty" doc:"Filter by the issue's current status (e.g. 'To Do', 'Backlog')."`
+	ReporterIn []string `json:"reporter_in,omitempty" doc:"Match issues whose reporter is in this list (Atlassian account IDs)."`
+	Project    *string  `json:"project,omitempty"`
+	IssueType  *string  `json:"issue_type,omitempty"`
+	Priority   *string  `json:"priority,omitempty"`
+	Status     *string  `json:"status,omitempty" doc:"Filter by the issue's current status (e.g. 'To Do', 'Backlog')."`
 }
 
 func (p JiraIssueAvailablePredicate) Matches(m JiraIssueAvailableMetadata) bool {
-	return strEq(p.Project, m.Project) &&
+	return stringInSliceFold(p.ReporterIn, m.ReporterAccountID) &&
+		strEq(p.Project, m.Project) &&
 		strEq(p.IssueType, m.IssueType) &&
 		strEq(p.Priority, m.Priority) &&
 		strEq(p.Status, m.Status)
@@ -85,26 +91,26 @@ func (p JiraIssueAvailablePredicate) Matches(m JiraIssueAvailableMetadata) bool 
 // -----------------------------------------------------------------------------
 
 type JiraIssueStatusChangedMetadata struct {
-	Assignee       string `json:"assignee"`
-	AssigneeIsSelf bool   `json:"assignee_is_self"`
-	IssueKey       string `json:"issue_key"`
-	Project        string `json:"project"`
-	IssueType      string `json:"issue_type"`
-	OldStatus      string `json:"old_status"`
-	NewStatus      string `json:"new_status"` // also the event's dedup_key
-	Priority       string `json:"priority"`
+	Assignee          string `json:"assignee"`
+	AssigneeAccountID string `json:"assignee_account_id"`
+	IssueKey          string `json:"issue_key"`
+	Project           string `json:"project"`
+	IssueType         string `json:"issue_type"`
+	OldStatus         string `json:"old_status"`
+	NewStatus         string `json:"new_status"` // also the event's dedup_key
+	Priority          string `json:"priority"`
 }
 
 type JiraIssueStatusChangedPredicate struct {
-	AssigneeIsSelf *bool   `json:"assignee_is_self,omitempty"`
-	Project        *string `json:"project,omitempty"`
-	IssueType      *string `json:"issue_type,omitempty"`
-	NewStatus      *string `json:"new_status,omitempty" doc:"Match transitions into a specific status (e.g. 'In Review')."`
-	OldStatus      *string `json:"old_status,omitempty" doc:"Match transitions out of a specific status."`
+	AssigneeIn []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Atlassian account IDs)."`
+	Project    *string  `json:"project,omitempty"`
+	IssueType  *string  `json:"issue_type,omitempty"`
+	NewStatus  *string  `json:"new_status,omitempty" doc:"Match transitions into a specific status (e.g. 'In Review')."`
+	OldStatus  *string  `json:"old_status,omitempty" doc:"Match transitions out of a specific status."`
 }
 
 func (p JiraIssueStatusChangedPredicate) Matches(m JiraIssueStatusChangedMetadata) bool {
-	return boolEq(p.AssigneeIsSelf, m.AssigneeIsSelf) &&
+	return stringInSliceFold(p.AssigneeIn, m.AssigneeAccountID) &&
 		strEq(p.Project, m.Project) &&
 		strEq(p.IssueType, m.IssueType) &&
 		strEq(p.NewStatus, m.NewStatus) &&
@@ -116,23 +122,23 @@ func (p JiraIssueStatusChangedPredicate) Matches(m JiraIssueStatusChangedMetadat
 // -----------------------------------------------------------------------------
 
 type JiraIssuePriorityChangedMetadata struct {
-	Assignee       string `json:"assignee"`
-	AssigneeIsSelf bool   `json:"assignee_is_self"`
-	IssueKey       string `json:"issue_key"`
-	Project        string `json:"project"`
-	OldPriority    string `json:"old_priority"`
-	NewPriority    string `json:"new_priority"` // also the event's dedup_key
+	Assignee          string `json:"assignee"`
+	AssigneeAccountID string `json:"assignee_account_id"`
+	IssueKey          string `json:"issue_key"`
+	Project           string `json:"project"`
+	OldPriority       string `json:"old_priority"`
+	NewPriority       string `json:"new_priority"` // also the event's dedup_key
 }
 
 type JiraIssuePriorityChangedPredicate struct {
-	AssigneeIsSelf *bool   `json:"assignee_is_self,omitempty"`
-	Project        *string `json:"project,omitempty"`
-	NewPriority    *string `json:"new_priority,omitempty"`
-	OldPriority    *string `json:"old_priority,omitempty"`
+	AssigneeIn  []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Atlassian account IDs)."`
+	Project     *string  `json:"project,omitempty"`
+	NewPriority *string  `json:"new_priority,omitempty"`
+	OldPriority *string  `json:"old_priority,omitempty"`
 }
 
 func (p JiraIssuePriorityChangedPredicate) Matches(m JiraIssuePriorityChangedMetadata) bool {
-	return boolEq(p.AssigneeIsSelf, m.AssigneeIsSelf) &&
+	return stringInSliceFold(p.AssigneeIn, m.AssigneeAccountID) &&
 		strEq(p.Project, m.Project) &&
 		strEq(p.NewPriority, m.NewPriority) &&
 		strEq(p.OldPriority, m.OldPriority)
@@ -143,26 +149,24 @@ func (p JiraIssuePriorityChangedPredicate) Matches(m JiraIssuePriorityChangedMet
 // -----------------------------------------------------------------------------
 
 type JiraIssueCommentedMetadata struct {
-	Assignee        string `json:"assignee"`
-	AssigneeIsSelf  bool   `json:"assignee_is_self"`
-	Commenter       string `json:"commenter"`
-	CommenterIsSelf bool   `json:"commenter_is_self"`
-	CommentID       string `json:"comment_id"`
-	IssueKey        string `json:"issue_key"`
-	Project         string `json:"project"`
+	Assignee           string `json:"assignee"`
+	AssigneeAccountID  string `json:"assignee_account_id"`
+	Commenter          string `json:"commenter"`
+	CommenterAccountID string `json:"commenter_account_id"`
+	CommentID          string `json:"comment_id"`
+	IssueKey           string `json:"issue_key"`
+	Project            string `json:"project"`
 }
 
 type JiraIssueCommentedPredicate struct {
-	AssigneeIsSelf  *bool   `json:"assignee_is_self,omitempty"`
-	CommenterIsSelf *bool   `json:"commenter_is_self,omitempty"`
-	Commenter       *string `json:"commenter,omitempty"`
-	Project         *string `json:"project,omitempty"`
+	AssigneeIn  []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Atlassian account IDs)."`
+	CommenterIn []string `json:"commenter_in,omitempty" doc:"Match comments authored by anyone in this list (Atlassian account IDs)."`
+	Project     *string  `json:"project,omitempty"`
 }
 
 func (p JiraIssueCommentedPredicate) Matches(m JiraIssueCommentedMetadata) bool {
-	return boolEq(p.AssigneeIsSelf, m.AssigneeIsSelf) &&
-		boolEq(p.CommenterIsSelf, m.CommenterIsSelf) &&
-		strEq(p.Commenter, m.Commenter) &&
+	return stringInSliceFold(p.AssigneeIn, m.AssigneeAccountID) &&
+		stringInSliceFold(p.CommenterIn, m.CommenterAccountID) &&
 		strEq(p.Project, m.Project)
 }
 
@@ -173,22 +177,22 @@ func (p JiraIssueCommentedPredicate) Matches(m JiraIssueCommentedMetadata) bool 
 // -----------------------------------------------------------------------------
 
 type JiraIssueCompletedMetadata struct {
-	Assignee       string `json:"assignee"`
-	AssigneeIsSelf bool   `json:"assignee_is_self"`
-	IssueKey       string `json:"issue_key"`
-	Project        string `json:"project"`
-	IssueType      string `json:"issue_type"`
-	FinalStatus    string `json:"final_status"`
+	Assignee          string `json:"assignee"`
+	AssigneeAccountID string `json:"assignee_account_id"`
+	IssueKey          string `json:"issue_key"`
+	Project           string `json:"project"`
+	IssueType         string `json:"issue_type"`
+	FinalStatus       string `json:"final_status"`
 }
 
 type JiraIssueCompletedPredicate struct {
-	AssigneeIsSelf *bool   `json:"assignee_is_self,omitempty"`
-	Project        *string `json:"project,omitempty"`
-	IssueType      *string `json:"issue_type,omitempty"`
+	AssigneeIn []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Atlassian account IDs)."`
+	Project    *string  `json:"project,omitempty"`
+	IssueType  *string  `json:"issue_type,omitempty"`
 }
 
 func (p JiraIssueCompletedPredicate) Matches(m JiraIssueCompletedMetadata) bool {
-	return boolEq(p.AssigneeIsSelf, m.AssigneeIsSelf) &&
+	return stringInSliceFold(p.AssigneeIn, m.AssigneeAccountID) &&
 		strEq(p.Project, m.Project) &&
 		strEq(p.IssueType, m.IssueType)
 }
@@ -203,26 +207,26 @@ func (p JiraIssueCompletedPredicate) Matches(m JiraIssueCompletedMetadata) bool 
 // -----------------------------------------------------------------------------
 
 type JiraIssueBecameAtomicMetadata struct {
-	Assignee       string `json:"assignee"`
-	AssigneeIsSelf bool   `json:"assignee_is_self"`
-	IssueKey       string `json:"issue_key"`
-	Project        string `json:"project"`
-	IssueType      string `json:"issue_type"`
-	Priority       string `json:"priority"`
-	Status         string `json:"status"`
-	Summary        string `json:"summary"`
+	Assignee          string `json:"assignee"`
+	AssigneeAccountID string `json:"assignee_account_id"`
+	IssueKey          string `json:"issue_key"`
+	Project           string `json:"project"`
+	IssueType         string `json:"issue_type"`
+	Priority          string `json:"priority"`
+	Status            string `json:"status"`
+	Summary           string `json:"summary"`
 }
 
 type JiraIssueBecameAtomicPredicate struct {
-	AssigneeIsSelf *bool   `json:"assignee_is_self,omitempty" doc:"Match issues assigned to you."`
-	Project        *string `json:"project,omitempty" doc:"Scope to a specific Jira project key."`
-	IssueType      *string `json:"issue_type,omitempty"`
-	Priority       *string `json:"priority,omitempty"`
-	Status         *string `json:"status,omitempty"`
+	AssigneeIn []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Atlassian account IDs)."`
+	Project    *string  `json:"project,omitempty" doc:"Scope to a specific Jira project key."`
+	IssueType  *string  `json:"issue_type,omitempty"`
+	Priority   *string  `json:"priority,omitempty"`
+	Status     *string  `json:"status,omitempty"`
 }
 
 func (p JiraIssueBecameAtomicPredicate) Matches(m JiraIssueBecameAtomicMetadata) bool {
-	return boolEq(p.AssigneeIsSelf, m.AssigneeIsSelf) &&
+	return stringInSliceFold(p.AssigneeIn, m.AssigneeAccountID) &&
 		strEq(p.Project, m.Project) &&
 		strEq(p.IssueType, m.IssueType) &&
 		strEq(p.Priority, m.Priority) &&

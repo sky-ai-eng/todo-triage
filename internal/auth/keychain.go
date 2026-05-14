@@ -14,31 +14,30 @@ const service = "triagefactory"
 
 // Keychain keys
 const (
-	keyGitHubURL       = "github_url"
-	keyGitHubPAT       = "github_pat"
-	keyJiraURL         = "jira_url"
-	keyJiraPAT         = "jira_pat"
-	keyJiraDisplayName = "jira_display_name"
+	keyGitHubURL = "github_url"
+	keyGitHubPAT = "github_pat"
+	keyJiraURL   = "jira_url"
+	keyJiraPAT   = "jira_pat"
 )
 
 // Environment variable names (TRIAGE_FACTORY_ prefix matches existing convention).
 var envKeys = map[string]string{
-	keyGitHubURL:       "TRIAGE_FACTORY_GITHUB_URL",
-	keyGitHubPAT:       "TRIAGE_FACTORY_GITHUB_PAT",
-	keyJiraURL:         "TRIAGE_FACTORY_JIRA_URL",
-	keyJiraPAT:         "TRIAGE_FACTORY_JIRA_PAT",
-	keyJiraDisplayName: "TRIAGE_FACTORY_JIRA_DISPLAY_NAME",
+	keyGitHubURL: "TRIAGE_FACTORY_GITHUB_URL",
+	keyGitHubPAT: "TRIAGE_FACTORY_GITHUB_PAT",
+	keyJiraURL:   "TRIAGE_FACTORY_JIRA_URL",
+	keyJiraPAT:   "TRIAGE_FACTORY_JIRA_PAT",
 }
 
-// Credentials holds the stored auth configuration. The GitHub login is
-// not held here — it lives on users.github_username, derived from the PAT
-// at startup via auth.ValidateGitHub.
+// Credentials holds the stored auth configuration. Identity facts that
+// aren't secrets live on the users row, not here — github_username
+// derived from the GitHub PAT, jira_account_id + jira_display_name
+// derived from the Jira PAT via auth.ValidateJira at startup
+// (bootstrapLocalGitHubIdentity / bootstrapLocalJiraIdentity in main.go).
 type Credentials struct {
-	GitHubURL       string
-	GitHubPAT       string
-	JiraURL         string
-	JiraPAT         string
-	JiraDisplayName string
+	GitHubURL string
+	GitHubPAT string
+	JiraURL   string
+	JiraPAT   string
 }
 
 // Store saves all credentials to the OS keychain.
@@ -57,7 +56,6 @@ func Store(creds Credentials) error {
 		{keyGitHubPAT, creds.GitHubPAT},
 		{keyJiraURL, creds.JiraURL},
 		{keyJiraPAT, creds.JiraPAT},
-		{keyJiraDisplayName, creds.JiraDisplayName},
 	}
 	for _, p := range pairs {
 		if p.val == "" {
@@ -88,7 +86,6 @@ func Load() (Credentials, error) {
 	overlay(keyGitHubPAT, &creds.GitHubPAT)
 	overlay(keyJiraURL, &creds.JiraURL)
 	overlay(keyJiraPAT, &creds.JiraPAT)
-	overlay(keyJiraDisplayName, &creds.JiraDisplayName)
 
 	if anyEnv {
 		logEnvOnce()
@@ -120,10 +117,6 @@ func loadFromKeychain() (Credentials, error) {
 	if err != nil {
 		return creds, err
 	}
-	creds.JiraDisplayName, err = get(keyJiraDisplayName)
-	if err != nil {
-		return creds, err
-	}
 
 	return creds, nil
 }
@@ -140,9 +133,12 @@ func deleteKeys(keys ...string) error {
 	return nil
 }
 
-// Clear removes all credentials from the OS keychain.
+// Clear removes all credentials from the OS keychain. Also sweeps the
+// legacy jira_display_name key (retired in SKY-270 when Jira identity
+// moved to users.jira_display_name / jira_account_id) so upgrades from
+// pre-SKY-270 keychains leave no orphan entries.
 func Clear() error {
-	return deleteKeys(keyGitHubURL, keyGitHubPAT, keyJiraURL, keyJiraPAT, keyJiraDisplayName)
+	return deleteKeys(keyGitHubURL, keyGitHubPAT, keyJiraURL, keyJiraPAT, "jira_display_name")
 }
 
 // ClearGitHub removes GitHub credentials from the OS keychain.
@@ -150,9 +146,10 @@ func ClearGitHub() error {
 	return deleteKeys(keyGitHubURL, keyGitHubPAT)
 }
 
-// ClearJira removes Jira credentials from the OS keychain.
+// ClearJira removes Jira credentials from the OS keychain. Sweeps the
+// legacy jira_display_name key too — see Clear().
 func ClearJira() error {
-	return deleteKeys(keyJiraURL, keyJiraPAT, keyJiraDisplayName)
+	return deleteKeys(keyJiraURL, keyJiraPAT, "jira_display_name")
 }
 
 // IsConfigured returns true if at least one PAT is available (from keychain or env vars).

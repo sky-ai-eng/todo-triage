@@ -210,16 +210,22 @@ func DedupCheckRunsByName(runs []CheckRun) []CheckRun {
 // PR bodies) lives on entities.description instead so diff reads don't
 // drag it through every refresh cycle.
 type JiraSnapshot struct {
-	Key          string   `json:"key"`
-	Summary      string   `json:"summary"`
-	Status       string   `json:"status"`
-	Assignee     string   `json:"assignee"`
-	Priority     string   `json:"priority"`
-	Labels       []string `json:"labels"`
-	IssueType    string   `json:"issue_type"`
-	ParentKey    string   `json:"parent_key"`
-	CommentCount int      `json:"comment_count"`
-	URL          string   `json:"url"`
+	Key      string `json:"key"`
+	Summary  string `json:"summary"`
+	Status   string `json:"status"`
+	Assignee string `json:"assignee"` // display name (UI surfaces)
+	// AssigneeAccountID is the Atlassian stable identifier — accountId
+	// on Cloud, legacy key on Server / DC. Captured alongside the
+	// display name in issueToState so the SKY-270 predicate matcher
+	// (assignee_in / commenter_in / reporter_in) has a stable
+	// comparison target. Empty on snapshots that predate the field.
+	AssigneeAccountID string   `json:"assignee_account_id,omitempty"`
+	Priority          string   `json:"priority"`
+	Labels            []string `json:"labels"`
+	IssueType         string   `json:"issue_type"`
+	ParentKey         string   `json:"parent_key"`
+	CommentCount      int      `json:"comment_count"`
+	URL               string   `json:"url"`
 	// CreatedAt is Jira's ISO-8601 timestamp for when the ticket was created
 	// (fields.created). Used for newest-first ordering in carry-over. Empty
 	// on snapshots that predate this field — callers should fall back to the

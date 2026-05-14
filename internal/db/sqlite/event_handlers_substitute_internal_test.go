@@ -69,11 +69,82 @@ func TestSubstituteLocalGitHubIdentity(t *testing.T) {
 			localUser: "AidanAllchin",
 			want:      map[string]any{"commenter_in": []any{"AidanAllchin"}},
 		},
+		{
+			name:      "jira assignee_in untouched by the GitHub helper",
+			input:     `{"assignee_in":[]}`,
+			localUser: "AidanAllchin",
+			wantInput: true,
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := substituteLocalGitHubIdentity(tc.input, tc.localUser)
+			if tc.wantInput {
+				if got != tc.input {
+					t.Errorf("expected passthrough; got %q want %q", got, tc.input)
+				}
+				return
+			}
+			var actual map[string]any
+			if err := json.Unmarshal([]byte(got), &actual); err != nil {
+				t.Fatalf("substituted JSON failed to decode: %v\n%s", err, got)
+			}
+			if !reflect.DeepEqual(actual, tc.want) {
+				t.Errorf("substituted JSON mismatch:\ngot:  %v\nwant: %v", actual, tc.want)
+			}
+		})
+	}
+}
+
+// TestSubstituteLocalJiraIdentity is the SKY-270 mirror: empty
+// assignee_in becomes single-entry, GitHub-namespaced keys are ignored
+// so the two helpers compose, and the same edge cases (empty identity,
+// malformed JSON, non-empty preservation) degrade cleanly.
+func TestSubstituteLocalJiraIdentity(t *testing.T) {
+	const accountID = "557058:abc-aidan"
+	cases := []struct {
+		name      string
+		input     string
+		localID   string
+		want      map[string]any
+		wantInput bool
+	}{
+		{
+			name:    "empty assignee_in → single-entry account ID",
+			input:   `{"assignee_in":[]}`,
+			localID: accountID,
+			want:    map[string]any{"assignee_in": []any{accountID}},
+		},
+		{
+			name:      "non-empty assignee_in preserved verbatim",
+			input:     `{"assignee_in":["someone-else"]}`,
+			localID:   accountID,
+			wantInput: true,
+		},
+		{
+			name:      "github author_in ignored by the Jira helper",
+			input:     `{"author_in":[]}`,
+			localID:   accountID,
+			wantInput: true,
+		},
+		{
+			name:      "empty account ID is no-op (Jira not connected yet)",
+			input:     `{"assignee_in":[]}`,
+			localID:   "",
+			wantInput: true,
+		},
+		{
+			name:      "malformed JSON passes through",
+			input:     `not-json`,
+			localID:   accountID,
+			wantInput: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := substituteLocalJiraIdentity(tc.input, tc.localID)
 			if tc.wantInput {
 				if got != tc.input {
 					t.Errorf("expected passthrough; got %q want %q", got, tc.input)

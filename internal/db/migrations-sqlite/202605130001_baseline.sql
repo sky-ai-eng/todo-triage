@@ -111,15 +111,24 @@ CREATE TABLE teams (
 );
 
 CREATE TABLE users (
-    id              TEXT PRIMARY KEY,
-    display_name    TEXT,
-    avatar_url      TEXT,
-    timezone        TEXT NOT NULL DEFAULT 'UTC',
-    default_org_id  TEXT,
-    external_id     TEXT,
-    github_username TEXT,
-    created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    id                TEXT PRIMARY KEY,
+    display_name      TEXT,
+    avatar_url        TEXT,
+    timezone          TEXT NOT NULL DEFAULT 'UTC',
+    default_org_id    TEXT,
+    external_id       TEXT,
+    github_username   TEXT,
+    -- jira_account_id is the Atlassian-side stable identifier
+    -- (Cloud: accountId; Server/DC: legacy key). Used by the
+    -- assignee_in / reporter_in / commenter_in predicate matchers.
+    -- jira_display_name is the Jira-side display name, used by stock
+    -- handlers for "is this assigned to me" checks and the optimistic
+    -- post-claim snapshot update. Both captured from auth.ValidateJira
+    -- at PAT setup, persisted by bootstrapLocalJiraIdentity at boot.
+    jira_account_id   TEXT,
+    jira_display_name TEXT,
+    created_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE org_memberships (

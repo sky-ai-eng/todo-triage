@@ -90,14 +90,14 @@ func TestBuildPromptReplacer_ThirdPartyCI_ZeroWorkflowRun(t *testing.T) {
 
 func TestBuildPromptReplacer_JiraAssigned(t *testing.T) {
 	meta := events.JiraIssueAssignedMetadata{
-		Assignee:       "Aidan",
-		AssigneeIsSelf: true,
-		IssueKey:       "SKY-123",
-		Project:        "SKY",
-		IssueType:      "Task",
-		Priority:       "High",
-		Status:         "To Do",
-		Summary:        "Fix the thing",
+		Assignee:          "Aidan",
+		AssigneeAccountID: "557058:abc-aidan",
+		IssueKey:          "SKY-123",
+		Project:           "SKY",
+		IssueType:         "Task",
+		Priority:          "High",
+		Status:            "To Do",
+		Summary:           "Fix the thing",
 	}
 	metaJSON, _ := json.Marshal(meta)
 

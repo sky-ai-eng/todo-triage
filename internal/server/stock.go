@@ -64,11 +64,23 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// SKY-270: identity facts live on the users row, not the keychain.
+	// Account ID drives "is this assigned to me" (stable, predicate-grade);
+	// display name drives the optimistic post-claim snapshot update so the
+	// synthesized event metadata reads correctly. Both come from the same
+	// auth.ValidateJira response at PAT setup; missing either means the
+	// bootstrap hasn't run yet or Jira isn't connected.
+	localAccountID, localDisplayName, err := s.users.GetJiraIdentity(r.Context(), runmode.LocalDefaultUserID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load Jira identity: " + err.Error()})
+		return
+	}
+
 	// Require full Jira configuration (PAT + URL + at least one project) plus
-	// a stored display name so we can match the assignee field. Partial config
+	// a stored identity so we can match the assignee field. Partial config
 	// would silently stall on "polling" forever because the poller never has
 	// anything to do.
-	if !cfg.Jira.Ready(creds.JiraPAT, creds.JiraURL) || creds.JiraDisplayName == "" {
+	if !cfg.Jira.Ready(creds.JiraPAT, creds.JiraURL) || localAccountID == "" || localDisplayName == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Jira not configured"})
 		return
 	}
@@ -145,7 +157,13 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 		// and leave prefilled actions empty for assigned tickets.
 		projectRule := cfg.Jira.RuleForProject(projectKey)
 
-		isSelf := snap.Assignee == creds.JiraDisplayName
+		// SKY-270: "is this assigned to me?" uses the Atlassian account ID
+		// — the stable identifier — rather than display name. Display name
+		// is a fallback for older snapshots that predate the account-id
+		// field (empty AssigneeAccountID); they degrade to today's behavior
+		// of comparing the display name string.
+		isSelf := (snap.AssigneeAccountID != "" && snap.AssigneeAccountID == localAccountID) ||
+			(snap.AssigneeAccountID == "" && snap.Assignee == localDisplayName)
 		isUnassigned := snap.Assignee == ""
 
 		switch {
@@ -281,7 +299,12 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	creds, _ := auth.Load()
-	if !cfg.Jira.Ready(creds.JiraPAT, creds.JiraURL) || creds.JiraDisplayName == "" {
+	localAccountID, localDisplayName, err := s.users.GetJiraIdentity(r.Context(), runmode.LocalDefaultUserID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load Jira identity: " + err.Error()})
+		return
+	}
+	if !cfg.Jira.Ready(creds.JiraPAT, creds.JiraURL) || localAccountID == "" || localDisplayName == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Jira not configured"})
 		return
 	}
@@ -346,7 +369,8 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 		// synthesized event doesn't depend on status rules).
 		projectRule := cfg.Jira.RuleForProject(projectFromKey(snap.Key))
 
-		isSelf := snap.Assignee == creds.JiraDisplayName
+		isSelf := (snap.AssigneeAccountID != "" && snap.AssigneeAccountID == localAccountID) ||
+			(snap.AssigneeAccountID == "" && snap.Assignee == localDisplayName)
 		isUnassigned := snap.Assignee == ""
 		isAvailable := isUnassigned && projectRule != nil && projectRule.Pickup.Contains(snap.Status)
 
@@ -399,10 +423,10 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 			var eventID string
 			if isAvailable {
 				eventType = domain.EventJiraIssueAvailable
-				eventID, err = recordCarryOverAvailableEvent(s.db, entity.ID, snap, creds.JiraDisplayName)
+				eventID, err = recordCarryOverAvailableEvent(s.db, entity.ID, snap)
 			} else {
 				eventType = domain.EventJiraIssueAssigned
-				eventID, err = recordCarryOverAssignedEvent(s.db, entity.ID, snap, creds.JiraDisplayName)
+				eventID, err = recordCarryOverAssignedEvent(s.db, entity.ID, snap)
 			}
 			if err != nil {
 				failed = append(failed, stockFailure{a.IssueKey, a.Action, "record event: " + err.Error()})
@@ -448,15 +472,16 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 
 			// Refresh the snap with the known post-mutation state so the
 			// synthesized event metadata matches the ticket's actual Jira
-			// state at the moment of claim. The assignee flips to self
-			// regardless of where we started.
-			snap.Assignee = creds.JiraDisplayName
+			// state at the moment of claim. Both the display name (for UI)
+			// and the account ID (for predicate matching) flip to self.
+			snap.Assignee = localDisplayName
+			snap.AssigneeAccountID = localAccountID
 
 			// Both assigned and available claim paths end with a
 			// jira:issue:assigned event — after the AssignToSelf call, the
 			// user is the assignee in Jira too, so the event metadata is
 			// accurate for either starting state.
-			eventID, err := recordCarryOverAssignedEvent(s.db, entity.ID, snap, creds.JiraDisplayName)
+			eventID, err := recordCarryOverAssignedEvent(s.db, entity.ID, snap)
 			if err != nil {
 				failed = append(failed, stockFailure{a.IssueKey, a.Action, "record event: " + err.Error()})
 				continue
@@ -547,16 +572,20 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 // on initial load" rule. Semantically this matches what would have fired if
 // the ticket had been assigned after we started watching. Uses RecordEvent
 // (not bus.Publish) so downstream handlers don't double-create a task.
-func recordCarryOverAssignedEvent(database *sql.DB, entityID string, snap domain.JiraSnapshot, displayName string) (string, error) {
+//
+// SKY-270: account ID flows through from the (caller-mutated) snap so the
+// metadata carries the stable identifier the matcher needs. The display
+// name in metadata is informational; matching keys on account ID.
+func recordCarryOverAssignedEvent(database *sql.DB, entityID string, snap domain.JiraSnapshot) (string, error) {
 	meta := events.JiraIssueAssignedMetadata{
-		Assignee:       snap.Assignee,
-		AssigneeIsSelf: snap.Assignee == displayName,
-		IssueKey:       snap.Key,
-		Project:        projectFromKey(snap.Key),
-		IssueType:      snap.IssueType,
-		Priority:       snap.Priority,
-		Status:         snap.Status,
-		Summary:        snap.Summary,
+		Assignee:          snap.Assignee,
+		AssigneeAccountID: snap.AssigneeAccountID,
+		IssueKey:          snap.Key,
+		Project:           projectFromKey(snap.Key),
+		IssueType:         snap.IssueType,
+		Priority:          snap.Priority,
+		Status:            snap.Status,
+		Summary:           snap.Summary,
 	}
 	metaJSON, err := json.Marshal(meta)
 	if err != nil {
@@ -574,8 +603,9 @@ func recordCarryOverAssignedEvent(database *sql.DB, entityID string, snap domain
 // recordCarryOverAssignedEvent: synthesizes a jira:issue:available event so
 // the carry-over "queue" action on an unassigned ticket has a real event
 // row to hang the task off. Mirrors the tracker's own emission path for
-// first-discovered available tickets (diff.go).
-func recordCarryOverAvailableEvent(database *sql.DB, entityID string, snap domain.JiraSnapshot, _ string) (string, error) {
+// first-discovered available tickets (diff.go). No actor identity carried
+// on this event — the ticket is unassigned by definition.
+func recordCarryOverAvailableEvent(database *sql.DB, entityID string, snap domain.JiraSnapshot) (string, error) {
 	meta := events.JiraIssueAvailableMetadata{
 		IssueKey:  snap.Key,
 		Project:   projectFromKey(snap.Key),

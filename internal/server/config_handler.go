@@ -21,8 +21,10 @@ type configResponse struct {
 }
 
 type configResponseUser struct {
-	ID             string  `json:"id"`
-	GitHubUsername *string `json:"github_username"` // null when not yet captured
+	ID              string  `json:"id"`
+	GitHubUsername  *string `json:"github_username"`   // null when not yet captured
+	JiraAccountID   *string `json:"jira_account_id"`   // null when Jira not yet connected
+	JiraDisplayName *string `json:"jira_display_name"` // null when Jira not yet connected
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
@@ -43,12 +45,22 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	if username != "" {
 		gh = &username
 	}
+	jiraAccount, jiraName, _ := s.users.GetJiraIdentity(r.Context(), runmode.LocalDefaultUserID)
+	var jiraAccountPtr, jiraNamePtr *string
+	if jiraAccount != "" {
+		jiraAccountPtr = &jiraAccount
+	}
+	if jiraName != "" {
+		jiraNamePtr = &jiraName
+	}
 	writeJSON(w, http.StatusOK, configResponse{
 		DeploymentMode: string(runmode.Current()),
 		TeamSize:       1,
 		CurrentUser: configResponseUser{
-			ID:             runmode.LocalDefaultUserID,
-			GitHubUsername: gh,
+			ID:              runmode.LocalDefaultUserID,
+			GitHubUsername:  gh,
+			JiraAccountID:   jiraAccountPtr,
+			JiraDisplayName: jiraNamePtr,
 		},
 	})
 }
@@ -65,6 +77,7 @@ type teamMemberRow struct {
 	UserID         string  `json:"user_id"`
 	DisplayName    string  `json:"display_name"`
 	GitHubUsername *string `json:"github_username"` // null when member hasn't captured identity
+	JiraAccountID  *string `json:"jira_account_id"` // null when member hasn't connected Jira
 	IsCurrentUser  bool    `json:"is_current_user"`
 }
 
@@ -82,9 +95,13 @@ func (s *Server) handleTeamMembers(w http.ResponseWriter, r *http.Request) {
 
 	username, _ := s.users.GetGitHubUsername(r.Context(), runmode.LocalDefaultUserID)
 	displayName, _ := s.users.GetDisplayName(r.Context(), runmode.LocalDefaultUserID)
-	var login *string
+	jiraAccount, _, _ := s.users.GetJiraIdentity(r.Context(), runmode.LocalDefaultUserID)
+	var login, jiraID *string
 	if username != "" {
 		login = &username
+	}
+	if jiraAccount != "" {
+		jiraID = &jiraAccount
 	}
 	writeJSON(w, http.StatusOK, teamMembersResponse{
 		Members: []teamMemberRow{
@@ -92,6 +109,7 @@ func (s *Server) handleTeamMembers(w http.ResponseWriter, r *http.Request) {
 				UserID:         runmode.LocalDefaultUserID,
 				DisplayName:    displayName,
 				GitHubUsername: login,
+				JiraAccountID:  jiraID,
 				IsCurrentUser:  true,
 			},
 		},

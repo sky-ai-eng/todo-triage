@@ -19,10 +19,28 @@ type GitHubUser struct {
 }
 
 // JiraUser is the subset of fields we extract from the Jira myself endpoint.
+//
+// Atlassian's stable identifier moved from `key` (Jira Server / DC, the
+// legacy username-style key) to `accountId` (Jira Cloud, an opaque hash).
+// /rest/api/2/myself returns whichever is appropriate for the deployment.
+// We capture both and let StableID() pick — AccountID first because
+// Cloud is dominant, falling back to Key for Server / DC installs.
 type JiraUser struct {
+	AccountID   string `json:"accountId"`
 	Key         string `json:"key"`
 	DisplayName string `json:"displayName"`
 	AvatarURL   string `json:"avatarUrl,omitempty"`
+}
+
+// StableID returns the deployment-appropriate stable identifier for this
+// Jira user — accountId on Cloud, falling back to the legacy key on
+// Server / DC. This is the value persisted to users.jira_account_id and
+// the value predicate matchers compare against.
+func (u JiraUser) StableID() string {
+	if u.AccountID != "" {
+		return u.AccountID
+	}
+	return u.Key
 }
 
 // ValidateGitHub checks the PAT against the GitHub API and returns the user info.
