@@ -2822,7 +2822,8 @@ POST /admin/sso/providers
 6.  Sandbox-side: addr + route + lo up   <span class="meta"># via `ip netns exec`</span>
 7.  Write /var/run/netns/tf-&lt;run_id&gt;/etc/resolv.conf → 1.1.1.1 / 8.8.8.8
 8.  iptables -t nat -A POSTROUTING -s &lt;subnet&gt; -o eth0 -j MASQUERADE
-9.  iptables -A FORWARD -s &lt;subnet&gt; -d &lt;internal-services&gt; -j DROP
+9.  Egress allowlist for &lt;subnet&gt;: create/use a dedicated FORWARD chain, jump sandbox traffic into it, then
+    allow <span class="meta">ESTABLISHED,RELATED</span>, allow dst ∈ {<span class="meta">resolved IPs for api.anthropic.com</span>, <span class="meta">resolved IPs for the per-run GitHub host</span>}, and <span class="meta">DROP everything else</span>
 10. Generate OCI bundle: rootfs (alpine) + spec with linux.namespaces[].path=/var/run/netns/tf-&lt;run_id&gt;
 11. runsc --ignore-cgroups --network=sandbox run --bundle &lt;dir&gt; &lt;id&gt;
 12. On exit: cleanup netns + veth + iptables + worktree
