@@ -10,7 +10,7 @@
 #     outbound HTTPS still works.
 #   - Env curation: only the env we put in process.env is visible.
 
-set -x
+set -euxo pipefail
 exec 2>&1
 
 hr() { printf '\n\n=== %s ===\n' "$*"; }
