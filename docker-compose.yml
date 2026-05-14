@@ -86,7 +86,7 @@ services:
       # GoTrue gets exactly the auth.* CRUD it needs, nothing else.
       # Distinct from POSTGRES_PASSWORD so a GoTrue compromise doesn't
       # also surrender superuser access.
-      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${SUPABASE_AUTH_ADMIN_PASSWORD}@postgres:5432/postgres?search_path=auth
+      GOTRUE_DB_DATABASE_URL: host=postgres port=5432 user=supabase_auth_admin password=${SUPABASE_AUTH_ADMIN_PASSWORD} dbname=postgres search_path=auth
       GOTRUE_API_HOST: 0.0.0.0
       GOTRUE_API_PORT: 9999
       API_EXTERNAL_URL: ${TF_PUBLIC_URL}/auth/v1
