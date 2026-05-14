@@ -15,6 +15,11 @@
 # Custom port, no browser
 ./triagefactory --port 8080 --no-browser
 
+# Bind to all interfaces (default is 127.0.0.1 — loopback only).
+# Only do this on a trusted network: the HTTP API is unauthenticated
+# and the server holds keychain-backed credentials.
+./triagefactory --host 0.0.0.0
+
 # Top-level help — points humans at the user commands and agents at exec.
 ./triagefactory --help
 ```

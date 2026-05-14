@@ -40,7 +40,15 @@ import (
 	"github.com/sky-ai-eng/triage-factory/cmd/uninstall"
 )
 
-const defaultPort = 3000
+const (
+	defaultPort = 3000
+	// defaultHost binds to loopback only. Triage Factory is a local-first
+	// tool that holds keychain-backed credentials and an unauthenticated
+	// HTTP API; exposing it on all interfaces by default would let anyone
+	// on the same network drive delegated runs. Override with --host if
+	// you genuinely want LAN access.
+	defaultHost = "127.0.0.1"
+)
 
 // Version is the binary's release tag, set by the linker at build time
 // (`-ldflags "-X main.Version=v0.1.0"`). Local builds without that flag
@@ -143,6 +151,8 @@ Run with no arguments to start the server (port 3000, opens browser).
 USER COMMANDS
   triagefactory                            start the server
   triagefactory --port N                   start on a custom port
+  triagefactory --host <addr>              bind address (default 127.0.0.1;
+                                           use 0.0.0.0 for LAN access)
   triagefactory --no-browser               start without opening a browser
   triagefactory --version                  print the binary's version
   triagefactory install [--dest <path>]    symlink the binary onto PATH
@@ -221,6 +231,7 @@ func main() {
 
 	// Server mode: start HTTP server + pollers
 	port := defaultPort
+	host := defaultHost
 	noBrowser := false
 
 	for i := 1; i < len(os.Args); i++ {
@@ -232,6 +243,11 @@ func main() {
 					log.Fatalf("invalid port: %s", os.Args[i+1])
 				}
 				port = p
+				i++
+			}
+		case "--host":
+			if i+1 < len(os.Args) {
+				host = os.Args[i+1]
 				i++
 			}
 		case "--no-browser":
@@ -291,8 +307,17 @@ func main() {
 		log.Fatalf("failed to initialize config: %v", err)
 	}
 
-	addr := fmt.Sprintf(":%d", port)
-	fmt.Printf("Triage Factory running at http://localhost%s\n", addr)
+	addr := fmt.Sprintf("%s:%d", host, port)
+	// Display host: keep "localhost" in the browser-facing URL when bound
+	// to loopback (prettier, and what users expect), but show the actual
+	// bind host when overridden so it's obvious where the server is
+	// reachable.
+	displayHost := host
+	if host == "127.0.0.1" || host == "" {
+		displayHost = "localhost"
+	}
+	browserURL := fmt.Sprintf("http://%s:%d", displayHost, port)
+	fmt.Printf("Triage Factory running at %s\n", browserURL)
 
 	// One-shot PATH hint. The `triagefactory resume` subcommand only
 	// works from any terminal once the binary's on PATH; nudge the
@@ -300,7 +325,7 @@ func main() {
 	install.HintIfMissing()
 
 	if !noBrowser {
-		openBrowser(fmt.Sprintf("http://localhost%s", addr))
+		openBrowser(browserURL)
 	}
 
 	srv := server.New(database, stores.Prompts, stores.Swipes, stores.Dashboard, stores.EventHandlers, stores.Agents, stores.TeamAgents, stores.Users, stores.Chains)
