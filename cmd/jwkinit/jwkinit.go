@@ -8,9 +8,15 @@
 // from GoTrue's /.well-known/jwks.json endpoint; GoTrue translates
 // between the two shapes internally.
 //
-// Default emits to stdout. With --write-env <path>, appends a single
-// GOTRUE_JWT_KEYS=<json> line to the given .env file so the operator can
-// pipe install setup into one step.
+// Default emits to stdout. With --write-env <path>, appends two lines to
+// the given .env file:
+//   - GOTRUE_JWT_KEYS=<json>   the RS256 signing material
+//   - GOTRUE_JWT_SECRET=<hex>  a fresh random value (GoTrue config
+//     validation requires this even under
+//     RS256; it's the legacy HS256 fallback
+//     and isn't used for signing in practice)
+//
+// so the operator can pipe install setup into one step.
 //
 // Also exposes --verify, which reads one JWT from stdin and verifies it
 // against the JWKS at TF_GOTRUE_JWKS_URL — the operator-facing version of
@@ -40,7 +46,7 @@ import (
 // Handle dispatches from main.go on `triagefactory jwk-init ...`.
 func Handle(args []string) {
 	fs := flag.NewFlagSet("jwk-init", flag.ExitOnError)
-	writeEnv := fs.String("write-env", "", "append GOTRUE_JWT_KEYS=<jwks> to this .env file instead of printing to stdout")
+	writeEnv := fs.String("write-env", "", "append GOTRUE_JWT_KEYS + GOTRUE_JWT_SECRET to this .env file instead of printing to stdout")
 	verifyMode := fs.Bool("verify", false, "read a JWT from stdin and verify it against TF_GOTRUE_JWKS_URL / TF_GOTRUE_ISSUER")
 	fs.Usage = func() {
 		fmt.Fprint(os.Stderr, usage)

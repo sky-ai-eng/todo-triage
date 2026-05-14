@@ -79,11 +79,11 @@ TOKEN=$(curl -s -X POST http://localhost:9999/signup \
   | jq -r .access_token)
 ```
 
-Round-trip through the Verifier:
+Round-trip through the Verifier. **Note:** `.env` is read by Docker Compose, not your shell, so substitute your actual `TF_PUBLIC_URL` value here (the shell won't pick it up from `.env` unless you `set -a; source .env; set +a` first):
 
 ```sh
 echo "$TOKEN" | TF_GOTRUE_JWKS_URL=http://localhost:9999/.well-known/jwks.json \
-  TF_GOTRUE_ISSUER=${TF_PUBLIC_URL}/auth/v1 \
+  TF_GOTRUE_ISSUER=https://triagefactory.yourcompany.com/auth/v1 \
   ./triagefactory jwk-init --verify
 ```
 
