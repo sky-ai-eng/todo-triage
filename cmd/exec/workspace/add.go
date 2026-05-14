@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -66,7 +67,28 @@ var (
 	errNotJiraRun          = errors.New("workspace add: only supported for Jira runs; GitHub PR runs have an eagerly-materialized worktree")
 	errRepoNotConfigured   = errors.New("workspace add: repo is not configured in Triage Factory; add it on the Settings page first")
 	errRepoMissingCloneURL = errors.New("workspace add: repo has no clone URL on its profile; try re-profiling from the Settings page")
+	errInvalidEntityKey    = errors.New("workspace add: task entity key contains characters disallowed for git refs")
 )
+
+// entityKeyPattern restricts task.EntitySourceID to a conservative refname
+// alphabet before it's interpolated into a feature branch and passed to git.
+// The spec calls for `^[a-z0-9][a-z0-9._/-]{0,128}$`; uppercase is permitted
+// here because Jira issue keys are upper-cased by convention (e.g. SKY-220)
+// and are already the de-facto branch-name source across the codebase.
+//
+// Blocks: leading dash (interpreted as a git CLI flag), whitespace, shell
+// metacharacters (`;`, `|`, backticks, `$`), refname-illegal characters
+// (`:`, `?`, `*`, `[`, `~`, `^`, `\`, control bytes). The `..` substring is
+// rejected separately — it's lexically allowed by the char class but git
+// refnames forbid it (and it enables path traversal in the worktree dir).
+var entityKeyPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,128}$`)
+
+func validateEntityKey(key string) error {
+	if !entityKeyPattern.MatchString(key) || strings.Contains(key, "..") {
+		return fmt.Errorf("%w: %q", errInvalidEntityKey, key)
+	}
+	return nil
+}
 
 // materializeWorkspace is the orchestration body of `workspace add`,
 // extracted from runAdd so it returns errors instead of os.Exit-ing.
@@ -121,6 +143,9 @@ func materializeWorkspace(database *db.DB, runID, ownerRepoArg string, deps addD
 	}
 	if task.EntitySource != "jira" {
 		return "", fmt.Errorf("%w (run task source is %q)", errNotJiraRun, task.EntitySource)
+	}
+	if err := validateEntityKey(task.EntitySourceID); err != nil {
+		return "", err
 	}
 
 	// Idempotent re-add. If a row exists for this (run, repo), prefer
