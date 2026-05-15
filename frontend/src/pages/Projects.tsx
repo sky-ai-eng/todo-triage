@@ -99,7 +99,7 @@ export default function Projects() {
     if (navigateAfter && target) {
       navigate(orgHref(`/projects/${encodeURIComponent(target.id)}`))
     }
-  }, [backfillTarget, backfillThenNavigate, navigate])
+  }, [backfillTarget, backfillThenNavigate, navigate, orgHref])
 
   const closeImportModal = useCallback(() => {
     setImportOpen(false)

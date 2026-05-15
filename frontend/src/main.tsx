@@ -155,9 +155,7 @@ function AppRoutes() {
     return (
       <div className="min-h-screen bg-surface flex items-center justify-center">
         <div className="text-center space-y-3">
-          <p className="text-text-secondary text-sm">
-            {error ?? 'Failed to load configuration'}
-          </p>
+          <p className="text-text-secondary text-sm">{error ?? 'Failed to load configuration'}</p>
           <button
             type="button"
             onClick={() => window.location.reload()}

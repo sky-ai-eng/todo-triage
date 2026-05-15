@@ -51,9 +51,7 @@ function MultiAuthGate({ children }: { children: React.ReactNode }) {
     return (
       <div className="min-h-screen bg-surface flex items-center justify-center">
         <div className="text-center space-y-3">
-          <p className="text-text-secondary text-sm">
-            {auth.error ?? 'Failed to load session'}
-          </p>
+          <p className="text-text-secondary text-sm">{auth.error ?? 'Failed to load session'}</p>
           <button
             type="button"
             onClick={() => void auth.refresh()}
