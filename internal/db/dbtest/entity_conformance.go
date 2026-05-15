@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -117,20 +118,30 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 	t.Run("UpdateSnapshot_stamps_last_polled_at", func(t *testing.T) {
 		s, orgID, _ := mk(t)
 
-		ent, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#2", "pr", "T", "")
-		if err != nil {
+		if _, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#2", "pr", "T", ""); err != nil {
 			t.Fatalf("seed: %v", err)
 		}
-		initialPolled := ent.LastPolledAt
-		if initialPolled == nil {
-			t.Fatalf("FindOrCreate should have stamped last_polled_at")
+		// Re-read so the baseline matches the backend's storage
+		// precision (Postgres timestamptz truncates to microseconds;
+		// FindOrCreate's returned struct carries Go's nanosec time
+		// and wouldn't .Equal() the round-tripped value).
+		baseline, err := s.GetBySource(ctx, orgID, "github", "owner/repo#2")
+		if err != nil || baseline == nil || baseline.LastPolledAt == nil {
+			t.Fatalf("baseline re-read: %v", err)
 		}
+		initialPolled := baseline.LastPolledAt
 
-		if err := s.UpdateSnapshot(ctx, orgID, ent.ID, `{"k":"v"}`); err != nil {
+		// Sleep past the backend's clock resolution before the update
+		// so the new stamp lands in a later bucket — without this, a
+		// fast Postgres host can store both timestamps in the same
+		// microsecond bin and .After() returns false.
+		time.Sleep(2 * time.Millisecond)
+
+		if err := s.UpdateSnapshot(ctx, orgID, baseline.ID, `{"k":"v"}`); err != nil {
 			t.Fatalf("UpdateSnapshot: %v", err)
 		}
 
-		got, err := s.Get(ctx, orgID, ent.ID)
+		got, err := s.Get(ctx, orgID, baseline.ID)
 		if err != nil || got == nil {
 			t.Fatalf("re-read: %v", err)
 		}
@@ -146,29 +157,31 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 	t.Run("PatchSnapshot_does_not_touch_last_polled_at", func(t *testing.T) {
 		s, orgID, _ := mk(t)
 
-		ent, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#3", "pr", "T", "")
-		if err != nil {
+		if _, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#3", "pr", "T", ""); err != nil {
 			t.Fatalf("seed: %v", err)
 		}
-		initialPolled := ent.LastPolledAt
-		if initialPolled == nil {
-			t.Fatalf("expected last_polled_at from FindOrCreate")
+		// Re-read for a DB-precision baseline — see UpdateSnapshot
+		// subtest above for the timestamptz-truncation rationale.
+		baseline, err := s.GetBySource(ctx, orgID, "github", "owner/repo#3")
+		if err != nil || baseline == nil || baseline.LastPolledAt == nil {
+			t.Fatalf("baseline re-read: %v", err)
 		}
+		initialPolled := baseline.LastPolledAt
 
-		if err := s.PatchSnapshot(ctx, orgID, ent.ID, `{"patched":true}`); err != nil {
+		if err := s.PatchSnapshot(ctx, orgID, baseline.ID, `{"patched":true}`); err != nil {
 			t.Fatalf("PatchSnapshot: %v", err)
 		}
 
-		got, err := s.Get(ctx, orgID, ent.ID)
+		got, err := s.Get(ctx, orgID, baseline.ID)
 		if err != nil || got == nil {
 			t.Fatalf("re-read: %v", err)
 		}
 		if !strings.Contains(got.SnapshotJSON, `"patched"`) {
 			t.Errorf("snapshot_json missing patched payload: %q", got.SnapshotJSON)
 		}
-		// last_polled_at must remain at the FindOrCreate timestamp — the
-		// helper exists precisely so the poll gate still considers the
-		// row stale enough to re-fetch.
+		// last_polled_at must remain at the baseline timestamp — the
+		// helper exists precisely so the poll gate still considers
+		// the row stale enough to re-fetch.
 		if got.LastPolledAt == nil || !got.LastPolledAt.Equal(*initialPolled) {
 			t.Errorf("PatchSnapshot must not advance last_polled_at — initial=%v after=%v",
 				initialPolled, got.LastPolledAt)
