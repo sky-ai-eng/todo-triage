@@ -609,6 +609,88 @@ func TestAuthFlow_ConcurrentRefresh_SerializesAndDedupes(t *testing.T) {
 	}
 }
 
+// Codex #3: when several requests share a refresh via singleflight, the
+// first caller's context cancellation must NOT poison the in-flight
+// gotrue call (and therefore every waiter). Proves the detach: fn runs
+// against its own context, indifferent to whichever caller raced first.
+func TestAuthFlow_RefreshIgnoresCallerCtxCancellation(t *testing.T) {
+	r := newAuthRig(t)
+	userID := r.seedUser()
+	r.seedOrg(userID, "alice-org")
+
+	jwtBefore := r.signKey.mintJWT(t, validClaimsFor(userID))
+	encStore := r.srv.authDeps.sessions
+	sess, err := encStore.Create(context.Background(), userID, jwtBefore, "refresh-original",
+		time.Now().Add(30*time.Second).UTC(),
+		time.Now().Add(30*24*time.Hour).UTC(),
+		"test-ua", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+
+	newJWT := r.signKey.mintJWT(t, validClaimsFor(userID))
+	inFlight := make(chan struct{})
+	release := make(chan struct{})
+
+	// Stub gotrueRefresh to: signal "started", then block on either
+	// release (the test's signal to finish) OR fnCtx.Done(). If the
+	// detach is broken, fnCtx == caller's ctx and the test's cancel
+	// races ahead of release — we'd return ctx.Err() and the assertion
+	// below fails.
+	r.srv.authDeps.gotrueRefresh = func(fnCtx context.Context, refresh string) (string, string, int64, error) {
+		close(inFlight)
+		select {
+		case <-release:
+			return newJWT, "refresh-rotated", time.Now().Add(time.Hour).Unix(), nil
+		case <-fnCtx.Done():
+			return "", "", 0, fnCtx.Err()
+		}
+	}
+
+	// Caller A: cancellable ctx. Will cancel mid-refresh.
+	aCtx, aCancel := context.WithCancel(context.Background())
+	aSess := *sess
+	aDone := make(chan error, 1)
+	go func() {
+		aDone <- r.srv.refreshSessionInline(aCtx, &aSess)
+	}()
+
+	// Wait until fn is in-flight.
+	select {
+	case <-inFlight:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fn never started — refreshSessionInline didn't reach gotrueRefresh")
+	}
+
+	// Cancel A's context. With detach, fnCtx is untouched.
+	aCancel()
+
+	// Give the cancellation 100ms to (incorrectly) propagate. If detach
+	// is broken, fn returns ctx.Canceled here, before release fires.
+	select {
+	case err := <-aDone:
+		t.Fatalf("refresh returned before release (err=%v) — caller ctx cancellation propagated into fn (detach broken)", err)
+	case <-time.After(100 * time.Millisecond):
+		// Good: fn is still blocked on release, ignoring A's cancellation.
+	}
+
+	// Release: fn completes cleanly, A picks up the result.
+	close(release)
+	select {
+	case err := <-aDone:
+		if err != nil {
+			t.Errorf("after release: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("refresh never returned after release")
+	}
+
+	// Sanity: aSess got the rotated JWT.
+	if aSess.JWT != newJWT {
+		t.Errorf("aSess.JWT not updated to rotated value")
+	}
+}
+
 // Logout-everywhere revokes all of the caller's sessions, invokes
 // gotrue /logout for each (best-effort), and clears the current
 // request's cookie. Subsequent access via ANY previously-issued sid
@@ -890,11 +972,52 @@ func TestNormalizeReturnTo(t *testing.T) {
 		{"https://evil.com/", "/"},   // absolute URL
 		{"javascript:alert(1)", "/"}, // scheme-relative
 		{"path-without-slash", "/"},
+		// WHATWG URL parsing treats `\` as `/` for special schemes,
+		// so `/\evil.com` resolves cross-origin. Reject explicit `\`
+		// and percent-encoded `%5C` variants.
+		{`/\evil.com`, "/"},
+		{`/\\evil.com`, "/"},
+		{`/foo\bar`, "/"},
+		{`/%5Cevil.com`, "/"},
+		{`/%5c%5cevil.com`, "/"}, // lowercase hex
 	}
 	for _, tc := range cases {
 		if got := normalizeReturnTo(tc.in); got != tc.want {
 			t.Errorf("normalizeReturnTo(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// clientIP must produce a value Postgres `inet` accepts. IPv6
+// `RemoteAddr` is `[addr]:port`; naive last-colon stripping returns
+// `[addr]` with brackets, which fails the cast and 500s the OAuth
+// callback. net.SplitHostPort handles both v4 + bracketed v6.
+func TestClientIP(t *testing.T) {
+	cases := []struct {
+		name       string
+		remoteAddr string
+		xff        string
+		want       string
+	}{
+		{"ipv4 with port", "192.0.2.1:54321", "", "192.0.2.1"},
+		{"ipv6 with port (bracketed)", "[2001:db8::1]:54321", "", "2001:db8::1"},
+		{"ipv6 loopback", "[::1]:8080", "", "::1"},
+		{"ipv4 no port (degenerate)", "192.0.2.1", "", "192.0.2.1"},
+		{"xff single ip", "192.0.2.1:54321", "203.0.113.5", "203.0.113.5"},
+		{"xff chain takes first", "192.0.2.1:54321", "203.0.113.5, 198.51.100.7", "203.0.113.5"},
+		{"xff ipv6", "192.0.2.1:54321", "2001:db8::abc", "2001:db8::abc"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/", nil)
+			req.RemoteAddr = tc.remoteAddr
+			if tc.xff != "" {
+				req.Header.Set("X-Forwarded-For", tc.xff)
+			}
+			if got := clientIP(req); got != tc.want {
+				t.Errorf("clientIP(%q, xff=%q) = %q, want %q", tc.remoteAddr, tc.xff, got, tc.want)
+			}
+		})
 	}
 }
 

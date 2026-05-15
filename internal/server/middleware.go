@@ -265,13 +265,25 @@ type refreshTokens struct {
 //
 // The *sess passed in is mutated in place so subsequent middleware
 // steps (verifier.Verify) see the fresh JWT.
+//
+// fn runs with a detached context, not the caller's. singleflight binds
+// the function's execution to whichever goroutine wins the race; if
+// THAT caller disconnects while N other waiters are still connected,
+// using the winner's ctx would cancel the gotrue call and 401 every
+// waiter — including ones whose own request is still live. The detach
+// + 35s timeout (margin above gotrueHTTPClient.Timeout's 30s) keeps the
+// refresh independent of any single caller's lifetime.
 func (s *Server) refreshSessionInline(ctx context.Context, sess *sessions.Session) error {
 	if s.authDeps == nil || s.authDeps.gotrueRefresh == nil {
 		return errors.New("refresh not wired")
 	}
+	_ = ctx // caller's ctx intentionally not propagated into fn; see comment above.
 
 	v, err, _ := s.refreshGroup.Do(sess.ID.String(), func() (any, error) {
-		fresh, err := s.authDeps.sessions.Lookup(ctx, sess.ID)
+		fnCtx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+		defer cancel()
+
+		fresh, err := s.authDeps.sessions.Lookup(fnCtx, sess.ID)
 		if err != nil {
 			return nil, fmt.Errorf("re-fetch session: %w", err)
 		}
@@ -284,12 +296,12 @@ func (s *Server) refreshSessionInline(ctx context.Context, sess *sessions.Sessio
 			return refreshTokens{jwt: fresh.JWT, refresh: fresh.RefreshToken, jwtExp: fresh.JWTExpiresAt}, nil
 		}
 
-		newJWT, newRefresh, newExp, err := s.authDeps.gotrueRefresh(ctx, fresh.RefreshToken)
+		newJWT, newRefresh, newExp, err := s.authDeps.gotrueRefresh(fnCtx, fresh.RefreshToken)
 		if err != nil {
 			return nil, err
 		}
 		newExpTime := unixToTime(newExp)
-		if err := s.authDeps.sessions.UpdateJWT(ctx, sess.ID, newJWT, newRefresh, newExpTime); err != nil {
+		if err := s.authDeps.sessions.UpdateJWT(fnCtx, sess.ID, newJWT, newRefresh, newExpTime); err != nil {
 			return nil, err
 		}
 		return refreshTokens{jwt: newJWT, refresh: newRefresh, jwtExp: newExpTime}, nil

@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -687,8 +688,20 @@ func parseStateCookie(raw string, key [32]byte) (*stateClaims, error) {
 // normalizeReturnTo enforces relative-path-only and a default of "/".
 // Anything starting with "//" (protocol-relative URL) or containing a
 // scheme/host is rewritten to "/" — open-redirect protection.
+//
+// Backslashes are also rejected (both literal `\` and percent-encoded
+// `%5C`). WHATWG URL parsing treats `\` as `/` for special schemes, so
+// `/\evil.com` resolves to `//evil.com` in modern browsers — the same
+// open-redirect class the `//` guard already blocks. Closing the
+// parallel gap.
 func normalizeReturnTo(raw string) string {
 	if raw == "" || raw == "/" {
+		return "/"
+	}
+	if strings.Contains(raw, "\\") {
+		return "/"
+	}
+	if dec, err := url.PathUnescape(raw); err == nil && strings.Contains(dec, "\\") {
 		return "/"
 	}
 	if !strings.HasPrefix(raw, "/") {
@@ -716,6 +729,14 @@ func isHTTPS(r *http.Request) bool {
 	return r.Header.Get("X-Forwarded-Proto") == "https"
 }
 
+// clientIP best-effort extracts the requesting IP. Stored on the session
+// row as `inet`, so the return value must be a valid Postgres `inet`
+// literal — bracketed IPv6 (`[2001:db8::1]`) gets rejected.
+//
+// IPv6 `RemoteAddr` is the `[addr]:port` form; naive last-colon stripping
+// returns `[addr]` with brackets intact, which then fails Postgres'
+// `::inet` cast and 500s the OAuth callback. net.SplitHostPort handles
+// both v4 + bracketed v6 correctly and unwraps the brackets.
 func clientIP(r *http.Request) string {
 	if xf := r.Header.Get("X-Forwarded-For"); xf != "" {
 		if i := strings.Index(xf, ","); i >= 0 {
@@ -723,9 +744,11 @@ func clientIP(r *http.Request) string {
 		}
 		return strings.TrimSpace(xf)
 	}
-	host := r.RemoteAddr
-	if i := strings.LastIndex(host, ":"); i >= 0 {
-		host = host[:i]
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
 	}
-	return host
+	// No port present (rare — RemoteAddr almost always carries one in
+	// HTTP). Return as-is and let the inet cast either accept it or
+	// fail downstream with a clear error.
+	return r.RemoteAddr
 }
