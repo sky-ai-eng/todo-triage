@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -59,6 +60,12 @@ type Server struct {
 	// becomes a concern, the reaper goroutine could sweep entries for
 	// revoked/expired sessions.
 	refreshLocks sync.Map
+
+	// inlineScriptHashes is the base64-encoded SHA-256 of each inline
+	// <script> block in the served index.html. Populated by SetStatic;
+	// the CSP middleware (withSecurityHeaders) injects them into
+	// script-src as `'sha256-<hash>'` directives.
+	inlineScriptHashes []string
 
 	// Jira poll readiness — used by /api/jira/stock to decide whether the
 	// poller has completed its first cycle after a restart. Carry-over reads
@@ -162,9 +169,11 @@ func New(database *sql.DB, prompts db.PromptStore, swipes db.SwipeStore, dashboa
 	return s
 }
 
-// ListenAndServe starts the HTTP server on the given address.
+// ListenAndServe starts the HTTP server on the given address. The mux
+// is wrapped in withSecurityHeaders so every response carries the
+// standard set (HSTS conditionally, CSP, X-Frame-Options, etc.).
 func (s *Server) ListenAndServe(addr string) error {
-	return http.ListenAndServe(addr, s.mux)
+	return http.ListenAndServe(addr, s.withSecurityHeaders(s.mux))
 }
 
 func (s *Server) routes() {
@@ -369,9 +378,17 @@ func (s *Server) handleFrontend(w http.ResponseWriter, r *http.Request) {
 	http.ServeFileFS(w, r, s.static, "index.html")
 }
 
-// SetStatic sets the embedded frontend filesystem.
+// SetStatic sets the embedded frontend filesystem. Also computes
+// SHA-256 hashes of every inline <script> block in index.html so the
+// CSP middleware can allowlist them via `'sha256-...'` directives —
+// keeps script-src tight without requiring frontend changes.
 func (s *Server) SetStatic(f fs.FS) {
 	s.static = f
+	hashes, err := computeInlineScriptHashes(f)
+	if err != nil {
+		log.Printf("[server] inline script hash compute failed: %v (CSP will block inline scripts)", err)
+	}
+	s.inlineScriptHashes = hashes
 }
 
 // SetSpawner sets the delegation spawner for agent runs.
