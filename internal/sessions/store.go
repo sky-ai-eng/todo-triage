@@ -132,11 +132,11 @@ func (s *Store) Lookup(ctx context.Context, sid uuid.UUID) (*Session, error) {
 
 	jwtBytes, err := s.key.Decrypt(jwtEnc, jwtNonce)
 	if err != nil {
-		return nil, fmt.Errorf("decrypt jwt for session %s: %w", sid, err)
+		return nil, fmt.Errorf("decrypt jwt for session %s: %w", LogID(sid), err)
 	}
 	refBytes, err := s.key.Decrypt(refEnc, refNonce)
 	if err != nil {
-		return nil, fmt.Errorf("decrypt refresh for session %s: %w", sid, err)
+		return nil, fmt.Errorf("decrypt refresh for session %s: %w", LogID(sid), err)
 	}
 	out.JWT = string(jwtBytes)
 	out.RefreshToken = string(refBytes)

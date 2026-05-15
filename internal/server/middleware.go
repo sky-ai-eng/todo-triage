@@ -133,7 +133,7 @@ func (s *Server) withSession(next http.Handler) http.Handler {
 		// already-expired JWT and 401 anyway.
 		if needsRefresh(sess) {
 			if err := s.refreshSessionInline(r.Context(), sess); err != nil {
-				log.Printf("[auth] refresh failed for sid=%s: %v", sid, err)
+				log.Printf("[auth] refresh failed for sid=%s: %v", sessions.LogID(sid), err)
 				writeUnauth(w)
 				return
 			}
@@ -144,7 +144,7 @@ func (s *Server) withSession(next http.Handler) http.Handler {
 			// Either the JWT decrypted cleanly but failed verification
 			// (rotated signing key, replay across issuers) — in either
 			// case the session is unrecoverable. 401.
-			log.Printf("[auth] verify failed for sid=%s: %v", sid, err)
+			log.Printf("[auth] verify failed for sid=%s: %v", sessions.LogID(sid), err)
 			writeUnauth(w)
 			return
 		}
@@ -154,7 +154,7 @@ func (s *Server) withSession(next http.Handler) http.Handler {
 		// Errors are logged inside the goroutine.
 		go func(id uuid.UUID) {
 			if err := s.authDeps.sessions.TouchLastSeen(context.Background(), id); err != nil {
-				log.Printf("[auth] touch last_seen for sid=%s: %v", id, err)
+				log.Printf("[auth] touch last_seen for sid=%s: %v", sessions.LogID(id), err)
 			}
 		}(sid)
 

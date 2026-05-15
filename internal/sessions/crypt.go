@@ -11,12 +11,15 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/google/uuid"
 )
 
 // Key is a 32-byte fixed-size key. Used for both the AES-256 session
@@ -95,6 +98,26 @@ func (k Key) Encrypt(plaintext []byte) (ciphertext, nonce []byte, err error) {
 	}
 	ciphertext = gcm.Seal(nil, nonce, plaintext, nil)
 	return ciphertext, nonce, nil
+}
+
+// LogID returns a short, non-reversible identifier for a session UUID
+// suitable for log lines and error messages. Implementation: first 8
+// hex chars of SHA-256(sid). Properties:
+//   - One-way: an attacker reading logs can't recover the sid
+//   - Stable: the same sid always maps to the same prefix, so a
+//     support engineer can correlate "this user's session keeps
+//     failing refresh" by spotting repeats
+//   - Collision-resistant at our scale: 8 hex chars = 32 bits ≈ 4B
+//     possibilities; for 10K active sessions, the birthday-collision
+//     probability is negligible
+//
+// Production log lines should always wrap sid arguments through this
+// helper. Logging the raw UUID gives an attacker who exfiltrates logs
+// a roster of recently-valid session ids that could be paired with
+// stolen cookies for replay.
+func LogID(sid uuid.UUID) string {
+	sum := sha256.Sum256(sid[:])
+	return hex.EncodeToString(sum[:4])
 }
 
 // Decrypt inverts Encrypt. Returns an error on either auth-tag failure
