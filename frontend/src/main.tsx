@@ -1,6 +1,12 @@
+/* eslint-disable react-refresh/only-export-components --
+   This is the SPA entrypoint. Inline route components (Loading,
+   RootRedirect, *Routes) aren't exported anywhere — the file calls
+   createRoot().render() at the bottom and exits. The rule's HMR
+   heuristic doesn't apply to an entrypoint. */
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate, useNavigate } from 'react-router-dom'
+import { useEffect } from 'react'
 import './index.css'
 import { watchSystemTheme } from './lib/theme'
 
@@ -17,36 +23,157 @@ import Repos from './pages/Repos'
 import Factory from './pages/Factory'
 import Projects from './pages/Projects'
 import ProjectDetail from './pages/ProjectDetail'
+import Login from './pages/Login'
+import NoOrgs from './pages/NoOrgs'
 import Shell from './Shell'
 import AuthGate from './AuthGate'
 import ToastProvider from './components/Toast/ToastProvider'
+import { useDeploymentConfig } from './hooks/useDeploymentConfig'
+import { AuthProvider, useAuth } from './contexts/AuthContext'
+import { OrgProvider, useActiveOrgId } from './contexts/OrgContext'
+
+/**
+ * Top-level router branches on deployment_mode (read once from
+ * /api/config). Local mode keeps the existing flat route table.
+ * Multi mode mounts an org-prefixed shell route plus /login,
+ * /no-orgs, and a RootRedirect for bare / and unknown paths.
+ *
+ * AuthProvider + OrgProvider only wrap the multi-mode tree —
+ * AuthContext is undefined in local mode, which is what
+ * useOptionalAuth keys off to hide the OrgPicker + UserMenu.
+ */
+
+function Loading() {
+  return (
+    <div className="min-h-screen bg-surface flex items-center justify-center">
+      <p className="text-text-tertiary text-sm">Loading...</p>
+    </div>
+  )
+}
+
+/** RootRedirect resolves bare / and unknown paths in multi mode to
+ *  /orgs/<active>. Sits inside AuthGate so unauth/no-orgs cases are
+ *  handled before it tries to redirect. */
+function RootRedirect() {
+  const auth = useAuth()
+  const activeOrgId = useActiveOrgId()
+  const navigate = useNavigate()
+
+  useEffect(() => {
+    if (auth.status !== 'authed' || !activeOrgId) return
+    navigate('/orgs/' + activeOrgId, { replace: true })
+  }, [auth.status, activeOrgId, navigate])
+
+  return <Loading />
+}
+
+function LocalRoutes() {
+  return (
+    <Routes>
+      <Route path="/setup" element={<Setup />} />
+      <Route
+        element={
+          <AuthGate mode="local">
+            <Shell />
+          </AuthGate>
+        }
+      >
+        <Route path="/" element={<Factory />} />
+        <Route path="/triage" element={<Cards />} />
+        <Route path="/board" element={<Board />} />
+        <Route path="/board/runs/:runID" element={<RunDetail />} />
+        <Route path="/prs" element={<PRDashboard />} />
+        <Route path="/prompts" element={<Prompts />} />
+        <Route path="/repos" element={<Repos />} />
+        <Route path="/projects" element={<Projects />} />
+        <Route path="/projects/:id" element={<ProjectDetail />} />
+        <Route path="/brief" element={<Brief />} />
+        <Route path="/settings" element={<Settings />} />
+      </Route>
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
+  )
+}
+
+function MultiRoutes() {
+  return (
+    <AuthProvider>
+      <OrgProvider>
+        <Routes>
+          <Route path="/login" element={<Login />} />
+          <Route path="/no-orgs" element={<NoOrgs />} />
+          {/* Local-mode keychain wizard isn't reachable in multi
+              mode — integration creds live in per-org Vault (D5)
+              and are configured via the admin UI (D14). */}
+          <Route path="/setup" element={<Navigate to="/" replace />} />
+          <Route
+            path="/orgs/:org_id"
+            element={
+              <AuthGate mode="multi">
+                <Shell />
+              </AuthGate>
+            }
+          >
+            <Route index element={<Factory />} />
+            <Route path="triage" element={<Cards />} />
+            <Route path="board" element={<Board />} />
+            <Route path="board/runs/:runID" element={<RunDetail />} />
+            <Route path="prs" element={<PRDashboard />} />
+            <Route path="prompts" element={<Prompts />} />
+            <Route path="repos" element={<Repos />} />
+            <Route path="projects" element={<Projects />} />
+            <Route path="projects/:id" element={<ProjectDetail />} />
+            <Route path="brief" element={<Brief />} />
+            <Route path="settings" element={<Settings />} />
+          </Route>
+          <Route
+            path="/"
+            element={
+              <AuthGate mode="multi">
+                <RootRedirect />
+              </AuthGate>
+            }
+          />
+          <Route
+            path="*"
+            element={
+              <AuthGate mode="multi">
+                <RootRedirect />
+              </AuthGate>
+            }
+          />
+        </Routes>
+      </OrgProvider>
+    </AuthProvider>
+  )
+}
+
+function AppRoutes() {
+  const { config, loading, error } = useDeploymentConfig()
+  if (loading) return <Loading />
+  if (error || !config) {
+    return (
+      <div className="min-h-screen bg-surface flex items-center justify-center">
+        <div className="text-center space-y-3">
+          <p className="text-text-secondary text-sm">{error ?? 'Failed to load configuration'}</p>
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            className="text-accent text-sm underline"
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    )
+  }
+  return config.deployment_mode === 'multi' ? <MultiRoutes /> : <LocalRoutes />
+}
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <BrowserRouter>
-      <Routes>
-        <Route path="/setup" element={<Setup />} />
-        <Route
-          element={
-            <AuthGate>
-              <Shell />
-            </AuthGate>
-          }
-        >
-          <Route path="/" element={<Factory />} />
-          <Route path="/triage" element={<Cards />} />
-          <Route path="/board" element={<Board />} />
-          <Route path="/board/runs/:runID" element={<RunDetail />} />
-          <Route path="/prs" element={<PRDashboard />} />
-          <Route path="/prompts" element={<Prompts />} />
-          <Route path="/repos" element={<Repos />} />
-          <Route path="/projects" element={<Projects />} />
-          <Route path="/projects/:id" element={<ProjectDetail />} />
-          <Route path="/brief" element={<Brief />} />
-          <Route path="/settings" element={<Settings />} />
-        </Route>
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
+      <AppRoutes />
       <ToastProvider />
     </BrowserRouter>
   </StrictMode>,

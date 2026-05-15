@@ -22,6 +22,7 @@ import TrackerProjectPickers from '../components/TrackerProjectPickers'
 import CuratorChat from '../components/CuratorChat'
 import ProjectEntitiesPanel from '../components/ProjectEntitiesPanel'
 import { useWebSocket } from '../hooks/useWebSocket'
+import { useOrgHref } from '../hooks/useOrgHref'
 
 // ProjectDetail is the per-project workspace. Top-to-bottom on the
 // left:
@@ -44,6 +45,7 @@ import { useWebSocket } from '../hooks/useWebSocket'
 export default function ProjectDetail() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
+  const orgHref = useOrgHref()
   const [project, setProject] = useState<Project | null>(null)
   const [loading, setLoading] = useState(true)
   const [missing, setMissing] = useState(false)
@@ -213,11 +215,11 @@ export default function ProjectDetail() {
       } else {
         toast.success(`Deleted project "${project.name}"`)
       }
-      navigate('/projects')
+      navigate(orgHref('/projects'))
     } catch (err) {
       toast.error(`Failed to delete project: ${err instanceof Error ? err.message : String(err)}`)
     }
-  }, [id, project, navigate])
+  }, [id, project, navigate, orgHref])
 
   if (loading) {
     return (
@@ -237,7 +239,7 @@ export default function ProjectDetail() {
     return (
       <div className="max-w-7xl mx-auto">
         <Link
-          to="/projects"
+          to={orgHref('/projects')}
           className="inline-flex items-center gap-1 text-[13px] text-text-secondary hover:text-text-primary mb-6"
         >
           <ArrowLeft size={14} /> Projects
@@ -253,7 +255,7 @@ export default function ProjectDetail() {
     return (
       <div className="max-w-7xl mx-auto">
         <Link
-          to="/projects"
+          to={orgHref('/projects')}
           className="inline-flex items-center gap-1 text-[13px] text-text-secondary hover:text-text-primary mb-6"
         >
           <ArrowLeft size={14} /> Projects
@@ -293,7 +295,7 @@ export default function ProjectDetail() {
     <div className="max-w-7xl mx-auto">
       <div className="flex items-center justify-between mb-6">
         <Link
-          to="/projects"
+          to={orgHref('/projects')}
           className="inline-flex items-center gap-1 text-[13px] text-text-secondary hover:text-text-primary"
         >
           <ArrowLeft size={14} /> Projects
@@ -557,6 +559,7 @@ function PinnedReposInline({
   jiraKey: string
   linearKey: string
 }) {
+  const orgHref = useOrgHref()
   const [available, setAvailable] = useState<string[]>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -740,7 +743,7 @@ function PinnedReposInline({
               ) : available.length === 0 ? (
                 <div className="text-[12px] text-text-tertiary px-2 py-1">
                   No repos configured.{' '}
-                  <Link to="/repos" className="text-accent hover:underline">
+                  <Link to={orgHref('/repos')} className="text-accent hover:underline">
                     Add some
                   </Link>
                   .

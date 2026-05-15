@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useCallback } from 'react'
 import { Link } from 'react-router-dom'
 import { Check, X } from 'lucide-react'
 import { readError } from '../lib/api'
+import { useOrgHref } from '../hooks/useOrgHref'
 import { toast } from './Toast/toastStore'
 
 interface RepoProfile {
@@ -29,6 +30,7 @@ export default function RepoMultiSelect({ value, onChange }: Props) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
+  const orgHref = useOrgHref()
 
   // Track whether the load actually succeeded vs. just returned
   // an empty list. Without this distinction, a network failure
@@ -116,7 +118,7 @@ export default function RepoMultiSelect({ value, onChange }: Props) {
     return (
       <div className="text-[12px] text-text-tertiary py-2">
         No repos configured.{' '}
-        <Link to="/repos" className="text-accent hover:underline">
+        <Link to={orgHref('/repos')} className="text-accent hover:underline">
           Add repos
         </Link>{' '}
         first.

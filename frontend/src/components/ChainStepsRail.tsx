@@ -1,6 +1,7 @@
 import { Link } from 'react-router-dom'
 import type { AgentRun } from '../types'
 import { isActiveStatus, isFailedStatus, statusLabel } from '../lib/runStatus'
+import { useOrgHref } from '../hooks/useOrgHref'
 
 interface Props {
   steps: AgentRun[]
@@ -12,6 +13,7 @@ interface Props {
 // Horizontal step indicator for chain runs. When `linkable` is true each
 // step links to its own detail page.
 export default function ChainStepsRail({ steps, currentRunID, currentStepIndex, linkable }: Props) {
+  const orgHref = useOrgHref()
   const fallbackIndex = steps.findIndex((s) => s.ID === currentRunID)
   const currentIndex = currentStepIndex ?? fallbackIndex
 
@@ -79,7 +81,7 @@ export default function ChainStepsRail({ steps, currentRunID, currentStepIndex, 
                 />
               )}
               {linkable && !step.ID.startsWith('__pending-') ? (
-                <Link to={`/board/runs/${step.ID}`}>{node}</Link>
+                <Link to={orgHref(`/board/runs/${step.ID}`)}>{node}</Link>
               ) : (
                 node
               )}

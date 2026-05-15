@@ -3,6 +3,7 @@ import * as Popover from '@radix-ui/react-popover'
 import { ChevronDown, GitBranch, Plus, RotateCw, AlertTriangle } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import RepoPickerModal from '../components/RepoPickerModal'
+import { useOrgHref } from '../hooks/useOrgHref'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { toast } from '../components/Toast/toastStore'
 import { readError } from '../lib/api'
@@ -293,6 +294,7 @@ function StatusDot({ state }: { state: DotState }) {
 
 function CloneFailedBadge({ profile }: { profile: RepoProfile }) {
   const [open, setOpen] = useState(false)
+  const orgHref = useOrgHref()
   const isSSH = profile.clone_error_kind === 'ssh'
   return (
     <Popover.Root open={open} onOpenChange={setOpen}>
@@ -351,7 +353,7 @@ function CloneFailedBadge({ profile }: { profile: RepoProfile }) {
           )}
           {isSSH && (
             <Link
-              to="/settings"
+              to={orgHref('/settings')}
               onClick={() => setOpen(false)}
               className="
                 inline-flex items-center gap-1 rounded-md

@@ -1,5 +1,9 @@
 import { NavLink, Outlet } from 'react-router-dom'
 import { Settings } from 'lucide-react'
+import { useOrgHref } from './hooks/useOrgHref'
+import { useOptionalAuth } from './contexts/AuthContext'
+import OrgPicker from './components/OrgPicker'
+import UserMenu from './components/UserMenu'
 
 const navItems = [
   { to: '/', label: 'Factory' },
@@ -13,17 +17,25 @@ const navItems = [
 ]
 
 export default function Shell() {
+  const orgHref = useOrgHref()
+  // useOptionalAuth returns the multi-mode auth context if present,
+  // null in local mode. The org picker and user menu are multi-only;
+  // local mode hides them.
+  const auth = useOptionalAuth()
+  const isMulti = auth !== null
+
   return (
     <div className="min-h-screen bg-surface text-text-primary">
-      <nav className="sticky top-0 z-50 backdrop-blur-xl bg-surface-overlay border-b border-border-subtle px-8 py-4 flex items-center gap-10">
+      <nav className="sticky top-0 z-50 backdrop-blur-xl bg-surface-overlay border-b border-border-subtle px-8 py-4 flex items-center gap-6">
         <span className="text-base font-semibold tracking-tight text-text-primary">
           Triage Factory
         </span>
+        {isMulti && <OrgPicker />}
         <div className="flex gap-1 flex-1">
           {navItems.map((item) => (
             <NavLink
               key={item.to}
-              to={item.to}
+              to={orgHref(item.to)}
               end={item.to === '/'}
               className={({ isActive }) =>
                 `text-[13px] font-medium px-4 py-1.5 rounded-full transition-all duration-200 ${
@@ -38,7 +50,7 @@ export default function Shell() {
           ))}
         </div>
         <NavLink
-          to="/settings"
+          to={orgHref('/settings')}
           className={({ isActive }) =>
             `p-2 rounded-full transition-all duration-200 ${
               isActive
@@ -49,6 +61,7 @@ export default function Shell() {
         >
           <Settings size={16} />
         </NavLink>
+        {isMulti && <UserMenu />}
       </nav>
       <main className="px-8 py-8">
         <Outlet />

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import type { AgentMessage, AgentRun, Task, ToolCall } from '../types'
+import { useOrgHref } from '../hooks/useOrgHref'
 import SourceBadge from './SourceBadge'
 import { toast } from './Toast/toastStore'
 import { readError } from '../lib/api'
@@ -19,6 +20,7 @@ interface Props {
 }
 
 export default function AgentCard({ task, run, chainSteps, messages, onRequeue, onReview }: Props) {
+  const orgHref = useOrgHref()
   const scrollRef = useRef<HTMLDivElement>(null)
   const [now, setNow] = useState(() => Date.now())
   const [takeoverInfo, setTakeoverInfo] = useState<TakeoverInfo | null>(null)
@@ -132,7 +134,7 @@ export default function AgentCard({ task, run, chainSteps, messages, onRequeue, 
           <div className="flex items-center gap-2">
             <span className="text-[11px] text-text-tertiary">{elapsed}</span>
             <Link
-              to={`/board/runs/${run.ID}`}
+              to={orgHref(`/board/runs/${run.ID}`)}
               aria-label="Expand run details"
               title="Open full session view"
               className="text-text-tertiary hover:text-text-primary transition-colors"
