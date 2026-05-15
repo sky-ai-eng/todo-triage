@@ -46,6 +46,7 @@ type Spawner struct {
 	chains    db.ChainStore
 	tasks     db.TaskStore     // SKY-283: re-read tasks for run lifecycle handlers
 	agentRuns db.AgentRunStore // SKY-285: run lifecycle + transcript + yields
+	entities  db.EntityStore   // SKY-284: entity reads for project lookup + resume context
 	wsHub     *websocket.Hub
 
 	mu                    sync.Mutex
@@ -61,7 +62,7 @@ type Spawner struct {
 	agentToolsCache string
 }
 
-func NewSpawner(database *sql.DB, prompts db.PromptStore, agents db.AgentStore, chains db.ChainStore, tasks db.TaskStore, agentRuns db.AgentRunStore, ghClient *ghclient.Client, wsHub *websocket.Hub, model string) *Spawner {
+func NewSpawner(database *sql.DB, prompts db.PromptStore, agents db.AgentStore, chains db.ChainStore, tasks db.TaskStore, agentRuns db.AgentRunStore, entities db.EntityStore, ghClient *ghclient.Client, wsHub *websocket.Hub, model string) *Spawner {
 	return &Spawner{
 		database:    database,
 		prompts:     prompts,
@@ -69,6 +70,7 @@ func NewSpawner(database *sql.DB, prompts db.PromptStore, agents db.AgentStore, 
 		chains:      chains,
 		tasks:       tasks,
 		agentRuns:   agentRuns,
+		entities:    entities,
 		ghClient:    ghClient,
 		wsHub:       wsHub,
 		model:       model,

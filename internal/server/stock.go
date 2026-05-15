@@ -90,7 +90,7 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	entities, err := db.ListActiveEntities(s.db, "jira")
+	entities, err := s.entities.ListActive(r.Context(), runmode.LocalDefaultOrgID, "jira")
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to list entities: " + err.Error()})
 		return
@@ -338,7 +338,7 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		entity, err := db.GetEntityBySource(s.db, "jira", issueKey)
+		entity, err := s.entities.GetBySource(r.Context(), runmode.LocalDefaultOrgID, "jira", issueKey)
 		if err != nil {
 			failed = append(failed, stockFailure{issueKey, a.Action, "failed to load entity"})
 			continue
@@ -526,7 +526,7 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 			}
-			if err := db.MarkEntityClosed(s.db, entity.ID); err != nil {
+			if err := s.entities.MarkClosed(r.Context(), runmode.LocalDefaultOrgID, entity.ID); err != nil {
 				failed = append(failed, stockFailure{a.IssueKey, a.Action, err.Error()})
 				continue
 			}

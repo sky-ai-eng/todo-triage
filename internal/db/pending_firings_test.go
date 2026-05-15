@@ -9,10 +9,7 @@ import (
 func TestEnqueuePendingFiring_Insert(t *testing.T) {
 	database := newTestDB(t)
 
-	entity, _, err := FindOrCreateEntity(database, "github", "owner/repo#1", "pr", "Test", "https://example.com/1")
-	if err != nil {
-		t.Fatalf("create entity: %v", err)
-	}
+	entity := createEntityForTest(t, database, "github", "owner/repo#1", "pr", "Test", "https://example.com/1")
 	createPromptForTest(t, database, domain.Prompt{ID: "p1", Name: "P", Body: "x", Source: "user"})
 	eventID, err := RecordEvent(database, domain.Event{
 		EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entity.ID, MetadataJSON: `{"check_name":"build"}`,
@@ -54,7 +51,7 @@ func TestEnqueuePendingFiring_Insert(t *testing.T) {
 
 func TestPopPendingFiring_FIFO(t *testing.T) {
 	database := newTestDB(t)
-	entity, _, _ := FindOrCreateEntity(database, "github", "owner/repo#1", "pr", "Test", "https://example.com/1")
+	entity := createEntityForTest(t, database, "github", "owner/repo#1", "pr", "Test", "https://example.com/1")
 	createPromptForTest(t, database, domain.Prompt{ID: "p1", Name: "P", Body: "x", Source: "user"})
 	eventID, _ := RecordEvent(database, domain.Event{
 		EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entity.ID, MetadataJSON: `{"check_name":"build"}`,
@@ -124,7 +121,7 @@ func TestPopPendingFiring_FIFO(t *testing.T) {
 
 func TestEntityCanFireImmediately_GateLogic(t *testing.T) {
 	database := newTestDB(t)
-	entity, _, _ := FindOrCreateEntity(database, "github", "owner/repo#1", "pr", "Test", "https://example.com/1")
+	entity := createEntityForTest(t, database, "github", "owner/repo#1", "pr", "Test", "https://example.com/1")
 	createPromptForTest(t, database, domain.Prompt{ID: "p1", Name: "P", Body: "x", Source: "user"})
 	eventID, _ := RecordEvent(database, domain.Event{
 		EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entity.ID, MetadataJSON: `{"check_name":"build"}`,
@@ -209,7 +206,7 @@ func TestEntityCanFireImmediately_GateLogic(t *testing.T) {
 // permanently block any future firings for that combo.
 func TestEnqueueAfterFired(t *testing.T) {
 	database := newTestDB(t)
-	entity, _, _ := FindOrCreateEntity(database, "github", "owner/repo#1", "pr", "Test", "https://example.com/1")
+	entity := createEntityForTest(t, database, "github", "owner/repo#1", "pr", "Test", "https://example.com/1")
 	createPromptForTest(t, database, domain.Prompt{ID: "p1", Name: "P", Body: "x", Source: "user"})
 	eventID, _ := RecordEvent(database, domain.Event{
 		EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entity.ID, MetadataJSON: `{"check_name":"build"}`,
@@ -260,8 +257,8 @@ func TestEnqueueAfterFired(t *testing.T) {
 // for entity B is unaffected by pending firings or active runs on entity A.
 func TestPendingFirings_CrossEntityIsolation(t *testing.T) {
 	database := newTestDB(t)
-	entA, _, _ := FindOrCreateEntity(database, "github", "owner/repo#1", "pr", "A", "https://example.com/A")
-	entB, _, _ := FindOrCreateEntity(database, "github", "owner/repo#2", "pr", "B", "https://example.com/B")
+	entA := createEntityForTest(t, database, "github", "owner/repo#1", "pr", "A", "https://example.com/A")
+	entB := createEntityForTest(t, database, "github", "owner/repo#2", "pr", "B", "https://example.com/B")
 	createPromptForTest(t, database, domain.Prompt{ID: "p1", Name: "P", Body: "x", Source: "user"})
 
 	evtA, _ := RecordEvent(database, domain.Event{
@@ -323,7 +320,7 @@ func TestPendingFirings_CrossEntityIsolation(t *testing.T) {
 // distinct firing, not a collapse.
 func TestEnqueue_SameTaskDifferentTrigger(t *testing.T) {
 	database := newTestDB(t)
-	entity, _, _ := FindOrCreateEntity(database, "github", "owner/repo#1", "pr", "Test", "https://example.com/1")
+	entity := createEntityForTest(t, database, "github", "owner/repo#1", "pr", "Test", "https://example.com/1")
 	createPromptForTest(t, database, domain.Prompt{ID: "p1", Name: "P1", Body: "x", Source: "user"})
 	createPromptForTest(t, database, domain.Prompt{ID: "p2", Name: "P2", Body: "y", Source: "user"})
 	eventID, _ := RecordEvent(database, domain.Event{
@@ -365,7 +362,7 @@ func TestEnqueue_SameTaskDifferentTrigger(t *testing.T) {
 // resolved).
 func TestMarkTransitions_Idempotent(t *testing.T) {
 	database := newTestDB(t)
-	entity, _, _ := FindOrCreateEntity(database, "github", "owner/repo#1", "pr", "Test", "https://example.com/1")
+	entity := createEntityForTest(t, database, "github", "owner/repo#1", "pr", "Test", "https://example.com/1")
 	createPromptForTest(t, database, domain.Prompt{ID: "p1", Name: "P", Body: "x", Source: "user"})
 	eventID, _ := RecordEvent(database, domain.Event{
 		EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entity.ID, MetadataJSON: `{"check_name":"build"}`,

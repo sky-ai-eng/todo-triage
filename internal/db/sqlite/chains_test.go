@@ -36,7 +36,7 @@ func insertPromptForChainTest(t *testing.T, conn *sql.DB, p domain.Prompt) {
 // ID. suffix scopes the seeded source_id so subtests don't collide.
 func seedEntityEventTask(t *testing.T, conn *sql.DB, suffix string) *domain.Task {
 	t.Helper()
-	entity, _, err := db.FindOrCreateEntity(conn, "github",
+	entity, _, err := sqlitestore.New(conn).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github",
 		"owner/repo#"+suffix, "pr", "Chain Test "+suffix, "https://example.com/"+suffix)
 	if err != nil {
 		t.Fatalf("create entity: %v", err)

@@ -63,7 +63,7 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	// clean it up — it'd run to completion against a closed PR).
 	// Mirrors the router's "task creation requires active entity"
 	// contract at routing/router.go.
-	entity, err := db.GetEntity(s.db, req.EntityID)
+	entity, err := s.entities.Get(r.Context(), runmode.LocalDefaultOrgID, req.EntityID)
 	if err != nil {
 		internalError(w, "factory", err)
 		return

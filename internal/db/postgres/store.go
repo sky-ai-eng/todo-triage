@@ -119,7 +119,14 @@ func New(admin, app *sql.DB) db.Stores {
 		// pair makes that insert unreachable through tf_app — see
 		// the impl's Create comment.
 		AgentRuns: newAgentRunStore(app, admin),
-		Tx:        s,
+		// Entities wires app — every consumer is request-equivalent
+		// (server panels, classifier, delegate context loaders) or
+		// runs in a server-side goroutine that already operates within
+		// the org's identity scope (tracker, started at server boot).
+		// RLS policy entities_all gates reads + writes on
+		// (org_id = tf.current_org_id() AND tf.user_has_org_access).
+		Entities: newEntityStore(app),
+		Tx:       s,
 	}
 	return s.stores
 }
@@ -166,5 +173,6 @@ func NewForTx(tx *sql.Tx) db.TxStores {
 		// production WithTx wiring instead, which gets the real
 		// admin pool via Store.admin.
 		AgentRuns: newAgentRunStore(tx, tx),
+		Entities:  newEntityStore(tx),
 	}
 }

@@ -48,7 +48,7 @@ func (s *stubDelegator) Cancel(runID string) error { return nil }
 func setupDrainScenario(t *testing.T, database *sql.DB) (entityID, taskID, triggerID, eventID string) {
 	t.Helper()
 
-	entity, _, err := db.FindOrCreateEntity(database, "github", "owner/repo#1", "pr",
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#1", "pr",
 		"Test PR", "https://github.com/owner/repo/pull/1")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
@@ -122,7 +122,7 @@ func TestDrainEntity_ClosedTask(t *testing.T) {
 		t.Fatalf("close task: %v", err)
 	}
 
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, nil, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, nil, noopScorer{}, websocket.NewHub())
 	router.DrainEntity(entityID)
 
 	rows, err := db.ListPendingFiringsForEntity(database, entityID)
@@ -163,7 +163,7 @@ func TestRevertTaskStatus_PreservesClaim(t *testing.T) {
 		t.Fatalf("pre-stage status: %v", err)
 	}
 
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, nil, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, nil, noopScorer{}, websocket.NewHub())
 	router.revertTaskStatus(taskID, "queued")
 
 	task, err := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrg, taskID)
@@ -211,7 +211,7 @@ func TestDrainEntity_SnoozedTask(t *testing.T) {
 		t.Fatalf("snooze task: %v", err)
 	}
 
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, nil, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, nil, noopScorer{}, websocket.NewHub())
 	router.DrainEntity(entityID)
 
 	rows, err := db.ListPendingFiringsForEntity(database, entityID)
@@ -243,7 +243,7 @@ func TestDrainEntity_DisabledTrigger(t *testing.T) {
 
 	setTriggerEnabledForTestRouting(t, database, triggerID, false)
 
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, nil, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, nil, noopScorer{}, websocket.NewHub())
 	router.DrainEntity(entityID)
 
 	rows, err := db.ListPendingFiringsForEntity(database, entityID)
@@ -306,7 +306,7 @@ func TestDrainEntity_MultipleStaleFirings(t *testing.T) {
 		}
 	}
 
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, nil, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, nil, noopScorer{}, websocket.NewHub())
 	router.DrainEntity(entityID)
 
 	rows, err := db.ListPendingFiringsForEntity(database, entityID)
@@ -333,7 +333,7 @@ func TestDrainEntity_EmptyQueue(t *testing.T) {
 	database := newTestDB(t)
 	entityID, _, _, _ := setupDrainScenario(t, database)
 
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, nil, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, nil, noopScorer{}, websocket.NewHub())
 	router.DrainEntity(entityID) // must not panic or error visibly
 
 	rows, err := db.ListPendingFiringsForEntity(database, entityID)
@@ -367,7 +367,7 @@ func TestDrainEntity_ConcurrentDrainsDoNotDoubleFire(t *testing.T) {
 	}
 
 	stub := &stubDelegator{db: database}
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, stub, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, stub, noopScorer{}, websocket.NewHub())
 
 	const drainers = 5
 	var wg sync.WaitGroup
@@ -420,7 +420,7 @@ func TestRunDrainSweeper_PicksUpStuckFiring(t *testing.T) {
 	}
 
 	stub := &stubDelegator{db: database}
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, stub, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, stub, noopScorer{}, websocket.NewHub())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -468,7 +468,7 @@ func TestRunDrainSweeper_NoOpWhenIdle(t *testing.T) {
 	_ = entityID
 
 	stub := &stubDelegator{db: database}
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, stub, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, stub, noopScorer{}, websocket.NewHub())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

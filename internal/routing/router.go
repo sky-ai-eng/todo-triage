@@ -56,6 +56,7 @@ type Router struct {
 	users      dbpkg.UsersStore     // SKY-270: read local user's jira_account_id for inline close gates
 	tasks      dbpkg.TaskStore      // SKY-283: task lifecycle, dedup, claims, breaker
 	agentRuns  dbpkg.AgentRunStore  // SKY-285: lookup active runs for the task-close cancel cascade
+	entities   dbpkg.EntityStore    // SKY-284: closed-entity guard + entity-terminating close cascade
 	spawner    Delegator
 	scorer     Scorer
 	ws         *websocket.Hub
@@ -82,7 +83,7 @@ type Router struct {
 // behavior). users is nil-safe too — the SKY-270 inline-close gate
 // degrades to "treat every reassignment as away-from-me" when missing,
 // which over-closes (acceptable: user can reopen via the next poll).
-func NewRouter(db *sql.DB, prompts dbpkg.PromptStore, handlers dbpkg.EventHandlerStore, agents dbpkg.AgentStore, teamAgents dbpkg.TeamAgentStore, users dbpkg.UsersStore, tasks dbpkg.TaskStore, agentRuns dbpkg.AgentRunStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
+func NewRouter(db *sql.DB, prompts dbpkg.PromptStore, handlers dbpkg.EventHandlerStore, agents dbpkg.AgentStore, teamAgents dbpkg.TeamAgentStore, users dbpkg.UsersStore, tasks dbpkg.TaskStore, agentRuns dbpkg.AgentRunStore, entities dbpkg.EntityStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
 	return &Router{
 		db:         db,
 		prompts:    prompts,
@@ -92,6 +93,7 @@ func NewRouter(db *sql.DB, prompts dbpkg.PromptStore, handlers dbpkg.EventHandle
 		users:      users,
 		tasks:      tasks,
 		agentRuns:  agentRuns,
+		entities:   entities,
 		spawner:    spawner,
 		scorer:     scorer,
 		ws:         ws,
@@ -147,7 +149,7 @@ func (r *Router) HandleEvent(evt domain.Event) {
 
 	// Step 4: Closed-entity guard — late events on already-closed entities
 	// are recorded (step 1) but don't spawn tasks.
-	entity, err := dbpkg.GetEntity(r.db, entityID)
+	entity, err := r.entities.Get(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil || entity == nil {
 		log.Printf("[router] failed to load entity %s: %v", entityID, err)
 		return
@@ -919,7 +921,7 @@ func (r *Router) closeEntity(entityID string) (int, error) {
 		}
 	}
 
-	if err := dbpkg.CloseEntity(r.db, entityID); err != nil {
+	if err := r.entities.Close(context.Background(), runmode.LocalDefaultOrgID, entityID); err != nil {
 		return 0, err
 	}
 	closed, err := r.tasks.CloseAllForEntity(context.Background(), runmode.LocalDefaultOrg, entityID, "entity_closed")
@@ -986,7 +988,7 @@ func (r *Router) closeCheckCIPassed(evt domain.Event, entityID string) bool {
 	}
 
 	// Check entity snapshot for remaining failures at the current SHA.
-	entity, err := dbpkg.GetEntity(r.db, entityID)
+	entity, err := r.entities.Get(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil || entity == nil {
 		return false
 	}
@@ -1047,7 +1049,7 @@ func (r *Router) closeCheckReviewResolved(evt domain.Event, entityID string) boo
 
 	// Check entity snapshot: does this reviewer's prior state include
 	// changes_requested, and is no other reviewer still requesting changes?
-	entity, err := dbpkg.GetEntity(r.db, entityID)
+	entity, err := r.entities.Get(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil || entity == nil {
 		return false
 	}

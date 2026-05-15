@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"testing"
 
@@ -15,7 +16,7 @@ import (
 // of the given shape. Returns the runID.
 func seedYieldedRun(t *testing.T, s *Server, req *domain.YieldRequest) string {
 	t.Helper()
-	entity, _, err := db.FindOrCreateEntity(s.db, "github", "owner/repo#1", "pr", "T", "https://example.com/1")
+	entity, _, err := sqlitestore.New(s.db).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#1", "pr", "T", "https://example.com/1")
 	if err != nil {
 		t.Fatalf("entity: %v", err)
 	}

@@ -1,6 +1,7 @@
 package delegate
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -25,7 +26,7 @@ func TestMaterializePriorMemories_CreatesDirEvenWithNoPriors(t *testing.T) {
 	database := newTakeoverTestDB(t)
 	cwd := t.TempDir()
 
-	entity, _, err := db.FindOrCreateEntity(database, "jira", "SKY-100", "issue", "T", "https://x/100")
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "jira", "SKY-100", "issue", "T", "https://x/100")
 	if err != nil {
 		t.Fatalf("entity: %v", err)
 	}
@@ -66,7 +67,7 @@ func TestMaterializePriorMemories_WritesPriors(t *testing.T) {
 	database := newTakeoverTestDB(t)
 	cwd := t.TempDir()
 
-	entity, _, err := db.FindOrCreateEntity(database, "jira", "SKY-200", "issue", "T", "https://x/200")
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "jira", "SKY-200", "issue", "T", "https://x/200")
 	if err != nil {
 		t.Fatalf("entity: %v", err)
 	}

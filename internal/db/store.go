@@ -89,6 +89,12 @@ type Stores struct {
 	// goroutine launched from a request handler.
 	AgentRuns AgentRunStore
 
+	// Entities owns the entities table — the long-lived source
+	// objects (PR, Jira issue) every event/task/run hangs off. App
+	// pool in Postgres; consumers are the tracker, projectclassify,
+	// delegate context loaders, the scorer, and the server panels.
+	Entities EntityStore
+
 	// Tx is the transaction runner — handlers that need atomic
 	// multi-store writes call Tx.WithTx and receive a TxStores with
 	// every field tx-bound. Postgres impl also sets the JWT claims
@@ -115,6 +121,7 @@ type TxStores struct {
 	Tasks         TaskStore
 	Factory       FactoryReadStore
 	AgentRuns     AgentRunStore
+	Entities      EntityStore
 }
 
 // TxRunner runs fn inside a single database transaction. Postgres

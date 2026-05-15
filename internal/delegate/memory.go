@@ -18,6 +18,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // maxMemoryRetries is the hard cap on how many times the write-gate
@@ -206,8 +207,8 @@ func materializePriorMemories(database *sql.DB, cwd, entityID string) {
 // entity is unassigned, missing, or the lookup fails). Failure is
 // logged and treated as "not assigned" — the spawner degrades gracefully
 // rather than blocking the run on a non-essential context lookup.
-func lookupEntityProjectID(database *sql.DB, entityID string) *string {
-	entity, err := db.GetEntity(database, entityID)
+func lookupEntityProjectID(entities db.EntityStore, entityID string) *string {
+	entity, err := entities.Get(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {
 		log.Printf("[delegate] warning: failed to load entity %s for project lookup: %v", entityID, err)
 		return nil

@@ -52,7 +52,7 @@ func newTakeoverTestDB(t *testing.T) *sql.DB {
 // don't need a real goroutine — only a row in the runs table.
 func seedRun(t *testing.T, database *sql.DB, runID, sessionID, worktreePath string) {
 	t.Helper()
-	entity, _, err := db.FindOrCreateEntity(database, "github", "owner/repo#"+runID, "pr", "T", "https://example.com/"+runID)
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#"+runID, "pr", "T", "https://example.com/"+runID)
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
@@ -89,7 +89,7 @@ func seedRun(t *testing.T, database *sql.DB, runID, sessionID, worktreePath stri
 // delegation rewrite) sees a Jira run rather than a GitHub PR run.
 func seedJiraRun(t *testing.T, database *sql.DB, runID, sessionID, worktreePath string) {
 	t.Helper()
-	entity, _, err := db.FindOrCreateEntity(database, "jira", "SKY-"+runID, "issue", "T-"+runID, "https://x/"+runID)
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "jira", "SKY-"+runID, "issue", "T-"+runID, "https://x/"+runID)
 	if err != nil {
 		t.Fatalf("create jira entity: %v", err)
 	}
@@ -121,7 +121,7 @@ func seedJiraRun(t *testing.T, database *sql.DB, runID, sessionID, worktreePath 
 // run registered in the cancels map — Takeover's atomic active-check
 // requires this to pass before doing any other work.
 func newSpawnerWithActiveCancel(database *sql.DB, runID string) *Spawner {
-	s := NewSpawner(database, testPromptStore(database), nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, nil, nil, "claude-sonnet-4-6")
+	s := NewSpawner(database, testPromptStore(database), nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, nil, nil, "claude-sonnet-4-6")
 	if runID != "" {
 		_, cancel := context.WithCancel(context.Background())
 		s.cancels[runID] = cancel
@@ -134,7 +134,7 @@ func newSpawnerWithActiveCancel(database *sql.DB, runID string) *Spawner {
 // sentinel — empty base dir is a server config bug, not a client
 // problem, and the handler routes uncategorized errors to 500.
 func TestTakeover_EmptyBaseDir(t *testing.T) {
-	s := NewSpawner(nil, nil, nil, nil, nil, nil, nil, nil, "")
+	s := NewSpawner(nil, nil, nil, nil, nil, nil, nil, nil, nil, "")
 	_, err := s.Takeover("any-run", "")
 	if err == nil {
 		t.Fatal("expected error on empty baseDir")
@@ -150,7 +150,7 @@ func TestTakeover_EmptyBaseDir(t *testing.T) {
 // Maps to 400 in the handler.
 func TestTakeover_NonexistentRun(t *testing.T) {
 	database := newTakeoverTestDB(t)
-	s := NewSpawner(database, testPromptStore(database), nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, nil, nil, "")
+	s := NewSpawner(database, testPromptStore(database), nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, nil, nil, "")
 
 	_, err := s.Takeover("no-such-run", "/tmp/dest")
 	if !errors.Is(err, ErrTakeoverInvalidState) {
@@ -216,7 +216,7 @@ func TestTakeover_NoActiveRun(t *testing.T) {
 	database := newTakeoverTestDB(t)
 	seedRun(t, database, "run-not-active", "sess-1", "/tmp/wt")
 	// No cancels[runID] set.
-	s := NewSpawner(database, testPromptStore(database), nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, nil, nil, "")
+	s := NewSpawner(database, testPromptStore(database), nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, nil, nil, "")
 
 	_, err := s.Takeover("run-not-active", "/tmp/dest")
 	if !errors.Is(err, ErrTakeoverInvalidState) {
@@ -245,7 +245,7 @@ func TestTakeover_AlreadyInProgress(t *testing.T) {
 // cleanup path. A nil-safe read — the map is always initialized in
 // NewSpawner — but cheap to assert.
 func TestWasTakenOver(t *testing.T) {
-	s := NewSpawner(nil, nil, nil, nil, nil, nil, nil, nil, "")
+	s := NewSpawner(nil, nil, nil, nil, nil, nil, nil, nil, nil, "")
 	if s.wasTakenOver("missing") {
 		t.Error("expected false for missing entry")
 	}

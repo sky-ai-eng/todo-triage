@@ -1,13 +1,16 @@
 package delegate
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // TestMaterializeProjectKnowledge_NilProjectID_CreatesEmptyDir guards
@@ -140,12 +143,12 @@ func TestMaterializeProjectKnowledge_MissingKnowledgeDir_NoOp(t *testing.T) {
 func TestLookupEntityProjectID_RoundTrips(t *testing.T) {
 	database := newTakeoverTestDB(t)
 
-	entity, _, err := db.FindOrCreateEntity(database, "github", "owner/repo#1", "pr", "T", "https://x/1")
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#1", "pr", "T", "https://x/1")
 	if err != nil {
 		t.Fatalf("entity: %v", err)
 	}
 
-	if got := lookupEntityProjectID(database, entity.ID); got != nil {
+	if got := lookupEntityProjectID(sqlitestore.New(database).Entities, entity.ID); got != nil {
 		t.Errorf("expected nil for unassigned entity, got %q", *got)
 	}
 
@@ -156,7 +159,7 @@ func TestLookupEntityProjectID_RoundTrips(t *testing.T) {
 		t.Fatalf("assign project: %v", err)
 	}
 
-	got := lookupEntityProjectID(database, entity.ID)
+	got := lookupEntityProjectID(sqlitestore.New(database).Entities, entity.ID)
 	if got == nil {
 		t.Fatal("expected project id after assignment, got nil")
 	}

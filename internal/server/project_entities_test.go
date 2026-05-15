@@ -1,12 +1,15 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // TestProjectEntities_FiltersByProjectAndState — only entities
@@ -26,18 +29,18 @@ func TestProjectEntities_FiltersByProjectAndState(t *testing.T) {
 	}
 
 	mine := mustEntity(t, s.db, "github", "owner/repo#1", "pr", "mine")
-	if err := db.AssignEntityProject(s.db, mine.ID, &pid, "rationale-1"); err != nil {
+	if err := sqlitestore.New(s.db).Entities.AssignProject(context.Background(), runmode.LocalDefaultOrgID, mine.ID, &pid, "rationale-1"); err != nil {
 		t.Fatal(err)
 	}
 	closedMine := mustEntity(t, s.db, "github", "owner/repo#2", "pr", "closed-mine")
-	if err := db.AssignEntityProject(s.db, closedMine.ID, &pid, ""); err != nil {
+	if err := sqlitestore.New(s.db).Entities.AssignProject(context.Background(), runmode.LocalDefaultOrgID, closedMine.ID, &pid, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.MarkEntityClosed(s.db, closedMine.ID); err != nil {
+	if err := sqlitestore.New(s.db).Entities.MarkClosed(context.Background(), runmode.LocalDefaultOrgID, closedMine.ID); err != nil {
 		t.Fatal(err)
 	}
 	otherProj := mustEntity(t, s.db, "github", "owner/repo#3", "pr", "other-project")
-	if err := db.AssignEntityProject(s.db, otherProj.ID, &other, ""); err != nil {
+	if err := sqlitestore.New(s.db).Entities.AssignProject(context.Background(), runmode.LocalDefaultOrgID, otherProj.ID, &other, ""); err != nil {
 		t.Fatal(err)
 	}
 	unassigned := mustEntity(t, s.db, "github", "owner/repo#4", "pr", "unassigned")

@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 
 	_ "modernc.org/sqlite"
 )
@@ -33,15 +35,15 @@ func newTestDB(t *testing.T) *sql.DB {
 // trigger the runner or wait at all.
 func TestWaitFor_ReturnsImmediatelyWhenAlreadyClassified(t *testing.T) {
 	database := newTestDB(t)
-	entity, _, err := db.FindOrCreateEntity(database, "github", "owner/repo#1", "pr", "T", "https://x/1")
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#1", "pr", "T", "https://x/1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AssignEntityProject(database, entity.ID, nil, ""); err != nil {
+	if err := sqlitestore.New(database).Entities.AssignProject(context.Background(), runmode.LocalDefaultOrgID, entity.ID, nil, ""); err != nil {
 		t.Fatal(err)
 	}
 
-	runner := NewRunner(database)
+	runner := NewRunner(database, sqlitestore.New(database).Entities)
 	start := time.Now()
 	WaitFor(context.Background(), database, runner, entity.ID, 5*time.Second)
 	elapsed := time.Since(start)
@@ -57,12 +59,12 @@ func TestWaitFor_ReturnsImmediatelyWhenAlreadyClassified(t *testing.T) {
 // channel actually drains.
 func TestWaitFor_TriggersRunnerOnEntry(t *testing.T) {
 	database := newTestDB(t)
-	entity, _, err := db.FindOrCreateEntity(database, "github", "owner/repo#2", "pr", "T", "https://x/2")
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#2", "pr", "T", "https://x/2")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	runner := NewRunner(database)
+	runner := NewRunner(database, sqlitestore.New(database).Entities)
 	// Don't Start the runner — we just want to observe that Trigger()
 	// got invoked. Inspect the trigger channel directly: a buffered
 	// chan with capacity 1 should have one signal queued after WaitFor.
@@ -87,12 +89,12 @@ func TestWaitFor_TriggersRunnerOnEntry(t *testing.T) {
 // configured budget when classification never completes.
 func TestWaitFor_HonorsTimeout(t *testing.T) {
 	database := newTestDB(t)
-	entity, _, err := db.FindOrCreateEntity(database, "github", "owner/repo#3", "pr", "T", "https://x/3")
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#3", "pr", "T", "https://x/3")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	runner := NewRunner(database)
+	runner := NewRunner(database, sqlitestore.New(database).Entities)
 	// Drain any trigger so the test focuses on the timeout path.
 	go func() {
 		<-runner.trigger
@@ -114,12 +116,12 @@ func TestWaitFor_HonorsTimeout(t *testing.T) {
 // returns promptly once classified_at is set mid-wait.
 func TestWaitFor_WakesOnceClassificationLands(t *testing.T) {
 	database := newTestDB(t)
-	entity, _, err := db.FindOrCreateEntity(database, "github", "owner/repo#4", "pr", "T", "https://x/4")
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#4", "pr", "T", "https://x/4")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	runner := NewRunner(database)
+	runner := NewRunner(database, sqlitestore.New(database).Entities)
 	go func() {
 		<-runner.trigger
 	}()
@@ -127,7 +129,7 @@ func TestWaitFor_WakesOnceClassificationLands(t *testing.T) {
 	// Mid-wait, mark the entity classified.
 	go func() {
 		time.Sleep(200 * time.Millisecond)
-		if err := db.AssignEntityProject(database, entity.ID, nil, ""); err != nil {
+		if err := sqlitestore.New(database).Entities.AssignProject(context.Background(), runmode.LocalDefaultOrgID, entity.ID, nil, ""); err != nil {
 			t.Errorf("AssignEntityProject in goroutine: %v", err)
 		}
 	}()
@@ -150,7 +152,7 @@ func TestWaitFor_WakesOnceClassificationLands(t *testing.T) {
 // drainer would block forever waiting for a signal that never comes.
 func TestWaitFor_ReturnsEarlyOnMissingEntity(t *testing.T) {
 	database := newTestDB(t)
-	runner := NewRunner(database)
+	runner := NewRunner(database, sqlitestore.New(database).Entities)
 
 	start := time.Now()
 	WaitFor(context.Background(), database, runner, "nonexistent-entity-id", 5*time.Second)
@@ -166,12 +168,12 @@ func TestWaitFor_ReturnsEarlyOnMissingEntity(t *testing.T) {
 // down), WaitFor must break out instead of blocking the full timeout.
 func TestWaitFor_ReturnsOnContextCancel(t *testing.T) {
 	database := newTestDB(t)
-	entity, _, err := db.FindOrCreateEntity(database, "github", "owner/repo#5", "pr", "T", "https://x/5")
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#5", "pr", "T", "https://x/5")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	runner := NewRunner(database)
+	runner := NewRunner(database, sqlitestore.New(database).Entities)
 	go func() {
 		<-runner.trigger
 	}()

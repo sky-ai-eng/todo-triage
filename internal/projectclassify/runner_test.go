@@ -7,7 +7,9 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // TestRunner_AllErroredLeavesEntityForRetry guards against the bug
@@ -23,7 +25,7 @@ func TestRunner_AllErroredLeavesEntityForRetry(t *testing.T) {
 	if _, err := db.CreateProject(database, domain.Project{ID: "p1", Name: "P1"}); err != nil {
 		t.Fatal(err)
 	}
-	entity, _, err := db.FindOrCreateEntity(database, "github", "owner/repo#1", "pr", "T", "https://x/1")
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#1", "pr", "T", "https://x/1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,10 +37,10 @@ func TestRunner_AllErroredLeavesEntityForRetry(t *testing.T) {
 		return 0, "", errors.New("simulated CLI down")
 	}
 
-	r := NewRunner(database)
+	r := NewRunner(database, sqlitestore.New(database).Entities)
 	r.run(context.Background()) // synchronous one cycle
 
-	post, err := db.ListUnclassifiedEntities(database)
+	post, err := sqlitestore.New(database).Entities.ListUnclassified(context.Background(), runmode.LocalDefaultOrgID)
 	if err != nil {
 		t.Fatalf("ListUnclassifiedEntities: %v", err)
 	}
@@ -68,7 +70,7 @@ func TestRunner_PartialErrorStillStamps(t *testing.T) {
 	if _, err := db.CreateProject(database, domain.Project{ID: "p-flaky", Name: "Flaky"}); err != nil {
 		t.Fatal(err)
 	}
-	entity, _, err := db.FindOrCreateEntity(database, "github", "owner/repo#2", "pr", "T", "https://x/2")
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#2", "pr", "T", "https://x/2")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,10 +84,10 @@ func TestRunner_PartialErrorStillStamps(t *testing.T) {
 		return 30, "stub for Good", nil
 	}
 
-	r := NewRunner(database)
+	r := NewRunner(database, sqlitestore.New(database).Entities)
 	r.run(context.Background())
 
-	post, err := db.ListUnclassifiedEntities(database)
+	post, err := sqlitestore.New(database).Entities.ListUnclassified(context.Background(), runmode.LocalDefaultOrgID)
 	if err != nil {
 		t.Fatal(err)
 	}

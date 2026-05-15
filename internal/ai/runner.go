@@ -38,7 +38,8 @@ type RunnerCallbacks struct {
 type Runner struct {
 	database     *sql.DB
 	scores       db.ScoreStore
-	orgID        string // scoring context org — runmode.LocalDefaultOrg in local mode
+	entities     db.EntityStore // SKY-284: scorer bulk-loads entity descriptions for prompt context
+	orgID        string         // scoring context org — runmode.LocalDefaultOrg in local mode
 	callbacks    RunnerCallbacks
 	profileReady func() bool // returns true when repo profiles are available
 	trigger      chan struct{}
@@ -47,10 +48,11 @@ type Runner struct {
 	running      bool
 }
 
-func NewRunner(database *sql.DB, scores db.ScoreStore, orgID string, callbacks RunnerCallbacks) *Runner {
+func NewRunner(database *sql.DB, scores db.ScoreStore, entities db.EntityStore, orgID string, callbacks RunnerCallbacks) *Runner {
 	return &Runner{
 		database:  database,
 		scores:    scores,
+		entities:  entities,
 		orgID:     orgID,
 		callbacks: callbacks,
 		trigger:   make(chan struct{}, 1),
@@ -158,7 +160,7 @@ func (r *Runner) run(ctx context.Context) {
 		r.callbacks.OnScoringStarted(taskIDs)
 	}
 
-	scores, skippedTasks, err := ScoreTasks(ctx, r.database, tasks)
+	scores, skippedTasks, err := ScoreTasks(ctx, r.database, r.entities, r.orgID, tasks)
 	if err != nil {
 		log.Printf("[ai] scoring failed: %v", err)
 		r.reportError(err)

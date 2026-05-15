@@ -12,10 +12,7 @@ import (
 // — InsertRunWorktree's FK is on runs(id) ON DELETE CASCADE.
 func seedJiraRun(t *testing.T, database *sql.DB, runID string) {
 	t.Helper()
-	entity, _, err := FindOrCreateEntity(database, "jira", "SKY-"+runID, "issue", "T-"+runID, "https://x/"+runID)
-	if err != nil {
-		t.Fatalf("entity: %v", err)
-	}
+	entity := createEntityForTest(t, database, "jira", "SKY-"+runID, "issue", "T-"+runID, "https://x/"+runID)
 	evt, err := RecordEvent(database, domain.Event{
 		EventType:    domain.EventJiraIssueAssigned,
 		EntityID:     &entity.ID,

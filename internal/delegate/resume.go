@@ -13,7 +13,6 @@ import (
 	"os"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -73,7 +72,7 @@ func (s *Spawner) ResumeAfterYield(runID, agentMessage string) error {
 	// without TRIAGE_FACTORY_REPO, the same way Jira-no-match runs do
 	// today.
 	owner, repo := "", ""
-	entity, err := db.GetEntity(s.database, task.EntityID)
+	entity, err := s.entities.Get(context.Background(), runmode.LocalDefaultOrgID, task.EntityID)
 	if err == nil && entity != nil {
 		owner, repo = parseOwnerRepo(entity.SourceID)
 	}

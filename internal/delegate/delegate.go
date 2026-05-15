@@ -313,7 +313,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, runID string, task domain.Tas
 		repo:      repo,
 		prNumber:  prNumber,
 		headRef:   pr.HeadRef,
-		projectID: lookupEntityProjectID(s.database, task.EntityID),
+		projectID: lookupEntityProjectID(s.entities, task.EntityID),
 	}, nil
 }
 
@@ -355,7 +355,7 @@ func (s *Spawner) setupJira(ctx context.Context, runID string, task domain.Task,
 		wtPath:    runRoot,
 		hasWT:     false,
 		runRoot:   runRoot,
-		projectID: lookupEntityProjectID(s.database, task.EntityID),
+		projectID: lookupEntityProjectID(s.entities, task.EntityID),
 		// owner/repo intentionally empty: the agent picks per-ticket via `workspace add`
 	}, nil
 }
