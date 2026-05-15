@@ -63,7 +63,7 @@ func seedFooterRun(t *testing.T, database *sql.DB, fix runFooterFixture) {
 			t.Fatalf("prompt: %v", err)
 		}
 	}
-	if err := db.CreateAgentRun(database, domain.AgentRun{
+	if err := sqlitestore.New(database).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrg, domain.AgentRun{
 		ID: fix.ID, TaskID: task.ID, PromptID: "footer-test-prompt",
 		Status: "running", Model: fix.Model, StartedAt: fix.StartedAt,
 	}); err != nil {
@@ -119,7 +119,7 @@ func TestBuild_KindNounRendersInDisclaimer(t *testing.T) {
 			Model:     "claude-haiku-4-5",
 			StartedAt: time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC),
 		})
-		got := Build(database, runID, kind)
+		got := Build(sqlitestore.New(database).AgentRuns, runID, kind)
 		want := "This " + kind + " was partially generated"
 		if !strings.Contains(got, want) {
 			t.Errorf("kind=%q: missing %q in %q", kind, want, got)
@@ -144,7 +144,7 @@ func TestBuild_HappyPath_UsesStoredCostAndDuration(t *testing.T) {
 		TotalCostUSD: &cost,
 	})
 
-	got := Build(database, "r1", "review")
+	got := Build(sqlitestore.New(database).AgentRuns, "r1", "review")
 	if !strings.Contains(got, "Time: 1m 30s") {
 		t.Errorf("missing/wrong Time: %q", got)
 	}
@@ -174,7 +174,7 @@ func TestBuild_LegacyFallback_FlagsApproximateCost(t *testing.T) {
 		// TotalCostUSD nil → forces the legacy path
 	})
 
-	got := Build(database, "r2", "review")
+	got := Build(sqlitestore.New(database).AgentRuns, "r2", "review")
 	if !strings.Contains(got, "Cost: ~$") {
 		t.Errorf("legacy fallback should prefix Cost with '~': %q", got)
 	}

@@ -23,6 +23,7 @@ package resume
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -32,7 +33,9 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // Handle dispatches the resume subcommand.
@@ -56,7 +59,14 @@ func Handle(args []string) {
 		fail("migrate database: %v", err)
 	}
 
-	runs, err := db.ListTakenOverRunsForResume(database)
+	// TODO(SKY-254 / D9): `triagefactory resume` is local-only by
+	// nature today — it cd's into a worktree on the operator's
+	// machine and execs `claude --resume`, which only makes sense
+	// for a local install. The DB lookup hardcodes sqlitestore for
+	// the same reason. If multi-mode ever grows a "resume my taken-
+	// over runs" CLI variant, it'll need the mode/JWT/DSN plumbing
+	// every other cmd/exec/* path is waiting on. Same TODO marker.
+	runs, err := sqlitestore.New(database).AgentRuns.ListTakenOverForResume(context.Background(), runmode.LocalDefaultOrg)
 	if err != nil {
 		fail("list taken-over runs: %v", err)
 	}

@@ -1,945 +1,189 @@
 package db
 
 import (
-	"database/sql"
-	"encoding/json"
-	"fmt"
-	"strings"
-	"time"
+	"context"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// CreateAgentRun inserts a new agent run.
+//go:generate go run github.com/vektra/mockery/v2 --name=AgentRunStore --output=./mocks --case=underscore --with-expecter
+
+// AgentRunStore owns the runs / run_messages tables — agent run
+// lifecycle, transcript messages, yield requests/responses, and the
+// derived queries the delegate spawner + agent handler + chains
+// depend on. All methods take orgID; local mode passes
+// runmode.LocalDefaultOrg.
 //
-// CreatorUserID defaulting: when the caller didn't supply one and
-// trigger_type is "manual" (the run-creation default), fall back to
-// the LocalDefaultUserID sentinel. This keeps test fixtures + legacy
-// callers working without having to know the post-SKY-261 CHECK
-// invariant. Production spawner.Delegate explicitly sets the value
-// based on trigger_type, so this default only kicks in for direct-
-// SQL callers (tests). For trigger_type='event' we leave CreatorUserID
-// alone — the spawner sets it to "" and nullIfEmpty maps to SQL NULL,
-// which is what the CHECK requires.
-func CreateAgentRun(database *sql.DB, run domain.AgentRun) error {
-	triggerType := run.TriggerType
-	if triggerType == "" {
-		triggerType = "manual"
-	}
-	if triggerType == "manual" && run.CreatorUserID == "" {
-		run.CreatorUserID = runmode.LocalDefaultUserID
-	}
-	var stepIdx interface{}
-	if run.ChainStepIndex != nil {
-		stepIdx = *run.ChainStepIndex
-	}
-	// team_id + visibility populated explicitly per SKY-262: runs inherit
-	// their task's team scope so the team-scoped queue / Board filter
-	// includes them. In local mode the team is the LocalDefaultTeamID
-	// sentinel from SKY-269. Postgres enforces team_id NOT NULL on runs;
-	// SQLite tolerates NULL but the canonical path passes the sentinel
-	// for parity.
-	//
-	// actor_agent_id is the SKY-261 D-Claims audit pointer — who actually
-	// ran this. Empty string maps to NULL (the spawner falls back to
-	// agents.GetForOrg() when the task's claim is empty, so this is
-	// typically populated; NULL is reserved for "no agents row exists
-	// yet" — transient between db init and agent bootstrap).
-	//
-	// creator_user_id is the inverse: NULL for trigger-spawned runs
-	// (no human delegator), set to the requesting user for manual
-	// runs. The schema CHECK pairs trigger_type and creator nullability
-	// so the seeder can't drift back to lying. The caller's spawner
-	// decides which value to pass; nullIfEmpty maps "" → NULL.
-	_, err := database.Exec(`
-		INSERT INTO runs (id, task_id, prompt_id, status, model, worktree_path, trigger_type, trigger_id, team_id, visibility, creator_user_id, actor_agent_id, chain_run_id, chain_step_index)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'team', ?, ?, ?, ?)
-	`, run.ID, run.TaskID, nullIfEmpty(run.PromptID), run.Status, run.Model, run.WorktreePath,
-		triggerType, nullIfEmpty(run.TriggerID), runmode.LocalDefaultTeamID,
-		nullIfEmpty(run.CreatorUserID), nullIfEmpty(run.ActorAgentID),
-		nullIfEmpty(run.ChainRunID), stepIdx)
-	return err
-}
-
-func nullIfEmpty(s string) any {
-	if s == "" {
-		return nil
-	}
-	return s
-}
-
-// CompleteAgentRun updates a run with completion info.
+// Wired against the app pool in Postgres (RLS-active): every
+// consumer is request-equivalent or runs inside a delegate spawner
+// goroutine launched from a request handler. System-service reads
+// of run state are routed through the admin-pooled FactoryReadStore
+// instead — that's the snapshot path; this store is for the actor
+// lifecycle.
 //
-// total_cost_usd / duration_ms / num_turns are *added* to existing
-// values rather than overwritten. For runs that never yielded the
-// columns are NULL coming in, so COALESCE(NULL, 0) + x = x — same
-// result as the previous assignment behavior. For yield-and-resume
-// runs (SKY-139) the partial totals from each yielded invocation are
-// already on the row via AddAgentRunPartialTotals; this final call
-// folds in the terminal invocation's totals to produce the correct
-// cumulative spend.
-func CompleteAgentRun(database *sql.DB, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary string) error {
-	now := time.Now()
-	_, err := database.Exec(`
-		UPDATE runs
-		SET status = ?,
-		    completed_at = ?,
-		    total_cost_usd = COALESCE(total_cost_usd, 0) + ?,
-		    duration_ms = COALESCE(duration_ms, 0) + ?,
-		    num_turns = COALESCE(num_turns, 0) + ?,
-		    stop_reason = ?,
-		    result_summary = ?
-		WHERE id = ?
-	`, status, now, costUSD, durationMs, numTurns, stopReason, resultSummary, runID)
-	return err
-}
-
-// AddAgentRunPartialTotals adds an invocation's cost/duration/turns to
-// the run's running totals without flipping status or completed_at.
-// Called when a run yields mid-execution so accumulated spend is
-// visible to the UI while the agent is parked in awaiting_input, and
-// so the eventual CompleteAgentRun produces a correct cumulative total
-// when it adds the terminal invocation's deltas on top. SKY-139.
-func AddAgentRunPartialTotals(database *sql.DB, runID string, costUSD float64, durationMs, numTurns int) error {
-	_, err := database.Exec(`
-		UPDATE runs
-		SET total_cost_usd = COALESCE(total_cost_usd, 0) + ?,
-		    duration_ms = COALESCE(duration_ms, 0) + ?,
-		    num_turns = COALESCE(num_turns, 0) + ?
-		WHERE id = ?
-	`, costUSD, durationMs, numTurns, runID)
-	return err
-}
-
-// MarkAgentRunAwaitingInput flips a running run to awaiting_input
-// without writing a terminal completed_at — the agent will be resumed
-// once the user responds. Guarded against concurrent terminal flips
-// (cancellation, takeover) by the status-NOT-IN filter; returns
-// ok=false (no error) if the row already reached a terminal state.
+// The MemoryMissing field returned by Get and ListForTask is
+// derived from a LEFT JOIN to run_memory (SKY-204) rather than read
+// off a column on runs. The JOIN keeps the projection honest by
+// construction — a denormalized column drifted from ground truth
+// whenever a memory row was written outside the spawner's gate.
 //
-// SKY-139.
-func MarkAgentRunAwaitingInput(database *sql.DB, runID string) (bool, error) {
-	res, err := database.Exec(`
-		UPDATE runs
-		SET status = 'awaiting_input'
-		WHERE id = ?
-		  AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable', 'pending_approval', 'taken_over', 'awaiting_input')
-	`, runID)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return false, err
-	}
-	return n > 0, nil
+// The transcript layer (Messages, InsertMessage, TokenTotals,
+// InsertYieldRequest/Response, LatestYieldRequest) sits on
+// run_messages. Yields are stored as messages with subtype
+// YieldRequestSubtype / YieldResponseSubtype rather than dedicated
+// tables so the UI can render Q+A pairs inline and the
+// run_messages-driven analytics don't need to know yield exists.
+type AgentRunStore interface {
+	// --- Lifecycle ---
+
+	// Create inserts a new agent run. CreatorUserID defaults to
+	// runmode.LocalDefaultUserID for trigger_type='manual' when
+	// the caller leaves it empty (test fixtures); for
+	// trigger_type='event' empty CreatorUserID maps to SQL NULL
+	// per the schema CHECK that pairs trigger_type and creator
+	// nullability.
+	Create(ctx context.Context, orgID string, run domain.AgentRun) error
+
+	// Complete finalizes a run with the terminal totals folded
+	// into any partial totals already on the row. SKY-139's
+	// yield-resume flow keeps cost/duration/turns running via
+	// AddPartialTotals; this call adds the terminal invocation's
+	// deltas to produce correct cumulative spend.
+	Complete(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary string) error
+
+	// AddPartialTotals folds an invocation's cost/duration/turns
+	// into the running totals without flipping status or
+	// completed_at. Called when a run yields mid-execution.
+	AddPartialTotals(ctx context.Context, orgID, runID string, costUSD float64, durationMs, numTurns int) error
+
+	// MarkAwaitingInput flips a running run to awaiting_input.
+	// Returns ok=false (no error) if the row already reached a
+	// terminal state.
+	MarkAwaitingInput(ctx context.Context, orgID, runID string) (bool, error)
+
+	// MarkResuming flips an awaiting_input run back to running
+	// when the user responds and a resume goroutine is about to
+	// spawn. ok=false means the run is no longer in awaiting_input
+	// — caller must not spawn the resume.
+	MarkResuming(ctx context.Context, orgID, runID string) (bool, error)
+
+	// SetSession stores the Claude Code session_id captured from
+	// the agent's init event. Persisted mid-run, before any
+	// terminal state, so the write-gate retry loop (SKY-141) can
+	// resume a run whose initial invocation failed the memory
+	// check.
+	SetSession(ctx context.Context, orgID, runID, sessionID string) error
+
+	// MarkTakenOver atomically flips runs.status to 'taken_over'
+	// AND (when claimUserID != "") flips the parent task's claim
+	// from the bot to the user in a single transaction. SKY-261
+	// B+ tightened this to atomic. ok=false means either the run
+	// or the task claim raced out from under us; caller calls
+	// abortTakeover to clean up.
+	MarkTakenOver(ctx context.Context, orgID, runID, takeoverPath, claimUserID string) (bool, error)
+
+	// MarkReleased flips a held takeover into the "released"
+	// sub-state: status stays 'taken_over', worktree_path cleared,
+	// result_summary appended. ok=false on double-click or
+	// release of a never-taken-over row.
+	MarkReleased(ctx context.Context, orgID, runID string) (bool, error)
+
+	// MarkCancelledIfActive marks a run cancelled with the given
+	// stop_reason / summary, but only if the row hasn't already
+	// reached a terminal state. Used by takeover-rollback.
+	MarkCancelledIfActive(ctx context.Context, orgID, runID, stopReason, summary string) (bool, error)
+
+	// MarkDiscarded marks a pending_approval run as cancelled
+	// when the user requeues / dismisses the task without
+	// submitting the review the agent prepared. The agent process
+	// has already exited; this is purely a DB cleanup.
+	MarkDiscarded(ctx context.Context, orgID, runID, stopReason string) (bool, error)
+
+	// --- Queries ---
+
+	// Get returns a single agent run by ID, or nil if absent.
+	// MemoryMissing is derived from a LEFT JOIN to run_memory.
+	Get(ctx context.Context, orgID, runID string) (*domain.AgentRun, error)
+
+	// ListForTask returns all runs for a given task, ordered
+	// started_at DESC. MemoryMissing derived per Get.
+	ListForTask(ctx context.Context, orgID, taskID string) ([]domain.AgentRun, error)
+
+	// PendingApprovalIDForTask returns the id of the (single)
+	// pending_approval run on a task, or "" if none. Bounded to
+	// one row by construction.
+	PendingApprovalIDForTask(ctx context.Context, orgID, taskID string) (string, error)
+
+	// HasActiveForTask returns true if the task has any agent
+	// run that hasn't reached a terminal state. Used as an
+	// in-flight gate for auto-delegation.
+	HasActiveForTask(ctx context.Context, orgID, taskID string) (bool, error)
+
+	// ActiveIDsForTask returns the IDs of runs on the task that
+	// haven't reached a terminal state. Used by the task-close
+	// → run-cancel cascade.
+	ActiveIDsForTask(ctx context.Context, orgID, taskID string) ([]string, error)
+
+	// ListTakenOverIDs returns the IDs of every run currently
+	// held in the taken_over state with a live takeover dir.
+	// Read at startup so the worktree-cleanup sweep preserves
+	// the corresponding ~/.claude/projects entries.
+	ListTakenOverIDs(ctx context.Context, orgID string) ([]string, error)
+
+	// ListTakenOverForResume returns every taken-over run in the
+	// local DB, joined with its task + entity for display,
+	// ordered newest-first. Used by the CLI's resume command.
+	ListTakenOverForResume(ctx context.Context, orgID string) ([]domain.TakenOverRun, error)
+
+	// EntitiesWithAwaitingInput returns the subset of entityIDs
+	// that have at least one run currently in awaiting_input.
+	// Drives the factory snapshot's "waiting for response" badge.
+	EntitiesWithAwaitingInput(ctx context.Context, orgID string, entityIDs []string) (map[string]struct{}, error)
+
+	// --- Transcript / messages ---
+
+	// InsertMessage inserts a run_messages row and returns its
+	// auto-assigned id. If msg.CreatedAt is zero, it is stamped
+	// with time.Now().UTC() and written back to the caller so a
+	// subsequent WS broadcast can carry the same value without a
+	// re-read.
+	InsertMessage(ctx context.Context, orgID string, msg *domain.AgentMessage) (int64, error)
+
+	// Messages returns all messages for a given run, ordered by id.
+	Messages(ctx context.Context, orgID, runID string) ([]domain.AgentMessage, error)
+
+	// TokenTotals sums token usage across all assistant messages
+	// in a run. Model is MAX(model) (preserves the
+	// last-wins-alphabetically pre-migration behavior).
+	TokenTotals(ctx context.Context, orgID, runID string) (*domain.TokenTotals, error)
+
+	// --- Yields (SKY-139) ---
+
+	// InsertYieldRequest records the agent's yield request as an
+	// assistant-role run_messages row with subtype
+	// YieldRequestSubtype. Returns the inserted message (ID +
+	// CreatedAt populated).
+	InsertYieldRequest(ctx context.Context, orgID, runID string, req *domain.YieldRequest) (*domain.AgentMessage, error)
+
+	// InsertYieldResponse records the user's response as a
+	// user-role row with subtype YieldResponseSubtype. content is
+	// the human-readable display rendering; metadata carries the
+	// structured YieldResponse JSON for backend replay.
+	InsertYieldResponse(ctx context.Context, orgID, runID string, resp *domain.YieldResponse, displayContent string) (*domain.AgentMessage, error)
+
+	// LatestYieldRequest returns the most recent yield_request
+	// for a run, or (nil, nil) if none. Used by the respond
+	// endpoint to validate that a submitted response matches the
+	// open request's type.
+	LatestYieldRequest(ctx context.Context, orgID, runID string) (*domain.YieldRequest, error)
 }
 
-// MarkAgentRunResuming flips an awaiting_input run back to running
-// when the user responds and a resume goroutine is about to spawn.
-// Returns ok=false (no error) if the row isn't in awaiting_input —
-// either the run was cancelled while the user was deciding, or two
-// respond submissions raced and the second lost. The caller must
-// treat ok=false as "don't spawn the resume" to avoid double-resume.
-//
-// SKY-139.
-func MarkAgentRunResuming(database *sql.DB, runID string) (bool, error) {
-	res, err := database.Exec(`
-		UPDATE runs SET status = 'running'
-		WHERE id = ? AND status = 'awaiting_input'
-	`, runID)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return false, err
-	}
-	return n > 0, nil
-}
-
-// GetAgentRun returns a single agent run by ID. MemoryMissing is
-// derived from run_memory rather than read off a column on runs —
-// the row is absent (or has agent_content NULL) when the agent didn't
-// pass through the memory gate. See SKY-204 for the move from a
-// denormalized boolean to a JOIN-derived projection.
-func GetAgentRun(database *sql.DB, runID string) (*domain.AgentRun, error) {
-	row := database.QueryRow(`
-		SELECT r.id, r.task_id, r.status, r.model, r.started_at, r.completed_at,
-		       r.total_cost_usd, r.duration_ms, r.num_turns, r.stop_reason, r.worktree_path,
-		       r.result_summary, r.session_id, r.actor_agent_id, r.chain_run_id, r.chain_step_index,
-		       (NULLIF(TRIM(rm.agent_content, ' ' || char(9) || char(10) || char(13)), '') IS NULL) AS memory_missing
-		FROM runs r
-		LEFT JOIN run_memory rm ON rm.run_id = r.id
-		WHERE r.id = ?
-	`, runID)
-
-	var r domain.AgentRun
-	var completedAt sql.NullTime
-	var costUSD sql.NullFloat64
-	var durationMs, numTurns, chainStep sql.NullInt64
-	var stopReason, worktreePath, model, resultSummary, sessionID, actorAgentID, chainRunID sql.NullString
-
-	err := row.Scan(&r.ID, &r.TaskID, &r.Status, &model, &r.StartedAt, &completedAt,
-		&costUSD, &durationMs, &numTurns, &stopReason, &worktreePath,
-		&resultSummary, &sessionID, &actorAgentID, &chainRunID, &chainStep, &r.MemoryMissing)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	r.Model = model.String
-	r.StopReason = stopReason.String
-	r.WorktreePath = worktreePath.String
-	r.ResultSummary = resultSummary.String
-	r.SessionID = sessionID.String
-	r.ActorAgentID = actorAgentID.String
-	if chainRunID.Valid {
-		r.ChainRunID = chainRunID.String
-	}
-	if chainStep.Valid {
-		v := int(chainStep.Int64)
-		r.ChainStepIndex = &v
-	}
-	if completedAt.Valid {
-		r.CompletedAt = &completedAt.Time
-	}
-	if costUSD.Valid {
-		r.TotalCostUSD = &costUSD.Float64
-	}
-	if durationMs.Valid {
-		v := int(durationMs.Int64)
-		r.DurationMs = &v
-	}
-	if numTurns.Valid {
-		v := int(numTurns.Int64)
-		r.NumTurns = &v
-	}
-
-	return &r, nil
-}
-
-// AgentRunsForTask returns all runs for a given task. See GetAgentRun
-// for the MemoryMissing derivation. NULLIF(TRIM(...), ”) guards
-// against any row whose agent_content was written as the empty string
-// (legacy data carried over from before SKY-204, or a future writer
-// that bypasses UpsertAgentMemory) — both NULL and "" mean "agent
-// didn't comply with the gate."
-func AgentRunsForTask(database *sql.DB, taskID string) ([]domain.AgentRun, error) {
-	rows, err := database.Query(`
-		SELECT r.id, r.task_id, r.status, r.model, r.started_at, r.completed_at,
-		       r.total_cost_usd, r.duration_ms, r.num_turns, r.stop_reason, r.worktree_path,
-		       r.result_summary, r.session_id, r.actor_agent_id, r.chain_run_id, r.chain_step_index,
-		       (NULLIF(TRIM(rm.agent_content, ' ' || char(9) || char(10) || char(13)), '') IS NULL) AS memory_missing
-		FROM runs r
-		LEFT JOIN run_memory rm ON rm.run_id = r.id
-		WHERE r.task_id = ?
-		ORDER BY r.started_at DESC
-	`, taskID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var runs []domain.AgentRun
-	for rows.Next() {
-		var r domain.AgentRun
-		var completedAt sql.NullTime
-		var costUSD sql.NullFloat64
-		var durationMs, numTurns, chainStep sql.NullInt64
-		var stopReason, worktreePath, model, resultSummary, sessionID, actorAgentID, chainRunID sql.NullString
-
-		if err := rows.Scan(&r.ID, &r.TaskID, &r.Status, &model, &r.StartedAt, &completedAt,
-			&costUSD, &durationMs, &numTurns, &stopReason, &worktreePath,
-			&resultSummary, &sessionID, &actorAgentID, &chainRunID, &chainStep, &r.MemoryMissing); err != nil {
-			return nil, err
-		}
-
-		r.Model = model.String
-		r.StopReason = stopReason.String
-		r.WorktreePath = worktreePath.String
-		r.ResultSummary = resultSummary.String
-		r.SessionID = sessionID.String
-		r.ActorAgentID = actorAgentID.String
-		if chainRunID.Valid {
-			r.ChainRunID = chainRunID.String
-		}
-		if chainStep.Valid {
-			v := int(chainStep.Int64)
-			r.ChainStepIndex = &v
-		}
-		if completedAt.Valid {
-			r.CompletedAt = &completedAt.Time
-		}
-		if costUSD.Valid {
-			r.TotalCostUSD = &costUSD.Float64
-		}
-		if durationMs.Valid {
-			v := int(durationMs.Int64)
-			r.DurationMs = &v
-		}
-		if numTurns.Valid {
-			v := int(numTurns.Int64)
-			r.NumTurns = &v
-		}
-
-		runs = append(runs, r)
-	}
-	return runs, rows.Err()
-}
-
-// SetAgentRunSession stores the Claude Code session_id captured from
-// `claude -p --output-format json` output. Called as soon as the spawner
-// parses the init event from the stream so subsequent resume calls have a
-// session to attach to. Separate from CompleteAgentRun because the session
-// id needs to be persisted mid-run, before any terminal state is reached —
-// the write-gate retry loop in SKY-141 depends on being able to resume a
-// run whose initial invocation returned but failed the memory-file check.
-func SetAgentRunSession(database *sql.DB, runID, sessionID string) error {
-	_, err := database.Exec(`
-		UPDATE runs SET session_id = ? WHERE id = ?
-	`, sessionID, runID)
-	return err
-}
-
-// MarkAgentRunTakenOver finalizes a run as terminal in the "user pulled it
-// out for interactive resume" sense. Distinct from cancelled because the
-// session lives on under the user's control.
-//
-// Updates worktree_path to point at the takeover destination — the
-// original /tmp worktree is removed by Spawner.Takeover, so leaving the
-// column pointing at a now-deleted path would be actively misleading.
-// Subsequent GetAgentRun calls return the live takeover dir as the
-// structured location of the run's working tree. result_summary
-// duplicates this in human-readable form for log/audit display.
-//
-// Cost/duration accounting is left blank: the headless invocation
-// didn't finish a turn and any meaningful spend belongs to whatever
-// the user does next, which we no longer track.
-//
-// Guarded against late-completion races: the UPDATE only fires when
-// the row is still in a non-terminal status. Returns ok=false (no
-// error) when the row already reached a terminal state — the caller
-// treats that as "the run finished on its own; takeover came too
-// late."
-// MarkAgentRunTakenOver atomically flips runs.status to 'taken_over'
-// AND (when claimUserID != "") flips the parent task's claim from
-// the bot to the user, in a single transaction. Without the
-// transaction, a partial failure between the two UPDATEs would leave
-// run.status='taken_over' alongside a stale bot claim on the task
-// (or vice versa) — the Board would render the AgentCard as taken-
-// over but show the task in the bot's lane, which is incoherent.
-// SKY-261 B+ tightened this to atomic.
-//
-// claimUserID="" is the legacy / test path: only the run is flipped.
-// Tests that pin run-flip behavior in isolation pass "".
-//
-// Returns ok=true when both UPDATEs landed; ok=false (no error) on
-// any race-loss, of which there are two flavors:
-//
-//   - run-race: the run row was already in a terminal status when
-//     we tried to flip it. "The run finished on its own; takeover
-//     came too late."
-//   - claim-race: the task's claim already moved out from under us
-//     (a concurrent swipe-claim takeover or /requeue) between our
-//     run UPDATE and our task UPDATE. The bot no longer owns the
-//     task, so the takeover's premise is gone.
-//
-// Both flavors trigger the deferred rollback, so neither the run
-// nor the task is mutated on race-loss. Caller treats ok=false the
-// same way regardless: call abortTakeover to clean up the worktree
-// copy and mark the run terminal.
-func MarkAgentRunTakenOver(database *sql.DB, runID, takeoverPath, claimUserID string) (bool, error) {
-	tx, err := database.Begin()
-	if err != nil {
-		return false, err
-	}
-	// Rollback is a no-op after a successful Commit; safe to defer
-	// unconditionally for the failure paths.
-	defer func() { _ = tx.Rollback() }()
-
-	now := time.Now()
-	res, err := tx.Exec(`
-		UPDATE runs
-		SET status = 'taken_over',
-		    completed_at = ?,
-		    stop_reason = 'user_takeover',
-		    result_summary = ?,
-		    worktree_path = ?
-		WHERE id = ?
-		  AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable', 'pending_approval', 'taken_over')
-	`, now, "Taken over by user → "+takeoverPath, takeoverPath, runID)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return false, err
-	}
-	if n == 0 {
-		// Race-lost. Returning here without commit triggers the
-		// deferred rollback, leaving both run and task unchanged.
-		return false, nil
-	}
-
-	if claimUserID != "" {
-		// Subquery resolves task_id from the run we just flipped —
-		// caller doesn't have to thread it separately, and the
-		// transaction guarantees the run's task_id is the one we
-		// just operated on (no race between the UPDATE and the
-		// subquery's SELECT).
-		//
-		// Race-safety guards on the task UPDATE itself: only fire
-		// when the bot still holds the claim AND no user has
-		// stepped in. In Postgres (READ COMMITTED) another
-		// transaction CAN commit changes to the task row between
-		// our run UPDATE and this task UPDATE — without the guards
-		// the takeover would silently overwrite a concurrent
-		// swipe-claim takeover or a /requeue's clear. SQLite's
-		// single-writer journal makes the race effectively
-		// impossible there, but Postgres needs the explicit
-		// protection. If the guards fail we return ok=false; the
-		// deferred rollback unwinds the run flip too, and the
-		// caller's abortTakeover cleans up the worktree move and
-		// marks the run terminal.
-		res, err := tx.Exec(`
-			UPDATE tasks
-			   SET claimed_by_user_id  = ?,
-			       claimed_by_agent_id = NULL
-			 WHERE id = (SELECT task_id FROM runs WHERE id = ?)
-			   AND claimed_by_agent_id IS NOT NULL
-			   AND claimed_by_user_id  IS NULL
-		`, claimUserID, runID)
-		if err != nil {
-			return false, err
-		}
-		taskN, err := res.RowsAffected()
-		if err != nil {
-			return false, err
-		}
-		if taskN == 0 {
-			// Race-lost on the task claim axis. Roll the whole
-			// transaction back (including the run flip we just
-			// did). Same downstream cleanup as the run-race path:
-			// caller calls abortTakeover.
-			return false, nil
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-// MarkAgentRunReleased flips a held takeover into the "released" sub-state:
-// status stays 'taken_over' (the audit trail keeps "the user took this over"
-// readable), but worktree_path is cleared and result_summary appended so the
-// resume picker / Held Takeovers banner / startup cleanup-preserve sweep all
-// drop the row from their working sets.
-//
-// Guarded by status='taken_over' AND non-empty worktree_path so a double-click
-// or a release on a never-taken-over row returns ok=false (no error). Caller
-// uses ok=false to skip the websocket broadcast and surface a 409 to the UI.
-func MarkAgentRunReleased(database *sql.DB, runID string) (bool, error) {
-	res, err := database.Exec(`
-		UPDATE runs
-		SET worktree_path = '',
-		    result_summary = CASE
-		        WHEN COALESCE(result_summary, '') = '' THEN 'released by user'
-		        ELSE result_summary || '; released by user'
-		    END
-		WHERE id = ?
-		  AND status = 'taken_over'
-		  AND COALESCE(worktree_path, '') != ''
-	`, runID)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return false, err
-	}
-	return n > 0, nil
-}
-
-// MarkAgentRunCancelledIfActive marks a run cancelled with the given
-// stop_reason / summary, but only if the row hasn't already reached a
-// terminal state. Returns ok=false (no error) when the row is already
-// terminal — used by takeover-rollback so the rollback can recover from
-// either "we cancelled the goroutine and need to write the terminal
-// status ourselves" or "the goroutine completed naturally before our
-// takeover landed; leave its real outcome alone." Either way, the row
-// ends up in a sensible terminal state and isn't left stuck on
-// 'running'.
-func MarkAgentRunCancelledIfActive(database *sql.DB, runID, stopReason, summary string) (bool, error) {
-	now := time.Now()
-	res, err := database.Exec(`
-		UPDATE runs
-		SET status = 'cancelled', completed_at = ?, stop_reason = ?, result_summary = ?
-		WHERE id = ?
-		  AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable', 'pending_approval', 'taken_over')
-	`, now, stopReason, summary, runID)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return false, err
-	}
-	return n > 0, nil
-}
-
-// MarkAgentRunDiscarded marks a pending_approval run as cancelled
-// when the user requeues / dismisses the task without submitting the
-// review the agent prepared. Mirrors MarkAgentRunCancelledIfActive
-// but specifically targets pending_approval — that helper deliberately
-// excludes pending_approval from its terminal-status filter so the
-// "process exited cleanly, awaiting user input" state isn't trampled
-// by a late takeover-rollback. Here we DO want to flip it: the user
-// has explicitly chosen to discard.
-//
-// The agent process has already exited by the time pending_approval
-// is reached (the spawner's runAgent defer ran), so there's nothing
-// to cancel at the process level — this is purely a DB cleanup.
-//
-// Idempotent against concurrent calls via the status='pending_approval'
-// guard: a second call against an already-cancelled row affects 0
-// rows. Returns ok=false in that case so the caller can skip the
-// websocket broadcast (no actual state change to push).
-func MarkAgentRunDiscarded(database *sql.DB, runID, stopReason string) (bool, error) {
-	now := time.Now()
-	res, err := database.Exec(`
-		UPDATE runs
-		SET status = 'cancelled',
-		    completed_at = COALESCE(completed_at, ?),
-		    stop_reason = ?,
-		    result_summary = COALESCE(NULLIF(result_summary, ''), ?)
-		WHERE id = ? AND status = 'pending_approval'
-	`, now, stopReason, "Review discarded by user.", runID)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return false, err
-	}
-	return n > 0, nil
-}
-
-// PendingApprovalRunIDForTask returns the id of the (single)
-// pending_approval run on a task, or "" if none. Used by the
-// requeue-finalizer to decide whether the discard cleanup needs to
-// run. Bounded to one row by construction — the spawner only flips
-// to pending_approval after CompleteAgentRun, and a task only has
-// one in-flight delegation at a time.
-func PendingApprovalRunIDForTask(database *sql.DB, taskID string) (string, error) {
-	var id string
-	err := database.QueryRow(
-		`SELECT id FROM runs WHERE task_id = ? AND status = 'pending_approval' LIMIT 1`,
-		taskID,
-	).Scan(&id)
-	if err == sql.ErrNoRows {
-		return "", nil
-	}
-	return id, err
-}
-
-// HasActiveRunForTask returns true if the task has any agent run that hasn't
-// reached a terminal state. Used as an in-flight gate for auto-delegation.
-func HasActiveRunForTask(database *sql.DB, taskID string) (bool, error) {
-	var count int
-	err := database.QueryRow(`
-		SELECT COUNT(*) FROM runs
-		WHERE task_id = ? AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable', 'pending_approval', 'taken_over')
-	`, taskID).Scan(&count)
-	return count > 0, err
-}
-
-// ActiveRunIDsForTask returns the IDs of runs on the task that haven't
-// reached a terminal state. Used by the task-close → run-cancel cascade
-// so any in-flight agent stops work the moment the system decides the
-// task is resolved (auto close, entity close, user dismiss).
-//
-// The terminal-state list matches HasActiveRunForTask — same answer to
-// "is this run still running," different shape. pending_approval counts
-// as terminal here: the process has exited and the user is deliberating,
-// cancelling it would discard work that's ready to apply.
-func ActiveRunIDsForTask(database *sql.DB, taskID string) ([]string, error) {
-	rows, err := database.Query(`
-		SELECT id FROM runs
-		WHERE task_id = ? AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable', 'pending_approval', 'taken_over')
-	`, taskID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	return ids, rows.Err()
-}
-
-// ListTakenOverRunIDs returns the IDs of every run currently held in the
-// taken_over state with a live takeover dir. Read at startup so the
-// worktree-cleanup sweep knows to leave those runs' ~/.claude/projects
-// entries alone — the JSONL inside is what makes `claude --resume` work in
-// the takeover destination. Released takeovers (status='taken_over' with
-// empty worktree_path) are excluded: their dirs are gone, so the projects
-// entry has nothing left to preserve.
-func ListTakenOverRunIDs(database *sql.DB) ([]string, error) {
-	rows, err := database.Query(`SELECT id FROM runs WHERE status = 'taken_over' AND COALESCE(worktree_path, '') != ''`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	return ids, rows.Err()
-}
-
-// ListTakenOverRunsForResume returns every taken-over run in the local
-// DB, joined with its task + entity for display, ordered newest-first.
-// Used by the CLI's resume command — the bare-call default picks
-// runs[0], the picker shows the whole list. Filters out rows missing
-// the session_id or worktree_path (shouldn't happen — Spawner.Takeover
-// requires both — but defensive against historical data).
-//
-// Title and source_id live on entities, not tasks: the join chain is
-// runs.task_id → tasks.entity_id → entities. LEFT JOIN throughout so
-// a deleted task or entity doesn't drop the run from the list — the
-// user can still resume even if the upstream task got cleaned up.
-func ListTakenOverRunsForResume(database *sql.DB) ([]domain.TakenOverRun, error) {
-	// completed_at and started_at returned as raw columns rather than
-	// COALESCE'd into one — the SQLite driver can scan a column of
-	// declared DATETIME type into sql.NullTime, but a COALESCE
-	// expression strips the type metadata and the result comes back
-	// as an unparseable string. Sort uses COALESCE because string
-	// sort over ISO-8601 happens to be correct ordering.
-	rows, err := database.Query(`
-		SELECT r.id, COALESCE(r.session_id, ''), COALESCE(r.worktree_path, ''),
-		       COALESCE(e.title, ''), COALESCE(e.source_id, ''),
-		       r.completed_at, r.started_at
-		FROM runs r
-		LEFT JOIN tasks t ON t.id = r.task_id
-		LEFT JOIN entities e ON e.id = t.entity_id
-		WHERE r.status = 'taken_over'
-		  AND COALESCE(r.worktree_path, '') != ''
-		ORDER BY COALESCE(r.completed_at, r.started_at) DESC
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var out []domain.TakenOverRun
-	for rows.Next() {
-		var r domain.TakenOverRun
-		var completedAt, startedAt sql.NullTime
-		if err := rows.Scan(&r.RunID, &r.SessionID, &r.WorktreePath, &r.TaskTitle, &r.SourceID, &completedAt, &startedAt); err != nil {
-			return nil, err
-		}
-		if r.SessionID == "" || r.WorktreePath == "" {
-			continue
-		}
-		switch {
-		case completedAt.Valid:
-			r.CompletedAt = completedAt.Time
-		case startedAt.Valid:
-			r.CompletedAt = startedAt.Time
-		}
-		out = append(out, r)
-	}
-	return out, rows.Err()
-}
-
-// InsertAgentMessage inserts a message and returns its ID. If msg.CreatedAt
-// is zero, it is stamped with time.Now().UTC() and written back to the caller
-// so a subsequent WS broadcast can carry the same value as the DB row without
-// a re-read.
-func InsertAgentMessage(database *sql.DB, msg *domain.AgentMessage) (int64, error) {
-	var toolCallsJSON, metadataJSON sql.NullString
-
-	if len(msg.ToolCalls) > 0 {
-		b, err := json.Marshal(msg.ToolCalls)
-		if err != nil {
-			return 0, fmt.Errorf("marshal tool_calls: %w", err)
-		}
-		toolCallsJSON = sql.NullString{String: string(b), Valid: true}
-	}
-	if len(msg.Metadata) > 0 {
-		b, err := json.Marshal(msg.Metadata)
-		if err != nil {
-			return 0, fmt.Errorf("marshal metadata: %w", err)
-		}
-		metadataJSON = sql.NullString{String: string(b), Valid: true}
-	}
-
-	if msg.CreatedAt.IsZero() {
-		msg.CreatedAt = time.Now().UTC()
-	}
-
-	result, err := database.Exec(`
-		INSERT INTO run_messages (run_id, role, content, subtype, tool_calls, tool_call_id, is_error, metadata, model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`,
-		msg.RunID, msg.Role, msg.Content, msg.Subtype,
-		toolCallsJSON, nullStr(msg.ToolCallID), msg.IsError, metadataJSON,
-		nullStr(msg.Model), nullInt(msg.InputTokens), nullInt(msg.OutputTokens),
-		nullInt(msg.CacheReadTokens), nullInt(msg.CacheCreationTokens),
-		msg.CreatedAt,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return result.LastInsertId()
-}
-
-// EntitiesWithAwaitingInputRuns returns the subset of entityIDs that
-// have at least one run currently in awaiting_input. Used by the
-// factory snapshot to paint a "waiting for response" badge on the
-// chip without the frontend having to walk every run. Bounded to
-// snapshot's entity set (≤ factoryEntityLimit), so the IN-list stays
-// well under SQLite's variable cap and a single round trip suffices.
-// SKY-139.
-func EntitiesWithAwaitingInputRuns(database *sql.DB, entityIDs []string) (map[string]struct{}, error) {
-	out := make(map[string]struct{})
-	if len(entityIDs) == 0 {
-		return out, nil
-	}
-	placeholders := make([]string, len(entityIDs))
-	args := make([]any, 0, len(entityIDs))
-	for i, id := range entityIDs {
-		placeholders[i] = "?"
-		args = append(args, id)
-	}
-	query := `
-		SELECT DISTINCT t.entity_id
-		FROM runs r
-		JOIN tasks t ON t.id = r.task_id
-		WHERE r.status = 'awaiting_input'
-		  AND t.entity_id IN (` + strings.Join(placeholders, ",") + `)
-	`
-	rows, err := database.Query(query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		out[id] = struct{}{}
-	}
-	return out, rows.Err()
-}
-
-// run_messages subtypes used by the SKY-139 yield-resume flow. Stored
-// in the existing transcript stream rather than dedicated tables so
-// the UI can render Q+A pairs inline with the rest of the run's
-// conversation, and so the run_messages-driven token/cost analytics
-// don't need to know yield exists.
+// run_messages subtypes used by the SKY-139 yield-resume flow.
+// Stored in the existing transcript stream rather than dedicated
+// tables so the UI can render Q+A pairs inline with the rest of
+// the run's conversation, and so the run_messages-driven token /
+// cost analytics don't need to know yield exists.
 const (
 	YieldRequestSubtype  = "yield_request"
 	YieldResponseSubtype = "yield_response"
 )
-
-// InsertYieldRequest records the agent's yield request as an
-// assistant-role message with subtype yield_request. content is the
-// JSON-marshalled YieldRequest payload — the frontend parses it to
-// pick a renderer and the respond endpoint reads it back to validate
-// that a submitted response matches the open request's type.
-//
-// Returns the inserted message (ID populated, CreatedAt stamped) so
-// the caller can broadcast it without a re-read.
-func InsertYieldRequest(database *sql.DB, runID string, req *domain.YieldRequest) (*domain.AgentMessage, error) {
-	payload, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("marshal yield request: %w", err)
-	}
-	msg := &domain.AgentMessage{
-		RunID:   runID,
-		Role:    "assistant",
-		Subtype: YieldRequestSubtype,
-		Content: string(payload),
-	}
-	id, err := InsertAgentMessage(database, msg)
-	if err != nil {
-		return nil, err
-	}
-	msg.ID = int(id)
-	return msg, nil
-}
-
-// InsertYieldResponse records the user's response to an open yield as
-// a user-role message with subtype yield_response. content is the
-// human-readable display rendering (e.g. "Approved", "Rebase onto
-// main", or the raw prompt text); metadata carries the structured
-// YieldResponse JSON so the backend can replay the answer later if
-// needed.
-//
-// The agent-facing plain-text rendering is computed at resume time
-// and not persisted on this row — it's a function of (request,
-// response) and reproducible from those two stored shapes.
-func InsertYieldResponse(database *sql.DB, runID string, resp *domain.YieldResponse, displayContent string) (*domain.AgentMessage, error) {
-	payload, err := json.Marshal(resp)
-	if err != nil {
-		return nil, fmt.Errorf("marshal yield response: %w", err)
-	}
-	msg := &domain.AgentMessage{
-		RunID:   runID,
-		Role:    "user",
-		Subtype: YieldResponseSubtype,
-		Content: displayContent,
-		Metadata: map[string]any{
-			"yield_response": json.RawMessage(payload),
-		},
-	}
-	id, err := InsertAgentMessage(database, msg)
-	if err != nil {
-		return nil, err
-	}
-	msg.ID = int(id)
-	return msg, nil
-}
-
-// LatestYieldRequest returns the most recent yield_request for a run,
-// or (nil, nil) if none exists. Used by the respond endpoint to read
-// back the open question so it can validate the submitted response's
-// shape against the request's type.
-//
-// "Most recent" is correct for "currently open" because once a yield
-// is answered, the run flips back to running and the agent has to
-// emit a fresh yield envelope to park again — each new park is a
-// new yield_request row that supersedes prior ones for the
-// "current open yield" purpose.
-func LatestYieldRequest(database *sql.DB, runID string) (*domain.YieldRequest, error) {
-	row := database.QueryRow(`
-		SELECT content FROM run_messages
-		WHERE run_id = ? AND subtype = ?
-		ORDER BY id DESC LIMIT 1
-	`, runID, YieldRequestSubtype)
-	var content sql.NullString
-	if err := row.Scan(&content); err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil
-		}
-		return nil, err
-	}
-	if !content.Valid || content.String == "" {
-		return nil, nil
-	}
-	var req domain.YieldRequest
-	if err := json.Unmarshal([]byte(content.String), &req); err != nil {
-		return nil, fmt.Errorf("unmarshal yield request: %w", err)
-	}
-	return &req, nil
-}
-
-// MessagesForRun returns all messages for a given agent run, ordered by ID.
-func MessagesForRun(database *sql.DB, runID string) ([]domain.AgentMessage, error) {
-	rows, err := database.Query(`
-		SELECT id, run_id, role, content, subtype, tool_calls, tool_call_id, is_error, metadata,
-		       model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at
-		FROM run_messages WHERE run_id = ? ORDER BY id ASC
-	`, runID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var messages []domain.AgentMessage
-	for rows.Next() {
-		var m domain.AgentMessage
-		var content, subtype, toolCallsStr, toolCallID, metadataStr, model sql.NullString
-		var inputTok, outputTok, cacheReadTok, cacheCreateTok sql.NullInt64
-
-		if err := rows.Scan(
-			&m.ID, &m.RunID, &m.Role, &content, &subtype, &toolCallsStr,
-			&toolCallID, &m.IsError, &metadataStr, &model,
-			&inputTok, &outputTok, &cacheReadTok, &cacheCreateTok, &m.CreatedAt,
-		); err != nil {
-			return nil, err
-		}
-
-		m.Content = content.String
-		m.Subtype = subtype.String
-		m.ToolCallID = toolCallID.String
-		m.Model = model.String
-
-		if toolCallsStr.Valid {
-			_ = json.Unmarshal([]byte(toolCallsStr.String), &m.ToolCalls)
-		}
-		if metadataStr.Valid {
-			_ = json.Unmarshal([]byte(metadataStr.String), &m.Metadata)
-		}
-		if inputTok.Valid {
-			v := int(inputTok.Int64)
-			m.InputTokens = &v
-		}
-		if outputTok.Valid {
-			v := int(outputTok.Int64)
-			m.OutputTokens = &v
-		}
-		if cacheReadTok.Valid {
-			v := int(cacheReadTok.Int64)
-			m.CacheReadTokens = &v
-		}
-		if cacheCreateTok.Valid {
-			v := int(cacheCreateTok.Int64)
-			m.CacheCreationTokens = &v
-		}
-
-		messages = append(messages, m)
-	}
-	return messages, rows.Err()
-}
-
-// RunTokenTotals sums token usage across all assistant messages in a run.
-func RunTokenTotals(database *sql.DB, runID string) (*domain.TokenTotals, error) {
-	row := database.QueryRow(`
-		SELECT COALESCE(MAX(model), ''),
-		       COALESCE(SUM(input_tokens), 0),
-		       COALESCE(SUM(output_tokens), 0),
-		       COALESCE(SUM(cache_read_tokens), 0),
-		       COALESCE(SUM(cache_creation_tokens), 0),
-		       COUNT(*)
-		FROM run_messages
-		WHERE run_id = ? AND role = 'assistant'
-	`, runID)
-
-	var t domain.TokenTotals
-	if err := row.Scan(&t.Model, &t.InputTokens, &t.OutputTokens, &t.CacheReadTokens, &t.CacheCreationTokens, &t.NumTurns); err != nil {
-		return nil, err
-	}
-	return &t, nil
-}
-
-func nullStr(s string) sql.NullString {
-	if s == "" {
-		return sql.NullString{}
-	}
-	return sql.NullString{String: s, Valid: true}
-}
-
-func nullInt(p *int) sql.NullInt64 {
-	if p == nil {
-		return sql.NullInt64{}
-	}
-	return sql.NullInt64{Int64: int64(*p), Valid: true}
-}

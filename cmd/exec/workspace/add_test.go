@@ -90,7 +90,7 @@ func seedJiraRun(t *testing.T, database *db.DB, runID, issueKey string) {
 	if err := sqlitestore.New(database.Conn).Prompts.Create(t.Context(), runmode.LocalDefaultOrg, domain.Prompt{ID: "p-" + runID, Name: "T", Body: "x", Source: "user"}); err != nil {
 		t.Fatalf("prompt: %v", err)
 	}
-	if err := db.CreateAgentRun(database.Conn, domain.AgentRun{
+	if err := sqlitestore.New(database.Conn).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrg, domain.AgentRun{
 		ID: runID, TaskID: task.ID, PromptID: "p-" + runID,
 		Status: "running", Model: "m",
 	}); err != nil {
@@ -119,7 +119,7 @@ func seedGitHubRun(t *testing.T, database *db.DB, runID string) {
 	if err := sqlitestore.New(database.Conn).Prompts.Create(t.Context(), runmode.LocalDefaultOrg, domain.Prompt{ID: "p-" + runID, Name: "T", Body: "x", Source: "user"}); err != nil {
 		t.Fatalf("prompt: %v", err)
 	}
-	if err := db.CreateAgentRun(database.Conn, domain.AgentRun{
+	if err := sqlitestore.New(database.Conn).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrg, domain.AgentRun{
 		ID: runID, TaskID: task.ID, PromptID: "p-" + runID,
 		Status: "running", Model: "m",
 	}); err != nil {

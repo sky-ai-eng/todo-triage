@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/agentmeta"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 )
@@ -413,8 +414,13 @@ func prSubmitReview(client *ghclient.Client, database *db.DB, args []string) {
 		return
 	}
 
-	// Inject footer with run metadata
-	body = body + agentmeta.Build(database.Conn, os.Getenv("TRIAGE_FACTORY_RUN_ID"), "review")
+	// Inject footer with run metadata.
+	// TODO(SKY-254 / D9): hardcoded sqlitestore is the local-mode
+	// path; multi-mode needs the sandbox to inject mode + JWT + DSN
+	// so this branches to pgstore.New under the run's user claims.
+	// Same assumption every other cmd/exec/* path makes — grep for
+	// "SKY-254".
+	body = body + agentmeta.Build(sqlitestore.New(database.Conn).AgentRuns, os.Getenv("TRIAGE_FACTORY_RUN_ID"), "review")
 
 	// Submit atomically to GitHub
 	ghReviewID, actualEvent, err := client.SubmitReview(
@@ -638,7 +644,9 @@ func prCreate(client *ghclient.Client, database *db.DB, args []string) {
 	}
 
 	// Standalone mode: open the PR immediately, with footer pre-applied.
-	body = body + agentmeta.Build(database.Conn, os.Getenv("TRIAGE_FACTORY_RUN_ID"), "PR")
+	// TODO(SKY-254 / D9): hardcoded sqlitestore — see review path
+	// above for the multi-mode plumbing this needs.
+	body = body + agentmeta.Build(sqlitestore.New(database.Conn).AgentRuns, os.Getenv("TRIAGE_FACTORY_RUN_ID"), "PR")
 	number, htmlURL, err := client.CreatePR(owner, repo, head, base, title, body, draft)
 	exitOnErr(err)
 

@@ -16,7 +16,6 @@ import (
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/config"
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
@@ -109,7 +108,7 @@ func (s *Spawner) Takeover(runID, baseDir string) (*TakeoverResult, error) {
 	// us mid-rename. See the function-level comment.
 	ctx := context.Background()
 
-	run, err := db.GetAgentRun(s.database, runID)
+	run, err := s.agentRuns.Get(context.Background(), runmode.LocalDefaultOrg, runID)
 	if err != nil {
 		return nil, fmt.Errorf("load run: %w", err)
 	}
@@ -205,7 +204,7 @@ func (s *Spawner) Takeover(runID, baseDir string) (*TakeoverResult, error) {
 	// still shows bot claim). Passing LocalDefaultUserID is what
 	// engages the claim-flip arm of the atomic UPDATE; the run's
 	// actor_agent_id stays stamped at the bot (immutable audit).
-	ok, err := db.MarkAgentRunTakenOver(s.database, runID, destPath, runmode.LocalDefaultUserID)
+	ok, err := s.agentRuns.MarkTakenOver(context.Background(), runmode.LocalDefaultOrg, runID, destPath, runmode.LocalDefaultUserID)
 	if err != nil {
 		// Transaction failed and rolled back — both run and task are
 		// unchanged. Same FS cleanup as the copy-failure path.
@@ -302,7 +301,7 @@ func (s *Spawner) abortTakeover(runID, claudeCwd, destPath string) {
 	// cancelled so the UI and the active-run gate don't see a phantom
 	// running run forever. If the row is already terminal (race-loss
 	// path), this no-ops and we leave the agent's real outcome alone.
-	ok, err := db.MarkAgentRunCancelledIfActive(s.database, runID, "takeover_failed", "Takeover failed; run was cancelled")
+	ok, err := s.agentRuns.MarkCancelledIfActive(context.Background(), runmode.LocalDefaultOrg, runID, "takeover_failed", "Takeover failed; run was cancelled")
 	if err != nil {
 		log.Printf("[delegate] warning: abort takeover for %s: mark cancelled: %v", runID, err)
 		return
@@ -360,7 +359,7 @@ func (s *Spawner) abortTakeover(runID, claudeCwd, destPath string) {
 // see Takeover's comment) — a released run never spawns another
 // goroutine, so the flag is harmless once set.
 func (s *Spawner) Release(runID string) error {
-	run, err := db.GetAgentRun(s.database, runID)
+	run, err := s.agentRuns.Get(context.Background(), runmode.LocalDefaultOrg, runID)
 	if err != nil {
 		return fmt.Errorf("load run: %w", err)
 	}
@@ -493,7 +492,7 @@ func (s *Spawner) Release(runID string) error {
 	// guard inside MarkAgentRunReleased makes a concurrent double-call
 	// idempotent: the second one returns ok=false and we return a
 	// 409-equivalent.
-	ok, err := db.MarkAgentRunReleased(s.database, runID)
+	ok, err := s.agentRuns.MarkReleased(context.Background(), runmode.LocalDefaultOrg, runID)
 	if err != nil {
 		return fmt.Errorf("mark released: %w", err)
 	}

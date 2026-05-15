@@ -200,7 +200,7 @@ func (s *Spawner) runChain(
 		// + chain_step_index thread it back to the chain instance.
 		stepRunID := uuid.New().String()
 		stepIdxCopy := i
-		if err := db.CreateAgentRun(s.database, domain.AgentRun{
+		if err := s.agentRuns.Create(context.Background(), runmode.LocalDefaultOrg, domain.AgentRun{
 			ID:             stepRunID,
 			TaskID:         task.ID,
 			PromptID:       stepPrompt.ID,
@@ -256,7 +256,7 @@ func (s *Spawner) runChain(
 		// Re-read the run row to learn its terminal status. runAgent's
 		// return is unconditional — completion / failure / cancellation
 		// / pending_approval / yield all come back through here.
-		stepRun, err := db.GetAgentRun(s.database, stepRunID)
+		stepRun, err := s.agentRuns.Get(context.Background(), runmode.LocalDefaultOrg, stepRunID)
 		if err != nil || stepRun == nil {
 			s.terminateChain(chainRunID, task.ID, triggerType, startTime, cfg, domain.ChainRunStatusFailed,
 				fmt.Sprintf("read step %d run after agent: %v", i, err), &step.StepIndex, false)

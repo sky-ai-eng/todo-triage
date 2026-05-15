@@ -11,12 +11,13 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
 func (s *Server) handleAgentStatus(w http.ResponseWriter, r *http.Request) {
 	runID := r.PathValue("runID")
-	run, err := db.GetAgentRun(s.db, runID)
+	run, err := s.agentRuns.Get(r.Context(), runmode.LocalDefaultOrg, runID)
 	if err != nil {
 		internalError(w, "agent", err)
 		return
@@ -76,7 +77,7 @@ func runResponse(database *sql.DB, run *domain.AgentRun) map[string]any {
 
 func (s *Server) handleAgentMessages(w http.ResponseWriter, r *http.Request) {
 	runID := r.PathValue("runID")
-	messages, err := db.MessagesForRun(s.db, runID)
+	messages, err := s.agentRuns.Messages(r.Context(), runmode.LocalDefaultOrg, runID)
 	if err != nil {
 		internalError(w, "agent", err)
 		return
@@ -188,7 +189,7 @@ func releaseErrorStatus(err error) int {
 // server-side using the same shellQuote() rule the takeover endpoint
 // uses, so the banner's modal renders an identical paste-safe command.
 func (s *Server) handleHeldTakeovers(w http.ResponseWriter, r *http.Request) {
-	runs, err := db.ListTakenOverRunsForResume(s.db)
+	runs, err := s.agentRuns.ListTakenOverForResume(r.Context(), runmode.LocalDefaultOrg)
 	if err != nil {
 		internalError(w, "agent", err)
 		return
@@ -233,7 +234,7 @@ func (s *Server) handleAgentRuns(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "task_id query parameter required"})
 		return
 	}
-	runs, err := db.AgentRunsForTask(s.db, taskID)
+	runs, err := s.agentRuns.ListForTask(r.Context(), runmode.LocalDefaultOrg, taskID)
 	if err != nil {
 		internalError(w, "agent", err)
 		return
@@ -286,7 +287,7 @@ func (s *Server) handleAgentRespond(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	run, err := db.GetAgentRun(s.db, runID)
+	run, err := s.agentRuns.Get(r.Context(), runmode.LocalDefaultOrg, runID)
 	if err != nil {
 		internalError(w, "agent", err)
 		return
@@ -300,7 +301,7 @@ func (s *Server) handleAgentRespond(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	req, err := db.LatestYieldRequest(s.db, runID)
+	req, err := s.agentRuns.LatestYieldRequest(r.Context(), runmode.LocalDefaultOrg, runID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "load yield request: " + err.Error()})
 		return
@@ -326,7 +327,7 @@ func (s *Server) handleAgentRespond(w http.ResponseWriter, r *http.Request) {
 	// took the run to a terminal state and the message is the
 	// historical record of what the user submitted.
 	displayContent := domain.RenderYieldResponseForDisplay(req, &resp)
-	msg, err := db.InsertYieldResponse(s.db, runID, &resp, displayContent)
+	msg, err := s.agentRuns.InsertYieldResponse(r.Context(), runmode.LocalDefaultOrg, runID, &resp, displayContent)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "record response: " + err.Error()})
 		return

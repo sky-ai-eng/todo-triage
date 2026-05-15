@@ -5,12 +5,13 @@
 package delegate
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
@@ -61,7 +62,7 @@ func (s *Spawner) Cancel(runID string) error {
 		_ = err
 	}
 
-	flipped, err := db.MarkAgentRunCancelledIfActive(s.database, runID, "user_cancelled", "Run cancelled by user")
+	flipped, err := s.agentRuns.MarkCancelledIfActive(context.Background(), runmode.LocalDefaultOrg, runID, "user_cancelled", "Run cancelled by user")
 	if err != nil {
 		return fmt.Errorf("mark cancelled: %w", err)
 	}
@@ -91,7 +92,7 @@ func (s *Spawner) handleCancelled(runID string, startTime time.Time, wtPath stri
 		return
 	}
 	elapsed := int(time.Since(startTime).Milliseconds())
-	if err := db.CompleteAgentRun(s.database, runID, "cancelled", 0, elapsed, 0, "cancelled", "Cancelled by user"); err != nil {
+	if err := s.agentRuns.Complete(context.Background(), runmode.LocalDefaultOrg, runID, "cancelled", 0, elapsed, 0, "cancelled", "Cancelled by user"); err != nil {
 		log.Printf("[delegate] warning: failed to record cancellation for run %s: %v", runID, err)
 	}
 	s.broadcastRunUpdate(runID, "cancelled")
@@ -114,7 +115,7 @@ func (s *Spawner) failRun(runID, taskID, triggerType, errMsg string) {
 		log.Printf("[delegate] warning: failed to mark run %s as failed: %v", runID, err)
 	}
 
-	if _, err := db.InsertAgentMessage(s.database, &domain.AgentMessage{
+	if _, err := s.agentRuns.InsertMessage(context.Background(), runmode.LocalDefaultOrg, &domain.AgentMessage{
 		RunID:   runID,
 		Role:    "assistant",
 		Subtype: "text",

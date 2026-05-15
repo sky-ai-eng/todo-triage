@@ -32,6 +32,19 @@ func (s *Store) WithTx(ctx context.Context, orgID, userID string, fn func(db.TxS
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// Elevate the role before doing anything else. The app pool
+	// connects as `authenticator` (LOGIN, NOINHERIT) which has no
+	// privileges by design — RLS policies expect `tf_app` to be
+	// the active role, and the pgtest harness's WithUser helper
+	// does the same elevation. Without this, every WithTx-bound
+	// store call would fail at the role layer (not even RLS — just
+	// "permission denied" because authenticator has no grants).
+	// SET LOCAL scopes the role change to the tx, so the pool
+	// connection returns to authenticator when the tx ends.
+	if _, err := tx.ExecContext(ctx, `SET LOCAL ROLE tf_app`); err != nil {
+		return err
+	}
+
 	claims, err := json.Marshal(map[string]any{
 		"sub":    userID,
 		"org_id": orgID,
@@ -56,6 +69,12 @@ func (s *Store) WithTx(ctx context.Context, orgID, userID string, fn func(db.TxS
 		Users:         newUsersStore(tx),
 		Tasks:         newTaskStore(tx),
 		Factory:       newFactoryReadStore(tx),
+		// AgentRuns: composed half is tx; admin half stays the
+		// real admin pool so event-triggered Create can route
+		// around RLS. The admin write commits autonomously from
+		// the outer tx — see Create's pool-routing comment for
+		// why that's the intended semantics.
+		AgentRuns: newAgentRunStore(tx, s.admin),
 	}
 	if err := fn(txStores); err != nil {
 		return err

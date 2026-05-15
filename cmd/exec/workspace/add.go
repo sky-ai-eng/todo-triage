@@ -129,16 +129,18 @@ func materializeWorkspace(database *db.DB, runID, ownerRepoArg string, deps addD
 		return "", errMissingRunID
 	}
 
-	run, err := db.GetAgentRun(database.Conn, runID)
+	// See list.go comment — sqlite stores constructed inline for the
+	// few store calls this path needs. TODO(SKY-254 / D9): same
+	// local-only assumption as list.go; lifts when the sandbox
+	// boundary supplies mode + JWT + DSN.
+	stores := sqlitestore.New(database.Conn)
+	run, err := stores.AgentRuns.Get(context.Background(), runmode.LocalDefaultOrg, runID)
 	if err != nil {
 		return "", fmt.Errorf("workspace add: load run: %w", err)
 	}
 	if run == nil {
 		return "", fmt.Errorf("%w: %s", errRunNotFound, runID)
 	}
-	// See list.go comment — sqlite stores constructed inline for the
-	// single TaskStore call this path needs.
-	stores := sqlitestore.New(database.Conn)
 	task, err := stores.Tasks.Get(context.Background(), runmode.LocalDefaultOrg, run.TaskID)
 	if err != nil {
 		return "", fmt.Errorf("workspace add: load task: %w", err)

@@ -67,18 +67,27 @@ func listWorkspaces(database *db.DB, runID string) (listOutput, error) {
 		return listOutput{}, errMissingRunID
 	}
 
-	run, err := db.GetAgentRun(database.Conn, runID)
+	// Construct a sqlite Stores bundle inline — cmd/exec runs as a
+	// separate process with its own connection, so wiring full stores
+	// at startup would be overkill for the few store calls this path
+	// needs. SKY-283 / SKY-285.
+	//
+	// TODO(SKY-254 / D9): cmd/exec is local-mode-only today. In
+	// multi-mode the sandbox boundary needs to inject a scoped JWT +
+	// TF_MODE=multi + Postgres DSN so this path can branch on
+	// runmode.Current() and wire pgstore.New(...) instead — with the
+	// JWT setting RLS claims on every per-request tx so the agent
+	// only sees data for the user the run was spawned by. Every other
+	// cmd/exec/* path makes the same hardcoded-sqlite assumption;
+	// grep for "SKY-254" to find them all.
+	stores := sqlitestore.New(database.Conn)
+	run, err := stores.AgentRuns.Get(context.Background(), runmode.LocalDefaultOrg, runID)
 	if err != nil {
 		return listOutput{}, fmt.Errorf("workspace list: load run: %w", err)
 	}
 	if run == nil {
 		return listOutput{}, fmt.Errorf("%w: %s", errRunNotFound, runID)
 	}
-	// Construct a sqlite Stores bundle inline — cmd/exec runs as a
-	// separate process with its own connection, so wiring full stores
-	// at startup would be overkill for the one TaskStore call this
-	// path needs. SKY-283.
-	stores := sqlitestore.New(database.Conn)
 	task, err := stores.Tasks.Get(context.Background(), runmode.LocalDefaultOrg, run.TaskID)
 	if err != nil {
 		return listOutput{}, fmt.Errorf("workspace list: load task: %w", err)

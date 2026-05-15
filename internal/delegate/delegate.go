@@ -14,7 +14,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/config"
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -126,7 +125,7 @@ func (s *Spawner) Delegate(task domain.Task, explicitPromptID string, triggerTyp
 	}
 
 	runID := uuid.New().String()
-	if err := db.CreateAgentRun(s.database, domain.AgentRun{
+	if err := s.agentRuns.Create(context.Background(), runmode.LocalDefaultOrg, domain.AgentRun{
 		ID:            runID,
 		TaskID:        task.ID,
 		PromptID:      promptID,

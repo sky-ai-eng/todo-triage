@@ -319,7 +319,7 @@ func (s *Server) handleFactorySnapshot(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	awaitingByEntity, err := db.EntitiesWithAwaitingInputRuns(s.db, entityIDs)
+	awaitingByEntity, err := s.agentRuns.EntitiesWithAwaitingInput(r.Context(), runmode.LocalDefaultOrg, entityIDs)
 	if err != nil {
 		internalError(w, "factory", err)
 		return

@@ -302,7 +302,7 @@ func (s *Spawner) processCompletion(
 			status = "task_unsolvable"
 		}
 	}
-	if err := db.CompleteAgentRun(s.database, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultSummary); err != nil {
+	if err := s.agentRuns.Complete(context.Background(), runmode.LocalDefaultOrg, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultSummary); err != nil {
 		log.Printf("[delegate] warning: failed to record completion for run %s: %v", runID, err)
 	}
 
@@ -425,17 +425,17 @@ func (s *Spawner) processCompletion(
 // status flip and the toast. The terminal status the racing path set
 // stands.
 func (s *Spawner) persistYield(runID string, req *domain.YieldRequest, completion *agentproc.Result) error {
-	if err := db.AddAgentRunPartialTotals(s.database, runID, completion.CostUSD, completion.DurationMs, completion.NumTurns); err != nil {
+	if err := s.agentRuns.AddPartialTotals(context.Background(), runmode.LocalDefaultOrg, runID, completion.CostUSD, completion.DurationMs, completion.NumTurns); err != nil {
 		log.Printf("[delegate] warning: failed to record partial totals for run %s: %v", runID, err)
 	}
 
-	msg, err := db.InsertYieldRequest(s.database, runID, req)
+	msg, err := s.agentRuns.InsertYieldRequest(context.Background(), runmode.LocalDefaultOrg, runID, req)
 	if err != nil {
 		return fmt.Errorf("insert yield request: %w", err)
 	}
 	s.broadcastMessage(runID, msg)
 
-	flipped, err := db.MarkAgentRunAwaitingInput(s.database, runID)
+	flipped, err := s.agentRuns.MarkAwaitingInput(context.Background(), runmode.LocalDefaultOrg, runID)
 	if err != nil {
 		return fmt.Errorf("mark awaiting_input: %w", err)
 	}

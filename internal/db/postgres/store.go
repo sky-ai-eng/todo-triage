@@ -108,7 +108,18 @@ func New(admin, app *sql.DB) db.Stores {
 		// Hydrate path runs at server startup before any JWT claims
 		// are in scope.
 		Factory: newFactoryReadStore(admin),
-		Tx:      s,
+		// AgentRuns wires app — every consumer is request-
+		// equivalent (server agent handler, delegate spawner
+		// goroutine spawned from a handler, chains). System-service
+		// reads of run state are routed through the admin-pooled
+		// FactoryReadStore instead.
+		// AgentRuns holds both pools. Manual-trigger Create + every
+		// other method run on app (RLS-active). Event-triggered
+		// Create routes to admin because the CHECK + RLS policy
+		// pair makes that insert unreachable through tf_app — see
+		// the impl's Create comment.
+		AgentRuns: newAgentRunStore(app, admin),
+		Tx:        s,
 	}
 	return s.stores
 }
@@ -149,5 +160,11 @@ func NewForTx(tx *sql.Tx) db.TxStores {
 		Users:         newUsersStore(tx),
 		Tasks:         newTaskStore(tx),
 		Factory:       newFactoryReadStore(tx),
+		// NewForTx is a test door — both pools collapse to the
+		// supplied tx. Tests that exercise the admin-only branch
+		// (event-triggered AgentRunStore.Create) need the
+		// production WithTx wiring instead, which gets the real
+		// admin pool via Store.admin.
+		AgentRuns: newAgentRunStore(tx, tx),
 	}
 }

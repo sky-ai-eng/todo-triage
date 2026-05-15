@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -31,10 +32,10 @@ func seedYieldedRun(t *testing.T, s *Server, req *domain.YieldRequest) string {
 		t.Fatalf("prompt: %v", err)
 	}
 	runID := "run-yielded"
-	if err := db.CreateAgentRun(s.db, domain.AgentRun{ID: runID, TaskID: task.ID, PromptID: "p", Status: "running", Model: "m"}); err != nil {
+	if err := sqlitestore.New(s.db).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrg, domain.AgentRun{ID: runID, TaskID: task.ID, PromptID: "p", Status: "running", Model: "m"}); err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if _, err := db.InsertYieldRequest(s.db, runID, req); err != nil {
+	if _, err := sqlitestore.New(s.db).AgentRuns.InsertYieldRequest(t.Context(), runmode.LocalDefaultOrg, runID, req); err != nil {
 		t.Fatalf("insert yield request: %v", err)
 	}
 	if _, err := s.db.Exec(`UPDATE runs SET status = 'awaiting_input' WHERE id = ?`, runID); err != nil {
