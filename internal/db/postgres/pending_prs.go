@@ -151,7 +151,7 @@ func (s *pendingPRStore) Lock(ctx context.Context, orgID, id, title, body string
 	return nil
 }
 
-func (s *pendingPRStore) MarkSubmitted(ctx context.Context, orgID, id string) (bool, error) {
+func (s *pendingPRStore) MarkSubmitted(ctx context.Context, orgID, id string) error {
 	// now() is fine here even though it's tx-fixed (vs
 	// clock_timestamp()): MarkSubmitted updates a single row per call
 	// and the column is a one-shot guard, not an ordering key. Two
@@ -163,11 +163,11 @@ func (s *pendingPRStore) MarkSubmitted(ctx context.Context, orgID, id string) (b
 		 WHERE org_id = $1 AND id = $2 AND submitted_at IS NULL
 	`, orgID, id)
 	if err != nil {
-		return false, err
+		return err
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return false, err
+		return err
 	}
 	if n == 0 {
 		var exists int
@@ -175,14 +175,14 @@ func (s *pendingPRStore) MarkSubmitted(ctx context.Context, orgID, id string) (b
 			`SELECT COUNT(*) FROM pending_prs WHERE org_id = $1 AND id = $2`,
 			orgID, id,
 		).Scan(&exists); qerr != nil {
-			return false, qerr
+			return qerr
 		}
 		if exists == 0 {
-			return false, fmt.Errorf("pending PR %s not found", id)
+			return fmt.Errorf("pending PR %s not found", id)
 		}
-		return false, db.ErrPendingPRSubmitInFlight
+		return db.ErrPendingPRSubmitInFlight
 	}
-	return true, nil
+	return nil
 }
 
 func (s *pendingPRStore) ClearSubmitted(ctx context.Context, orgID, id string) error {

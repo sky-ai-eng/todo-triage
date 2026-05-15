@@ -242,11 +242,10 @@ func RunPendingPRStoreConformance(t *testing.T, mk PendingPRStoreFactory) {
 		runID := seed.Run(t)
 		id := uuid.New().String()
 		mustCreatePendingPR(ctx, t, s, orgID, runID, id)
-		winner, err := s.MarkSubmitted(ctx, orgID, id)
-		if err != nil || !winner {
-			t.Fatalf("MarkSubmitted: winner=%v err=%v", winner, err)
+		if err := s.MarkSubmitted(ctx, orgID, id); err != nil {
+			t.Fatalf("MarkSubmitted: %v", err)
 		}
-		err = s.UpdateTitleBody(ctx, orgID, id, "late edit", "late body")
+		err := s.UpdateTitleBody(ctx, orgID, id, "late edit", "late body")
 		if !errors.Is(err, db.ErrPendingPRSubmitted) {
 			t.Errorf("UpdateTitleBody after submit: err = %v, want ErrPendingPRSubmitted", err)
 		}
@@ -323,12 +322,8 @@ func RunPendingPRStoreConformance(t *testing.T, mk PendingPRStoreFactory) {
 		id := uuid.New().String()
 		mustCreatePendingPR(ctx, t, s, orgID, runID, id)
 
-		winner, err := s.MarkSubmitted(ctx, orgID, id)
-		if err != nil {
+		if err := s.MarkSubmitted(ctx, orgID, id); err != nil {
 			t.Fatalf("first MarkSubmitted: %v", err)
-		}
-		if !winner {
-			t.Errorf("first MarkSubmitted winner = false, want true")
 		}
 		// The row should now have a non-nil SubmittedAt.
 		got, _ := s.Get(ctx, orgID, id)
@@ -344,26 +339,20 @@ func RunPendingPRStoreConformance(t *testing.T, mk PendingPRStoreFactory) {
 		runID := seed.Run(t)
 		id := uuid.New().String()
 		mustCreatePendingPR(ctx, t, s, orgID, runID, id)
-		if _, err := s.MarkSubmitted(ctx, orgID, id); err != nil {
+		if err := s.MarkSubmitted(ctx, orgID, id); err != nil {
 			t.Fatalf("first MarkSubmitted: %v", err)
 		}
-		winner, err := s.MarkSubmitted(ctx, orgID, id)
+		err := s.MarkSubmitted(ctx, orgID, id)
 		if !errors.Is(err, db.ErrPendingPRSubmitInFlight) {
 			t.Errorf("second MarkSubmitted: err = %v, want ErrPendingPRSubmitInFlight", err)
-		}
-		if winner {
-			t.Errorf("second MarkSubmitted winner = true, want false")
 		}
 	})
 
 	t.Run("MarkSubmitted_bogus_id_distinct_from_in_flight", func(t *testing.T) {
 		s, orgID, _ := mk(t)
-		winner, err := s.MarkSubmitted(ctx, orgID, uuid.New().String())
+		err := s.MarkSubmitted(ctx, orgID, uuid.New().String())
 		if errors.Is(err, db.ErrPendingPRSubmitInFlight) {
 			t.Errorf("bogus id should not return ErrPendingPRSubmitInFlight, got %v", err)
-		}
-		if winner {
-			t.Errorf("bogus id winner = true, want false")
 		}
 		if err == nil || !strings.Contains(err.Error(), "not found") {
 			t.Errorf("bogus id: err = %v, want 'not found'", err)
@@ -377,18 +366,14 @@ func RunPendingPRStoreConformance(t *testing.T, mk PendingPRStoreFactory) {
 		runID := seed.Run(t)
 		id := uuid.New().String()
 		mustCreatePendingPR(ctx, t, s, orgID, runID, id)
-		if _, err := s.MarkSubmitted(ctx, orgID, id); err != nil {
+		if err := s.MarkSubmitted(ctx, orgID, id); err != nil {
 			t.Fatalf("first MarkSubmitted: %v", err)
 		}
 		if err := s.ClearSubmitted(ctx, orgID, id); err != nil {
 			t.Fatalf("ClearSubmitted: %v", err)
 		}
-		winner, err := s.MarkSubmitted(ctx, orgID, id)
-		if err != nil {
-			t.Fatalf("retry MarkSubmitted: %v", err)
-		}
-		if !winner {
-			t.Errorf("retry MarkSubmitted winner = false, want true after Clear")
+		if err := s.MarkSubmitted(ctx, orgID, id); err != nil {
+			t.Fatalf("retry MarkSubmitted (Clear should have released the guard): %v", err)
 		}
 	})
 

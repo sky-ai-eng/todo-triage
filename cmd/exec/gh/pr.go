@@ -636,15 +636,15 @@ func prCreate(client *ghclient.Client, database *db.DB, args []string) {
 		}
 
 		printJSON(map[string]any{
-			"status":     "queued_for_human_approval",
-			"id":         id,
-			"owner":      owner,
-			"repo":       repo,
-			"head":       head,
-			"base":       base,
-			"head_sha":   headSHA,
-			"draft_hint": draft, // not stored — passed through at user-approval time
-			"next_step":  "PR is queued for human approval. Do not call pr create again. Finish the run by writing $TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/<run_id>.md and returning your completion JSON.",
+			"status":    "queued_for_human_approval",
+			"id":        id,
+			"owner":     owner,
+			"repo":      repo,
+			"head":      head,
+			"base":      base,
+			"head_sha":  headSHA,
+			"draft":     draft,
+			"next_step": "PR is queued for human approval. Do not call pr create again. Finish the run by writing $TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/<run_id>.md and returning your completion JSON.",
 		})
 		return
 	}

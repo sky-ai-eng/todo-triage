@@ -101,7 +101,9 @@ type PendingPRStore interface {
 	// clicking "Open PR" simultaneously both hit POST /submit; only
 	// one should actually call GitHub's CreatePR. The
 	// `WHERE submitted_at IS NULL` clause matches once; the loser
-	// sees RowsAffected=0 and gets ErrPendingPRSubmitInFlight.
+	// sees RowsAffected=0 and gets ErrPendingPRSubmitInFlight (and
+	// the existence probe disambiguates that case from a bogus id,
+	// which surfaces as a wrapped "not found" error).
 	//
 	// Returns (winner, err). winner=true means this caller should
 	// proceed with CreatePR. winner=false + nil err means another
@@ -111,7 +113,7 @@ type PendingPRStore interface {
 	// On submit failure the server should call ClearSubmitted to
 	// release the guard so the user can retry without the lock
 	// blocking every retry attempt.
-	MarkSubmitted(ctx context.Context, orgID, id string) (winner bool, err error)
+	MarkSubmitted(ctx context.Context, orgID, id string) error
 
 	// ClearSubmitted releases the submitted_at guard so a failed
 	// submission can be retried by the user. Called from the submit

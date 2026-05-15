@@ -152,9 +152,9 @@ func (s *pendingPRStore) Lock(ctx context.Context, orgID, id, title, body string
 	return nil
 }
 
-func (s *pendingPRStore) MarkSubmitted(ctx context.Context, orgID, id string) (bool, error) {
+func (s *pendingPRStore) MarkSubmitted(ctx context.Context, orgID, id string) error {
 	if err := assertLocalOrg(orgID); err != nil {
-		return false, err
+		return err
 	}
 	res, err := s.q.ExecContext(ctx,
 		`UPDATE pending_prs
@@ -163,23 +163,23 @@ func (s *pendingPRStore) MarkSubmitted(ctx context.Context, orgID, id string) (b
 		time.Now().UTC(), id,
 	)
 	if err != nil {
-		return false, err
+		return err
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return false, err
+		return err
 	}
 	if n == 0 {
 		var exists int
 		if qerr := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM pending_prs WHERE id = ?`, id).Scan(&exists); qerr != nil {
-			return false, qerr
+			return qerr
 		}
 		if exists == 0 {
-			return false, fmt.Errorf("pending PR %s not found", id)
+			return fmt.Errorf("pending PR %s not found", id)
 		}
-		return false, db.ErrPendingPRSubmitInFlight
+		return db.ErrPendingPRSubmitInFlight
 	}
-	return true, nil
+	return nil
 }
 
 func (s *pendingPRStore) ClearSubmitted(ctx context.Context, orgID, id string) error {

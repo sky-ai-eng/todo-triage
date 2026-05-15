@@ -95,9 +95,7 @@ func TestPendingPRStore_Postgres_CrossOrgLeakage(t *testing.T) {
 
 	// MarkSubmitted cross-org must return "not found" (NOT
 	// ErrPendingPRSubmitInFlight) — same sentinel-leakage concern.
-	if winner, err := stores.PendingPRs.MarkSubmitted(ctx, orgB, prA); winner {
-		t.Errorf("orgB MarkSubmitted(orgA PR) won; want false")
-	} else if err == nil {
+	if err := stores.PendingPRs.MarkSubmitted(ctx, orgB, prA); err == nil {
 		t.Errorf("orgB MarkSubmitted(orgA PR) returned nil err; want not-found")
 	} else if errors.Is(err, db.ErrPendingPRSubmitInFlight) {
 		t.Errorf("cross-org MarkSubmitted returned ErrPendingPRSubmitInFlight, want not-found")

@@ -213,17 +213,12 @@ func (s *Server) handlePendingPRSubmit(w http.ResponseWriter, r *http.Request) {
 	// on to call GitHub; the loser sees 409 and can retry once the
 	// winner finishes (which will release the guard on failure or
 	// delete the row on success).
-	winner, err := s.pendingPRs.MarkSubmitted(r.Context(), runmode.LocalDefaultOrgID, id)
-	if err != nil {
+	if err := s.pendingPRs.MarkSubmitted(r.Context(), runmode.LocalDefaultOrgID, id); err != nil {
 		if errors.Is(err, db.ErrPendingPRSubmitInFlight) {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "another submit is in flight or has already completed"})
 			return
 		}
 		internalError(w, "pending-prs", err)
-		return
-	}
-	if !winner {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "another submit is in flight or has already completed"})
 		return
 	}
 
