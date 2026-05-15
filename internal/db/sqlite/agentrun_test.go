@@ -1,0 +1,146 @@
+package sqlite_test
+
+import (
+	"database/sql"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	_ "modernc.org/sqlite"
+
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+)
+
+// TestAgentRunStore_SQLite runs the shared conformance suite against
+// the SQLite AgentRunStore impl. Each subtest gets a fresh in-memory
+// DB so the run lifecycle assertions don't bleed across.
+func TestAgentRunStore_SQLite(t *testing.T) {
+	dbtest.RunAgentRunStoreConformance(t, func(t *testing.T) (db.AgentRunStore, string, string, dbtest.AgentRunSeeder) {
+		t.Helper()
+		conn := newSQLiteForAgentRunTest(t)
+		seed := newSQLiteAgentRunSeeder(conn)
+		stores := sqlitestore.New(conn)
+		return stores.AgentRuns, runmode.LocalDefaultOrg, runmode.LocalDefaultUserID, seed
+	})
+}
+
+// newSQLiteForAgentRunTest opens an in-memory DB, bootstraps the
+// schema, and seeds the local default agent + the conformance
+// prompt. Returned connection is t.Cleanup-closed.
+func newSQLiteForAgentRunTest(t *testing.T) *sql.DB {
+	t.Helper()
+	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	if err != nil {
+		t.Fatalf("open in-memory db: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	conn.SetMaxOpenConns(1)
+	conn.SetMaxIdleConns(1)
+	if err := db.BootstrapSchemaForTest(conn); err != nil {
+		t.Fatalf("bootstrap schema: %v", err)
+	}
+	// agents row backs runs.actor_agent_id and task claim stamps —
+	// migration seeds the sentinel user/team but not the agent row
+	// itself (production does that via BootstrapLocalAgent).
+	if _, err := conn.Exec(
+		`INSERT OR IGNORE INTO agents (id, org_id, display_name) VALUES (?, ?, 'Test Bot')`,
+		runmode.LocalDefaultAgentID, runmode.LocalDefaultOrgID,
+	); err != nil {
+		t.Fatalf("seed local agent: %v", err)
+	}
+	// Conformance suite's run.PromptID points at this stable ID.
+	if _, err := conn.Exec(
+		`INSERT INTO prompts (id, name, body, creator_user_id, team_id) VALUES ('p_agentrun_test', 'Test', 'body', ?, ?)`,
+		runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID,
+	); err != nil {
+		t.Fatalf("seed prompt: %v", err)
+	}
+	return conn
+}
+
+// newSQLiteAgentRunSeeder returns the FactorySeeder-style bag of
+// callbacks the conformance suite drives. Raw SQL keeps the seeder
+// independent of the store under test.
+func newSQLiteAgentRunSeeder(conn *sql.DB) dbtest.AgentRunSeeder {
+	return dbtest.AgentRunSeeder{
+		Entity: func(t *testing.T, suffix string) string {
+			t.Helper()
+			id := uuid.New().String()
+			sourceID := fmt.Sprintf("agentrun-%s-%s", suffix, id[:8])
+			if _, err := conn.Exec(`
+				INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at)
+				VALUES (?, 'github', ?, 'pr', ?, ?, '{}', ?)
+			`, id, sourceID, "Conformance "+suffix, "https://example/"+sourceID, time.Now().UTC()); err != nil {
+				t.Fatalf("seed entity %s: %v", suffix, err)
+			}
+			return id
+		},
+		Event: func(t *testing.T, entityID, eventType string) string {
+			t.Helper()
+			id := uuid.New().String()
+			if _, err := conn.Exec(`
+				INSERT INTO events (id, entity_id, event_type, dedup_key, metadata_json, created_at)
+				VALUES (?, ?, ?, '', '{}', ?)
+			`, id, entityID, eventType, time.Now().UTC()); err != nil {
+				t.Fatalf("seed event: %v", err)
+			}
+			return id
+		},
+		Task: func(t *testing.T, entityID, eventType, primaryEventID string) string {
+			t.Helper()
+			id := uuid.New().String()
+			if _, err := conn.Exec(`
+				INSERT INTO tasks (id, entity_id, event_type, dedup_key, primary_event_id,
+				                   status, priority_score, scoring_status, created_at,
+				                   team_id, visibility)
+				VALUES (?, ?, ?, '', ?, 'queued', 0.5, 'pending', ?, ?, 'team')
+			`, id, entityID, eventType, primaryEventID, time.Now().UTC(), runmode.LocalDefaultTeamID); err != nil {
+				t.Fatalf("seed task: %v", err)
+			}
+			return id
+		},
+		StampAgentClaim: func(t *testing.T, taskID, agentID string) {
+			t.Helper()
+			if _, err := conn.Exec(
+				`UPDATE tasks SET claimed_by_agent_id = ?, claimed_by_user_id = NULL WHERE id = ?`,
+				agentID, taskID,
+			); err != nil {
+				t.Fatalf("stamp claim: %v", err)
+			}
+		},
+		SetRunMemory: func(t *testing.T, runID, entityID, content string) {
+			t.Helper()
+			memID := uuid.New().String()
+			if content == dbtest.NullMemorySentinel {
+				if _, err := conn.Exec(`
+					INSERT INTO run_memory (id, run_id, entity_id, agent_content) VALUES (?, ?, ?, NULL)
+				`, memID, runID, entityID); err != nil {
+					t.Fatalf("seed null memory: %v", err)
+				}
+				return
+			}
+			if _, err := conn.Exec(`
+				INSERT INTO run_memory (id, run_id, entity_id, agent_content) VALUES (?, ?, ?, ?)
+			`, memID, runID, entityID, content); err != nil {
+				t.Fatalf("seed memory: %v", err)
+			}
+		},
+		AgentID: runmode.LocalDefaultAgentID,
+	}
+}
+
+// TestAgentRunStore_SQLite_AssertLocalOrg pins the local-only invariant:
+// the orgID guard at every method entry refuses non-LocalDefaultOrg.
+// The conformance suite exercises the happy path; this test pins the
+// SQLite-specific rejection.
+func TestAgentRunStore_SQLite_AssertLocalOrg(t *testing.T) {
+	conn := newSQLiteForAgentRunTest(t)
+	store := sqlitestore.New(conn).AgentRuns
+	if _, err := store.HasActiveForTask(t.Context(), "some-other-org", uuid.New().String()); err == nil {
+		t.Error("HasActiveForTask accepted non-LocalDefaultOrg without error")
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -81,7 +82,7 @@ func TestMaterializePriorMemories_WritesPriors(t *testing.T) {
 		t.Fatalf("task: %v", err)
 	}
 	ensureTestPrompt(t, database, domain.Prompt{ID: "p1", Name: "T", Body: "x", Source: "user"})
-	if err := db.CreateAgentRun(database, domain.AgentRun{
+	if err := sqlitestore.New(database).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrg, domain.AgentRun{
 		ID: "prior-run", TaskID: task.ID, PromptID: "p1", Status: "completed", Model: "m",
 	}); err != nil {
 		t.Fatalf("run: %v", err)

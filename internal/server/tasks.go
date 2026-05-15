@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
@@ -411,7 +412,7 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 		}
 		s.cleanupPendingApprovalRun(id, outcome)
 		if s.spawner != nil {
-			ids, err := db.ActiveRunIDsForTask(s.db, id)
+			ids, err := s.agentRuns.ActiveIDsForTask(r.Context(), runmode.LocalDefaultOrg, id)
 			if err != nil {
 				log.Printf("[swipe] active-run lookup for task %s failed: %v", id, err)
 			} else {
@@ -731,7 +732,7 @@ func (s *Server) finalizeRequeue(taskID string, task *domain.Task) {
 // cancelled run finds no pending_approval row (the lookup filters on
 // status='pending_approval') and exits silently.
 func (s *Server) cleanupPendingApprovalRun(taskID string, outcome discardOutcome) {
-	runID, err := db.PendingApprovalRunIDForTask(s.db, taskID)
+	runID, err := s.agentRuns.PendingApprovalIDForTask(context.Background(), runmode.LocalDefaultOrg, taskID)
 	if err != nil {
 		log.Printf("[approval-discard] pending_approval lookup for task %s failed: %v", taskID, err)
 		return
@@ -810,7 +811,7 @@ func (s *Server) cleanupPendingApprovalRun(taskID string, outcome discardOutcome
 	// already cancelled by a concurrent path (idempotent re-call,
 	// rare race) — skip the broadcast in that case so we don't
 	// double-fire.
-	ok, err := db.MarkAgentRunDiscarded(s.db, runID, stopReason)
+	ok, err := s.agentRuns.MarkDiscarded(context.Background(), runmode.LocalDefaultOrg, runID, stopReason)
 	if err != nil {
 		log.Printf("[approval-discard] MarkAgentRunDiscarded %s failed: %v", runID, err)
 		return

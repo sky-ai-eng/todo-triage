@@ -83,6 +83,12 @@ type Stores struct {
 	// path runs at startup before any JWT claims are in scope.
 	Factory FactoryReadStore
 
+	// AgentRuns owns runs + run_messages — agent run lifecycle,
+	// transcript, yield requests/responses. App pool in Postgres;
+	// every consumer is request-equivalent or runs in a delegate
+	// goroutine launched from a request handler.
+	AgentRuns AgentRunStore
+
 	// Tx is the transaction runner — handlers that need atomic
 	// multi-store writes call Tx.WithTx and receive a TxStores with
 	// every field tx-bound. Postgres impl also sets the JWT claims
@@ -108,6 +114,7 @@ type TxStores struct {
 	Users         UsersStore
 	Tasks         TaskStore
 	Factory       FactoryReadStore
+	AgentRuns     AgentRunStore
 }
 
 // TxRunner runs fn inside a single database transaction. Postgres

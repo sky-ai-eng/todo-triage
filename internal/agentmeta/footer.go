@@ -17,7 +17,7 @@
 package agentmeta
 
 import (
-	"database/sql"
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -25,6 +25,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // Build returns the markdown footer to append to an agent-authored
@@ -42,7 +43,7 @@ import (
 // bare branding-only footer rather than blocking the submit — the
 // disclosure is still meaningful (a run did exist) even if we
 // couldn't render the metrics.
-func Build(database *sql.DB, runID, kind string) string {
+func Build(agentRuns db.AgentRunStore, runID, kind string) string {
 	if runID == "" {
 		return ""
 	}
@@ -53,14 +54,15 @@ func Build(database *sql.DB, runID, kind string) string {
 	)
 	bare := "\n\n---\n" + disclaimer
 
-	run, err := db.GetAgentRun(database, runID)
+	ctx := context.Background()
+	run, err := agentRuns.Get(ctx, runmode.LocalDefaultOrg, runID)
 	if err != nil || run == nil {
 		return bare
 	}
 
 	model := prettyModel(run.Model)
 	elapsed := elapsedFromRun(run)
-	cost, costPrefix := costFromRun(database, runID, run)
+	cost, costPrefix := costFromRun(ctx, agentRuns, runID, run)
 
 	return fmt.Sprintf(
 		"\n\n---\n%s\n\nTime: %s | Model: %s | Cost: %s$%.3f",
@@ -92,11 +94,11 @@ func elapsedFromRun(run *domain.AgentRun) string {
 // for the still-running CLI mode. The "~" prefix flags the
 // approximate-from-tokens estimate so a reader can tell apart the
 // settled cost from a live estimate.
-func costFromRun(database *sql.DB, runID string, run *domain.AgentRun) (cost float64, prefix string) {
+func costFromRun(ctx context.Context, agentRuns db.AgentRunStore, runID string, run *domain.AgentRun) (cost float64, prefix string) {
 	if run.TotalCostUSD != nil {
 		return *run.TotalCostUSD, ""
 	}
-	totals, err := db.RunTokenTotals(database, runID)
+	totals, err := agentRuns.TokenTotals(ctx, runmode.LocalDefaultOrg, runID)
 	if err != nil {
 		return 0, ""
 	}

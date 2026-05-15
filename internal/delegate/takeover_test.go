@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	_ "modernc.org/sqlite"
@@ -68,7 +69,7 @@ func seedRun(t *testing.T, database *sql.DB, runID, sessionID, worktreePath stri
 		t.Fatalf("create task: %v", err)
 	}
 	ensureTestPrompt(t, database, domain.Prompt{ID: "test-prompt", Name: "T", Body: "x", Source: "user"})
-	if err := db.CreateAgentRun(database, domain.AgentRun{
+	if err := sqlitestore.New(database).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrg, domain.AgentRun{
 		ID:           runID,
 		TaskID:       task.ID,
 		PromptID:     "test-prompt",
@@ -105,7 +106,7 @@ func seedJiraRun(t *testing.T, database *sql.DB, runID, sessionID, worktreePath 
 		t.Fatalf("create task: %v", err)
 	}
 	ensureTestPrompt(t, database, domain.Prompt{ID: "test-prompt", Name: "T", Body: "x", Source: "user"})
-	if err := db.CreateAgentRun(database, domain.AgentRun{
+	if err := sqlitestore.New(database).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrg, domain.AgentRun{
 		ID: runID, TaskID: task.ID, PromptID: "test-prompt",
 		Status: "running", Model: "claude-sonnet-4-6", WorktreePath: worktreePath,
 	}); err != nil {
@@ -120,7 +121,7 @@ func seedJiraRun(t *testing.T, database *sql.DB, runID, sessionID, worktreePath 
 // run registered in the cancels map — Takeover's atomic active-check
 // requires this to pass before doing any other work.
 func newSpawnerWithActiveCancel(database *sql.DB, runID string) *Spawner {
-	s := NewSpawner(database, testPromptStore(database), nil, nil, testTaskStore(database), nil, nil, "claude-sonnet-4-6")
+	s := NewSpawner(database, testPromptStore(database), nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, nil, nil, "claude-sonnet-4-6")
 	if runID != "" {
 		_, cancel := context.WithCancel(context.Background())
 		s.cancels[runID] = cancel
@@ -133,7 +134,7 @@ func newSpawnerWithActiveCancel(database *sql.DB, runID string) *Spawner {
 // sentinel — empty base dir is a server config bug, not a client
 // problem, and the handler routes uncategorized errors to 500.
 func TestTakeover_EmptyBaseDir(t *testing.T) {
-	s := NewSpawner(nil, nil, nil, nil, nil, nil, nil, "")
+	s := NewSpawner(nil, nil, nil, nil, nil, nil, nil, nil, "")
 	_, err := s.Takeover("any-run", "")
 	if err == nil {
 		t.Fatal("expected error on empty baseDir")
@@ -149,7 +150,7 @@ func TestTakeover_EmptyBaseDir(t *testing.T) {
 // Maps to 400 in the handler.
 func TestTakeover_NonexistentRun(t *testing.T) {
 	database := newTakeoverTestDB(t)
-	s := NewSpawner(database, testPromptStore(database), nil, nil, testTaskStore(database), nil, nil, "")
+	s := NewSpawner(database, testPromptStore(database), nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, nil, nil, "")
 
 	_, err := s.Takeover("no-such-run", "/tmp/dest")
 	if !errors.Is(err, ErrTakeoverInvalidState) {
@@ -215,7 +216,7 @@ func TestTakeover_NoActiveRun(t *testing.T) {
 	database := newTakeoverTestDB(t)
 	seedRun(t, database, "run-not-active", "sess-1", "/tmp/wt")
 	// No cancels[runID] set.
-	s := NewSpawner(database, testPromptStore(database), nil, nil, testTaskStore(database), nil, nil, "")
+	s := NewSpawner(database, testPromptStore(database), nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, nil, nil, "")
 
 	_, err := s.Takeover("run-not-active", "/tmp/dest")
 	if !errors.Is(err, ErrTakeoverInvalidState) {
@@ -244,7 +245,7 @@ func TestTakeover_AlreadyInProgress(t *testing.T) {
 // cleanup path. A nil-safe read — the map is always initialized in
 // NewSpawner — but cheap to assert.
 func TestWasTakenOver(t *testing.T) {
-	s := NewSpawner(nil, nil, nil, nil, nil, nil, nil, "")
+	s := NewSpawner(nil, nil, nil, nil, nil, nil, nil, nil, "")
 	if s.wasTakenOver("missing") {
 		t.Error("expected false for missing entry")
 	}
@@ -292,7 +293,7 @@ func TestAbortTakeover_MarksRowTerminal(t *testing.T) {
 
 	s.abortTakeover("run-mark", "", "")
 
-	got, err := db.GetAgentRun(database, "run-mark")
+	got, err := sqlitestore.New(database).AgentRuns.Get(t.Context(), runmode.LocalDefaultOrg, "run-mark")
 	if err != nil {
 		t.Fatalf("GetAgentRun: %v", err)
 	}
@@ -411,7 +412,7 @@ func TestAbortTakeover_PreservesTerminalRow(t *testing.T) {
 
 	s.abortTakeover("run-already-done", "", "")
 
-	got, err := db.GetAgentRun(database, "run-already-done")
+	got, err := sqlitestore.New(database).AgentRuns.Get(t.Context(), runmode.LocalDefaultOrg, "run-already-done")
 	if err != nil {
 		t.Fatalf("GetAgentRun: %v", err)
 	}

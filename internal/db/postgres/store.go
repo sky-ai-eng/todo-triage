@@ -108,7 +108,13 @@ func New(admin, app *sql.DB) db.Stores {
 		// Hydrate path runs at server startup before any JWT claims
 		// are in scope.
 		Factory: newFactoryReadStore(admin),
-		Tx:      s,
+		// AgentRuns wires app — every consumer is request-
+		// equivalent (server agent handler, delegate spawner
+		// goroutine spawned from a handler, chains). System-service
+		// reads of run state are routed through the admin-pooled
+		// FactoryReadStore instead.
+		AgentRuns: newAgentRunStore(app),
+		Tx:        s,
 	}
 	return s.stores
 }
@@ -149,5 +155,6 @@ func NewForTx(tx *sql.Tx) db.TxStores {
 		Users:         newUsersStore(tx),
 		Tasks:         newTaskStore(tx),
 		Factory:       newFactoryReadStore(tx),
+		AgentRuns:     newAgentRunStore(tx),
 	}
 }

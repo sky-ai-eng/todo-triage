@@ -56,6 +56,7 @@ func (s *Store) WithTx(ctx context.Context, orgID, userID string, fn func(db.TxS
 		Users:         newUsersStore(tx),
 		Tasks:         newTaskStore(tx),
 		Factory:       newFactoryReadStore(tx),
+		AgentRuns:     newAgentRunStore(tx),
 	}
 	if err := fn(txStores); err != nil {
 		return err

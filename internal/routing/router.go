@@ -55,6 +55,7 @@ type Router struct {
 	teamAgents dbpkg.TeamAgentStore // SKY-261: read team_agents.enabled before auto-firing triggers
 	users      dbpkg.UsersStore     // SKY-270: read local user's jira_account_id for inline close gates
 	tasks      dbpkg.TaskStore      // SKY-283: task lifecycle, dedup, claims, breaker
+	agentRuns  dbpkg.AgentRunStore  // SKY-285: lookup active runs for the task-close cancel cascade
 	spawner    Delegator
 	scorer     Scorer
 	ws         *websocket.Hub
@@ -81,7 +82,7 @@ type Router struct {
 // behavior). users is nil-safe too — the SKY-270 inline-close gate
 // degrades to "treat every reassignment as away-from-me" when missing,
 // which over-closes (acceptable: user can reopen via the next poll).
-func NewRouter(db *sql.DB, prompts dbpkg.PromptStore, handlers dbpkg.EventHandlerStore, agents dbpkg.AgentStore, teamAgents dbpkg.TeamAgentStore, users dbpkg.UsersStore, tasks dbpkg.TaskStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
+func NewRouter(db *sql.DB, prompts dbpkg.PromptStore, handlers dbpkg.EventHandlerStore, agents dbpkg.AgentStore, teamAgents dbpkg.TeamAgentStore, users dbpkg.UsersStore, tasks dbpkg.TaskStore, agentRuns dbpkg.AgentRunStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
 	return &Router{
 		db:         db,
 		prompts:    prompts,
@@ -90,6 +91,7 @@ func NewRouter(db *sql.DB, prompts dbpkg.PromptStore, handlers dbpkg.EventHandle
 		teamAgents: teamAgents,
 		users:      users,
 		tasks:      tasks,
+		agentRuns:  agentRuns,
 		spawner:    spawner,
 		scorer:     scorer,
 		ws:         ws,
@@ -883,7 +885,7 @@ func (r *Router) cancelActiveRunsForTask(taskID string) {
 	if r.spawner == nil {
 		return
 	}
-	ids, err := dbpkg.ActiveRunIDsForTask(r.db, taskID)
+	ids, err := r.agentRuns.ActiveIDsForTask(context.Background(), runmode.LocalDefaultOrg, taskID)
 	if err != nil {
 		log.Printf("[router] active-run lookup for task %s failed: %v", taskID, err)
 		return

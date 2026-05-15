@@ -47,7 +47,7 @@ var ErrYieldNotResumable = errors.New("yield: run not in awaiting_input")
 //
 // SKY-139.
 func (s *Spawner) ResumeAfterYield(runID, agentMessage string) error {
-	run, err := db.GetAgentRun(s.database, runID)
+	run, err := s.agentRuns.Get(context.Background(), runmode.LocalDefaultOrg, runID)
 	if err != nil {
 		return fmt.Errorf("load run: %w", err)
 	}
@@ -122,7 +122,7 @@ func (s *Spawner) ResumeAfterYield(runID, agentMessage string) error {
 	// goroutine still running" state the review bot flagged. With
 	// the cancel handle already in place, any Cancel() now hits
 	// cancel(ctx) and the goroutine handles the terminal write.
-	flipped, err := db.MarkAgentRunResuming(s.database, runID)
+	flipped, err := s.agentRuns.MarkResuming(context.Background(), runmode.LocalDefaultOrg, runID)
 	if err != nil {
 		s.mu.Lock()
 		delete(s.cancels, runID)
@@ -157,7 +157,7 @@ func (s *Spawner) ResumeAfterYield(runID, agentMessage string) error {
 		// path doesn't touch the DB; this goroutine owns the
 		// terminal write any time it observes ctx.Err().
 		markCancelled := func() {
-			ok, _ := db.MarkAgentRunCancelledIfActive(s.database, runID, "user_cancelled", "Run cancelled by user")
+			ok, _ := s.agentRuns.MarkCancelledIfActive(context.Background(), runmode.LocalDefaultOrg, runID, "user_cancelled", "Run cancelled by user")
 			if ok {
 				s.broadcastRunUpdate(runID, "cancelled")
 			}

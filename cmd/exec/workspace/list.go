@@ -67,18 +67,18 @@ func listWorkspaces(database *db.DB, runID string) (listOutput, error) {
 		return listOutput{}, errMissingRunID
 	}
 
-	run, err := db.GetAgentRun(database.Conn, runID)
+	// Construct a sqlite Stores bundle inline — cmd/exec runs as a
+	// separate process with its own connection, so wiring full stores
+	// at startup would be overkill for the few store calls this path
+	// needs. SKY-283 / SKY-285.
+	stores := sqlitestore.New(database.Conn)
+	run, err := stores.AgentRuns.Get(context.Background(), runmode.LocalDefaultOrg, runID)
 	if err != nil {
 		return listOutput{}, fmt.Errorf("workspace list: load run: %w", err)
 	}
 	if run == nil {
 		return listOutput{}, fmt.Errorf("%w: %s", errRunNotFound, runID)
 	}
-	// Construct a sqlite Stores bundle inline — cmd/exec runs as a
-	// separate process with its own connection, so wiring full stores
-	// at startup would be overkill for the one TaskStore call this
-	// path needs. SKY-283.
-	stores := sqlitestore.New(database.Conn)
 	task, err := stores.Tasks.Get(context.Background(), runmode.LocalDefaultOrg, run.TaskID)
 	if err != nil {
 		return listOutput{}, fmt.Errorf("workspace list: load task: %w", err)

@@ -118,7 +118,7 @@ func (s *Server) handleReviewSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build the final review body with header + footer using actual run data
-	body := review.ReviewBody + agentmeta.Build(s.db, review.RunID, "review")
+	body := review.ReviewBody + agentmeta.Build(s.agentRuns, review.RunID, "review")
 
 	// Submit to GitHub
 	ghReviewID, actualEvent, err := s.ghClient.SubmitReview(

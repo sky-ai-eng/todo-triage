@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/agentmeta"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 )
@@ -414,7 +415,7 @@ func prSubmitReview(client *ghclient.Client, database *db.DB, args []string) {
 	}
 
 	// Inject footer with run metadata
-	body = body + agentmeta.Build(database.Conn, os.Getenv("TRIAGE_FACTORY_RUN_ID"), "review")
+	body = body + agentmeta.Build(sqlitestore.New(database.Conn).AgentRuns, os.Getenv("TRIAGE_FACTORY_RUN_ID"), "review")
 
 	// Submit atomically to GitHub
 	ghReviewID, actualEvent, err := client.SubmitReview(
@@ -638,7 +639,7 @@ func prCreate(client *ghclient.Client, database *db.DB, args []string) {
 	}
 
 	// Standalone mode: open the PR immediately, with footer pre-applied.
-	body = body + agentmeta.Build(database.Conn, os.Getenv("TRIAGE_FACTORY_RUN_ID"), "PR")
+	body = body + agentmeta.Build(sqlitestore.New(database.Conn).AgentRuns, os.Getenv("TRIAGE_FACTORY_RUN_ID"), "PR")
 	number, htmlURL, err := client.CreatePR(owner, repo, head, base, title, body, draft)
 	exitOnErr(err)
 

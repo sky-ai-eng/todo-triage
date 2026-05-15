@@ -1,0 +1,775 @@
+package dbtest
+
+import (
+	"context"
+	"strconv"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+)
+
+// AgentRunStoreFactory is what a per-backend test file hands to
+// RunAgentRunStoreConformance. Returns:
+//   - the wired AgentRunStore impl,
+//   - the orgID to pass to every call,
+//   - a userID for claim-flip assertions (MarkTakenOver wires this
+//     into the target task row),
+//   - an AgentRunSeeder for entity/task/run_memory/task-claim
+//     fixtures the harness needs but doesn't go through the store
+//     to provide.
+type AgentRunStoreFactory func(t *testing.T) (
+	store db.AgentRunStore,
+	orgID, userID string,
+	seed AgentRunSeeder,
+)
+
+// AgentRunSeeder is a bag of callbacks the conformance suite uses
+// to stage fixture rows that aren't agent-run-shaped. Each backend
+// test file implements them against its own SQL.
+type AgentRunSeeder struct {
+	// Entity inserts an active GitHub PR entity and returns its ID.
+	Entity func(t *testing.T, suffix string) string
+
+	// Event inserts an entity-attached event with the given event
+	// type. Returns the event ID.
+	Event func(t *testing.T, entityID, eventType string) string
+
+	// Task inserts a task row tied to the given entity and event.
+	// status defaults to "queued" — the factory's behavior tests
+	// don't care about the parent task status, only about the runs
+	// hanging off it.
+	Task func(t *testing.T, entityID, eventType, primaryEventID string) string
+
+	// StampAgentClaim sets the task's claimed_by_agent_id directly.
+	// Used to set up the MarkTakenOver atomic-flip preconditions:
+	// the takeover only flips the task claim when the bot still
+	// holds it. agentID matches the value MarkTakenOver expects to
+	// vacate.
+	StampAgentClaim func(t *testing.T, taskID, agentID string)
+
+	// SetRunMemory upserts a run_memory row with the given
+	// agent_content. content="" inserts an empty string;
+	// NullMemorySentinel inserts SQL NULL.
+	SetRunMemory func(t *testing.T, runID, entityID, content string)
+
+	// AgentID returns an identifier suitable for the
+	// StampAgentClaim agentID and the run row's actor_agent_id.
+	// Backends use this to thread their own seeded agent row (the
+	// Postgres path needs a real FK; SQLite is more relaxed).
+	AgentID string
+}
+
+// RunAgentRunStoreConformance covers the agent-run contract every
+// backend impl must hold:
+//
+//   - Lifecycle methods (Create / Complete / AddPartialTotals /
+//     SetSession / MarkAwaitingInput / MarkResuming /
+//     MarkCancelledIfActive / MarkDiscarded / MarkReleased /
+//     MarkTakenOver) refuse terminal statuses and produce correct
+//     side effects when they accept.
+//   - MarkTakenOver is atomic with the parent task's claim flip —
+//     ok=true requires BOTH UPDATEs landed; race-loss on either
+//     axis rolls back the run flip and returns (false, nil).
+//   - Queries return what they advertise (status filters, sort
+//     orders, JOIN-derived projections).
+//   - Transcript layer round-trips messages including JSONB
+//     metadata + tool_calls, and TokenTotals sums correctly.
+//   - Yields go through the run_messages subtype channel and the
+//     latest-yield lookup picks the most recent.
+//   - Memory_missing derivation matches the four noncompliance
+//     forms (no row / NULL / "" / whitespace) + the populated
+//     baseline.
+//
+// Cross-org leakage is Postgres-only and lives in the backend test
+// file directly. The SQLite assertLocalOrg guard is also pinned in
+// the backend test file.
+func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
+	t.Helper()
+
+	t.Run("Create_PersistsRun_GetReturnsIt", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		ent := seed.Entity(t, "create")
+		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+		runID := uuid.New().String()
+		if err := store.Create(ctx, orgID, domain.AgentRun{
+			ID: runID, TaskID: taskID, PromptID: agentRunTestPrompt(t), Status: "running", Model: "claude-test",
+		}); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		got, err := store.Get(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if got == nil || got.ID != runID {
+			t.Fatalf("Get returned %v, want id=%s", got, runID)
+		}
+		if got.Status != "running" || got.Model != "claude-test" {
+			t.Errorf("Get fields drift: %+v", got)
+		}
+	})
+
+	t.Run("Get_ReturnsNilForMissingID", func(t *testing.T) {
+		store, orgID, _, _ := mk(t)
+		got, err := store.Get(context.Background(), orgID, uuid.New().String())
+		if err != nil {
+			t.Fatalf("Get missing: %v", err)
+		}
+		if got != nil {
+			t.Errorf("expected nil, got %+v", got)
+		}
+	})
+
+	t.Run("Complete_FoldsTotalsAndStampsCompletedAt", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+
+		// Pre-seed a partial total so Complete's COALESCE+add semantics
+		// are exercised end-to-end (a fresh run starts with NULL
+		// totals; we want to verify a yield-resume-style accumulation).
+		if err := store.AddPartialTotals(ctx, orgID, runID, 1.25, 4000, 3); err != nil {
+			t.Fatalf("AddPartialTotals: %v", err)
+		}
+		if err := store.Complete(ctx, orgID, runID, "completed", 0.75, 2000, 5, "ok", "all done"); err != nil {
+			t.Fatalf("Complete: %v", err)
+		}
+		got, err := store.Get(ctx, orgID, runID)
+		if err != nil || got == nil {
+			t.Fatalf("Get: err=%v, got=%v", err, got)
+		}
+		if got.Status != "completed" {
+			t.Errorf("status = %q, want completed", got.Status)
+		}
+		if got.CompletedAt == nil {
+			t.Errorf("completed_at not stamped")
+		}
+		if got.TotalCostUSD == nil || *got.TotalCostUSD != 2.0 {
+			t.Errorf("total_cost_usd = %v, want 2.0 (partial 1.25 + terminal 0.75)", got.TotalCostUSD)
+		}
+		if got.DurationMs == nil || *got.DurationMs != 6000 {
+			t.Errorf("duration_ms = %v, want 6000", got.DurationMs)
+		}
+		if got.NumTurns == nil || *got.NumTurns != 8 {
+			t.Errorf("num_turns = %v, want 8", got.NumTurns)
+		}
+		if got.StopReason != "ok" {
+			t.Errorf("stop_reason = %q, want ok", got.StopReason)
+		}
+	})
+
+	t.Run("SetSession_PersistsSessionID", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		if err := store.SetSession(ctx, orgID, runID, "sess-abc"); err != nil {
+			t.Fatalf("SetSession: %v", err)
+		}
+		got, _ := store.Get(ctx, orgID, runID)
+		if got == nil || got.SessionID != "sess-abc" {
+			t.Errorf("session_id = %q, want sess-abc", got.SessionID)
+		}
+	})
+
+	t.Run("MarkAwaitingInput_FlipsRunning_RefusesTerminal", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		// Running → ok=true.
+		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		ok, err := store.MarkAwaitingInput(ctx, orgID, runID)
+		if err != nil || !ok {
+			t.Fatalf("MarkAwaitingInput on running: ok=%v err=%v", ok, err)
+		}
+		got, _ := store.Get(ctx, orgID, runID)
+		if got.Status != "awaiting_input" {
+			t.Errorf("status = %q, want awaiting_input", got.Status)
+		}
+		// Already awaiting_input → ok=false (terminal-list excludes
+		// awaiting_input, so idempotent re-call refuses).
+		ok, err = store.MarkAwaitingInput(ctx, orgID, runID)
+		if err != nil || ok {
+			t.Errorf("re-call on awaiting_input: ok=%v err=%v, want false/nil", ok, err)
+		}
+		// Terminal → ok=false.
+		runID2 := seedAgentRunForTest(t, store, orgID, seed, "completed")
+		ok, err = store.MarkAwaitingInput(ctx, orgID, runID2)
+		if err != nil || ok {
+			t.Errorf("on completed: ok=%v err=%v, want false/nil", ok, err)
+		}
+	})
+
+	t.Run("MarkResuming_OnlyFromAwaitingInput", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		// Running → refused.
+		ok, err := store.MarkResuming(ctx, orgID, runID)
+		if err != nil || ok {
+			t.Errorf("Resuming on running: ok=%v err=%v, want false", ok, err)
+		}
+		// Park it, then resume → ok.
+		if _, err := store.MarkAwaitingInput(ctx, orgID, runID); err != nil {
+			t.Fatalf("park: %v", err)
+		}
+		ok, err = store.MarkResuming(ctx, orgID, runID)
+		if err != nil || !ok {
+			t.Fatalf("Resuming from awaiting: ok=%v err=%v", ok, err)
+		}
+		// Second resume → refused (back to running).
+		ok, _ = store.MarkResuming(ctx, orgID, runID)
+		if ok {
+			t.Errorf("double-resume succeeded")
+		}
+	})
+
+	t.Run("MarkCancelledIfActive_FlipsActive_RefusesTerminal", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		ok, err := store.MarkCancelledIfActive(ctx, orgID, runID, "manual", "user cancelled")
+		if err != nil || !ok {
+			t.Fatalf("cancel active: ok=%v err=%v", ok, err)
+		}
+		got, _ := store.Get(ctx, orgID, runID)
+		if got.Status != "cancelled" || got.StopReason != "manual" {
+			t.Errorf("after cancel: status=%q stop_reason=%q", got.Status, got.StopReason)
+		}
+		// Already terminal → refused.
+		ok, err = store.MarkCancelledIfActive(ctx, orgID, runID, "manual", "")
+		if err != nil || ok {
+			t.Errorf("re-cancel: ok=%v err=%v, want false/nil", ok, err)
+		}
+	})
+
+	t.Run("MarkDiscarded_OnlyPendingApproval", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runRunning := seedAgentRunForTest(t, store, orgID, seed, "running")
+		runPending := seedAgentRunForTest(t, store, orgID, seed, "pending_approval")
+
+		// Running → refused (Discard targets pending_approval only).
+		ok, _ := store.MarkDiscarded(ctx, orgID, runRunning, "discarded")
+		if ok {
+			t.Errorf("Discarded on running: ok=true, want false")
+		}
+		// pending_approval → ok.
+		ok, err := store.MarkDiscarded(ctx, orgID, runPending, "discarded")
+		if err != nil || !ok {
+			t.Fatalf("Discarded on pending_approval: ok=%v err=%v", ok, err)
+		}
+		got, _ := store.Get(ctx, orgID, runPending)
+		if got.Status != "cancelled" {
+			t.Errorf("after discard: status=%q, want cancelled", got.Status)
+		}
+	})
+
+	t.Run("MarkReleased_OnlyFromTakenOverWithPath", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		// Seed taken-over via the store's atomic flip (sets worktree_path).
+		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		ok, _ := store.MarkTakenOver(ctx, orgID, runID, "/tmp/takeover-foo", "")
+		if !ok {
+			t.Fatalf("seed: MarkTakenOver failed")
+		}
+		ok, err := store.MarkReleased(ctx, orgID, runID)
+		if err != nil || !ok {
+			t.Fatalf("MarkReleased: ok=%v err=%v", ok, err)
+		}
+		got, _ := store.Get(ctx, orgID, runID)
+		if got.Status != "taken_over" {
+			t.Errorf("after release: status=%q, want taken_over (status stays)", got.Status)
+		}
+		if got.WorktreePath != "" {
+			t.Errorf("after release: worktree_path=%q, want empty", got.WorktreePath)
+		}
+		// Second release → refused.
+		ok, _ = store.MarkReleased(ctx, orgID, runID)
+		if ok {
+			t.Errorf("double-release succeeded")
+		}
+	})
+
+	t.Run("MarkTakenOver_AtomicWithClaim_Succeeds", func(t *testing.T) {
+		store, orgID, userID, seed := mk(t)
+		ctx := context.Background()
+		ent := seed.Entity(t, "to-claim")
+		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+		seed.StampAgentClaim(t, taskID, seed.AgentID)
+		runID := uuid.New().String()
+		if err := store.Create(ctx, orgID, domain.AgentRun{
+			ID: runID, TaskID: taskID, PromptID: agentRunTestPrompt(t), Status: "running", Model: "m",
+		}); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		ok, err := store.MarkTakenOver(ctx, orgID, runID, "/tmp/takeover", userID)
+		if err != nil {
+			t.Fatalf("MarkTakenOver: %v", err)
+		}
+		if !ok {
+			t.Fatal("MarkTakenOver returned false, want true")
+		}
+		got, _ := store.Get(ctx, orgID, runID)
+		if got.Status != "taken_over" {
+			t.Errorf("status = %q, want taken_over", got.Status)
+		}
+		if got.WorktreePath != "/tmp/takeover" {
+			t.Errorf("worktree_path = %q, want /tmp/takeover", got.WorktreePath)
+		}
+	})
+
+	t.Run("MarkTakenOver_RollsBackOnRunRace", func(t *testing.T) {
+		store, orgID, userID, seed := mk(t)
+		ctx := context.Background()
+		// Run is already terminal → run-axis race-loss.
+		runID := seedAgentRunForTest(t, store, orgID, seed, "completed")
+		ok, err := store.MarkTakenOver(ctx, orgID, runID, "/tmp/takeover", userID)
+		if err != nil {
+			t.Fatalf("MarkTakenOver: %v", err)
+		}
+		if ok {
+			t.Error("MarkTakenOver returned true on terminal run, want false")
+		}
+		got, _ := store.Get(ctx, orgID, runID)
+		if got.Status != "completed" {
+			t.Errorf("status = %q, want completed (rollback should preserve)", got.Status)
+		}
+	})
+
+	t.Run("MarkTakenOver_RollsBackOnClaimRace", func(t *testing.T) {
+		store, orgID, userID, seed := mk(t)
+		ctx := context.Background()
+		// Task claim is empty (no agent stamp) → claim-axis race-loss
+		// when claimUserID is non-empty: the takeover refuses to
+		// flip a non-agent-claimed task. Run flip should roll back.
+		ent := seed.Entity(t, "claim-race")
+		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+		// Deliberately do NOT call StampAgentClaim — the bot hasn't
+		// claimed this task, so the claim-flip predicate fails.
+		runID := uuid.New().String()
+		if err := store.Create(ctx, orgID, domain.AgentRun{
+			ID: runID, TaskID: taskID, PromptID: agentRunTestPrompt(t), Status: "running", Model: "m",
+		}); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		ok, err := store.MarkTakenOver(ctx, orgID, runID, "/tmp/claim-race", userID)
+		if err != nil {
+			t.Fatalf("MarkTakenOver: %v", err)
+		}
+		if ok {
+			t.Error("MarkTakenOver returned true with no agent claim, want false")
+		}
+		got, _ := store.Get(ctx, orgID, runID)
+		if got.Status != "running" {
+			t.Errorf("status = %q, want running (run flip should have rolled back)", got.Status)
+		}
+	})
+
+	t.Run("ListForTask_OrderedByStartedAtDesc", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		ent := seed.Entity(t, "list")
+		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+		// Two runs with a >1s sleep — SQLite's CURRENT_TIMESTAMP
+		// default has 1-second granularity, so the gap is needed
+		// for ORDER BY to discriminate. Two runs is enough to pin
+		// "newest first"; three would risk landing in the same
+		// second slot without making the assertion stronger.
+		first := uuid.New().String()
+		if err := store.Create(ctx, orgID, domain.AgentRun{
+			ID: first, TaskID: taskID, PromptID: agentRunTestPrompt(t), Status: "running", Model: "m",
+		}); err != nil {
+			t.Fatalf("Create first: %v", err)
+		}
+		time.Sleep(1100 * time.Millisecond)
+		second := uuid.New().String()
+		if err := store.Create(ctx, orgID, domain.AgentRun{
+			ID: second, TaskID: taskID, PromptID: agentRunTestPrompt(t), Status: "running", Model: "m",
+		}); err != nil {
+			t.Fatalf("Create second: %v", err)
+		}
+		runs, err := store.ListForTask(ctx, orgID, taskID)
+		if err != nil {
+			t.Fatalf("ListForTask: %v", err)
+		}
+		if len(runs) != 2 {
+			t.Fatalf("len = %d, want 2", len(runs))
+		}
+		if runs[0].ID != second || runs[1].ID != first {
+			t.Errorf("order = [%s, %s], want [%s, %s] (newest first)",
+				runs[0].ID, runs[1].ID, second, first)
+		}
+	})
+
+	t.Run("HasActiveAndActiveIDs_ForTask", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		ent := seed.Entity(t, "ha")
+		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+		// No runs yet → false / empty.
+		if has, _ := store.HasActiveForTask(ctx, orgID, taskID); has {
+			t.Error("HasActive with no runs: true, want false")
+		}
+		ids, _ := store.ActiveIDsForTask(ctx, orgID, taskID)
+		if len(ids) != 0 {
+			t.Errorf("ActiveIDs with no runs: %v, want []", ids)
+		}
+		// One running + one terminal → has=true, ids=[running].
+		runRun := seedAgentRunForTaskTest(t, store, orgID, taskID, "running")
+		_ = seedAgentRunForTaskTest(t, store, orgID, taskID, "completed")
+		if has, _ := store.HasActiveForTask(ctx, orgID, taskID); !has {
+			t.Error("HasActive with running: false, want true")
+		}
+		ids, _ = store.ActiveIDsForTask(ctx, orgID, taskID)
+		if len(ids) != 1 || ids[0] != runRun {
+			t.Errorf("ActiveIDs = %v, want [%s]", ids, runRun)
+		}
+	})
+
+	t.Run("PendingApprovalIDForTask", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		ent := seed.Entity(t, "pa")
+		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+		// Empty → "".
+		id, _ := store.PendingApprovalIDForTask(ctx, orgID, taskID)
+		if id != "" {
+			t.Errorf("with no pending: id=%q, want empty", id)
+		}
+		// Seed one pending_approval run.
+		runID := seedAgentRunForTaskTest(t, store, orgID, taskID, "pending_approval")
+		id, _ = store.PendingApprovalIDForTask(ctx, orgID, taskID)
+		if id != runID {
+			t.Errorf("PendingApprovalID = %q, want %q", id, runID)
+		}
+	})
+
+	t.Run("ListTakenOverIDs_FiltersByWorktreePath", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		// One held takeover, one released takeover, one terminal.
+		held := seedAgentRunForTest(t, store, orgID, seed, "running")
+		ok, _ := store.MarkTakenOver(ctx, orgID, held, "/tmp/held", "")
+		if !ok {
+			t.Fatal("seed: held takeover failed")
+		}
+		released := seedAgentRunForTest(t, store, orgID, seed, "running")
+		ok, _ = store.MarkTakenOver(ctx, orgID, released, "/tmp/released", "")
+		if !ok {
+			t.Fatal("seed: released takeover failed")
+		}
+		if _, err := store.MarkReleased(ctx, orgID, released); err != nil {
+			t.Fatalf("MarkReleased: %v", err)
+		}
+		_ = seedAgentRunForTest(t, store, orgID, seed, "completed")
+
+		ids, err := store.ListTakenOverIDs(ctx, orgID)
+		if err != nil {
+			t.Fatalf("ListTakenOverIDs: %v", err)
+		}
+		got := map[string]bool{}
+		for _, id := range ids {
+			got[id] = true
+		}
+		if !got[held] {
+			t.Errorf("held takeover %s missing from ListTakenOverIDs", held)
+		}
+		if got[released] {
+			t.Errorf("released takeover %s leaked — worktree_path filter failed", released)
+		}
+	})
+
+	t.Run("EntitiesWithAwaitingInput_EmptyInputFastPath", func(t *testing.T) {
+		store, orgID, _, _ := mk(t)
+		got, err := store.EntitiesWithAwaitingInput(context.Background(), orgID, nil)
+		if err != nil {
+			t.Fatalf("nil: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("nil input: %d entries, want 0", len(got))
+		}
+		got, err = store.EntitiesWithAwaitingInput(context.Background(), orgID, []string{})
+		if err != nil {
+			t.Fatalf("empty: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("empty input: %d entries, want 0", len(got))
+		}
+	})
+
+	t.Run("EntitiesWithAwaitingInput_FiltersByStatus", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		entA := seed.Entity(t, "ewa-a")
+		entB := seed.Entity(t, "ewa-b")
+		evA := seed.Event(t, entA, domain.EventGitHubPROpened)
+		evB := seed.Event(t, entB, domain.EventGitHubPROpened)
+		taskA := seed.Task(t, entA, domain.EventGitHubPROpened, evA)
+		taskB := seed.Task(t, entB, domain.EventGitHubPROpened, evB)
+
+		// A has a run in awaiting_input; B has only a running run.
+		runA := seedAgentRunForTaskTest(t, store, orgID, taskA, "running")
+		if _, err := store.MarkAwaitingInput(ctx, orgID, runA); err != nil {
+			t.Fatalf("park A: %v", err)
+		}
+		_ = seedAgentRunForTaskTest(t, store, orgID, taskB, "running")
+
+		got, err := store.EntitiesWithAwaitingInput(ctx, orgID, []string{entA, entB})
+		if err != nil {
+			t.Fatalf("EntitiesWithAwaitingInput: %v", err)
+		}
+		if _, ok := got[entA]; !ok {
+			t.Errorf("entA missing from awaiting set")
+		}
+		if _, ok := got[entB]; ok {
+			t.Errorf("entB leaked — only entA has an awaiting run")
+		}
+	})
+
+	t.Run("InsertMessage_StampsCreatedAtAndReturnsID", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+
+		msg := &domain.AgentMessage{
+			RunID:   runID,
+			Role:    "assistant",
+			Content: "hello",
+			Subtype: "text",
+		}
+		id, err := store.InsertMessage(ctx, orgID, msg)
+		if err != nil {
+			t.Fatalf("InsertMessage: %v", err)
+		}
+		if id <= 0 {
+			t.Errorf("returned id = %d, want > 0", id)
+		}
+		if msg.CreatedAt.IsZero() {
+			t.Errorf("CreatedAt not stamped")
+		}
+	})
+
+	t.Run("InsertMessage_PreservesExplicitCreatedAt", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		explicit := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+		msg := &domain.AgentMessage{
+			RunID: runID, Role: "assistant", Content: "x", Subtype: "text",
+			CreatedAt: explicit,
+		}
+		if _, err := store.InsertMessage(ctx, orgID, msg); err != nil {
+			t.Fatalf("InsertMessage: %v", err)
+		}
+		if !msg.CreatedAt.Equal(explicit) {
+			t.Errorf("CreatedAt rewritten: got %v, want %v", msg.CreatedAt, explicit)
+		}
+	})
+
+	t.Run("Messages_RoundTripsToolCallsAndMetadata", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		msg := &domain.AgentMessage{
+			RunID:   runID,
+			Role:    "assistant",
+			Content: "calling tool",
+			Subtype: "tool_use",
+			ToolCalls: []domain.ToolCall{
+				{ID: "call-1", Name: "Edit", Input: map[string]any{"path": "foo.go"}},
+			},
+			Metadata: map[string]any{"k": "v"},
+		}
+		if _, err := store.InsertMessage(ctx, orgID, msg); err != nil {
+			t.Fatalf("InsertMessage: %v", err)
+		}
+		msgs, err := store.Messages(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("Messages: %v", err)
+		}
+		if len(msgs) != 1 {
+			t.Fatalf("len = %d, want 1", len(msgs))
+		}
+		got := msgs[0]
+		if len(got.ToolCalls) != 1 || got.ToolCalls[0].ID != "call-1" {
+			t.Errorf("ToolCalls round-trip: %+v", got.ToolCalls)
+		}
+		if got.Metadata["k"] != "v" {
+			t.Errorf("Metadata round-trip: %+v", got.Metadata)
+		}
+	})
+
+	t.Run("TokenTotals_SumsAssistantOnly", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		// Two assistant messages with tokens, plus a user message that
+		// should NOT contribute to totals.
+		i1, i2 := 100, 50
+		o1, o2 := 200, 75
+		for _, tup := range []struct {
+			role           string
+			input, output  int
+			countsToTotals bool
+		}{
+			{"assistant", i1, o1, true},
+			{"assistant", i2, o2, true},
+			{"user", 99999, 99999, false},
+		} {
+			in, out := tup.input, tup.output
+			msg := &domain.AgentMessage{
+				RunID: runID, Role: tup.role, Content: "x", Subtype: "text",
+				InputTokens: &in, OutputTokens: &out,
+				Model: "claude-test",
+			}
+			if _, err := store.InsertMessage(ctx, orgID, msg); err != nil {
+				t.Fatalf("InsertMessage(%s): %v", tup.role, err)
+			}
+		}
+		tot, err := store.TokenTotals(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("TokenTotals: %v", err)
+		}
+		if tot.InputTokens != i1+i2 {
+			t.Errorf("InputTokens = %d, want %d (user role must not count)", tot.InputTokens, i1+i2)
+		}
+		if tot.OutputTokens != o1+o2 {
+			t.Errorf("OutputTokens = %d, want %d", tot.OutputTokens, o1+o2)
+		}
+		if tot.NumTurns != 2 {
+			t.Errorf("NumTurns = %d, want 2 (assistant rows)", tot.NumTurns)
+		}
+	})
+
+	t.Run("InsertYieldRequest_LatestYieldRequest_RoundTrip", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		req := &domain.YieldRequest{Type: domain.YieldTypePrompt, Message: "name?"}
+		msg, err := store.InsertYieldRequest(ctx, orgID, runID, req)
+		if err != nil {
+			t.Fatalf("InsertYieldRequest: %v", err)
+		}
+		if msg == nil || msg.Subtype != db.YieldRequestSubtype {
+			t.Fatalf("InsertYieldRequest returned %+v", msg)
+		}
+		got, err := store.LatestYieldRequest(ctx, orgID, runID)
+		if err != nil {
+			t.Fatalf("LatestYieldRequest: %v", err)
+		}
+		if got == nil || got.Type != domain.YieldTypePrompt || got.Message != "name?" {
+			t.Errorf("LatestYieldRequest: %+v", got)
+		}
+	})
+
+	t.Run("LatestYieldRequest_PicksMostRecent", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		runID := seedAgentRunForTest(t, store, orgID, seed, "running")
+		if _, err := store.InsertYieldRequest(ctx, orgID, runID,
+			&domain.YieldRequest{Type: domain.YieldTypeConfirmation, Message: "first?"}); err != nil {
+			t.Fatalf("first: %v", err)
+		}
+		if _, err := store.InsertYieldRequest(ctx, orgID, runID,
+			&domain.YieldRequest{Type: domain.YieldTypePrompt, Message: "second?"}); err != nil {
+			t.Fatalf("second: %v", err)
+		}
+		got, err := store.LatestYieldRequest(ctx, orgID, runID)
+		if err != nil || got == nil {
+			t.Fatalf("LatestYieldRequest: err=%v got=%v", err, got)
+		}
+		if got.Message != "second?" {
+			t.Errorf("got message %q, want 'second?'", got.Message)
+		}
+	})
+
+	t.Run("MemoryMissing_DerivedFromRunMemoryJOIN", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		ent := seed.Entity(t, "mem")
+		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+
+		// One run per memory-content state. memory_missing should be
+		// true for no-row, NULL, "", whitespace; false for populated.
+		runNoRow := uuid.New().String()
+		runNullContent := uuid.New().String()
+		runEmpty := uuid.New().String()
+		runWhitespace := uuid.New().String()
+		runPopulated := uuid.New().String()
+		for _, id := range []string{runNoRow, runNullContent, runEmpty, runWhitespace, runPopulated} {
+			if err := store.Create(ctx, orgID, domain.AgentRun{
+				ID: id, TaskID: taskID, PromptID: agentRunTestPrompt(t), Status: "running", Model: "m",
+			}); err != nil {
+				t.Fatalf("Create %s: %v", id, err)
+			}
+		}
+		seed.SetRunMemory(t, runNullContent, ent, NullMemorySentinel)
+		seed.SetRunMemory(t, runEmpty, ent, "")
+		seed.SetRunMemory(t, runWhitespace, ent, "  \t\n ")
+		seed.SetRunMemory(t, runPopulated, ent, "real reasoning text")
+
+		want := map[string]bool{
+			runNoRow:       true,
+			runNullContent: true,
+			runEmpty:       true,
+			runWhitespace:  true,
+			runPopulated:   false,
+		}
+		for id, expected := range want {
+			got, err := store.Get(ctx, orgID, id)
+			if err != nil || got == nil {
+				t.Fatalf("Get %s: err=%v got=%v", id, err, got)
+			}
+			if got.MemoryMissing != expected {
+				t.Errorf("run %s: memory_missing=%v, want %v", id, got.MemoryMissing, expected)
+			}
+		}
+	})
+}
+
+// seedAgentRunForTest creates a fresh entity+event+task+run chain and
+// returns the run ID. status is what we want the run row to land in;
+// the seeder calls the store with the status set directly rather
+// than driving the lifecycle methods (which is the conformance
+// suite's job to test).
+func seedAgentRunForTest(t *testing.T, store db.AgentRunStore, orgID string, seed AgentRunSeeder, status string) string {
+	t.Helper()
+	ent := seed.Entity(t, "seed-"+status+"-"+strconv.FormatInt(time.Now().UnixNano(), 36))
+	ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+	taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+	return seedAgentRunForTaskTest(t, store, orgID, taskID, status)
+}
+
+// seedAgentRunForTaskTest creates a run on an existing task, used
+// by tests that need multiple runs on the same parent.
+func seedAgentRunForTaskTest(t *testing.T, store db.AgentRunStore, orgID, taskID, status string) string {
+	t.Helper()
+	id := uuid.New().String()
+	ctx := context.Background()
+	if err := store.Create(ctx, orgID, domain.AgentRun{
+		ID: id, TaskID: taskID, PromptID: agentRunTestPrompt(t), Status: status, Model: "m",
+	}); err != nil {
+		t.Fatalf("Create %s: %v", status, err)
+	}
+	return id
+}
+
+// agentRunTestPromptID is the prompt-row id the backend test files
+// seed once per test factory call. Conformance subtests reference
+// it by this constant when creating runs; the seeder doesn't surface
+// it as a field because every call uses the same value within one
+// subtest.
+const agentRunTestPromptID = "p_agentrun_test"
+
+func agentRunTestPrompt(_ *testing.T) string { return agentRunTestPromptID }

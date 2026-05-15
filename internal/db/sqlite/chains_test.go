@@ -95,7 +95,7 @@ func TestChainStore_SQLite_RunsForChain_RoundTrip(t *testing.T) {
 		{ID: "chain-step-run-0", TaskID: task.ID, PromptID: "step-prompt-1", Status: "initializing", Model: "claude-sonnet-4-6", ChainRunID: "chain-run-rt", ChainStepIndex: &step0},
 		{ID: "chain-step-run-1", TaskID: task.ID, PromptID: "step-prompt-2", Status: "initializing", Model: "claude-sonnet-4-6", ChainRunID: "chain-run-rt", ChainStepIndex: &step1},
 	} {
-		if err := db.CreateAgentRun(conn, run); err != nil {
+		if err := sqlitestore.New(conn).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrg, run); err != nil {
 			t.Fatalf("create agent run %s: %v", run.ID, err)
 		}
 	}
@@ -146,7 +146,7 @@ func TestChainStore_SQLite_LatestVerdictsForRuns(t *testing.T) {
 	}
 
 	step0 := 0
-	if err := db.CreateAgentRun(conn, domain.AgentRun{
+	if err := sqlitestore.New(conn).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrg, domain.AgentRun{
 		ID: "vp-run", TaskID: task.ID, PromptID: "vp-step", Status: "initializing",
 		Model: "claude-sonnet-4-6", ChainRunID: "vp-chain-run", ChainStepIndex: &step0,
 	}); err != nil {

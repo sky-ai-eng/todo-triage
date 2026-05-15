@@ -23,6 +23,7 @@ package resume
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -32,7 +33,9 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // Handle dispatches the resume subcommand.
@@ -56,7 +59,7 @@ func Handle(args []string) {
 		fail("migrate database: %v", err)
 	}
 
-	runs, err := db.ListTakenOverRunsForResume(database)
+	runs, err := sqlitestore.New(database).AgentRuns.ListTakenOverForResume(context.Background(), runmode.LocalDefaultOrg)
 	if err != nil {
 		fail("list taken-over runs: %v", err)
 	}

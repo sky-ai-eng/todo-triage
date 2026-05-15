@@ -98,7 +98,7 @@ func TestPopPendingFiring_FIFO(t *testing.T) {
 
 	// Mark fired; next pop returns task B. fired_run_id has an FK to
 	// runs, so create a real run first.
-	if err := CreateAgentRun(database, domain.AgentRun{
+	if err := createRunForTest(t, database, domain.AgentRun{
 		ID: "run-A", TaskID: taskA.ID, PromptID: "p1", Status: "running",
 		Model: "x", TriggerType: "event",
 	}); err != nil {
@@ -156,7 +156,7 @@ func TestEntityCanFireImmediately_GateLogic(t *testing.T) {
 	// Drain it (mark fired) — fired_run_id has an FK to runs, so the run
 	// must exist first. Mark it completed immediately so the gate sees no
 	// active auto run.
-	if err := CreateAgentRun(database, domain.AgentRun{
+	if err := createRunForTest(t, database, domain.AgentRun{
 		ID: "r-drained", TaskID: task.ID, PromptID: "p1", Status: "running",
 		Model: "x", TriggerType: "event",
 	}); err != nil {
@@ -175,7 +175,7 @@ func TestEntityCanFireImmediately_GateLogic(t *testing.T) {
 	}
 
 	// Active auto run (trigger_type='event') → gate closed.
-	if err := CreateAgentRun(database, domain.AgentRun{
+	if err := createRunForTest(t, database, domain.AgentRun{
 		ID: "r-active", TaskID: task.ID, PromptID: "p1", Status: "running",
 		Model: "x", TriggerType: "event",
 	}); err != nil {
@@ -190,7 +190,7 @@ func TestEntityCanFireImmediately_GateLogic(t *testing.T) {
 	if _, err := database.Exec(`UPDATE runs SET status = 'completed' WHERE id = 'r-active'`); err != nil {
 		t.Fatalf("complete active: %v", err)
 	}
-	if err := CreateAgentRun(database, domain.AgentRun{
+	if err := createRunForTest(t, database, domain.AgentRun{
 		ID: "r-manual", TaskID: task.ID, PromptID: "p1", Status: "running",
 		Model: "x", TriggerType: "manual",
 	}); err != nil {
@@ -228,7 +228,7 @@ func TestEnqueueAfterFired(t *testing.T) {
 	first, _ := PopPendingFiringForEntity(database, entity.ID)
 
 	// Materialize a run and mark the firing as fired.
-	if err := CreateAgentRun(database, domain.AgentRun{
+	if err := createRunForTest(t, database, domain.AgentRun{
 		ID: "r-1", TaskID: task.ID, PromptID: "p1", Status: "completed",
 		Model: "x", TriggerType: "event",
 	}); err != nil {
@@ -285,7 +285,7 @@ func TestPendingFirings_CrossEntityIsolation(t *testing.T) {
 	}
 
 	// Active auto run on A.
-	if err := CreateAgentRun(database, domain.AgentRun{
+	if err := createRunForTest(t, database, domain.AgentRun{
 		ID: "r-A", TaskID: taskA.ID, PromptID: "p1", Status: "running",
 		Model: "x", TriggerType: "event",
 	}); err != nil {
@@ -375,13 +375,13 @@ func TestMarkTransitions_Idempotent(t *testing.T) {
 		ID: "t1", PromptID: "p1", TriggerType: domain.TriggerTypeEvent,
 		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: intPtr(4), MinAutonomySuitability: floatPtr(0), Enabled: true,
 	})
-	if err := CreateAgentRun(database, domain.AgentRun{
+	if err := createRunForTest(t, database, domain.AgentRun{
 		ID: "r-orig", TaskID: task.ID, PromptID: "p1", Status: "completed",
 		Model: "x", TriggerType: "event",
 	}); err != nil {
 		t.Fatalf("create run: %v", err)
 	}
-	if err := CreateAgentRun(database, domain.AgentRun{
+	if err := createRunForTest(t, database, domain.AgentRun{
 		ID: "r-second", TaskID: task.ID, PromptID: "p1", Status: "completed",
 		Model: "x", TriggerType: "event",
 	}); err != nil {

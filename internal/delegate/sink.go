@@ -1,11 +1,12 @@
 package delegate
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // runSink adapts an agentproc invocation to the delegate's storage:
@@ -45,7 +46,7 @@ func (k *runSink) OnSession(sessionID string) error {
 		return nil
 	}
 	k.sessionDelivered = true
-	if err := db.SetAgentRunSession(k.spawner.database, k.runID, sessionID); err != nil {
+	if err := k.spawner.agentRuns.SetSession(context.Background(), runmode.LocalDefaultOrg, k.runID, sessionID); err != nil {
 		return fmt.Errorf("persist session_id: %w", err)
 	}
 	k.spawner.broadcastRunUpdate(k.runID, "running")
@@ -57,7 +58,7 @@ func (k *runSink) OnSession(sessionID string) error {
 // are returned to agentproc, which logs and continues — losing one
 // row is preferable to abandoning the run.
 func (k *runSink) OnMessage(msg *domain.AgentMessage) error {
-	id, err := db.InsertAgentMessage(k.spawner.database, msg)
+	id, err := k.spawner.agentRuns.InsertMessage(context.Background(), runmode.LocalDefaultOrg, msg)
 	if err != nil {
 		return fmt.Errorf("insert message: %w", err)
 	}
