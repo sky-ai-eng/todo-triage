@@ -301,7 +301,7 @@ func (s *Server) handleFactorySnapshot(w http.ResponseWriter, r *http.Request) {
 	// event_type + dedup_key) rather than the full Task struct so
 	// /api/factory/snapshot doesn't pay for the entity JOIN and the
 	// snapshot_json json_extract on every poll.
-	pendingTasks, err := db.ListActiveTaskRefsForEntities(s.db, entityIDs)
+	pendingTasks, err := s.tasks.ListActiveRefsForEntities(r.Context(), runmode.LocalDefaultOrg, entityIDs)
 	if err != nil {
 		internalError(w, "factory", err)
 		return

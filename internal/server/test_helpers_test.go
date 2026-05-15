@@ -66,7 +66,7 @@ func newTestServer(t *testing.T) *Server {
 		t.Fatalf("seed local team_agents: %v", err)
 	}
 	stores := sqlitestore.New(database)
-	return New(database, stores.Prompts, stores.Swipes, stores.Dashboard, stores.EventHandlers, stores.Agents, stores.TeamAgents, stores.Users, stores.Chains)
+	return New(database, stores.Prompts, stores.Swipes, stores.Dashboard, stores.EventHandlers, stores.Agents, stores.TeamAgents, stores.Users, stores.Chains, stores.Tasks)
 }
 
 // doJSON performs a JSON request against the server's mux and returns

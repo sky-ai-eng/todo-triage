@@ -23,6 +23,17 @@ func testPromptStore(database *sql.DB) db.PromptStore {
 	return sqlitestore.New(database).Prompts
 }
 
+// testTaskStore returns a SQLite-backed TaskStore for spawner-test
+// fixtures. Spawner consumes it for run lifecycle handlers; tests
+// pass it through NewSpawner so production and test share one path.
+// Returns nil for the nil-database smoke tests.
+func testTaskStore(database *sql.DB) db.TaskStore {
+	if database == nil {
+		return nil
+	}
+	return sqlitestore.New(database).Tasks
+}
+
 // ensureTestPrompt is the FindOrCreate replacement for the deleted
 // db.GetPrompt + db.CreatePrompt pair tests used to seed a prompt
 // row for run fixtures. Idempotent: subsequent calls on the same

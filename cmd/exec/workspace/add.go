@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
@@ -134,7 +136,10 @@ func materializeWorkspace(database *db.DB, runID, ownerRepoArg string, deps addD
 	if run == nil {
 		return "", fmt.Errorf("%w: %s", errRunNotFound, runID)
 	}
-	task, err := db.GetTask(database.Conn, run.TaskID)
+	// See list.go comment — sqlite stores constructed inline for the
+	// single TaskStore call this path needs.
+	stores := sqlitestore.New(database.Conn)
+	task, err := stores.Tasks.Get(context.Background(), runmode.LocalDefaultOrg, run.TaskID)
 	if err != nil {
 		return "", fmt.Errorf("workspace add: load task: %w", err)
 	}

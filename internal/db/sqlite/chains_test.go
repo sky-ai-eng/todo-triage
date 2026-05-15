@@ -49,7 +49,7 @@ func seedEntityEventTask(t *testing.T, conn *sql.DB, suffix string) *domain.Task
 	if err != nil {
 		t.Fatalf("record event: %v", err)
 	}
-	task, _, err := db.FindOrCreateTask(conn, entity.ID,
+	task, _, err := sqlitestore.New(conn).Tasks.FindOrCreate(t.Context(), runmode.LocalDefaultOrg, entity.ID,
 		domain.EventGitHubPRCICheckFailed, suffix, eventID, 0.5)
 	if err != nil {
 		t.Fatalf("create task: %v", err)

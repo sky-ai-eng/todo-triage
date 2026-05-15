@@ -23,7 +23,7 @@ func seedYieldedRun(t *testing.T, s *Server, req *domain.YieldRequest) string {
 	if err != nil {
 		t.Fatalf("event: %v", err)
 	}
-	task, _, err := db.FindOrCreateTask(s.db, entity.ID, domain.EventGitHubPRCICheckFailed, "k", eventID, 0.5)
+	task, _, err := s.tasks.FindOrCreate(t.Context(), runmode.LocalDefaultOrg, entity.ID, domain.EventGitHubPRCICheckFailed, "k", eventID, 0.5)
 	if err != nil {
 		t.Fatalf("task: %v", err)
 	}

@@ -60,7 +60,7 @@ func (s *Spawner) ResumeAfterYield(runID, agentMessage string) error {
 	if run.WorktreePath == "" {
 		return fmt.Errorf("run has no worktree path; cannot resume")
 	}
-	task, err := db.GetTask(s.database, run.TaskID)
+	task, err := s.tasks.Get(context.Background(), runmode.LocalDefaultOrg, run.TaskID)
 	if err != nil {
 		return fmt.Errorf("load task: %w", err)
 	}

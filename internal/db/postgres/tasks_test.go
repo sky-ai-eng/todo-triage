@@ -1,0 +1,178 @@
+package postgres_test
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
+	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
+	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
+)
+
+// TestTaskStore_Postgres runs the shared conformance suite against
+// the Postgres TaskStore impl. Each subtest gets a fresh org + user +
+// agent + entity/event/task fixture seeded through the harness's
+// admin connection (BYPASSRLS), then exercises the store via the app
+// pool. Skips cleanly when Docker isn't available — pgtest.Shared
+// handles that.
+func TestTaskStore_Postgres(t *testing.T) {
+	h := pgtest.Shared(t)
+	// Wire both pools against AdminDB so the conformance suite's
+	// FindOrCreate INSERT (which COALESCEs tf.current_user_id() →
+	// org-owner) can resolve creator_user_id without a JWT-claims tx
+	// — supabase_admin owns the tf.* functions and can EXECUTE them
+	// even without the per-request tf_app grant. RLS bypass on
+	// AdminDB is fine for behavior conformance; the cross-org leakage
+	// test below exercises the defense-in-depth org_id filter
+	// directly. Same pattern as TestSwipeStore_Postgres.
+	stores := pgstore.New(h.AdminDB, h.AdminDB)
+
+	dbtest.RunTaskStoreConformance(t, func(t *testing.T) (db.TaskStore, string, string, string, dbtest.TaskSeeder) {
+		t.Helper()
+		h.Reset(t)
+		orgID, userID, agentID := seedPgOrgUserAgent(t, h)
+		seeder := func(t *testing.T, suffix string) (entityID, eventID, taskID string) {
+			t.Helper()
+			return seedPgTaskChain(t, h.AdminDB, orgID, userID, suffix)
+		}
+		return stores.Tasks, orgID, agentID, userID, seeder
+	})
+}
+
+// seedPgOrgUserAgent builds the (auth.user, public.user, org,
+// membership, default team, agent, team_agents-membership) graph the
+// claim methods FK into. Mirrors the shape ScoreStore tests use for
+// org/user, plus the agent half.
+func seedPgOrgUserAgent(t *testing.T, h *pgtest.Harness) (orgID, userID, agentID string) {
+	t.Helper()
+	orgID = uuid.New().String()
+	userID = uuid.New().String()
+	agentID = uuid.New().String()
+	email := fmt.Sprintf("conformance-%s@test.local", userID[:8])
+
+	h.SeedAuthUser(t, userID, email)
+
+	if _, err := h.AdminDB.Exec(
+		`INSERT INTO users (id, display_name) VALUES ($1, $2)`,
+		userID, "Conformance User",
+	); err != nil {
+		t.Fatalf("seed public.users: %v", err)
+	}
+	if _, err := h.AdminDB.Exec(
+		`INSERT INTO orgs (id, name, slug, owner_user_id) VALUES ($1, $2, $3, $4)`,
+		orgID, "Conformance Org "+orgID[:8], "conf-"+orgID[:8], userID,
+	); err != nil {
+		t.Fatalf("seed org: %v", err)
+	}
+	if _, err := h.AdminDB.Exec(
+		`INSERT INTO org_memberships (org_id, user_id, role) VALUES ($1, $2, 'owner')`,
+		orgID, userID,
+	); err != nil {
+		t.Fatalf("seed org_membership: %v", err)
+	}
+	seedPgDefaultTeam(t, h, orgID, userID)
+	// Agents row backing the claim methods. Created on admin (bootstrap
+	// has no JWT claims).
+	if _, err := h.AdminDB.Exec(
+		`INSERT INTO agents (id, org_id, display_name) VALUES ($1, $2, 'Conformance Bot')`,
+		agentID, orgID,
+	); err != nil {
+		t.Fatalf("seed agent: %v", err)
+	}
+	return orgID, userID, agentID
+}
+
+// seedPgTaskChain inserts a fresh entity + event + task chain. Uses
+// the suffix to keep source_id unique. Returns the IDs so the
+// conformance harness can address them in subsequent calls.
+func seedPgTaskChain(t *testing.T, conn *sql.DB, orgID, userID, suffix string) (entityID, eventID, taskID string) {
+	t.Helper()
+	now := time.Now().UTC()
+	entityID = uuid.New().String()
+	taskID = uuid.New().String()
+	eventID = uuid.New().String()
+	sourceID := fmt.Sprintf("conformance-%s-%d", suffix, now.UnixNano())
+	// EventGitHubPRCICheckFailed is in the seeded events_catalog; using
+	// it keeps the catalog FK happy without re-seeding inline. The
+	// dashboard / "passed" variants are also catalogued in case future
+	// expansions of the conformance suite need them.
+	eventType := "github:pr:ci_check_failed"
+
+	if _, err := conn.Exec(`
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
+		VALUES ($1, $2, 'github', $3, 'pr', $4, $5, '{}'::jsonb, $6)
+	`, entityID, orgID, sourceID, "Conformance "+suffix, "https://example/"+sourceID, now); err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	if _, err := conn.Exec(`
+		INSERT INTO events (id, org_id, entity_id, event_type, dedup_key, metadata_json, created_at)
+		VALUES ($1, $2, $3, $4, '', '{}'::jsonb, $5)
+	`, eventID, orgID, entityID, eventType, now); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	if _, err := conn.Exec(`
+		INSERT INTO tasks (id, org_id, creator_user_id, team_id, visibility, entity_id, event_type, dedup_key, primary_event_id,
+		                   status, scoring_status, priority_score, created_at)
+		VALUES ($1, $2, $3,
+		        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
+		        'team', $4, $5, '', $6, 'queued', 'pending', 0.5, $7)
+	`, taskID, orgID, userID, entityID, eventType, eventID, now); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+	return entityID, eventID, taskID
+}
+
+// TestTaskStore_Postgres_CrossOrgLeakage pins the defense-in-depth
+// guarantee: even with the org_id filter as the only line of defense
+// (AdminDB bypasses RLS), org A's queries can't see org B's tasks.
+// In production the RLS policies add a second layer; this test
+// validates the WHERE-clause filter on its own so a regression
+// there can't silently rely on RLS to compensate.
+func TestTaskStore_Postgres_CrossOrgLeakage(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgA, userA, _ := seedPgOrgUserAgent(t, h)
+	orgB, userB, _ := seedPgOrgUserAgent(t, h)
+	entA, _, taskA := seedPgTaskChain(t, h.AdminDB, orgA, userA, "cross-A")
+	_, _, taskB := seedPgTaskChain(t, h.AdminDB, orgB, userB, "cross-B")
+
+	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	ctx := context.Background()
+
+	// Org A's view shouldn't see B's task.
+	if task, err := stores.Tasks.Get(ctx, orgA, taskB); err != nil {
+		t.Fatalf("Get cross-org: %v", err)
+	} else if task != nil {
+		t.Errorf("orgA Get returned orgB task %s; defense-in-depth filter leaked", taskB)
+	}
+	// Symmetric.
+	if task, err := stores.Tasks.Get(ctx, orgB, taskA); err != nil {
+		t.Fatalf("Get cross-org reverse: %v", err)
+	} else if task != nil {
+		t.Errorf("orgB Get returned orgA task %s", taskA)
+	}
+
+	// ListActiveRefsForEntities scoped to orgA, looking at entA, should
+	// see exactly one row. Asking the same with orgB and entA must
+	// return zero (entA isn't visible from orgB).
+	refs, err := stores.Tasks.ListActiveRefsForEntities(ctx, orgA, []string{entA})
+	if err != nil {
+		t.Fatalf("ListActiveRefsForEntities orgA: %v", err)
+	}
+	if len(refs) != 1 || refs[0].ID != taskA {
+		t.Errorf("orgA refs = %+v, want exactly taskA", refs)
+	}
+	refs, err = stores.Tasks.ListActiveRefsForEntities(ctx, orgB, []string{entA})
+	if err != nil {
+		t.Fatalf("ListActiveRefsForEntities orgB→entA: %v", err)
+	}
+	if len(refs) != 0 {
+		t.Errorf("orgB looking at entA returned %d refs; want 0 (cross-org leak)", len(refs))
+	}
+}

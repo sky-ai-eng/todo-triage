@@ -1,0 +1,681 @@
+package sqlite
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+)
+
+// taskStore is the SQLite impl of db.TaskStore. SQL bodies are moved
+// verbatim from the pre-D2 internal/db/tasks.go; the only behavioral
+// change is the orgID assertion at each method entry. Local mode is
+// single-tenant by design — the orgID column on the SQLite tasks row
+// defaults to LocalDefaultOrgID so we don't need to thread it through
+// every UPDATE/INSERT, but rejecting an unexpected orgID at the entry
+// point is the safety net for a caller that's confused about which
+// mode it's in.
+type taskStore struct{ q queryer }
+
+func newTaskStore(q queryer) db.TaskStore { return &taskStore{q: q} }
+
+var _ db.TaskStore = (*taskStore)(nil)
+
+// --- Lookup ---
+
+func (s *taskStore) Get(ctx context.Context, orgID, taskID string) (*domain.Task, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	var t domain.Task
+	err := scanTaskFromRow(s.q.QueryRowContext(ctx, `
+		SELECT `+sqliteTaskColumnsWithEntity+`
+		FROM tasks t
+		JOIN entities e ON t.entity_id = e.id
+		WHERE t.id = ?
+	`, taskID), &t)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
+func (s *taskStore) Queued(ctx context.Context, orgID string) ([]domain.Task, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	// SKY-261 B+ derived filter: queue = status='queued' + both claim
+	// cols NULL + not future-snoozed.
+	return queryTasksCtx(ctx, s.q, `
+		SELECT `+sqliteTaskColumnsWithEntity+`
+		FROM tasks t
+		JOIN entities e ON t.entity_id = e.id
+		LEFT JOIN (
+			SELECT org_id, event_type, MIN(sort_order) AS sort_order
+			FROM event_handlers
+			WHERE enabled = 1 AND kind = 'rule'
+			GROUP BY org_id, event_type
+		) tr ON t.event_type = tr.event_type AND t.org_id = tr.org_id
+		WHERE t.status = 'queued'
+			AND t.claimed_by_agent_id IS NULL
+			AND t.claimed_by_user_id  IS NULL
+			AND (t.snooze_until IS NULL OR t.snooze_until <= datetime('now'))
+		ORDER BY COALESCE(tr.sort_order, 999) ASC, COALESCE(t.priority_score, 0.5) DESC
+	`)
+}
+
+func (s *taskStore) ByStatus(ctx context.Context, orgID, status string) ([]domain.Task, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	// SKY-261 B+: 'claimed' and 'delegated' aren't real lifecycle
+	// values — they're derived filters on the claim columns.
+	switch status {
+	case "claimed":
+		return queryTasksCtx(ctx, s.q, `
+			SELECT `+sqliteTaskColumnsWithEntity+`
+			FROM tasks t
+			JOIN entities e ON t.entity_id = e.id
+			WHERE t.claimed_by_user_id IS NOT NULL
+				AND t.status NOT IN ('done', 'dismissed')
+			ORDER BY COALESCE(t.priority_score, 0.5) DESC
+		`)
+	case "delegated":
+		return queryTasksCtx(ctx, s.q, `
+			SELECT `+sqliteTaskColumnsWithEntity+`
+			FROM tasks t
+			JOIN entities e ON t.entity_id = e.id
+			WHERE t.claimed_by_agent_id IS NOT NULL
+				AND t.status NOT IN ('done', 'dismissed')
+			ORDER BY COALESCE(t.priority_score, 0.5) DESC
+		`)
+	}
+	return queryTasksCtx(ctx, s.q, `
+		SELECT `+sqliteTaskColumnsWithEntity+`
+		FROM tasks t
+		JOIN entities e ON t.entity_id = e.id
+		WHERE t.status = ?
+		ORDER BY COALESCE(t.priority_score, 0.5) DESC
+	`, status)
+}
+
+func (s *taskStore) FindActiveByEntityAndType(ctx context.Context, orgID, entityID, eventType string) ([]domain.Task, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	return queryTasksCtx(ctx, s.q, `
+		SELECT `+sqliteTaskColumnsWithEntity+`
+		FROM tasks t
+		JOIN entities e ON t.entity_id = e.id
+		WHERE t.entity_id = ? AND t.event_type = ? AND t.status NOT IN ('done', 'dismissed')
+	`, entityID, eventType)
+}
+
+func (s *taskStore) FindActiveByEntity(ctx context.Context, orgID, entityID string) ([]domain.Task, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	return queryTasksCtx(ctx, s.q, `
+		SELECT `+sqliteTaskColumnsWithEntity+`
+		FROM tasks t
+		JOIN entities e ON t.entity_id = e.id
+		WHERE t.entity_id = ? AND t.status NOT IN ('done', 'dismissed')
+	`, entityID)
+}
+
+// listActiveRefsChunkSize is the chunk applied to the IN clause when
+// fanning out across many entities, kept conservatively below SQLite's
+// historical bound-variable limit. Same shape ListRecentEventsByEntity
+// uses.
+const listActiveRefsChunkSize = 500
+
+func (s *taskStore) ListActiveRefsForEntities(ctx context.Context, orgID string, entityIDs []string) ([]domain.PendingTaskRef, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	if len(entityIDs) == 0 {
+		return nil, nil
+	}
+	out := make([]domain.PendingTaskRef, 0, len(entityIDs))
+	for start := 0; start < len(entityIDs); start += listActiveRefsChunkSize {
+		end := start + listActiveRefsChunkSize
+		if end > len(entityIDs) {
+			end = len(entityIDs)
+		}
+		chunk := entityIDs[start:end]
+		placeholders := make([]string, len(chunk))
+		args := make([]any, 0, len(chunk))
+		for i, id := range chunk {
+			placeholders[i] = "?"
+			args = append(args, id)
+		}
+		rows, err := s.q.QueryContext(ctx, `
+			SELECT id, entity_id, event_type, dedup_key
+			FROM tasks
+			WHERE entity_id IN (`+strings.Join(placeholders, ",")+`)
+				AND status NOT IN ('done', 'dismissed')
+			ORDER BY entity_id, event_type, created_at DESC, rowid DESC
+		`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var ref domain.PendingTaskRef
+			if err := rows.Scan(&ref.ID, &ref.EntityID, &ref.EventType, &ref.DedupKey); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			out = append(out, ref)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return out, nil
+}
+
+func (s *taskStore) EntityIDsWithActiveTasks(ctx context.Context, orgID, source string) (map[string]struct{}, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT DISTINCT t.entity_id
+		FROM tasks t
+		JOIN entities e ON t.entity_id = e.id
+		WHERE e.source = ? AND t.status NOT IN ('done', 'dismissed')
+	`, source)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	ids := map[string]struct{}{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids[id] = struct{}{}
+	}
+	return ids, rows.Err()
+}
+
+// --- Lifecycle ---
+
+func (s *taskStore) FindOrCreate(ctx context.Context, orgID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64) (*domain.Task, bool, error) {
+	return s.FindOrCreateAt(ctx, orgID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, time.Now())
+}
+
+func (s *taskStore) FindOrCreateAt(ctx context.Context, orgID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, false, err
+	}
+	// Try to find an existing active task first.
+	var existing domain.Task
+	err := scanTaskFromRow(s.q.QueryRowContext(ctx, `
+		SELECT `+sqliteTaskColumnsWithEntity+`
+		FROM tasks t
+		JOIN entities e ON t.entity_id = e.id
+		WHERE t.entity_id = ? AND t.event_type = ? AND t.dedup_key = ?
+			AND t.status NOT IN ('done', 'dismissed')
+		LIMIT 1
+	`, entityID, eventType, dedupKey), &existing)
+	if err == nil {
+		return &existing, false, nil
+	}
+	if err != sql.ErrNoRows {
+		return nil, false, err
+	}
+
+	// Create new task. The partial unique index on
+	// (entity_id, event_type, dedup_key) WHERE status NOT IN
+	// ('done', 'dismissed') is the race backstop: a concurrent
+	// goroutine that races past the SELECT will get rejected on
+	// INSERT, and we re-read to return the winner's row.
+	id := uuid.New().String()
+	// team_id + visibility populated explicitly per SKY-262: post-
+	// migration the team-scoped queue derived filter requires team_id
+	// on every task, and 'team' is the canonical visibility.
+	_, err = s.q.ExecContext(ctx, `
+		INSERT INTO tasks (id, entity_id, event_type, dedup_key, primary_event_id,
+		                   status, priority_score, scoring_status, created_at,
+		                   team_id, visibility)
+		VALUES (?, ?, ?, ?, ?, 'queued', ?, 'pending', ?, ?, 'team')
+	`, id, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt, runmode.LocalDefaultTeamID)
+	if err != nil {
+		var raced domain.Task
+		err2 := scanTaskFromRow(s.q.QueryRowContext(ctx, `
+			SELECT `+sqliteTaskColumnsWithEntity+`
+			FROM tasks t
+			JOIN entities e ON t.entity_id = e.id
+			WHERE t.entity_id = ? AND t.event_type = ? AND t.dedup_key = ?
+				AND t.status NOT IN ('done', 'dismissed')
+			LIMIT 1
+		`, entityID, eventType, dedupKey), &raced)
+		if err2 == nil {
+			return &raced, false, nil
+		}
+		return nil, false, err
+	}
+
+	task, err := s.Get(ctx, orgID, id)
+	if err != nil {
+		return nil, false, err
+	}
+	return task, true, nil
+}
+
+func (s *taskStore) Bump(ctx context.Context, orgID, taskID, eventID string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	_, err := s.q.ExecContext(ctx, `
+		UPDATE tasks
+		SET status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END,
+		    snooze_until = CASE WHEN status = 'snoozed' THEN NULL ELSE snooze_until END
+		WHERE id = ?
+	`, taskID)
+	return err
+}
+
+func (s *taskStore) Close(ctx context.Context, orgID, taskID, closeReason, closeEventType string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	now := time.Now()
+	var cet *string
+	if closeEventType != "" {
+		cet = &closeEventType
+	}
+	_, err := s.q.ExecContext(ctx, `
+		UPDATE tasks SET status = 'done', close_reason = ?, close_event_type = ?,
+		                 closed_at = ?
+		WHERE id = ? AND status NOT IN ('done', 'dismissed')
+	`, closeReason, cet, now, taskID)
+	return err
+}
+
+func (s *taskStore) CloseAllForEntity(ctx context.Context, orgID, entityID, closeReason string) (int, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return 0, err
+	}
+	now := time.Now()
+	result, err := s.q.ExecContext(ctx, `
+		UPDATE tasks SET status = 'done', close_reason = ?, closed_at = ?
+		WHERE entity_id = ? AND status NOT IN ('done', 'dismissed')
+	`, closeReason, now, entityID)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := result.RowsAffected()
+	return int(n), nil
+}
+
+func (s *taskStore) SetStatus(ctx context.Context, orgID, taskID, status string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	_, err := s.q.ExecContext(ctx, `UPDATE tasks SET status = ? WHERE id = ?`, status, taskID)
+	return err
+}
+
+func (s *taskStore) RecordEvent(ctx context.Context, orgID, taskID, eventID, kind string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	_, err := s.q.ExecContext(ctx, `
+		INSERT OR IGNORE INTO task_events (task_id, event_id, kind, created_at)
+		VALUES (?, ?, ?, ?)
+	`, taskID, eventID, kind, time.Now())
+	return err
+}
+
+// --- Claim mutations ---
+
+func (s *taskStore) SetClaimedByAgent(ctx context.Context, orgID, taskID, agentID string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	var claimedByAgentID any = agentID
+	if agentID == "" {
+		claimedByAgentID = nil
+	}
+	_, err := s.q.ExecContext(ctx, `
+		UPDATE tasks
+		   SET claimed_by_agent_id = ?,
+		       claimed_by_user_id  = NULL
+		 WHERE id = ?
+	`, claimedByAgentID, taskID)
+	return err
+}
+
+func (s *taskStore) SetClaimedByUser(ctx context.Context, orgID, taskID, userID string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	var claimedByUserID any = userID
+	if userID == "" {
+		// Empty string is the domain's NULL convention. Passing it raw
+		// would violate the users(id) FK on the next read.
+		claimedByUserID = nil
+	}
+	_, err := s.q.ExecContext(ctx, `
+		UPDATE tasks
+		   SET claimed_by_user_id  = ?,
+		       claimed_by_agent_id = NULL
+		 WHERE id = ?
+	`, claimedByUserID, taskID)
+	return err
+}
+
+func (s *taskStore) StampAgentClaimIfUnclaimed(ctx context.Context, orgID, taskID, agentID string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	if agentID == "" {
+		return false, fmt.Errorf("StampAgentClaimIfUnclaimed: empty agentID")
+	}
+	res, err := s.q.ExecContext(ctx, `
+		UPDATE tasks
+		   SET claimed_by_agent_id = ?,
+		       snooze_until = NULL,
+		       status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END
+		 WHERE id = ?
+		   AND claimed_by_user_id IS NULL
+		   AND (claimed_by_agent_id IS NULL OR claimed_by_agent_id != ?)
+		   AND status NOT IN ('done', 'dismissed')
+	`, agentID, taskID, agentID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+func (s *taskStore) HandoffAgentClaim(ctx context.Context, orgID, taskID, agentID, userID string) (db.HandoffResult, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return db.HandoffRefused, err
+	}
+	if agentID == "" {
+		return db.HandoffRefused, fmt.Errorf("HandoffAgentClaim: empty agentID")
+	}
+	if userID == "" {
+		return db.HandoffRefused, fmt.Errorf("HandoffAgentClaim: empty userID")
+	}
+	res, err := s.q.ExecContext(ctx, `
+		UPDATE tasks
+		   SET claimed_by_agent_id = ?,
+		       claimed_by_user_id  = NULL,
+		       snooze_until = NULL,
+		       status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END
+		 WHERE id = ?
+		   AND (claimed_by_user_id  IS NULL OR claimed_by_user_id  = ?)
+		   AND (claimed_by_agent_id IS NULL OR claimed_by_agent_id != ?)
+		   AND status NOT IN ('done', 'dismissed')
+	`, agentID, taskID, userID, agentID)
+	if err != nil {
+		return db.HandoffRefused, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return db.HandoffRefused, err
+	}
+	if n > 0 {
+		return db.HandoffChanged, nil
+	}
+	// 0 rows — re-read to figure out which guard tripped. Terminal-status
+	// check takes precedence over the no-op check so a sticky-bot-claim
+	// on a closed task doesn't fall through to HandoffNoOp and let the
+	// caller proceed past a row that mustn't be reopened.
+	var curUser, curAgent sql.NullString
+	var curStatus string
+	err = s.q.QueryRowContext(ctx,
+		`SELECT claimed_by_user_id, claimed_by_agent_id, status FROM tasks WHERE id = ?`,
+		taskID,
+	).Scan(&curUser, &curAgent, &curStatus)
+	if err == sql.ErrNoRows {
+		return db.HandoffRefused, nil
+	}
+	if err != nil {
+		return db.HandoffRefused, err
+	}
+	if curStatus == "done" || curStatus == "dismissed" {
+		return db.HandoffRefused, nil
+	}
+	if curAgent.Valid && curAgent.String == agentID {
+		return db.HandoffNoOp, nil
+	}
+	return db.HandoffRefused, nil
+}
+
+func (s *taskStore) TakeoverClaimFromAgent(ctx context.Context, orgID, taskID, userID string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	if userID == "" {
+		return false, fmt.Errorf("TakeoverClaimFromAgent: empty userID")
+	}
+	res, err := s.q.ExecContext(ctx, `
+		UPDATE tasks
+		   SET claimed_by_user_id  = ?,
+		       claimed_by_agent_id = NULL,
+		       snooze_until = NULL,
+		       status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END
+		 WHERE id = ?
+		   AND claimed_by_agent_id IS NOT NULL
+		   AND claimed_by_user_id  IS NULL
+		   AND status NOT IN ('done', 'dismissed')
+	`, userID, taskID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+func (s *taskStore) ClaimQueuedForUser(ctx context.Context, orgID, taskID, userID string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	if userID == "" {
+		return false, fmt.Errorf("ClaimQueuedForUser: empty userID is not a valid claimant")
+	}
+	res, err := s.q.ExecContext(ctx, `
+		UPDATE tasks
+		   SET claimed_by_user_id = ?,
+		       snooze_until = NULL,
+		       status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END
+		 WHERE id = ?
+		   AND status IN ('queued', 'snoozed')
+		   AND claimed_by_user_id  IS NULL
+		   AND claimed_by_agent_id IS NULL
+	`, userID, taskID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// --- Breaker ---
+
+func (s *taskStore) CountConsecutiveFailedRuns(ctx context.Context, orgID, entityID, promptID string) (int, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return 0, err
+	}
+	var count int
+	err := s.q.QueryRowContext(ctx, `
+		WITH recent AS (
+			SELECT
+				CASE
+					WHEN r.chain_run_id IS NULL THEN 'leaf'
+					ELSE 'chain'
+				END AS kind,
+				r.chain_run_id,
+				COALESCE(cr.status, r.status) AS status,
+				COALESCE(cr.started_at, r.started_at) AS started_at,
+				ROW_NUMBER() OVER (
+					PARTITION BY COALESCE(r.chain_run_id, r.id)
+					ORDER BY r.started_at ASC
+				) AS step_rank
+			FROM runs r
+			JOIN tasks t ON r.task_id = t.id
+			LEFT JOIN chain_runs cr ON cr.id = r.chain_run_id
+			WHERE t.entity_id = ?
+				AND (
+					(r.chain_run_id IS NULL AND r.prompt_id = ?)
+					OR (cr.chain_prompt_id = ?)
+				)
+				AND r.trigger_type = 'event'
+		),
+		dedup AS (
+			SELECT status, started_at
+			FROM recent
+			WHERE step_rank = 1
+			ORDER BY started_at DESC
+			LIMIT 20
+		)
+		SELECT COUNT(*)
+		FROM dedup
+		WHERE status IN ('failed', 'task_unsolvable', 'aborted')
+			AND started_at > (
+				SELECT COALESCE(MAX(started_at), '1970-01-01')
+				FROM dedup WHERE status = 'completed'
+			)
+	`, entityID, promptID, promptID).Scan(&count)
+	return count, err
+}
+
+// --- Internal helpers ---
+
+// sqliteTaskColumnsWithEntity is the canonical column list for every
+// task query that feeds scanTask. Lives on TaskStore because it owns
+// the surface; ScoreStore's UnscoredTasks references this constant via
+// the same-package import.
+const sqliteTaskColumnsWithEntity = `
+	t.id, t.entity_id, t.event_type, t.dedup_key, t.primary_event_id,
+	t.status, t.priority_score, t.ai_summary, t.autonomy_suitability,
+	t.priority_reasoning, t.scoring_status, t.severity, t.relevance_reason,
+	t.source_status, t.snooze_until, t.close_reason, t.close_event_type,
+	t.closed_at, t.created_at,
+	t.claimed_by_agent_id, t.claimed_by_user_id,
+	COALESCE(e.title, ''), COALESCE(e.url, ''), e.source_id, e.source, e.kind,
+	-- Guard json_extract so malformed or empty legacy snapshots do not fail
+	-- the entire task query.
+	COALESCE(
+		CASE
+			WHEN json_valid(NULLIF(e.snapshot_json, ''))
+				THEN json_extract(NULLIF(e.snapshot_json, ''), '$.open_subtask_count')
+			ELSE NULL
+		END,
+		0
+	)`
+
+// taskScanState holds the NullX intermediates for one row of
+// sqliteTaskColumnsWithEntity. Keeping the helper here means
+// TaskStore's scan path is right next to the column list — the
+// dependency runs in one direction (queries → scan) and lives in one
+// file.
+type taskScanState struct {
+	priorityScore, autonomySuitability sql.NullFloat64
+	aiSummary, priorityReasoning       sql.NullString
+	severity, relevanceReason          sql.NullString
+	sourceStatus, scoringStatus        sql.NullString
+	closeReason, closeEventType        sql.NullString
+	snoozeUntil, closedAt              sql.NullTime
+	claimedByAgentID, claimedByUserID  sql.NullString
+}
+
+func (s *taskScanState) targets(t *domain.Task) []any {
+	return []any{
+		&t.ID, &t.EntityID, &t.EventType, &t.DedupKey, &t.PrimaryEventID,
+		&t.Status, &s.priorityScore, &s.aiSummary, &s.autonomySuitability,
+		&s.priorityReasoning, &s.scoringStatus, &s.severity, &s.relevanceReason,
+		&s.sourceStatus, &s.snoozeUntil, &s.closeReason, &s.closeEventType,
+		&s.closedAt, &t.CreatedAt,
+		&s.claimedByAgentID, &s.claimedByUserID,
+		&t.Title, &t.SourceURL, &t.EntitySourceID, &t.EntitySource, &t.EntityKind,
+		&t.OpenSubtaskCount,
+	}
+}
+
+func (s *taskScanState) finalize(t *domain.Task) {
+	if s.priorityScore.Valid {
+		t.PriorityScore = &s.priorityScore.Float64
+	}
+	if s.autonomySuitability.Valid {
+		t.AutonomySuitability = &s.autonomySuitability.Float64
+	}
+	t.AISummary = s.aiSummary.String
+	t.PriorityReasoning = s.priorityReasoning.String
+	t.Severity = s.severity.String
+	t.RelevanceReason = s.relevanceReason.String
+	t.SourceStatus = s.sourceStatus.String
+	t.ScoringStatus = s.scoringStatus.String
+	t.CloseReason = s.closeReason.String
+	t.CloseEventType = s.closeEventType.String
+	if s.snoozeUntil.Valid {
+		t.SnoozeUntil = &s.snoozeUntil.Time
+	}
+	if s.closedAt.Valid {
+		t.ClosedAt = &s.closedAt.Time
+	}
+	t.ClaimedByAgentID = s.claimedByAgentID.String
+	t.ClaimedByUserID = s.claimedByUserID.String
+}
+
+func scanTaskFields(rows *sql.Rows, t *domain.Task) error {
+	var s taskScanState
+	if err := rows.Scan(s.targets(t)...); err != nil {
+		return err
+	}
+	s.finalize(t)
+	return nil
+}
+
+func scanTaskFromRow(row *sql.Row, t *domain.Task) error {
+	var s taskScanState
+	if err := row.Scan(s.targets(t)...); err != nil {
+		return err
+	}
+	s.finalize(t)
+	return nil
+}
+
+func queryTasksCtx(ctx context.Context, q queryer, query string, args ...any) ([]domain.Task, error) {
+	rows, err := q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tasks []domain.Task
+	for rows.Next() {
+		var t domain.Task
+		if err := scanTaskFields(rows, &t); err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, t)
+	}
+	return tasks, rows.Err()
+}

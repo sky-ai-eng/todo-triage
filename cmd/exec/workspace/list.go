@@ -1,11 +1,14 @@
 package workspace
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // listOutput is the JSON shape printed by `workspace list`. Two sections:
@@ -71,7 +74,12 @@ func listWorkspaces(database *db.DB, runID string) (listOutput, error) {
 	if run == nil {
 		return listOutput{}, fmt.Errorf("%w: %s", errRunNotFound, runID)
 	}
-	task, err := db.GetTask(database.Conn, run.TaskID)
+	// Construct a sqlite Stores bundle inline — cmd/exec runs as a
+	// separate process with its own connection, so wiring full stores
+	// at startup would be overkill for the one TaskStore call this
+	// path needs. SKY-283.
+	stores := sqlitestore.New(database.Conn)
+	task, err := stores.Tasks.Get(context.Background(), runmode.LocalDefaultOrg, run.TaskID)
 	if err != nil {
 		return listOutput{}, fmt.Errorf("workspace list: load task: %w", err)
 	}

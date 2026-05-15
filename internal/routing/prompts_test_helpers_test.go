@@ -31,6 +31,16 @@ func testEventHandlerStore(database *sql.DB) db.EventHandlerStore {
 	return sqlitestore.New(database).EventHandlers
 }
 
+// testTaskStore returns a SQLite-backed TaskStore for routing tests.
+// SKY-283 — Router takes one store for task lifecycle/claim/queue
+// queries; the per-method orgID arg defaults to LocalDefaultOrg.
+func testTaskStore(database *sql.DB) db.TaskStore {
+	if database == nil {
+		return nil
+	}
+	return sqlitestore.New(database).Tasks
+}
+
 // createTriggerForTestRouting + setTriggerEnabledForTestRouting are
 // trigger-shape helpers used by drain_test + rederive_test. Post-
 // SKY-259 they wrap EventHandlerStore.Create / SetEnabled, building a

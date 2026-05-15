@@ -68,6 +68,14 @@ type Stores struct {
 	// allowlists.
 	Users UsersStore
 
+	// Tasks owns the tasks table — lifecycle, claims, dedup,
+	// swipe-triggered transitions, plus the run-history queries
+	// powering the auto-delegate breaker. App pool in Postgres
+	// (RLS-active) since the queue + per-task surface is request-
+	// driven; the AI scorer reads tasks via the admin-pooled
+	// ScoreStore.
+	Tasks TaskStore
+
 	// Tx is the transaction runner — handlers that need atomic
 	// multi-store writes call Tx.WithTx and receive a TxStores with
 	// every field tx-bound. Postgres impl also sets the JWT claims
@@ -91,6 +99,7 @@ type TxStores struct {
 	Agents        AgentStore
 	TeamAgents    TeamAgentStore
 	Users         UsersStore
+	Tasks         TaskStore
 }
 
 // TxRunner runs fn inside a single database transaction. Postgres

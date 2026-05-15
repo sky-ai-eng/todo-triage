@@ -7,6 +7,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // TestMaterializePriorMemories_CreatesDirEvenWithNoPriors guards the
@@ -75,7 +76,7 @@ func TestMaterializePriorMemories_WritesPriors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("event: %v", err)
 	}
-	task, _, err := db.FindOrCreateTask(database, entity.ID, domain.EventJiraIssueAssigned, "", evt, 0.5)
+	task, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, entity.ID, domain.EventJiraIssueAssigned, "", evt, 0.5)
 	if err != nil {
 		t.Fatalf("task: %v", err)
 	}

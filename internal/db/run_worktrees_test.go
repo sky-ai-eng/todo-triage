@@ -24,10 +24,7 @@ func seedJiraRun(t *testing.T, database *sql.DB, runID string) {
 	if err != nil {
 		t.Fatalf("event: %v", err)
 	}
-	task, _, err := FindOrCreateTask(database, entity.ID, domain.EventJiraIssueAssigned, runID, evt, 0.5)
-	if err != nil {
-		t.Fatalf("task: %v", err)
-	}
+	task := seedTaskForTest(t, database, entity.ID, domain.EventJiraIssueAssigned, runID, evt)
 	createPromptForTest(t, database, domain.Prompt{ID: "p-" + runID, Name: "T", Body: "x", Source: "user"})
 	if err := CreateAgentRun(database, domain.AgentRun{
 		ID: runID, TaskID: task.ID, PromptID: "p-" + runID,

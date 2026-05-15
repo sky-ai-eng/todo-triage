@@ -20,10 +20,7 @@ func TestEnqueuePendingFiring_Insert(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record event: %v", err)
 	}
-	task, _, err := FindOrCreateTask(database, entity.ID, domain.EventGitHubPRCICheckFailed, "build", eventID, 0.5)
-	if err != nil {
-		t.Fatalf("create task: %v", err)
-	}
+	task := seedTaskForTest(t, database, entity.ID, domain.EventGitHubPRCICheckFailed, "build", eventID)
 	createTriggerForTest(t, database, domain.EventHandler{Kind: domain.EventHandlerKindTrigger,
 		ID: "t1", PromptID: "p1", TriggerType: domain.TriggerTypeEvent,
 		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: intPtr(4), MinAutonomySuitability: floatPtr(0), Enabled: true,
@@ -67,8 +64,8 @@ func TestPopPendingFiring_FIFO(t *testing.T) {
 	// distinct prompts because (prompt_id, event_type, trigger_type) is
 	// a unique index on prompt_triggers.
 	createPromptForTest(t, database, domain.Prompt{ID: "p2", Name: "P2", Body: "y", Source: "user"})
-	taskA, _, _ := FindOrCreateTask(database, entity.ID, domain.EventGitHubPRCICheckFailed, "buildA", eventID, 0.5)
-	taskB, _, _ := FindOrCreateTask(database, entity.ID, domain.EventGitHubPRCICheckFailed, "buildB", eventID, 0.5)
+	taskA := seedTaskForTest(t, database, entity.ID, domain.EventGitHubPRCICheckFailed, "buildA", eventID)
+	taskB := seedTaskForTest(t, database, entity.ID, domain.EventGitHubPRCICheckFailed, "buildB", eventID)
 	createTriggerForTest(t, database, domain.EventHandler{Kind: domain.EventHandlerKindTrigger,
 		ID: "tA", PromptID: "p1", TriggerType: domain.TriggerTypeEvent,
 		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: intPtr(4), MinAutonomySuitability: floatPtr(0), Enabled: true,
@@ -132,7 +129,7 @@ func TestEntityCanFireImmediately_GateLogic(t *testing.T) {
 	eventID, _ := RecordEvent(database, domain.Event{
 		EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entity.ID, MetadataJSON: `{"check_name":"build"}`,
 	})
-	task, _, _ := FindOrCreateTask(database, entity.ID, domain.EventGitHubPRCICheckFailed, "build", eventID, 0.5)
+	task := seedTaskForTest(t, database, entity.ID, domain.EventGitHubPRCICheckFailed, "build", eventID)
 	createTriggerForTest(t, database, domain.EventHandler{Kind: domain.EventHandlerKindTrigger,
 		ID: "t1", PromptID: "p1", TriggerType: domain.TriggerTypeEvent,
 		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: intPtr(4), MinAutonomySuitability: floatPtr(0), Enabled: true,
@@ -217,7 +214,7 @@ func TestEnqueueAfterFired(t *testing.T) {
 	eventID, _ := RecordEvent(database, domain.Event{
 		EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entity.ID, MetadataJSON: `{"check_name":"build"}`,
 	})
-	task, _, _ := FindOrCreateTask(database, entity.ID, domain.EventGitHubPRCICheckFailed, "build", eventID, 0.5)
+	task := seedTaskForTest(t, database, entity.ID, domain.EventGitHubPRCICheckFailed, "build", eventID)
 	createTriggerForTest(t, database, domain.EventHandler{Kind: domain.EventHandlerKindTrigger,
 		ID: "t1", PromptID: "p1", TriggerType: domain.TriggerTypeEvent,
 		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: intPtr(4), MinAutonomySuitability: floatPtr(0), Enabled: true,
@@ -274,8 +271,8 @@ func TestPendingFirings_CrossEntityIsolation(t *testing.T) {
 		EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entB.ID, MetadataJSON: `{"check_name":"build"}`,
 	})
 
-	taskA, _, _ := FindOrCreateTask(database, entA.ID, domain.EventGitHubPRCICheckFailed, "build", evtA, 0.5)
-	taskB, _, _ := FindOrCreateTask(database, entB.ID, domain.EventGitHubPRCICheckFailed, "build", evtB, 0.5)
+	taskA := seedTaskForTest(t, database, entA.ID, domain.EventGitHubPRCICheckFailed, "build", evtA)
+	taskB := seedTaskForTest(t, database, entB.ID, domain.EventGitHubPRCICheckFailed, "build", evtB)
 
 	createTriggerForTest(t, database, domain.EventHandler{Kind: domain.EventHandlerKindTrigger,
 		ID: "t1", PromptID: "p1", TriggerType: domain.TriggerTypeEvent,
@@ -332,7 +329,7 @@ func TestEnqueue_SameTaskDifferentTrigger(t *testing.T) {
 	eventID, _ := RecordEvent(database, domain.Event{
 		EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entity.ID, MetadataJSON: `{"check_name":"build"}`,
 	})
-	task, _, _ := FindOrCreateTask(database, entity.ID, domain.EventGitHubPRCICheckFailed, "build", eventID, 0.5)
+	task := seedTaskForTest(t, database, entity.ID, domain.EventGitHubPRCICheckFailed, "build", eventID)
 	createTriggerForTest(t, database, domain.EventHandler{Kind: domain.EventHandlerKindTrigger,
 		ID: "tA", PromptID: "p1", TriggerType: domain.TriggerTypeEvent,
 		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: intPtr(4), MinAutonomySuitability: floatPtr(0), Enabled: true,
@@ -373,7 +370,7 @@ func TestMarkTransitions_Idempotent(t *testing.T) {
 	eventID, _ := RecordEvent(database, domain.Event{
 		EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entity.ID, MetadataJSON: `{"check_name":"build"}`,
 	})
-	task, _, _ := FindOrCreateTask(database, entity.ID, domain.EventGitHubPRCICheckFailed, "build", eventID, 0.5)
+	task := seedTaskForTest(t, database, entity.ID, domain.EventGitHubPRCICheckFailed, "build", eventID)
 	createTriggerForTest(t, database, domain.EventHandler{Kind: domain.EventHandlerKindTrigger,
 		ID: "t1", PromptID: "p1", TriggerType: domain.TriggerTypeEvent,
 		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: intPtr(4), MinAutonomySuitability: floatPtr(0), Enabled: true,

@@ -68,7 +68,7 @@ func setupDrainScenario(t *testing.T, database *sql.DB) (entityID, taskID, trigg
 		t.Fatalf("record event: %v", err)
 	}
 
-	task, _, err := db.FindOrCreateTask(database, entityID, domain.EventGitHubPRCICheckFailed, "build", eventID, 0.5)
+	task, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, entityID, domain.EventGitHubPRCICheckFailed, "build", eventID, 0.5)
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
@@ -85,7 +85,7 @@ func setupDrainScenario(t *testing.T, database *sql.DB) (entityID, taskID, trigg
 	); err != nil {
 		t.Fatalf("seed agent: %v", err)
 	}
-	if err := db.SetTaskClaimedByAgent(database, taskID, runmode.LocalDefaultAgentID); err != nil {
+	if err := testTaskStore(database).SetClaimedByAgent(t.Context(), runmode.LocalDefaultOrg, taskID, runmode.LocalDefaultAgentID); err != nil {
 		t.Fatalf("stamp claim: %v", err)
 	}
 
@@ -117,11 +117,11 @@ func TestDrainEntity_ClosedTask(t *testing.T) {
 
 	// Close the task between enqueue and drain — simulates an inline close
 	// check or entity cascade resolving the task while a firing waits.
-	if err := db.CloseTask(database, taskID, "test_close", ""); err != nil {
+	if err := testTaskStore(database).Close(t.Context(), runmode.LocalDefaultOrg, taskID, "test_close", ""); err != nil {
 		t.Fatalf("close task: %v", err)
 	}
 
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), nil, noopScorer{}, websocket.NewHub())
 	router.DrainEntity(entityID)
 
 	rows, err := db.ListPendingFiringsForEntity(database, entityID)
@@ -158,14 +158,14 @@ func TestRevertTaskStatus_PreservesClaim(t *testing.T) {
 	// we're testing revert independently of the caller path, so set
 	// status to something visibly distinct so the assertion catches
 	// a regression where SetTaskStatus isn't called either.)
-	if err := db.SetTaskStatus(database, taskID, "snoozed"); err != nil {
+	if err := testTaskStore(database).SetStatus(t.Context(), runmode.LocalDefaultOrg, taskID, "snoozed"); err != nil {
 		t.Fatalf("pre-stage status: %v", err)
 	}
 
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), nil, noopScorer{}, websocket.NewHub())
 	router.revertTaskStatus(taskID, "queued")
 
-	task, err := db.GetTask(database, taskID)
+	task, err := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrg, taskID)
 	if err != nil || task == nil {
 		t.Fatalf("read task: task=%v err=%v", task, err)
 	}
@@ -200,7 +200,7 @@ func TestDrainEntity_SnoozedTask(t *testing.T) {
 
 	// Bot-claim the task (drain would otherwise short-circuit on
 	// claim_changed before the lifecycle check) AND snooze it.
-	if err := db.SetTaskClaimedByAgent(database, taskID, runmode.LocalDefaultAgentID); err != nil {
+	if err := testTaskStore(database).SetClaimedByAgent(t.Context(), runmode.LocalDefaultOrg, taskID, runmode.LocalDefaultAgentID); err != nil {
 		t.Fatalf("stamp claim: %v", err)
 	}
 	if _, err := database.Exec(
@@ -210,7 +210,7 @@ func TestDrainEntity_SnoozedTask(t *testing.T) {
 		t.Fatalf("snooze task: %v", err)
 	}
 
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), nil, noopScorer{}, websocket.NewHub())
 	router.DrainEntity(entityID)
 
 	rows, err := db.ListPendingFiringsForEntity(database, entityID)
@@ -242,7 +242,7 @@ func TestDrainEntity_DisabledTrigger(t *testing.T) {
 
 	setTriggerEnabledForTestRouting(t, database, triggerID, false)
 
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), nil, noopScorer{}, websocket.NewHub())
 	router.DrainEntity(entityID)
 
 	rows, err := db.ListPendingFiringsForEntity(database, entityID)
@@ -275,7 +275,7 @@ func TestDrainEntity_MultipleStaleFirings(t *testing.T) {
 	triggerIDs := []string{}
 	for i := 0; i < 3; i++ {
 		dedup := []string{"checkA", "checkB", "checkC"}[i]
-		task, _, err := db.FindOrCreateTask(database, entityID, domain.EventGitHubPRCICheckFailed, dedup, eventID, 0.5)
+		task, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, entityID, domain.EventGitHubPRCICheckFailed, dedup, eventID, 0.5)
 		if err != nil {
 			t.Fatalf("create task %d: %v", i, err)
 		}
@@ -300,12 +300,12 @@ func TestDrainEntity_MultipleStaleFirings(t *testing.T) {
 
 	// Close every task so all three drain as task_closed.
 	for _, id := range taskIDs {
-		if err := db.CloseTask(database, id, "test_close", ""); err != nil {
+		if err := testTaskStore(database).Close(t.Context(), runmode.LocalDefaultOrg, id, "test_close", ""); err != nil {
 			t.Fatalf("close task %s: %v", id, err)
 		}
 	}
 
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), nil, noopScorer{}, websocket.NewHub())
 	router.DrainEntity(entityID)
 
 	rows, err := db.ListPendingFiringsForEntity(database, entityID)
@@ -332,7 +332,7 @@ func TestDrainEntity_EmptyQueue(t *testing.T) {
 	database := newTestDB(t)
 	entityID, _, _, _ := setupDrainScenario(t, database)
 
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), nil, noopScorer{}, websocket.NewHub())
 	router.DrainEntity(entityID) // must not panic or error visibly
 
 	rows, err := db.ListPendingFiringsForEntity(database, entityID)
@@ -366,7 +366,7 @@ func TestDrainEntity_ConcurrentDrainsDoNotDoubleFire(t *testing.T) {
 	}
 
 	stub := &stubDelegator{db: database}
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, stub, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), stub, noopScorer{}, websocket.NewHub())
 
 	const drainers = 5
 	var wg sync.WaitGroup
@@ -419,7 +419,7 @@ func TestRunDrainSweeper_PicksUpStuckFiring(t *testing.T) {
 	}
 
 	stub := &stubDelegator{db: database}
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, stub, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), stub, noopScorer{}, websocket.NewHub())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -467,7 +467,7 @@ func TestRunDrainSweeper_NoOpWhenIdle(t *testing.T) {
 	_ = entityID
 
 	stub := &stubDelegator{db: database}
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, stub, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), stub, noopScorer{}, websocket.NewHub())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

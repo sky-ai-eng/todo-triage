@@ -148,7 +148,7 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	task, created, err := db.FindOrCreateTask(s.db, req.EntityID, req.EventType, req.DedupKey, primaryEvent.ID, defaultPriority)
+	task, created, err := s.tasks.FindOrCreate(r.Context(), runmode.LocalDefaultOrg, req.EntityID, req.EventType, req.DedupKey, primaryEvent.ID, defaultPriority)
 	if err != nil {
 		internalError(w, "factory", err)
 		return
@@ -167,7 +167,7 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	// RecordSwipe), not a fresh event landing — there's nothing new
 	// to link the existing task to.
 	if created {
-		if err := db.RecordTaskEvent(s.db, task.ID, primaryEvent.ID, "spawned"); err != nil {
+		if err := s.tasks.RecordEvent(r.Context(), runmode.LocalDefaultOrg, task.ID, primaryEvent.ID, "spawned"); err != nil {
 			log.Printf("[factory] failed to record spawned task_event for %s: %v", task.ID, err)
 		}
 	}
@@ -204,7 +204,7 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	// (a chip the user previously claimed via the Board), and the
 	// idempotent same-agent no-op. Refuses on a different-user
 	// claim — the factory drop shouldn't steal.
-	switch result, err := db.HandoffAgentClaim(s.db, task.ID, a.ID, runmode.LocalDefaultUserID); {
+	switch result, err := s.tasks.HandoffAgentClaim(r.Context(), runmode.LocalDefaultOrg, task.ID, a.ID, runmode.LocalDefaultUserID); {
 	case err != nil:
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "claim stamp failed: " + err.Error()})
 		return
