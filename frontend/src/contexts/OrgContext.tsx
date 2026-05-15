@@ -29,6 +29,10 @@ const ACTIVE_ORG_KEY = 'triagefactory.activeOrgId'
 
 interface OrgContextValue {
   activeOrgId: string | null
+  /** True when the URL contains an /orgs/:org_id the authenticated user
+   *  is not a member of. AuthGate uses this to redirect to the active
+   *  org rather than silently showing a different org's data. */
+  urlOrgInvalid: boolean
   /** Persists a new active org. Doesn't navigate — the caller (e.g.
    *  OrgPicker) handles the route swap. */
   setActiveOrgId: (id: string) => void
@@ -81,6 +85,14 @@ export function OrgProvider({ children }: { children: React.ReactNode }) {
     return null
   }, [auth, urlOrgId, storedId])
 
+  // Detect when the URL names an org the authenticated user isn't in.
+  // Only meaningful once we have a confirmed org list (authed state).
+  const urlOrgInvalid = useMemo(() => {
+    if (!auth || !urlOrgId) return false
+    if (auth.status !== 'authed') return false
+    return !auth.orgs.some((o) => o.id === urlOrgId)
+  }, [auth, urlOrgId])
+
   // Sync localStorage with the resolved active org so a fresh tab
   // picks it up. Skip when null (no orgs yet or pre-auth).
   useEffect(() => {
@@ -90,12 +102,13 @@ export function OrgProvider({ children }: { children: React.ReactNode }) {
   const value = useMemo<OrgContextValue>(
     () => ({
       activeOrgId,
+      urlOrgInvalid,
       setActiveOrgId: (id: string) => {
         writeStored(id)
         setStoredId(id)
       },
     }),
-    [activeOrgId],
+    [activeOrgId, urlOrgInvalid],
   )
 
   return <OrgContext.Provider value={value}>{children}</OrgContext.Provider>

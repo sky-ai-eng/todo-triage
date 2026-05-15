@@ -2,7 +2,7 @@ import { Navigate, useLocation } from 'react-router-dom'
 import { useAuthStatus } from './hooks/useAuthStatus'
 import { useDeploymentConfig } from './hooks/useDeploymentConfig'
 import { useAuth } from './contexts/AuthContext'
-import { useActiveOrgId } from './contexts/OrgContext'
+import { useOrgContext } from './contexts/OrgContext'
 
 /**
  * AuthGate routes between the existing local-mode keychain setup
@@ -13,9 +13,10 @@ import { useActiveOrgId } from './contexts/OrgContext'
  *
  * Multi-mode states:
  *   loading → spinner
- *   error   → spinner (transient; AuthContext keeps retrying via refresh())
+ *   error   → error panel with retry button
  *   unauth  → redirect to /login?return_to=<current>
  *   authed + 0 orgs   → redirect to /no-orgs
+ *   authed + N orgs, URL has unknown org_id → redirect to /orgs/<active> (preserve tail)
  *   authed + N orgs, URL not under /orgs/:id → redirect to /orgs/<active>
  *   authed + N orgs, URL under /orgs/:id → render children
  *
@@ -41,11 +42,29 @@ function LocalAuthGate({ children }: { children: React.ReactNode }) {
 
 function MultiAuthGate({ children }: { children: React.ReactNode }) {
   const auth = useAuth()
-  const activeOrgId = useActiveOrgId()
+  const { activeOrgId, urlOrgInvalid } = useOrgContext()
   const location = useLocation()
 
-  if (auth.status === 'loading' || auth.status === 'error') {
+  if (auth.status === 'loading') {
     return <Loading />
+  }
+  if (auth.status === 'error') {
+    return (
+      <div className="min-h-screen bg-surface flex items-center justify-center">
+        <div className="text-center space-y-3">
+          <p className="text-text-secondary text-sm">
+            {auth.error ?? 'Failed to load session'}
+          </p>
+          <button
+            type="button"
+            onClick={() => void auth.refresh()}
+            className="text-accent text-sm underline"
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    )
   }
   if (auth.status === 'unauth') {
     const target = location.pathname + location.search
@@ -54,6 +73,12 @@ function MultiAuthGate({ children }: { children: React.ReactNode }) {
   }
   if (auth.orgs.length === 0) {
     return <Navigate to="/no-orgs" replace />
+  }
+  // URL has an org_id the user is not a member of — swap it for the
+  // active org while preserving the rest of the path.
+  if (urlOrgInvalid && activeOrgId) {
+    const tail = (location.pathname.replace(/^\/orgs\/[^/]+/, '') || '/') + location.search
+    return <Navigate to={'/orgs/' + activeOrgId + tail} replace />
   }
   // Authed + has orgs. The router only mounts MultiAuthGate under
   // /orgs/:org_id/* so by definition we're on an org-scoped path.

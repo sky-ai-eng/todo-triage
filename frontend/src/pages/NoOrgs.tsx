@@ -1,3 +1,5 @@
+import { useEffect } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
 
 /**
@@ -9,6 +11,16 @@ import { useAuth } from '../contexts/AuthContext'
  */
 export default function NoOrgs() {
   const auth = useAuth()
+  const navigate = useNavigate()
+
+  // When an admin adds this user to an org after they landed here,
+  // auth.refresh() will update the orgs list and this effect redirects
+  // them in-place without a full page reload.
+  useEffect(() => {
+    if (auth.status === 'authed' && auth.orgs.length > 0) {
+      navigate('/orgs/' + auth.orgs[0].id, { replace: true })
+    }
+  }, [auth.status, auth.orgs, navigate])
 
   return (
     <div className="min-h-screen bg-surface flex items-center justify-center p-4">
@@ -32,7 +44,7 @@ export default function NoOrgs() {
         <div className="flex gap-3">
           <button
             type="button"
-            onClick={() => window.location.reload()}
+            onClick={() => void auth.refresh()}
             className="flex-1 bg-white/50 hover:bg-white/80 border border-border-subtle text-text-secondary font-medium rounded-xl px-4 py-2.5 text-[13px] transition-colors"
           >
             Refresh

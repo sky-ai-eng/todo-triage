@@ -149,8 +149,26 @@ function MultiRoutes() {
 }
 
 function AppRoutes() {
-  const { config, loading } = useDeploymentConfig()
-  if (loading || !config) return <Loading />
+  const { config, loading, error } = useDeploymentConfig()
+  if (loading) return <Loading />
+  if (error || !config) {
+    return (
+      <div className="min-h-screen bg-surface flex items-center justify-center">
+        <div className="text-center space-y-3">
+          <p className="text-text-secondary text-sm">
+            {error ?? 'Failed to load configuration'}
+          </p>
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            className="text-accent text-sm underline"
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    )
+  }
   return config.deployment_mode === 'multi' ? <MultiRoutes /> : <LocalRoutes />
 }
 
