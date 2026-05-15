@@ -826,7 +826,7 @@ export default function Settings() {
             type="button"
             onClick={async () => {
               if (!confirm('Clear all stored tokens? You will need to re-authenticate.')) return
-              await fetch('/api/auth', { method: 'DELETE' })
+              await fetch('/api/integrations', { method: 'DELETE' })
               window.location.href = '/setup'
             }}
             className="text-[13px] text-dismiss hover:text-dismiss/80 border border-dismiss/20 hover:border-dismiss/30 rounded-xl px-4 py-2 transition-colors"

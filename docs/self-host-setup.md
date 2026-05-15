@@ -24,8 +24,8 @@ Fill in:
 - `SUPABASE_AUTH_ADMIN_PASSWORD` — distinct password for the role GoTrue connects as. Keeping it separate from the superuser means a GoTrue compromise doesn't surrender full DB access. **Generate with `openssl rand -hex 32`** — GoTrue's DB library only accepts URL-form connection strings, so the password is interpolated into a `postgres://user:pass@host/...` URL. Plain hex avoids every URL-reserved character (`/`, `?`, `#`, `@`, `+`, `=`) by construction. Do *not* use `openssl rand -base64 32` — base64 includes `/` and `+` which break URL parsing.
 - `TF_PUBLIC_URL` — your public URL (no trailing slash)
 - `GH_CLIENT_ID` / `GH_CLIENT_SECRET` — from step 1
-
-Leave `TF_SESSION_KEY` empty for now (D7 wires it).
+- `TF_SESSION_ENCRYPTION_KEY` — 32 random bytes; AES-GCM master key for the access/refresh tokens stored at rest in `public.sessions`. **Generate with `openssl rand -hex 32`.** Rotating this key invalidates every existing session (ciphertext can't be decrypted) — plan it as a forced re-auth event.
+- `TF_COOKIE_SECRET` — 32 random bytes; HMAC-SHA256 key for the short-lived OAuth state cookie (carries PKCE verifier + CSRF token). **Generate with `openssl rand -hex 32`.** Kept distinct from `TF_SESSION_ENCRYPTION_KEY` so the two rotate independently — rotating only this one invalidates in-flight OAuth handshakes (10-minute window), not active sessions.
 
 > **Rotating passwords:** edit `.env` and re-run `docker compose up -d`. A short-lived `postgres-postinit` sidecar runs on every boot and reapplies `ALTER USER` for the non-superuser roles, so password changes propagate without wiping the data volume. Rotating `POSTGRES_PASSWORD` itself requires more care — that's the superuser's password and Postgres only honors the env var on first init, so changing it means `ALTER USER postgres WITH PASSWORD '...'` by hand inside the running container.
 
@@ -50,6 +50,7 @@ This starts Postgres + GoTrue. The Postgres image is `supabase/postgres`, which 
 The Triage Factory binary itself runs from the host (D13 will package it as a container image; D9 will wire its own DB connection):
 
 ```sh
+set -a; source .env; set +a   # exports TF_SESSION_ENCRYPTION_KEY + TF_COOKIE_SECRET + the rest
 TF_MODE=multi \
   TF_GOTRUE_URL=http://localhost:9999 \
   TF_GOTRUE_JWKS_URL=http://localhost:9999/.well-known/jwks.json \
@@ -58,7 +59,24 @@ TF_MODE=multi \
   ./triagefactory
 ```
 
-(End-to-end multi-mode boot is not wired yet — see SKY-242 for the v1 epic. D6 brings up the auth substrate; D7 wires the handlers.)
+(End-to-end multi-mode boot is not yet stitched into the `main.go` server start — see SKY-242 for the v1 epic. D6 brought up the auth substrate; D7 ships the handlers + middleware + sessions, exercised via integration tests. D9 will let the binary boot multi-mode end-to-end once every existing handler picks up `WithTx` + RLS claims.)
+
+## Verifying the auth flow (post-D7)
+
+Once the binary can boot multi-mode (post-D9), the GitHub OAuth roundtrip can be smoke-tested manually:
+
+```sh
+# 1. Open the browser at /api/auth/oauth/github
+open "https://triagefactory.yourcompany.com/api/auth/oauth/github?return_to=/"
+# 2. Authorize in the GitHub UI
+# 3. Browser lands back on / with an `sid` HttpOnly cookie
+# 4. Confirm session is live
+curl -b "sid=<value>" https://triagefactory.yourcompany.com/api/me
+# 5. Logout (revokes server-side, clears cookie)
+curl -b "sid=<value>" -X POST https://triagefactory.yourcompany.com/api/auth/logout
+```
+
+Until then, the same flow is covered by the integration test suite (`go test ./internal/server/ -run TestAuthFlow`), which drives the callback handler directly against a testcontainer postgres + in-process JWKS. Real-GitHub coverage waits for D9's full-binary boot path.
 
 ## 5. Verify JWKS is reachable
 

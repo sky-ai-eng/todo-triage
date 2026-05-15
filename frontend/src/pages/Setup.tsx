@@ -91,7 +91,7 @@ export default function Setup() {
       // setup with a clear error if it fails. Don't double-check
       // here — duplicating the gate forces us to keep two error
       // surfaces in sync.
-      const res = await fetch('/api/auth/setup', {
+      const res = await fetch('/api/integrations/setup', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -271,7 +271,7 @@ export default function Setup() {
     // Disconnect Jira — clear stored credentials so the user must
     // re-enter at least the PAT to reconnect.
     try {
-      await fetch('/api/auth/jira', { method: 'DELETE' })
+      await fetch('/api/integrations/jira', { method: 'DELETE' })
     } catch {
       // Best-effort — proceed with local state reset regardless.
     }

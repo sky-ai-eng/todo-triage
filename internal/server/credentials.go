@@ -31,7 +31,7 @@ type setupResponse struct {
 	Jira   *auth.JiraUser   `json:"jira,omitempty"`
 }
 
-func (s *Server) handleAuthSetup(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleIntegrationsSetup(w http.ResponseWriter, r *http.Request) {
 	var req setupRequest
 	if !decodeJSON(w, r, &req, "") {
 		return
@@ -143,7 +143,7 @@ func (s *Server) handleAuthSetup(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request) {
 	creds, err := auth.Load()
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -174,7 +174,11 @@ func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
-func (s *Server) handleAuthDelete(w http.ResponseWriter, r *http.Request) {
+// DELETE /api/integrations — clears all integration credentials (GitHub
+// + Jira) from the keychain. Used by the Settings "Clear All Tokens"
+// flow when the user wants a fresh slate. Granular per-integration
+// clears live on subpaths (e.g. DELETE /api/integrations/jira).
+func (s *Server) handleIntegrationsClear(w http.ResponseWriter, r *http.Request) {
 	if err := auth.Clear(); err != nil {
 		internalError(w, "auth", err)
 		return
@@ -182,8 +186,10 @@ func (s *Server) handleAuthDelete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "cleared"})
 }
 
-// DELETE /api/auth/jira — clears Jira credentials only, preserving GitHub.
-func (s *Server) handleAuthDeleteJira(w http.ResponseWriter, r *http.Request) {
+// DELETE /api/integrations/jira — clears Jira credentials only,
+// preserving GitHub. Counterpart to the collection-level clear at
+// DELETE /api/integrations.
+func (s *Server) handleIntegrationsDeleteJira(w http.ResponseWriter, r *http.Request) {
 	if err := auth.ClearJira(); err != nil {
 		internalError(w, "auth", err)
 		return

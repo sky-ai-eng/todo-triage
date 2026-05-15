@@ -20,7 +20,7 @@ export function useAuthStatus(): AuthStatus {
   })
 
   useEffect(() => {
-    fetch('/api/auth/status')
+    fetch('/api/integrations/status')
       .then((res) => res.json())
       .then((data) => setStatus({ ...data, loading: false }))
       .catch(() => setStatus((s) => ({ ...s, loading: false })))

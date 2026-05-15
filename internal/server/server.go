@@ -6,10 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 
 	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -43,6 +46,30 @@ type Server struct {
 	onJiraChanged   func() // Jira config changed — restart Jira poller only
 	scorerTrigger   func() // invoked after non-poll task creation (e.g. carry-over) to kick scoring immediately
 	lifetimeCounter *db.LifetimeDistinctCounter
+
+	// authDeps groups the multi-mode-only auth stack (JWKS verifier +
+	// session store + gotrue HTTP client). Nil in local mode; checked
+	// by middleware before any session lookup so local-mode boots
+	// without dragging GoTrue into the dependency graph.
+	authDeps  *authDeps
+	authCfg   *authConfig
+	authProxy http.Handler // /auth/v1/* → gotrue:9999/*
+
+	// refreshGroup dedupes concurrent JWT refresh attempts per session.
+	// singleflight.Group is the standard "share-the-call-result-across-
+	// concurrent-callers" primitive: at most one gotrue refresh runs
+	// per session ID at a time, and all waiters receive the same
+	// result. The key is cleared once the in-flight call returns, so
+	// there's no per-session state accumulating over process lifetime
+	// (vs the prior sync.Map[uuid]*Mutex which leaked one entry per
+	// session forever).
+	refreshGroup singleflight.Group
+
+	// inlineScriptHashes is the base64-encoded SHA-256 of each inline
+	// <script> block in the served index.html. Populated by SetStatic;
+	// the CSP middleware (withSecurityHeaders) injects them into
+	// script-src as `'sha256-<hash>'` directives.
+	inlineScriptHashes []string
 
 	// Jira poll readiness — used by /api/jira/stock to decide whether the
 	// poller has completed its first cycle after a restart. Carry-over reads
@@ -146,17 +173,63 @@ func New(database *sql.DB, prompts db.PromptStore, swipes db.SwipeStore, dashboa
 	return s
 }
 
-// ListenAndServe starts the HTTP server on the given address.
+// ListenAndServe starts the HTTP server on the given address. The mux
+// is wrapped in withSecurityHeaders so every response carries the
+// standard set (HSTS conditionally, CSP, X-Frame-Options, etc.).
 func (s *Server) ListenAndServe(addr string) error {
-	return http.ListenAndServe(addr, s.mux)
+	return http.ListenAndServe(addr, s.withSecurityHeaders(s.mux))
 }
 
 func (s *Server) routes() {
 	// API routes
-	s.mux.HandleFunc("POST /api/auth/setup", s.handleAuthSetup)
-	s.mux.HandleFunc("GET /api/auth/status", s.handleAuthStatus)
-	s.mux.HandleFunc("DELETE /api/auth", s.handleAuthDelete)
-	s.mux.HandleFunc("DELETE /api/auth/jira", s.handleAuthDeleteJira)
+	// Integration credentials (GitHub PAT, Jira PAT). Distinct from the
+	// session-auth routes below — these are per-user-stored credentials
+	// for talking to third-party services on the user's behalf, not the
+	// user's own login. Lived under /api/auth/* historically; renamed in
+	// the post-SKY-251 cleanup so /api/auth/* unambiguously means
+	// "session authentication." D9 wires its session middleware to
+	// /api/* — including these, since you need to be logged in to
+	// manage your integration credentials.
+	s.mux.HandleFunc("POST /api/integrations/setup", s.handleIntegrationsSetup)
+	s.mux.HandleFunc("GET /api/integrations/status", s.handleIntegrationsStatus)
+	// DELETE on the collection = nuke all integration credentials.
+	// Targeted clears (Jira only) get explicit subpaths.
+	s.mux.HandleFunc("DELETE /api/integrations", s.handleIntegrationsClear)
+	s.mux.HandleFunc("DELETE /api/integrations/jira", s.handleIntegrationsDeleteJira)
+
+	// Multi-mode OAuth flow. Handlers 404 themselves when authDeps is
+	// nil (local mode), so unconditional mount is safe — the routes
+	// are inert until SetAuthDeps wires them.
+	s.mux.HandleFunc("GET /api/auth/oauth/{provider}", s.handleOAuthStart)
+	s.mux.HandleFunc("GET /api/auth/callback", s.handleOAuthCallback)
+	// Logout is the only cookie-authed mutating endpoint in D7. Wrap
+	// in the Origin-check middleware so a cross-site form POST can't
+	// drive-by-log-the-user-out. D9 will apply the same wrapper to
+	// every retrofitted mutating endpoint.
+	s.mux.Handle("POST /api/auth/logout", s.withCSRFOriginCheck(http.HandlerFunc(s.handleLogout)))
+	// Logout-everywhere: must be authenticated to use it (you can only
+	// nuke your own sessions). Wrapped in withSession + the same
+	// CSRF guard as /logout.
+	s.mux.Handle("POST /api/auth/logout/all", s.withCSRFOriginCheck(s.withSession(http.HandlerFunc(s.handleLogoutAll))))
+	// /api/me is the session-protected identity endpoint. withSession
+	// passes through in local mode (no authDeps), so a local-mode
+	// /api/me hit would reach the handler with nil claims and write
+	// 401. The frontend in local mode shouldn't be calling this; D8
+	// handles the conditional mount on the SPA side.
+	s.mux.Handle("GET /api/me", s.withSession(http.HandlerFunc(s.handleMe)))
+
+	// /auth/v1/* reverse-proxy to gotrue, wired lazily inside
+	// SetAuthDeps. The closure here re-reads s.authProxy each
+	// request so local-mode (where it stays nil) returns 404
+	// rather than panicking, and multi-mode picks up the proxy
+	// once SetAuthDeps completes.
+	s.mux.Handle("/auth/v1/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.authProxy == nil {
+			http.NotFound(w, r)
+			return
+		}
+		s.authProxy.ServeHTTP(w, r)
+	}))
 
 	s.mux.HandleFunc("GET /api/queue", s.handleQueue)
 	s.mux.HandleFunc("GET /api/tasks", s.handleTasks)
@@ -309,9 +382,17 @@ func (s *Server) handleFrontend(w http.ResponseWriter, r *http.Request) {
 	http.ServeFileFS(w, r, s.static, "index.html")
 }
 
-// SetStatic sets the embedded frontend filesystem.
+// SetStatic sets the embedded frontend filesystem. Also computes
+// SHA-256 hashes of every inline <script> block in index.html so the
+// CSP middleware can allowlist them via `'sha256-...'` directives —
+// keeps script-src tight without requiring frontend changes.
 func (s *Server) SetStatic(f fs.FS) {
 	s.static = f
+	hashes, err := computeInlineScriptHashes(f)
+	if err != nil {
+		log.Printf("[server] inline script hash compute failed: %v (CSP will block inline scripts)", err)
+	}
+	s.inlineScriptHashes = hashes
 }
 
 // SetSpawner sets the delegation spawner for agent runs.

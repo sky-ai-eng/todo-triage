@@ -1,0 +1,340 @@
+package sessions
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"log"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// Store wraps the public.sessions table. The DB handle must be the
+// admin (BYPASSRLS) pool — session lookup happens *before* we have a
+// claim context to install via SET LOCAL request.jwt.claims, so the
+// table's RLS policies can't be relied on for the lookup itself.
+// (RLS on the table still defends against the eventual app-pool
+// reader for the "list my sessions" UI surface in D11.)
+type Store struct {
+	db  *sql.DB
+	key Key
+}
+
+// NewStore wires the store. Caller owns the *sql.DB lifecycle; this
+// type holds the encryption key by value (32 bytes, cheap to copy).
+func NewStore(db *sql.DB, key Key) *Store {
+	return &Store{db: db, key: key}
+}
+
+// Session is the decrypted-on-read projection. Production rows in
+// public.sessions hold ciphertext for jwt + refresh; this struct holds
+// them already-decrypted.
+type Session struct {
+	ID           uuid.UUID
+	UserID       uuid.UUID
+	JWT          string
+	RefreshToken string
+	JWTExpiresAt time.Time
+	ExpiresAt    time.Time
+	CreatedAt    time.Time
+	LastSeenAt   time.Time
+	RevokedAt    sql.NullTime
+	UserAgent    string
+	IPAddr       string
+}
+
+// Create encrypts the tokens and inserts a fresh row. Returns the
+// session ID (the opaque value we'll set on the sid cookie).
+func (s *Store) Create(
+	ctx context.Context,
+	userID uuid.UUID,
+	jwt, refresh string,
+	jwtExp, sessExp time.Time,
+	userAgent, ipAddr string,
+) (*Session, error) {
+	jwtEnc, jwtNonce, err := s.key.Encrypt([]byte(jwt))
+	if err != nil {
+		return nil, fmt.Errorf("encrypt jwt: %w", err)
+	}
+	refEnc, refNonce, err := s.key.Encrypt([]byte(refresh))
+	if err != nil {
+		return nil, fmt.Errorf("encrypt refresh: %w", err)
+	}
+
+	// CHECK constraint on the table: jwt_expires_at <= expires_at. We
+	// could clamp here, but a violation almost certainly means a caller
+	// bug (gotrue's session expiry shorter than its JWT? — wrong) so
+	// surfacing the constraint error is more useful than silently
+	// shifting the timestamps.
+	row := s.db.QueryRowContext(ctx, `
+		INSERT INTO public.sessions
+		    (user_id, jwt_enc, jwt_nonce, refresh_token_enc, refresh_nonce,
+		     jwt_expires_at, expires_at, user_agent, ip_addr)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, ''), NULLIF($9, '')::inet)
+		RETURNING id, created_at, last_seen_at
+	`, userID, jwtEnc, jwtNonce, refEnc, refNonce, jwtExp, sessExp, userAgent, ipAddr)
+
+	out := &Session{
+		UserID:       userID,
+		JWT:          jwt,
+		RefreshToken: refresh,
+		JWTExpiresAt: jwtExp,
+		ExpiresAt:    sessExp,
+		UserAgent:    userAgent,
+		IPAddr:       ipAddr,
+	}
+	if err := row.Scan(&out.ID, &out.CreatedAt, &out.LastSeenAt); err != nil {
+		return nil, fmt.Errorf("insert session: %w", err)
+	}
+	return out, nil
+}
+
+// Lookup fetches a non-revoked, non-expired session by id, decrypts its
+// tokens, and returns it. Returns (nil, nil) when no matching row exists
+// — the caller renders 401. An error return means a DB or decrypt
+// failure, which is a 500.
+//
+// The decrypt-on-miss-key case (TF_SESSION_KEY rotated, existing rows
+// can no longer be decrypted) deliberately surfaces as an error rather
+// than (nil, nil): callers shouldn't quietly treat "session existed but
+// we can't read it" the same as "no session." Rotation of the master
+// key requires explicit handling (drain sessions, re-issue).
+func (s *Store) Lookup(ctx context.Context, sid uuid.UUID) (*Session, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, user_id,
+		       jwt_enc, jwt_nonce, refresh_token_enc, refresh_nonce,
+		       jwt_expires_at, expires_at, created_at, last_seen_at, revoked_at,
+		       COALESCE(user_agent, ''), COALESCE(host(ip_addr), '')
+		  FROM public.sessions
+		 WHERE id = $1
+		   AND revoked_at IS NULL
+		   AND expires_at > now()
+	`, sid)
+
+	var (
+		out                                Session
+		jwtEnc, jwtNonce, refEnc, refNonce []byte
+	)
+	err := row.Scan(
+		&out.ID, &out.UserID,
+		&jwtEnc, &jwtNonce, &refEnc, &refNonce,
+		&out.JWTExpiresAt, &out.ExpiresAt, &out.CreatedAt, &out.LastSeenAt, &out.RevokedAt,
+		&out.UserAgent, &out.IPAddr,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query session: %w", err)
+	}
+
+	jwtBytes, err := s.key.Decrypt(jwtEnc, jwtNonce)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt jwt for session %s: %w", LogID(sid), err)
+	}
+	refBytes, err := s.key.Decrypt(refEnc, refNonce)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt refresh for session %s: %w", LogID(sid), err)
+	}
+	out.JWT = string(jwtBytes)
+	out.RefreshToken = string(refBytes)
+	return &out, nil
+}
+
+// UpdateJWT rewrites the access + refresh tokens after a successful
+// refresh dance with GoTrue. Does not touch expires_at — the session's
+// own 30-day window keeps ticking; only the inner JWT/refresh rotate.
+func (s *Store) UpdateJWT(
+	ctx context.Context,
+	sid uuid.UUID,
+	jwt, refresh string,
+	jwtExp time.Time,
+) error {
+	jwtEnc, jwtNonce, err := s.key.Encrypt([]byte(jwt))
+	if err != nil {
+		return fmt.Errorf("encrypt jwt: %w", err)
+	}
+	refEnc, refNonce, err := s.key.Encrypt([]byte(refresh))
+	if err != nil {
+		return fmt.Errorf("encrypt refresh: %w", err)
+	}
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE public.sessions
+		   SET jwt_enc = $2, jwt_nonce = $3,
+		       refresh_token_enc = $4, refresh_nonce = $5,
+		       jwt_expires_at = $6
+		 WHERE id = $1
+		   AND revoked_at IS NULL
+	`, sid, jwtEnc, jwtNonce, refEnc, refNonce, jwtExp)
+	if err != nil {
+		return fmt.Errorf("update session: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		// Session vanished or was revoked mid-refresh; signal caller
+		// to drop the cookie rather than silently no-op.
+		return ErrSessionGone
+	}
+	return nil
+}
+
+// ErrSessionGone signals that a session we held a handle to was deleted
+// or revoked between read and write. Middleware turns this into a 401.
+var ErrSessionGone = errors.New("session no longer exists or was revoked")
+
+// Revoke flips revoked_at to now() on a session. Soft-delete: row stays
+// for audit. Idempotent — calling on an already-revoked row is a no-op.
+func (s *Store) Revoke(ctx context.Context, sid uuid.UUID) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE public.sessions
+		   SET revoked_at = now()
+		 WHERE id = $1
+		   AND revoked_at IS NULL
+	`, sid)
+	if err != nil {
+		return fmt.Errorf("revoke session: %w", err)
+	}
+	return nil
+}
+
+// ListActiveForUser returns all non-revoked, non-expired sessions for
+// the given user, with tokens already decrypted. Used by the
+// logout-everywhere flow to know which upstream gotrue sessions to
+// invalidate before flipping revoked_at locally.
+//
+// Order: most recently active first, so a caller that only wants the
+// "current device" can take the head without sorting.
+func (s *Store) ListActiveForUser(ctx context.Context, userID uuid.UUID) ([]Session, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, user_id,
+		       jwt_enc, jwt_nonce, refresh_token_enc, refresh_nonce,
+		       jwt_expires_at, expires_at, created_at, last_seen_at, revoked_at,
+		       COALESCE(user_agent, ''), COALESCE(host(ip_addr), '')
+		  FROM public.sessions
+		 WHERE user_id = $1
+		   AND revoked_at IS NULL
+		   AND expires_at > now()
+		 ORDER BY last_seen_at DESC
+	`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("query sessions: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Session
+	for rows.Next() {
+		var (
+			sess                               Session
+			jwtEnc, jwtNonce, refEnc, refNonce []byte
+		)
+		if err := rows.Scan(
+			&sess.ID, &sess.UserID,
+			&jwtEnc, &jwtNonce, &refEnc, &refNonce,
+			&sess.JWTExpiresAt, &sess.ExpiresAt, &sess.CreatedAt, &sess.LastSeenAt, &sess.RevokedAt,
+			&sess.UserAgent, &sess.IPAddr,
+		); err != nil {
+			return nil, fmt.Errorf("scan session: %w", err)
+		}
+		// Decrypt per row. If one row fails to decrypt (post-key-rotation
+		// state), skip it rather than failing the whole list — the caller
+		// will revoke it locally regardless, and we'd rather drop a
+		// stale row than 500 the logout-everywhere flow.
+		jwtBytes, jerr := s.key.Decrypt(jwtEnc, jwtNonce)
+		refBytes, rerr := s.key.Decrypt(refEnc, refNonce)
+		if jerr != nil || rerr != nil {
+			continue
+		}
+		sess.JWT = string(jwtBytes)
+		sess.RefreshToken = string(refBytes)
+		out = append(out, sess)
+	}
+	return out, rows.Err()
+}
+
+// RevokeAllForUser flips revoked_at on every active session for the
+// user. Returns the count of newly-revoked rows (already-revoked rows
+// are not counted again).
+func (s *Store) RevokeAllForUser(ctx context.Context, userID uuid.UUID) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE public.sessions
+		   SET revoked_at = now()
+		 WHERE user_id = $1
+		   AND revoked_at IS NULL
+	`, userID)
+	if err != nil {
+		return 0, fmt.Errorf("revoke all for user %s: %w", userID, err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// TouchLastSeen bumps last_seen_at to now(). Best-effort — errors are
+// swallowed by the caller (middleware fires this in a goroutine).
+func (s *Store) TouchLastSeen(ctx context.Context, sid uuid.UUID) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE public.sessions SET last_seen_at = now() WHERE id = $1
+	`, sid)
+	if err != nil {
+		return fmt.Errorf("touch last_seen: %w", err)
+	}
+	return nil
+}
+
+// RunReaper drives ReapExpired on a ticker until ctx is cancelled.
+// Designed to be spawned as a goroutine from the server's auth-wiring
+// path (SetAuthDeps) so its lifetime matches the multi-mode session
+// surface — no host process to coordinate, no cron entry for the
+// operator to forget. Errors are logged but don't terminate the loop;
+// a transient DB blip shouldn't permanently leave revoked rows around.
+//
+// interval is the cadence between sweeps. retention is the age
+// threshold passed to ReapExpired. Both should be set wide enough
+// (e.g. 10m interval, 30d retention) that the work per tick stays
+// small.
+//
+// On shutdown: when ctx is cancelled the ticker is stopped and the
+// goroutine returns. A reap-in-progress finishes naturally — DELETE
+// honors the context, so a long-running sweep cancels at the next
+// row boundary.
+func (s *Store) RunReaper(ctx context.Context, interval, retention time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			n, err := s.ReapExpired(ctx, retention)
+			if err != nil && ctx.Err() == nil {
+				// Filter out ctx-cancelled errors (those are just
+				// shutdown noise). Real DB errors get logged for
+				// the operator to investigate.
+				log.Printf("[sessions] reaper: %v", err)
+				continue
+			}
+			if n > 0 {
+				log.Printf("[sessions] reaper: deleted %d rows", n)
+			}
+		}
+	}
+}
+
+// ReapExpired hard-deletes:
+//   - revoked rows older than retention (logged out long ago — audit window passed)
+//   - naturally-expired rows older than retention (sat unrenewed past the session window)
+//
+// Returns total rows deleted across both categories.
+func (s *Store) ReapExpired(ctx context.Context, retention time.Duration) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `
+		DELETE FROM public.sessions
+		 WHERE (revoked_at IS NOT NULL AND revoked_at <  now() - $1::interval)
+		    OR (revoked_at IS NULL     AND expires_at <  now() - $1::interval)
+	`, retention.String())
+	if err != nil {
+		return 0, fmt.Errorf("reap sessions: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
