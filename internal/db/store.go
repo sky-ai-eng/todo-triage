@@ -95,6 +95,14 @@ type Stores struct {
 	// delegate context loaders, the scorer, and the server panels.
 	Entities EntityStore
 
+	// Reviews owns pending_reviews + pending_review_comments — the
+	// agent-prepared GitHub review that sits in `pending_approval`
+	// until the user accepts / edits / discards. App pool in
+	// Postgres; consumers are the reviews handler, the spawner's
+	// discard cleanup, the swipe-dismiss path, and the
+	// cmd/exec/gh agent submit gate.
+	Reviews ReviewStore
+
 	// Tx is the transaction runner — handlers that need atomic
 	// multi-store writes call Tx.WithTx and receive a TxStores with
 	// every field tx-bound. Postgres impl also sets the JWT claims
@@ -122,6 +130,7 @@ type TxStores struct {
 	Factory       FactoryReadStore
 	AgentRuns     AgentRunStore
 	Entities      EntityStore
+	Reviews       ReviewStore
 }
 
 // TxRunner runs fn inside a single database transaction. Postgres

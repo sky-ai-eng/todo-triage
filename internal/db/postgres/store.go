@@ -126,7 +126,13 @@ func New(admin, app *sql.DB) db.Stores {
 		// RLS policy entities_all gates reads + writes on
 		// (org_id = tf.current_org_id() AND tf.user_has_org_access).
 		Entities: newEntityStore(app),
-		Tx:       s,
+		// Reviews wires app — every consumer is request-equivalent
+		// (reviews handler, swipe-dismiss, agent submit-review via
+		// cmd/exec/gh) or runs in a spawner goroutine launched from
+		// a request handler. RLS policies pending_reviews_all +
+		// pending_review_comments_all gate every statement.
+		Reviews: newReviewStore(app),
+		Tx:      s,
 	}
 	return s.stores
 }
@@ -174,5 +180,6 @@ func NewForTx(tx *sql.Tx) db.TxStores {
 		// admin pool via Store.admin.
 		AgentRuns: newAgentRunStore(tx, tx),
 		Entities:  newEntityStore(tx),
+		Reviews:   newReviewStore(tx),
 	}
 }

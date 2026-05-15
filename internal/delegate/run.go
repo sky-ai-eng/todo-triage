@@ -333,7 +333,7 @@ func (s *Spawner) processCompletion(
 		// chain terminates at this step on human approval instead of
 		// advancing past stale handoff narrative into a no-op step.
 		hasPending := false
-		if pendingReview, _ := db.PendingReviewByRunID(s.database, runID); pendingReview != nil {
+		if pendingReview, _ := s.reviews.ByRunID(ctx, runmode.LocalDefaultOrgID, runID); pendingReview != nil {
 			hasPending = true
 		} else if pendingPR, _ := db.PendingPRByRunID(s.database, runID); pendingPR != nil {
 			hasPending = true

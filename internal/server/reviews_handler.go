@@ -36,7 +36,7 @@ type pendingReviewCommentJSON struct {
 func (s *Server) handleReviewGet(w http.ResponseWriter, r *http.Request) {
 	reviewID := r.PathValue("id")
 
-	review, err := db.GetPendingReview(s.db, reviewID)
+	review, err := s.reviews.Get(r.Context(), runmode.LocalDefaultOrgID, reviewID)
 	if err != nil {
 		internalError(w, "reviews", err)
 		return
@@ -46,7 +46,7 @@ func (s *Server) handleReviewGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	comments, err := db.ListPendingReviewComments(s.db, reviewID)
+	comments, err := s.reviews.ListComments(r.Context(), runmode.LocalDefaultOrgID, reviewID)
 	if err != nil {
 		internalError(w, "reviews", err)
 		return
@@ -86,7 +86,7 @@ func (s *Server) handleReviewSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	review, err := db.GetPendingReview(s.db, reviewID)
+	review, err := s.reviews.Get(r.Context(), runmode.LocalDefaultOrgID, reviewID)
 	if err != nil {
 		internalError(w, "reviews", err)
 		return
@@ -101,7 +101,7 @@ func (s *Server) handleReviewSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Load comments (potentially edited by the user)
-	comments, err := db.ListPendingReviewComments(s.db, reviewID)
+	comments, err := s.reviews.ListComments(r.Context(), runmode.LocalDefaultOrgID, reviewID)
 	if err != nil {
 		internalError(w, "reviews", err)
 		return
@@ -145,7 +145,7 @@ func (s *Server) handleReviewSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Clean up local state
-	if err := db.DeletePendingReview(s.db, reviewID); err != nil {
+	if err := s.reviews.Delete(r.Context(), runmode.LocalDefaultOrgID, reviewID); err != nil {
 		log.Printf("[reviews] warning: failed to clean up review %s: %v", reviewID, err)
 	}
 
@@ -190,7 +190,7 @@ func (s *Server) handleReviewSubmit(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRunReview(w http.ResponseWriter, r *http.Request) {
 	runID := r.PathValue("runID")
 
-	review, err := db.PendingReviewByRunID(s.db, runID)
+	review, err := s.reviews.ByRunID(r.Context(), runmode.LocalDefaultOrgID, runID)
 	if err != nil {
 		internalError(w, "reviews", err)
 		return
@@ -201,7 +201,7 @@ func (s *Server) handleRunReview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Delegate to the full review GET which includes comments
-	comments, err := db.ListPendingReviewComments(s.db, review.ID)
+	comments, err := s.reviews.ListComments(r.Context(), runmode.LocalDefaultOrgID, review.ID)
 	if err != nil {
 		internalError(w, "reviews", err)
 		return
@@ -244,7 +244,7 @@ func (s *Server) handleReviewUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	review, err := db.GetPendingReview(s.db, reviewID)
+	review, err := s.reviews.Get(r.Context(), runmode.LocalDefaultOrgID, reviewID)
 	if err != nil {
 		internalError(w, "reviews", err)
 		return
@@ -263,7 +263,7 @@ func (s *Server) handleReviewUpdate(w http.ResponseWriter, r *http.Request) {
 		event = *req.ReviewEvent
 	}
 
-	if err := db.SetPendingReviewSubmission(s.db, reviewID, body, event); err != nil {
+	if err := s.reviews.SetSubmission(r.Context(), runmode.LocalDefaultOrgID, reviewID, body, event); err != nil {
 		internalError(w, "reviews", err)
 		return
 	}
@@ -286,7 +286,7 @@ func (s *Server) handleReviewCommentUpdate(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if err := db.UpdatePendingReviewComment(s.db, commentID, req.Body); err != nil {
+	if err := s.reviews.UpdateComment(r.Context(), runmode.LocalDefaultOrgID, commentID, req.Body); err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 		return
 	}
@@ -298,7 +298,7 @@ func (s *Server) handleReviewCommentUpdate(w http.ResponseWriter, r *http.Reques
 func (s *Server) handleReviewCommentDelete(w http.ResponseWriter, r *http.Request) {
 	commentID := r.PathValue("commentId")
 
-	if err := db.DeletePendingReviewComment(s.db, commentID); err != nil {
+	if err := s.reviews.DeleteComment(r.Context(), runmode.LocalDefaultOrgID, commentID); err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 		return
 	}
@@ -315,7 +315,7 @@ func (s *Server) handleReviewDiff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	review, err := db.GetPendingReview(s.db, reviewID)
+	review, err := s.reviews.Get(r.Context(), runmode.LocalDefaultOrgID, reviewID)
 	if err != nil {
 		internalError(w, "reviews", err)
 		return

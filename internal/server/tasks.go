@@ -783,8 +783,8 @@ func (s *Server) cleanupPendingApprovalRun(taskID string, outcome discardOutcome
 	// mark together. UpdateRunMemoryHumanContent above is
 	// idempotent on re-entry (UPDATE overwrites with the same or
 	// refined verdict).
-	if err := db.DeletePendingReviewByRunID(s.db, runID); err != nil {
-		log.Printf("[approval-discard] DeletePendingReviewByRunID for run %s failed (run held in pending_approval for retry): %v", runID, err)
+	if err := s.reviews.DeleteByRunID(context.Background(), runmode.LocalDefaultOrgID, runID); err != nil {
+		log.Printf("[approval-discard] DeleteByRunID for run %s failed (run held in pending_approval for retry): %v", runID, err)
 		return
 	}
 	// Same hold-for-retry semantics for the pending-PR side table.

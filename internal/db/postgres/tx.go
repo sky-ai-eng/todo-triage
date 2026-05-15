@@ -76,6 +76,7 @@ func (s *Store) WithTx(ctx context.Context, orgID, userID string, fn func(db.TxS
 		// why that's the intended semantics.
 		AgentRuns: newAgentRunStore(tx, s.admin),
 		Entities:  newEntityStore(tx),
+		Reviews:   newReviewStore(tx),
 	}
 	if err := fn(txStores); err != nil {
 		return err
