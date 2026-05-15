@@ -59,6 +59,13 @@ func Handle(args []string) {
 		fail("migrate database: %v", err)
 	}
 
+	// TODO(SKY-254 / D9): `triagefactory resume` is local-only by
+	// nature today — it cd's into a worktree on the operator's
+	// machine and execs `claude --resume`, which only makes sense
+	// for a local install. The DB lookup hardcodes sqlitestore for
+	// the same reason. If multi-mode ever grows a "resume my taken-
+	// over runs" CLI variant, it'll need the mode/JWT/DSN plumbing
+	// every other cmd/exec/* path is waiting on. Same TODO marker.
 	runs, err := sqlitestore.New(database).AgentRuns.ListTakenOverForResume(context.Background(), runmode.LocalDefaultOrg)
 	if err != nil {
 		fail("list taken-over runs: %v", err)

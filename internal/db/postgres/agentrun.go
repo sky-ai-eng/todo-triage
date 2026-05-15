@@ -10,7 +10,6 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // agentRunStore is the Postgres impl of db.AgentRunStore. Wired
@@ -37,30 +36,48 @@ func (s *agentRunStore) Create(ctx context.Context, orgID string, run domain.Age
 	if triggerType == "" {
 		triggerType = "manual"
 	}
-	if triggerType == "manual" && run.CreatorUserID == "" {
-		run.CreatorUserID = runmode.LocalDefaultUserID
-	}
+	// CreatorUserID default differs from the SQLite impl: the
+	// LocalDefaultUserID sentinel has no FK target in a Postgres
+	// `users` row, so falling back to it here would fail
+	// runs_creator_user_id_fkey on any caller that omits the field.
+	// Postgres callers in production set it explicitly (auth-context
+	// derived); for the trigger_type='manual' fallback path used by
+	// tests and direct-SQL fixtures, the COALESCE inside the SQL
+	// resolves either tf.current_user_id() (set by WithTx's JWT
+	// claims when composed inside a tx) or the org's owner_user_id
+	// — the same pattern TaskStore.FindOrCreate uses. The schema
+	// CHECK pairs trigger_type='manual' ↔ non-NULL creator, so a
+	// real value is required; org-owner is the only universally
+	// available non-null in production multi-mode.
 	var stepIdx any
 	if run.ChainStepIndex != nil {
 		stepIdx = *run.ChainStepIndex
 	}
-	// team_id is resolved server-side by looking up the org's default
-	// team. domain.AgentRun has no TeamID field yet — every caller
-	// either uses the org's default team or (in D9) gains a team_id
-	// once the spawner is wired through team-scoped delegation.
-	// Until then, "the org's first team by created_at" is the only
-	// meaningful answer in production multi-mode and harmless in
-	// SQLite where there's exactly one team.
+	// team_id resolves from the parent task — runs inherit team
+	// scope from their task so team-scoped queue / Board filters
+	// attribute the run consistently. Pre-fix this read the org's
+	// oldest team, which misattributed runs whose task belonged to
+	// a different team. SKY-285 review.
 	_, err := s.q.ExecContext(ctx, `
 		INSERT INTO runs (id, org_id, task_id, prompt_id, status, model, worktree_path,
 		                  trigger_type, trigger_id, team_id, visibility, creator_user_id,
 		                  actor_agent_id, chain_run_id, chain_step_index)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
-		        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
-		        'team', $10, $11, $12, $13)
+		        (SELECT team_id FROM tasks WHERE id = $3 AND org_id = $2),
+		        'team',
+		        CASE
+		            WHEN $8 = 'manual' THEN
+		                COALESCE(
+		                    NULLIF($10, '')::uuid,
+		                    tf.current_user_id(),
+		                    (SELECT owner_user_id FROM orgs WHERE id = $2)
+		                )
+		            ELSE NULLIF($10, '')::uuid
+		        END,
+		        $11, $12, $13)
 	`, run.ID, orgID, run.TaskID, nullIfEmpty(run.PromptID), run.Status, run.Model, run.WorktreePath,
 		triggerType, nullIfEmpty(run.TriggerID),
-		nullIfEmpty(run.CreatorUserID), nullIfEmpty(run.ActorAgentID),
+		run.CreatorUserID, nullIfEmpty(run.ActorAgentID),
 		nullIfEmpty(run.ChainRunID), stepIdx)
 	return err
 }
@@ -126,8 +143,7 @@ func (s *agentRunStore) SetSession(ctx context.Context, orgID, runID, sessionID 
 }
 
 func (s *agentRunStore) MarkTakenOver(ctx context.Context, orgID, runID, takeoverPath, claimUserID string) (bool, error) {
-	var ok bool
-	err := s.runInTx(ctx, func(tx *sql.Tx) error {
+	rolled, err := s.runScoped(ctx, func(tx queryer) error {
 		now := time.Now()
 		res, err := tx.ExecContext(ctx, `
 			UPDATE runs
@@ -148,9 +164,11 @@ func (s *agentRunStore) MarkTakenOver(ctx context.Context, orgID, runID, takeove
 			return err
 		}
 		if n == 0 {
-			// Race-lost on the run flip. Triggering a non-nil
-			// return rolls back the surrounding tx; ok stays false.
-			return errAgentRunTakenOverRace
+			// Race-lost on the run flip — run is already terminal.
+			// errScopedRollback tells runScoped to roll back the
+			// scope (savepoint when composed, tx when standalone)
+			// and surface (false, nil) to the caller.
+			return errScopedRollback
 		}
 
 		if claimUserID != "" {
@@ -178,25 +196,23 @@ func (s *agentRunStore) MarkTakenOver(ctx context.Context, orgID, runID, takeove
 				return err
 			}
 			if taskN == 0 {
-				return errAgentRunTakenOverRace
+				// Race-lost on the task claim axis. Rolling back
+				// the scope unwinds the run UPDATE too — both
+				// statements are atomic with respect to outer
+				// state.
+				return errScopedRollback
 			}
 		}
-		ok = true
 		return nil
 	})
-	if errors.Is(err, errAgentRunTakenOverRace) {
+	if err != nil {
+		return false, err
+	}
+	if rolled {
 		return false, nil
 	}
-	return ok, err
+	return true, nil
 }
-
-// errAgentRunTakenOverRace is the sentinel runInTx uses to translate
-// "race-lost" into a rollback without surfacing the error to the
-// caller. MarkTakenOver maps it back to (false, nil) — both
-// flavors of race-loss (run row terminal, task claim moved) signal
-// the same caller cleanup (abortTakeover), so the sentinel doesn't
-// need to discriminate which axis lost.
-var errAgentRunTakenOverRace = errors.New("agentrun: takeover race-lost")
 
 func (s *agentRunStore) MarkReleased(ctx context.Context, orgID, runID string) (bool, error) {
 	res, err := s.q.ExecContext(ctx, `
@@ -722,23 +738,95 @@ func finalizeAgentRun(r *domain.AgentRun, completedAt sql.NullTime, costUSD sql.
 	}
 }
 
-func (s *agentRunStore) runInTx(ctx context.Context, fn func(*sql.Tx) error) error {
+// runScoped runs fn inside a rollback-safe scope:
+//
+//   - If s.q is *sql.DB (the standalone path — every store method
+//     called outside Stores.Tx.WithTx), runScoped opens a fresh tx,
+//     hands fn the *sql.Tx as a queryer, and commits on success or
+//     rolls back via defer on any error including the sentinel.
+//
+//   - If s.q is *sql.Tx (composed inside an outer WithTx), runScoped
+//     declares a SAVEPOINT, runs fn against the same tx, and either
+//     RELEASEs on success or ROLLBACK-TO-SAVEPOINTs on errScopedRollback
+//     — leaving the surrounding tx's other work intact.
+//
+// fn signals "roll back this scope but don't surface an error to the
+// caller" by returning errScopedRollback. runScoped translates that
+// into (rolledBack=true, nil); MarkTakenOver uses it to convert
+// takeover-race-lost into (false, nil) without poisoning an outer tx.
+//
+// Other errors bubble up unchanged — runScoped rolls back the scope
+// (savepoint or tx) and returns (false, err).
+//
+// Savepoint names are unique per call to avoid collisions if a
+// future caller composes two AgentRunStore methods inside one
+// outer tx.
+func (s *agentRunStore) runScoped(ctx context.Context, fn func(queryer) error) (rolledBack bool, err error) {
 	switch v := s.q.(type) {
 	case *sql.Tx:
-		return fn(v)
+		sp := scopedSavepointName()
+		if _, err := v.ExecContext(ctx, "SAVEPOINT "+sp); err != nil {
+			return false, err
+		}
+		fnErr := fn(v)
+		if fnErr == nil {
+			if _, err := v.ExecContext(ctx, "RELEASE SAVEPOINT "+sp); err != nil {
+				return false, err
+			}
+			return false, nil
+		}
+		// Always roll back the savepoint on any error so partial work
+		// doesn't leak into the outer tx. The RELEASE after ROLLBACK
+		// TO is necessary in Postgres — the savepoint stays declared
+		// otherwise (SQLite's parser tolerates either; uniform shape
+		// keeps the helper simple).
+		if _, rerr := v.ExecContext(ctx, "ROLLBACK TO SAVEPOINT "+sp); rerr != nil {
+			return false, rerr
+		}
+		if _, rerr := v.ExecContext(ctx, "RELEASE SAVEPOINT "+sp); rerr != nil {
+			return false, rerr
+		}
+		if errors.Is(fnErr, errScopedRollback) {
+			return true, nil
+		}
+		return false, fnErr
 	case *sql.DB:
 		tx, err := v.BeginTx(ctx, nil)
 		if err != nil {
-			return err
+			return false, err
 		}
 		defer func() { _ = tx.Rollback() }()
-		if err := fn(tx); err != nil {
-			return err
+		if fnErr := fn(tx); fnErr != nil {
+			if errors.Is(fnErr, errScopedRollback) {
+				return true, nil // deferred Rollback unwinds the tx
+			}
+			return false, fnErr
 		}
-		return tx.Commit()
+		if err := tx.Commit(); err != nil {
+			return false, err
+		}
+		return false, nil
 	default:
-		return errors.New("postgres agentrun: unexpected queryer type")
+		return false, errors.New("postgres agentrun: unexpected queryer type")
 	}
+}
+
+// errScopedRollback is the sentinel fn returns when it wants
+// runScoped to roll back the current scope (savepoint or tx) and
+// surface (rolledBack=true, nil) to the caller. Used by
+// MarkTakenOver to model race-loss as a non-error rollback.
+var errScopedRollback = errors.New("agentrun: scoped rollback")
+
+// scopedSavepointName generates a unique savepoint identifier per
+// call. UnixNano + a process-local counter would be marginally safer
+// against same-nanosecond collisions but the helper is only called
+// inside a transaction, where SAVEPOINT names form a stack and
+// declaring two with the same name shadows the outer — the unique
+// suffix is defensive against logical collisions across nested
+// composed calls within one tx, not against time-resolution
+// collisions.
+func scopedSavepointName() string {
+	return fmt.Sprintf("agentrun_scope_%d", time.Now().UnixNano())
 }
 
 // nullIfEmpty is the small reusable helper many Postgres stores want

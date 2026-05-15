@@ -139,8 +139,7 @@ func (s *agentRunStore) MarkTakenOver(ctx context.Context, orgID, runID, takeove
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
-	var ok bool
-	err := inTx(ctx, s.q, func(tx queryer) error {
+	rolled, err := s.runScoped(ctx, func(tx queryer) error {
 		now := time.Now()
 		res, err := tx.ExecContext(ctx, `
 			UPDATE runs
@@ -161,7 +160,10 @@ func (s *agentRunStore) MarkTakenOver(ctx context.Context, orgID, runID, takeove
 			return err
 		}
 		if n == 0 {
-			return errAgentRunTakenOverRace
+			// Race-lost on the run flip. errScopedRollback rolls
+			// back the scope (savepoint when composed, tx when
+			// standalone) and surfaces (false, nil) to the caller.
+			return errScopedRollback
 		}
 
 		if claimUserID != "" {
@@ -181,22 +183,78 @@ func (s *agentRunStore) MarkTakenOver(ctx context.Context, orgID, runID, takeove
 				return err
 			}
 			if taskN == 0 {
-				return errAgentRunTakenOverRace
+				return errScopedRollback
 			}
 		}
-		ok = true
 		return nil
 	})
-	if errors.Is(err, errAgentRunTakenOverRace) {
+	if err != nil {
+		return false, err
+	}
+	if rolled {
 		return false, nil
 	}
-	return ok, err
+	return true, nil
 }
 
-// errAgentRunTakenOverRace is the sentinel inTx uses to translate
-// "race-lost" into a rollback without surfacing the error to the
-// caller. MarkTakenOver maps it back to (false, nil).
-var errAgentRunTakenOverRace = errors.New("agentrun: takeover race-lost")
+// runScoped runs fn inside a rollback-safe scope. See
+// internal/db/postgres/agentrun.go's runScoped for the full design;
+// the SQLite shape is identical (savepoint syntax is portable). When
+// s.q is a *sql.Tx (composed inside an outer WithTx), the scope is
+// a SAVEPOINT so partial failure doesn't leak; when s.q is *sql.DB,
+// runScoped opens a fresh tx.
+func (s *agentRunStore) runScoped(ctx context.Context, fn func(queryer) error) (rolledBack bool, err error) {
+	switch v := s.q.(type) {
+	case *sql.Tx:
+		sp := scopedSavepointName()
+		if _, err := v.ExecContext(ctx, "SAVEPOINT "+sp); err != nil {
+			return false, err
+		}
+		fnErr := fn(v)
+		if fnErr == nil {
+			if _, err := v.ExecContext(ctx, "RELEASE SAVEPOINT "+sp); err != nil {
+				return false, err
+			}
+			return false, nil
+		}
+		if _, rerr := v.ExecContext(ctx, "ROLLBACK TO SAVEPOINT "+sp); rerr != nil {
+			return false, rerr
+		}
+		if _, rerr := v.ExecContext(ctx, "RELEASE SAVEPOINT "+sp); rerr != nil {
+			return false, rerr
+		}
+		if errors.Is(fnErr, errScopedRollback) {
+			return true, nil
+		}
+		return false, fnErr
+	case *sql.DB:
+		tx, err := v.BeginTx(ctx, nil)
+		if err != nil {
+			return false, err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if fnErr := fn(tx); fnErr != nil {
+			if errors.Is(fnErr, errScopedRollback) {
+				return true, nil
+			}
+			return false, fnErr
+		}
+		if err := tx.Commit(); err != nil {
+			return false, err
+		}
+		return false, nil
+	default:
+		return false, fmt.Errorf("sqlite agentrun: unexpected queryer type %T", v)
+	}
+}
+
+// errScopedRollback is the sentinel fn returns to ask runScoped for
+// a non-error rollback of the current scope.
+var errScopedRollback = errors.New("agentrun: scoped rollback")
+
+func scopedSavepointName() string {
+	return fmt.Sprintf("agentrun_scope_%d", time.Now().UnixNano())
+}
 
 func (s *agentRunStore) MarkReleased(ctx context.Context, orgID, runID string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {

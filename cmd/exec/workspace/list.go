@@ -71,6 +71,15 @@ func listWorkspaces(database *db.DB, runID string) (listOutput, error) {
 	// separate process with its own connection, so wiring full stores
 	// at startup would be overkill for the few store calls this path
 	// needs. SKY-283 / SKY-285.
+	//
+	// TODO(SKY-254 / D9): cmd/exec is local-mode-only today. In
+	// multi-mode the sandbox boundary needs to inject a scoped JWT +
+	// TF_MODE=multi + Postgres DSN so this path can branch on
+	// runmode.Current() and wire pgstore.New(...) instead — with the
+	// JWT setting RLS claims on every per-request tx so the agent
+	// only sees data for the user the run was spawned by. Every other
+	// cmd/exec/* path makes the same hardcoded-sqlite assumption;
+	// grep for "SKY-254" to find them all.
 	stores := sqlitestore.New(database.Conn)
 	run, err := stores.AgentRuns.Get(context.Background(), runmode.LocalDefaultOrg, runID)
 	if err != nil {

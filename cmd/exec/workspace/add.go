@@ -130,7 +130,9 @@ func materializeWorkspace(database *db.DB, runID, ownerRepoArg string, deps addD
 	}
 
 	// See list.go comment — sqlite stores constructed inline for the
-	// few store calls this path needs.
+	// few store calls this path needs. TODO(SKY-254 / D9): same
+	// local-only assumption as list.go; lifts when the sandbox
+	// boundary supplies mode + JWT + DSN.
 	stores := sqlitestore.New(database.Conn)
 	run, err := stores.AgentRuns.Get(context.Background(), runmode.LocalDefaultOrg, runID)
 	if err != nil {
