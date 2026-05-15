@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { Plus, Trash2, Upload } from 'lucide-react'
+import { useOrgHref } from '../hooks/useOrgHref'
 import type { Project, ProjectImportError, ProjectImportResult } from '../types'
 import { readError } from '../lib/api'
 import { toast } from '../components/Toast/toastStore'
@@ -18,6 +19,7 @@ import ProjectBackfillModal from '../components/ProjectBackfillModal'
 // only appears once at least one project exists.
 export default function Projects() {
   const navigate = useNavigate()
+  const orgHref = useOrgHref()
   const [projects, setProjects] = useState<Project[]>([])
   const [loading, setLoading] = useState(true)
   const [createOpen, setCreateOpen] = useState(false)
@@ -95,7 +97,7 @@ export default function Projects() {
     setBackfillTarget(null)
     setBackfillThenNavigate(false)
     if (navigateAfter && target) {
-      navigate(`/projects/${encodeURIComponent(target.id)}`)
+      navigate(orgHref(`/projects/${encodeURIComponent(target.id)}`))
     }
   }, [backfillTarget, backfillThenNavigate, navigate])
 
@@ -595,6 +597,7 @@ function pickTfprojectFile(files: FileList | null): File | null {
 }
 
 function ProjectCard({ project, onDelete }: { project: Project; onDelete: () => void }) {
+  const orgHref = useOrgHref()
   const desc = (project.description || '').trim()
   // Stretched-link pattern: the outer <article> is the visual card,
   // a transparent <Link> overlay covers it for navigation, and the
@@ -617,7 +620,7 @@ function ProjectCard({ project, onDelete }: { project: Project; onDelete: () => 
         className="pointer-events-none absolute -left-8 -top-8 h-24 w-24 rounded-full bg-white/30 blur-2xl"
       />
       <Link
-        to={`/projects/${encodeURIComponent(project.id)}`}
+        to={orgHref(`/projects/${encodeURIComponent(project.id)}`)}
         aria-label={`Open project ${project.name}`}
         className="
           absolute inset-0 z-10 rounded-2xl

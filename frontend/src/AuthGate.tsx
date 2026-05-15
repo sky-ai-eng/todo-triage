@@ -1,6 +1,5 @@
 import { Navigate, useLocation } from 'react-router-dom'
 import { useAuthStatus } from './hooks/useAuthStatus'
-import { useDeploymentConfig } from './hooks/useDeploymentConfig'
 import { useAuth } from './contexts/AuthContext'
 import { useOrgContext } from './contexts/OrgContext'
 
@@ -91,15 +90,14 @@ function MultiAuthGate({ children }: { children: React.ReactNode }) {
   return <>{children}</>
 }
 
-export default function AuthGate({ children }: { children: React.ReactNode }) {
-  const { config, loading } = useDeploymentConfig()
-
-  // Boot: we don't know which mode we're in yet. Spinner until
-  // /api/config resolves. This is the only request that blocks the
-  // app from rendering anything.
-  if (loading || !config) return <Loading />
-
-  if (config.deployment_mode === 'multi') {
+export default function AuthGate({
+  children,
+  mode,
+}: {
+  children: React.ReactNode
+  mode: 'local' | 'multi'
+}) {
+  if (mode === 'multi') {
     return <MultiAuthGate>{children}</MultiAuthGate>
   }
   return <LocalAuthGate>{children}</LocalAuthGate>

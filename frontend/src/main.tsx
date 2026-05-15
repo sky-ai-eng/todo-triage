@@ -73,7 +73,7 @@ function LocalRoutes() {
       <Route path="/setup" element={<Setup />} />
       <Route
         element={
-          <AuthGate>
+          <AuthGate mode="local">
             <Shell />
           </AuthGate>
         }
@@ -109,7 +109,7 @@ function MultiRoutes() {
           <Route
             path="/orgs/:org_id"
             element={
-              <AuthGate>
+              <AuthGate mode="multi">
                 <Shell />
               </AuthGate>
             }
@@ -129,7 +129,7 @@ function MultiRoutes() {
           <Route
             path="/"
             element={
-              <AuthGate>
+              <AuthGate mode="multi">
                 <RootRedirect />
               </AuthGate>
             }
@@ -137,7 +137,7 @@ function MultiRoutes() {
           <Route
             path="*"
             element={
-              <AuthGate>
+              <AuthGate mode="multi">
                 <RootRedirect />
               </AuthGate>
             }

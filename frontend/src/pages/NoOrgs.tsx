@@ -13,6 +13,14 @@ export default function NoOrgs() {
   const auth = useAuth()
   const navigate = useNavigate()
 
+  // Redirect to /login once logout flips auth to unauth. NoOrgs is
+  // outside AuthGate so nothing else observes this state transition.
+  useEffect(() => {
+    if (auth.status === 'unauth') {
+      navigate('/login', { replace: true })
+    }
+  }, [auth.status, navigate])
+
   // When an admin adds this user to an org after they landed here,
   // auth.refresh() will update the orgs list and this effect redirects
   // them in-place without a full page reload.
