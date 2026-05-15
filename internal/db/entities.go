@@ -1,372 +1,154 @@
 package db
 
 import (
-	"database/sql"
-	"strings"
-	"time"
+	"context"
 
-	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// FindOrCreateEntity returns the entity for (source, source_id), creating it
-// if it doesn't exist. Returns (entity, created, error).
-func FindOrCreateEntity(db *sql.DB, source, sourceID, kind, title, url string) (*domain.Entity, bool, error) {
-	// Try to find existing first (common path on subsequent polls).
-	existing, err := GetEntityBySource(db, source, sourceID)
-	if err != nil {
-		return nil, false, err
-	}
-	if existing != nil {
-		return existing, false, nil
-	}
+//go:generate go run github.com/vektra/mockery/v2 --name=EntityStore --output=./mocks --case=underscore --with-expecter
 
-	// Create new entity.
-	id := uuid.New().String()
-	now := time.Now()
-	_, err = db.Exec(`
-		INSERT INTO entities (id, source, source_id, kind, title, url, state, created_at, last_polled_at)
-		VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)
-	`, id, source, sourceID, kind, title, url, now, now)
-	if err != nil {
-		// Race condition: another goroutine may have created it between our
-		// SELECT and INSERT. Re-read.
-		existing, err2 := GetEntityBySource(db, source, sourceID)
-		if err2 == nil && existing != nil {
-			return existing, false, nil
-		}
-		return nil, false, err
-	}
-
-	entity := &domain.Entity{
-		ID:           id,
-		Source:       source,
-		SourceID:     sourceID,
-		Kind:         kind,
-		Title:        title,
-		URL:          url,
-		State:        "active",
-		CreatedAt:    now,
-		LastPolledAt: &now,
-	}
-	return entity, true, nil
-}
-
-// MarkEntityClosed sets state='closed' and closed_at=now without the task
-// cascade. Used at discovery time when the initial snapshot is already terminal
-// (merged/closed PR, completed Jira issue) — the entity was never active, so
-// there are no tasks to cascade-close.
-func MarkEntityClosed(db *sql.DB, entityID string) error {
-	_, err := db.Exec(`
-		UPDATE entities SET state = 'closed', closed_at = ? WHERE id = ?
-	`, time.Now(), entityID)
-	return err
-}
-
-// ReactivateEntity transitions a closed entity back to active. Used when a
-// previously-terminal entity reappears as open (e.g., reopened PR, reopened
-// Jira issue). Returns true if the entity was actually reactivated.
-func ReactivateEntity(db *sql.DB, entityID string) (bool, error) {
-	result, err := db.Exec(`
-		UPDATE entities SET state = 'active', closed_at = NULL WHERE id = ? AND state = 'closed'
-	`, entityID)
-	if err != nil {
-		return false, err
-	}
-	n, _ := result.RowsAffected()
-	return n > 0, nil
-}
-
-// UpdateEntitySnapshot updates the snapshot_json and last_polled_at for an entity.
-func UpdateEntitySnapshot(db *sql.DB, entityID, snapshotJSON string) error {
-	_, err := db.Exec(`
-		UPDATE entities SET snapshot_json = ?, last_polled_at = ? WHERE id = ?
-	`, snapshotJSON, time.Now(), entityID)
-	return err
-}
-
-// UpdateEntityTitle updates the title for an entity (e.g., PR title changed).
-func UpdateEntityTitle(db *sql.DB, entityID, title string) error {
-	_, err := db.Exec(`UPDATE entities SET title = ? WHERE id = ?`, title, entityID)
-	return err
-}
-
-// UpdateEntityDescription updates the flattened description body for an entity.
-// Description lives outside snapshot_json because it's large and not part of
-// the diff scope — keeping it off the snapshot means diff reads stay small
-// even on tickets with multi-KB bodies.
-func UpdateEntityDescription(db *sql.DB, entityID, description string) error {
-	_, err := db.Exec(`UPDATE entities SET description = ? WHERE id = ?`, description, entityID)
-	return err
-}
-
-// AssignEntityProject sets entities.project_id (NULL if projectID is nil
-// or "") and stamps classified_at = CURRENT_TIMESTAMP so the project
-// classifier (SKY-220) won't re-fire on this entity. Both the auto
-// classifier and the project-creation backfill popup write through this
-// helper — a popup-driven assignment is also a "final answer" from the
-// classifier's perspective.
+// EntityStore owns the entities table — the long-lived "source
+// object" (PR, Jira issue, Linear ticket, Slack message) that every
+// event, task, and run hangs off. Lives from first poll until the
+// poller observes the upstream as closed/merged.
 //
-// rationale is the highest-scoring project's one-sentence explanation
-// (winner OR runner-up), preserved on the row so the UI can surface
-// "why this match" or "closest match was X at score N." Empty string
-// is acceptable for the popup path, where the human is the rationale.
+// Audiences:
 //
-// Returns sql.ErrNoRows when the UPDATE matches no row — i.e. the
-// entity id doesn't exist. Callers that ingest user input (e.g. the
-// backfill HTTP handler) need this signal to report per-row failures
-// rather than silently counting bogus ids as applied.
-func AssignEntityProject(database *sql.DB, entityID string, projectID *string, rationale string) error {
-	var arg any
-	if projectID != nil && *projectID != "" {
-		arg = *projectID
-	} else {
-		arg = nil
-	}
-	var rationaleArg any
-	if rationale != "" {
-		rationaleArg = rationale
-	} else {
-		rationaleArg = nil
-	}
-	res, err := database.Exec(`
-		UPDATE entities
-		SET project_id = ?,
-		    classification_rationale = ?,
-		    classified_at = CURRENT_TIMESTAMP
-		WHERE id = ?
-	`, arg, rationaleArg, entityID)
-	if err != nil {
-		return err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		var exists int
-		err := database.QueryRow(`SELECT 1 FROM entities WHERE id = ?`, entityID).Scan(&exists)
-		if err == sql.ErrNoRows {
-			return sql.ErrNoRows
-		}
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// ListUnclassifiedEntities returns active entities that haven't been
-// classified yet — i.e. project_id IS NULL AND classified_at IS NULL.
-// Once an entity has been processed by the classifier (with any outcome,
-// including below-threshold) classified_at is set and the entity won't
-// resurface here. Re-assignment via the backfill popup also sets
-// classified_at, so a popup-assigned entity stays out too.
-func ListUnclassifiedEntities(database *sql.DB) ([]domain.Entity, error) {
-	rows, err := database.Query(`
-		SELECT id, source, source_id, kind, COALESCE(title, ''), COALESCE(url, ''),
-		       COALESCE(snapshot_json, ''), COALESCE(description, ''), state, project_id, COALESCE(classification_rationale, ''), created_at, last_polled_at, closed_at
-		FROM entities
-		WHERE project_id IS NULL AND classified_at IS NULL AND state = 'active'
-		ORDER BY created_at ASC
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var out []domain.Entity
-	for rows.Next() {
-		var e domain.Entity
-		var projectID sql.NullString
-		if err := rows.Scan(&e.ID, &e.Source, &e.SourceID, &e.Kind, &e.Title, &e.URL,
-			&e.SnapshotJSON, &e.Description, &e.State, &projectID, &e.ClassificationRationale, &e.CreatedAt, &e.LastPolledAt, &e.ClosedAt); err != nil {
-			return nil, err
-		}
-		if projectID.Valid {
-			e.ProjectID = &projectID.String
-		}
-		out = append(out, e)
-	}
-	return out, rows.Err()
-}
-
-// CloseEntity sets state='closed' and closed_at=now. Called by the entity
-// lifecycle handler when an entity-terminating event fires.
-func CloseEntity(db *sql.DB, entityID string) error {
-	_, err := db.Exec(`
-		UPDATE entities SET state = 'closed', closed_at = ? WHERE id = ? AND state = 'active'
-	`, time.Now(), entityID)
-	return err
-}
-
-// GetEntity returns an entity by ID, or nil if not found.
-func GetEntity(db *sql.DB, id string) (*domain.Entity, error) {
-	row := db.QueryRow(`
-		SELECT id, source, source_id, kind, COALESCE(title, ''), COALESCE(url, ''),
-		       COALESCE(snapshot_json, ''), COALESCE(description, ''), state, project_id, COALESCE(classification_rationale, ''), created_at, last_polled_at, closed_at
-		FROM entities WHERE id = ?
-	`, id)
-	return scanEntity(row)
-}
-
-// GetEntityBySource returns an entity by (source, source_id), or nil if not found.
-func GetEntityBySource(db *sql.DB, source, sourceID string) (*domain.Entity, error) {
-	row := db.QueryRow(`
-		SELECT id, source, source_id, kind, COALESCE(title, ''), COALESCE(url, ''),
-		       COALESCE(snapshot_json, ''), COALESCE(description, ''), state, project_id, COALESCE(classification_rationale, ''), created_at, last_polled_at, closed_at
-		FROM entities WHERE source = ? AND source_id = ?
-	`, source, sourceID)
-	return scanEntity(row)
-}
-
-// entityIDInChunkSize caps the number of `?` placeholders per batched
-// WHERE id IN (...) query so we stay well under SQLite's default
-// SQLITE_LIMIT_VARIABLE_NUMBER (999). Chunking runs multiple round-trips
-// but keeps the query schema compatible with the default build — the
-// scorer's entity set can easily exceed 1k tasks on large repos.
-const entityIDInChunkSize = 500
-
-// GetEntityDescriptions returns the flattened description body for each of
-// the given entity IDs as a map keyed by entity ID. Empty descriptions are
-// omitted. Used by the scorer to enrich TaskInput without dragging the
-// full snapshot_json through the call. Dedupes IDs (multiple tasks can
-// share an entity — e.g. ci_failed + new_commits on the same PR) and
-// chunks the IN clause to respect SQLite's variable limit.
-func GetEntityDescriptions(database *sql.DB, ids []string) (map[string]string, error) {
-	out := make(map[string]string, len(ids))
-	if len(ids) == 0 {
-		return out, nil
-	}
-
-	seen := make(map[string]struct{}, len(ids))
-	unique := make([]string, 0, len(ids))
-	for _, id := range ids {
-		if id == "" {
-			continue
-		}
-		if _, ok := seen[id]; ok {
-			continue
-		}
-		seen[id] = struct{}{}
-		unique = append(unique, id)
-	}
-
-	for start := 0; start < len(unique); start += entityIDInChunkSize {
-		end := start + entityIDInChunkSize
-		if end > len(unique) {
-			end = len(unique)
-		}
-		chunk := unique[start:end]
-
-		placeholders := make([]string, len(chunk))
-		args := make([]any, len(chunk))
-		for i, id := range chunk {
-			placeholders[i] = "?"
-			args[i] = id
-		}
-		query := `SELECT id, COALESCE(description, '') FROM entities WHERE id IN (` +
-			strings.Join(placeholders, ",") + `)`
-		rows, err := database.Query(query, args...)
-		if err != nil {
-			return nil, err
-		}
-		for rows.Next() {
-			var id, desc string
-			if err := rows.Scan(&id, &desc); err != nil {
-				rows.Close()
-				return nil, err
-			}
-			if desc != "" {
-				out[id] = desc
-			}
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		rows.Close()
-	}
-
-	return out, nil
-}
-
-// ListProjectPanelEntities returns active entities assigned to the
-// given project, ordered by last_polled_at DESC so the most recently
-// updated entity bubbles to the top. NULL last_polled_at sorts last —
-// fresh-discovered entities haven't been polled yet but they're rare
-// and the ordering is best-effort.
+//   - Poller / tracker (internal/tracker) — FindOrCreate on every
+//     poll cycle, then UpdateSnapshot / UpdateTitle / UpdateDescription
+//     when the snapshot diff shows a drift, and MarkClosed / Close /
+//     Reactivate on lifecycle transitions.
+//   - Project classifier (internal/projectclassify) +
+//     factory_delegate backfill — ListUnclassified to find candidates,
+//     AssignProject to record the winner with rationale.
+//   - Delegation memory + resume + materialize (internal/delegate) —
+//     Get to fetch entity context attached to a task.
+//   - AI scorer (internal/ai) — Descriptions to bulk-load the
+//     flattened body text for prompt context without pulling
+//     snapshot_json.
+//   - Server panels (factory snapshot, dashboard, projects panel) —
+//     Get / GetBySource / ListActive / ListProjectPanel for the
+//     entity views the UI renders.
 //
-// Trimmed-column scan — see domain.ProjectPanelEntity. The general
-// scanEntity / ListActiveEntities path pulls snapshot_json +
-// description, which is wasteful for the list-view payload.
-func ListProjectPanelEntities(db *sql.DB, projectID string) ([]domain.ProjectPanelEntity, error) {
-	rows, err := db.Query(`
-		SELECT id, source, source_id, kind, COALESCE(title, ''), COALESCE(url, ''),
-		       state, COALESCE(classification_rationale, ''), created_at, last_polled_at
-		FROM entities
-		WHERE project_id = ? AND state = 'active'
-		ORDER BY last_polled_at DESC NULLS LAST
-	`, projectID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+// Wired against the app pool in Postgres (RLS-active): every
+// consumer is request-equivalent or runs inside a server-side
+// goroutine that already operates within the org's identity scope
+// (tracker is started at server boot and is currently single-org;
+// multi-mode org fan-out lands in D9 / SKY-253).
+//
+// SQLite has one connection; assertLocalOrg pins orgID to
+// runmode.LocalDefaultOrgID so a confused caller fails loudly rather
+// than silently reading a different tenant's row (which can't
+// actually exist in local mode, but the assertion catches misuse
+// during the multi-mode migration).
+//
+// Return convention: Get / GetBySource return (nil, nil) when no
+// row matches — a missing entity is a normal read outcome, not an
+// error. List* methods return an empty slice on no rows, never nil.
+// Reactivate and AssignProject expose distinct success signals
+// (boolean / sql.ErrNoRows) because their callers need to know
+// whether the row changed.
+type EntityStore interface {
+	// --- Lookup ---
 
-	var out []domain.ProjectPanelEntity
-	for rows.Next() {
-		var e domain.ProjectPanelEntity
-		if err := rows.Scan(&e.ID, &e.Source, &e.SourceID, &e.Kind, &e.Title, &e.URL,
-			&e.State, &e.ClassificationRationale, &e.CreatedAt, &e.LastPolledAt); err != nil {
-			return nil, err
-		}
-		out = append(out, e)
-	}
-	return out, rows.Err()
-}
+	// Get returns a single entity by ID, or (nil, nil) if no row
+	// matches.
+	Get(ctx context.Context, orgID, id string) (*domain.Entity, error)
 
-// ListActiveEntities returns all entities with state='active' for a given source.
-func ListActiveEntities(db *sql.DB, source string) ([]domain.Entity, error) {
-	rows, err := db.Query(`
-		SELECT id, source, source_id, kind, COALESCE(title, ''), COALESCE(url, ''),
-		       COALESCE(snapshot_json, ''), COALESCE(description, ''), state, project_id, COALESCE(classification_rationale, ''), created_at, last_polled_at, closed_at
-		FROM entities WHERE source = ? AND state = 'active'
-		ORDER BY last_polled_at ASC
-	`, source)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+	// GetBySource returns the entity for (source, source_id) — the
+	// poller-side natural key — or (nil, nil) if not yet recorded.
+	GetBySource(ctx context.Context, orgID, source, sourceID string) (*domain.Entity, error)
 
-	var entities []domain.Entity
-	for rows.Next() {
-		var e domain.Entity
-		var projectID sql.NullString
-		if err := rows.Scan(&e.ID, &e.Source, &e.SourceID, &e.Kind, &e.Title, &e.URL,
-			&e.SnapshotJSON, &e.Description, &e.State, &projectID, &e.ClassificationRationale, &e.CreatedAt, &e.LastPolledAt, &e.ClosedAt); err != nil {
-			return nil, err
-		}
-		if projectID.Valid {
-			e.ProjectID = &projectID.String
-		}
-		entities = append(entities, e)
-	}
-	return entities, rows.Err()
-}
+	// Descriptions returns the flattened description body for each
+	// of the given entity IDs as a map keyed by ID. Empty
+	// descriptions are omitted from the result map. Used by the
+	// scorer to enrich TaskInput without pulling snapshot_json
+	// through the call. Dedupes IDs and chunks the IN clause in
+	// the SQLite impl to respect the variable-bind limit.
+	Descriptions(ctx context.Context, orgID string, ids []string) (map[string]string, error)
 
-func scanEntity(row *sql.Row) (*domain.Entity, error) {
-	var e domain.Entity
-	var projectID sql.NullString
-	err := row.Scan(&e.ID, &e.Source, &e.SourceID, &e.Kind, &e.Title, &e.URL,
-		&e.SnapshotJSON, &e.Description, &e.State, &projectID, &e.ClassificationRationale, &e.CreatedAt, &e.LastPolledAt, &e.ClosedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	if projectID.Valid {
-		e.ProjectID = &projectID.String
-	}
-	return &e, nil
+	// ListUnclassified returns active entities that have not been
+	// project-classified yet (project_id IS NULL AND classified_at
+	// IS NULL AND state='active'), ordered by created_at ASC. Once
+	// the classifier has processed an entity with any outcome —
+	// including below-threshold — classified_at is set and the
+	// entity stops surfacing here. Reassignment via the backfill
+	// popup also sets classified_at.
+	ListUnclassified(ctx context.Context, orgID string) ([]domain.Entity, error)
+
+	// ListActive returns every state='active' entity for the given
+	// source ("github" / "jira"), ordered by last_polled_at ASC so
+	// the freshest items rotate out of the head of the list each
+	// poll cycle.
+	ListActive(ctx context.Context, orgID, source string) ([]domain.Entity, error)
+
+	// ListProjectPanel returns the trimmed-column projection used
+	// by the Projects panel: id, source, source_id, kind, title,
+	// url, state, classification_rationale, created_at,
+	// last_polled_at — no snapshot_json / description blob. Ordered
+	// by last_polled_at DESC with NULLs last.
+	ListProjectPanel(ctx context.Context, orgID, projectID string) ([]domain.ProjectPanelEntity, error)
+
+	// --- Mutation ---
+
+	// FindOrCreate is the poller's "is this row known?" entry
+	// point: it returns the existing entity if (source, source_id)
+	// already maps to one, and inserts a new row otherwise.
+	// Returns (entity, created, error). Idempotent under a race:
+	// concurrent first-discovery callers re-read on insert
+	// failure so they each see a populated entity.
+	FindOrCreate(ctx context.Context, orgID, source, sourceID, kind, title, url string) (*domain.Entity, bool, error)
+
+	// UpdateSnapshot writes the new snapshot_json and stamps
+	// last_polled_at. Called by the tracker after every successful
+	// poll that found a row diff.
+	UpdateSnapshot(ctx context.Context, orgID, id, snapshotJSON string) error
+
+	// PatchSnapshot writes the new snapshot_json **without** touching
+	// last_polled_at — deliberately distinct from UpdateSnapshot. Used
+	// by handlers that mutate an entity via an external API and want
+	// the local copy to match the just-pushed state, but still expect
+	// the next poll cycle to reconcile (so last_polled_at must stay
+	// stale enough for the poll gate to refresh the row). Race
+	// window: a concurrent in-flight poll can overwrite our patch
+	// with its pre-mutation snapshot. Caller accepts that as the cost
+	// of in-place patching.
+	PatchSnapshot(ctx context.Context, orgID, id, snapshotJSON string) error
+
+	// UpdateTitle writes a new entity title (e.g. a PR title was
+	// edited upstream). No snapshot or last_polled_at change.
+	UpdateTitle(ctx context.Context, orgID, id, title string) error
+
+	// UpdateDescription writes the flattened issue/PR body. Stored
+	// out of snapshot_json because it's large and not part of the
+	// diff scope — keeping it off the snapshot keeps diff reads
+	// small even for multi-KB bodies.
+	UpdateDescription(ctx context.Context, orgID, id, description string) error
+
+	// AssignProject sets project_id (NULL when projectID is nil
+	// or ""), records the classifier's rationale, and stamps
+	// classified_at = now so the classifier won't re-fire on this
+	// entity. Returns sql.ErrNoRows when the UPDATE matches no
+	// row — callers that ingest user input (e.g. the backfill
+	// HTTP handler) need this signal to report per-row failures
+	// rather than silently counting bogus ids as applied.
+	AssignProject(ctx context.Context, orgID, id string, projectID *string, rationale string) error
+
+	// MarkClosed unconditionally sets state='closed' and stamps
+	// closed_at = now. Used at discovery time when the initial
+	// snapshot is already terminal (merged PR / done issue) — the
+	// entity was never active, so there are no tasks to cascade.
+	MarkClosed(ctx context.Context, orgID, id string) error
+
+	// Close transitions an active entity to closed, but only when
+	// state='active' — idempotent against double-fire from the
+	// entity-lifecycle handler.
+	Close(ctx context.Context, orgID, id string) error
+
+	// Reactivate flips a closed entity back to active and clears
+	// closed_at. Called when a previously-terminal entity reappears
+	// as open (reopened PR, reopened Jira issue). Returns true
+	// when the row actually changed.
+	Reactivate(ctx context.Context, orgID, id string) (bool, error)
 }

@@ -71,7 +71,7 @@ func newTestDB(t *testing.T) *db.DB {
 
 func seedJiraRun(t *testing.T, database *db.DB, runID, issueKey string) {
 	t.Helper()
-	entity, _, err := db.FindOrCreateEntity(database.Conn, "jira", issueKey, "issue", "T-"+issueKey, "https://x/"+issueKey)
+	entity, _, err := sqlitestore.New(database.Conn).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "jira", issueKey, "issue", "T-"+issueKey, "https://x/"+issueKey)
 	if err != nil {
 		t.Fatalf("entity: %v", err)
 	}
@@ -100,7 +100,7 @@ func seedJiraRun(t *testing.T, database *db.DB, runID, issueKey string) {
 
 func seedGitHubRun(t *testing.T, database *db.DB, runID string) {
 	t.Helper()
-	entity, _, err := db.FindOrCreateEntity(database.Conn, "github", "owner/repo#"+runID, "pr", "T", "https://x/"+runID)
+	entity, _, err := sqlitestore.New(database.Conn).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#"+runID, "pr", "T", "https://x/"+runID)
 	if err != nil {
 		t.Fatalf("entity: %v", err)
 	}

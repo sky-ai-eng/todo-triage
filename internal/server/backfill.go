@@ -9,6 +9,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -60,7 +61,7 @@ func (s *Server) handleBackfillCandidates(w http.ResponseWriter, r *http.Request
 
 	var collected []domain.Entity
 
-	github, err := db.ListActiveEntities(s.db, "github")
+	github, err := s.entities.ListActive(r.Context(), runmode.LocalDefaultOrgID, "github")
 	if err != nil {
 		log.Printf("[backfill] candidates: list github entities: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load github entities"})
@@ -73,7 +74,7 @@ func (s *Server) handleBackfillCandidates(w http.ResponseWriter, r *http.Request
 		collected = append(collected, e)
 	}
 
-	jira, err := db.ListActiveEntities(s.db, "jira")
+	jira, err := s.entities.ListActive(r.Context(), runmode.LocalDefaultOrgID, "jira")
 	if err != nil {
 		log.Printf("[backfill] candidates: list jira entities: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load jira entities"})
@@ -137,7 +138,7 @@ type backfillFailure struct {
 }
 
 // handleBackfill bulk-assigns the named entities to the project. Reuses
-// db.AssignEntityProject so each row gets its classified_at stamped —
+// EntityStore.AssignProject so each row gets its classified_at stamped —
 // popup-claimed entities stay sticky against the auto-classifier.
 //
 // Partial-success result shape mirrors handleJiraStockPost
@@ -186,7 +187,7 @@ func (s *Server) handleBackfill(w http.ResponseWriter, r *http.Request) {
 		// Without this gate, a malicious client could reassign any
 		// entity row by id, and a stale UI could quietly stamp
 		// classified_at on closed work.
-		entity, lookupErr := db.GetEntity(s.db, eid)
+		entity, lookupErr := s.entities.Get(r.Context(), runmode.LocalDefaultOrgID, eid)
 		if lookupErr != nil {
 			failures = append(failures, backfillFailure{EntityID: eid, Error: "lookup failed: " + lookupErr.Error()})
 			continue
@@ -210,7 +211,7 @@ func (s *Server) handleBackfill(w http.ResponseWriter, r *http.Request) {
 		// supersedes the classifier's vote, and showing the stale
 		// model rationale next to a human-claimed assignment would
 		// be misleading.
-		if assignErr := db.AssignEntityProject(s.db, eid, &projectID, manualAssignmentMessage); assignErr != nil {
+		if assignErr := s.entities.AssignProject(r.Context(), runmode.LocalDefaultOrgID, eid, &projectID, manualAssignmentMessage); assignErr != nil {
 			if errors.Is(assignErr, sql.ErrNoRows) {
 				failures = append(failures, backfillFailure{EntityID: eid, Error: "entity not found"})
 			} else {

@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -28,7 +30,7 @@ func TestHandleFactoryDelegate_ServiceUnavailableWithoutSpawner(t *testing.T) {
 	// Seed a real entity + event so the request is otherwise valid
 	// when it reaches the missing-spawner gate in the handler's
 	// progressive validation flow.
-	entity, _, err := db.FindOrCreateEntity(s.db, "github", "owner/repo#503", "pr", "", "")
+	entity, _, err := sqlitestore.New(s.db).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#503", "pr", "", "")
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -70,7 +72,7 @@ func TestHandleFactoryDelegate_404OnMissingEntity(t *testing.T) {
 // request validation error must precede the 503 infrastructure gate.
 func TestHandleFactoryDelegate_400OnNoMatchingEvent(t *testing.T) {
 	s := newTestServer(t)
-	entity, _, err := db.FindOrCreateEntity(s.db, "github", "owner/repo#400e", "pr", "", "")
+	entity, _, err := sqlitestore.New(s.db).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#400e", "pr", "", "")
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -94,11 +96,11 @@ func TestHandleFactoryDelegate_400OnNoMatchingEvent(t *testing.T) {
 // same "active only" contract; this test pins it for the drag path.
 func TestHandleFactoryDelegate_409OnClosedEntity(t *testing.T) {
 	s := newTestServer(t)
-	entity, _, err := db.FindOrCreateEntity(s.db, "github", "owner/repo#409", "pr", "", "")
+	entity, _, err := sqlitestore.New(s.db).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#409", "pr", "", "")
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
-	if err := db.MarkEntityClosed(s.db, entity.ID); err != nil {
+	if err := sqlitestore.New(s.db).Entities.MarkClosed(context.Background(), runmode.LocalDefaultOrgID, entity.ID); err != nil {
 		t.Fatalf("close entity: %v", err)
 	}
 	eid := entity.ID
@@ -160,9 +162,9 @@ func TestHandleFactoryDelegate_400OnMalformedJSON(t *testing.T) {
 // success (claim committed, run didn't fire).
 func TestHandleFactoryDelegate_DelegateErrorPreservesClaim(t *testing.T) {
 	s := newTestServer(t)
-	s.SetSpawner(delegate.NewSpawner(s.db, s.prompts, nil, s.chains, s.tasks, s.agentRuns, nil, websocket.NewHub(), "haiku"))
+	s.SetSpawner(delegate.NewSpawner(s.db, s.prompts, nil, s.chains, s.tasks, s.agentRuns, s.entities, nil, websocket.NewHub(), "haiku"))
 
-	entity, _, err := db.FindOrCreateEntity(s.db, "github", "owner/repo#400p", "pr", "", "")
+	entity, _, err := sqlitestore.New(s.db).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#400p", "pr", "", "")
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -247,7 +249,7 @@ func TestHandleFactoryDelegate_DelegateErrorPreservesClaim(t *testing.T) {
 // the factory drop UI.
 func TestHandleFactoryDelegate_RefusedWhenBotDisabled(t *testing.T) {
 	s := newTestServer(t)
-	s.SetSpawner(delegate.NewSpawner(s.db, s.prompts, nil, nil, s.tasks, s.agentRuns, nil, websocket.NewHub(), "haiku"))
+	s.SetSpawner(delegate.NewSpawner(s.db, s.prompts, nil, nil, s.tasks, s.agentRuns, s.entities, nil, websocket.NewHub(), "haiku"))
 
 	// Flip the bot OFF on the local team. Production path is
 	// team_agents.SetEnabled via a team-admin gesture; direct
@@ -262,7 +264,7 @@ func TestHandleFactoryDelegate_RefusedWhenBotDisabled(t *testing.T) {
 
 	// Seed an entity + event that would otherwise let the factory
 	// drop succeed (active entity, matching event for the station).
-	entity, _, err := db.FindOrCreateEntity(s.db, "github", "owner/repo#fdrop-off", "pr", "Disabled Factory", "https://example.com/fdo")
+	entity, _, err := sqlitestore.New(s.db).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#fdrop-off", "pr", "Disabled Factory", "https://example.com/fdo")
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -326,7 +328,7 @@ func TestHandleFactoryDelegate_RefusedWhenBotDisabled(t *testing.T) {
 func TestHandleFactoryDelegate_PendingTasksRoundtrip(t *testing.T) {
 	s := newTestServer(t)
 
-	entity, _, err := db.FindOrCreateEntity(s.db, "github", "owner/repo#7", "pr", "test PR", "")
+	entity, _, err := sqlitestore.New(s.db).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#7", "pr", "test PR", "")
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}

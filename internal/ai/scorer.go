@@ -90,7 +90,7 @@ const scoringModel = "haiku"
 // the count, and so the number stays correct if batchSize changes.
 // Failures are non-fatal: the function still returns whatever scores
 // succeeded, and the caller surfaces skippedTasks as a warning toast.
-func ScoreTasks(ctx context.Context, database *sql.DB, tasks []domain.Task) (scores []TaskScore, skippedTasks int, err error) {
+func ScoreTasks(ctx context.Context, database *sql.DB, entities db.EntityStore, orgID string, tasks []domain.Task) (scores []TaskScore, skippedTasks int, err error) {
 	if len(tasks) == 0 {
 		return nil, 0, nil
 	}
@@ -103,8 +103,8 @@ func ScoreTasks(ctx context.Context, database *sql.DB, tasks []domain.Task) (sco
 		entityIDs = append(entityIDs, t.EntityID)
 	}
 	descriptions := map[string]string{}
-	if database != nil {
-		if descs, err := db.GetEntityDescriptions(database, entityIDs); err != nil {
+	if entities != nil {
+		if descs, err := entities.Descriptions(ctx, orgID, entityIDs); err != nil {
 			log.Printf("[ai] warning: failed to load entity descriptions for scoring: %v", err)
 		} else {
 			descriptions = descs

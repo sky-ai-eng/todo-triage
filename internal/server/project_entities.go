@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // projectEntity is the per-row payload returned by
@@ -45,7 +46,7 @@ func (s *Server) handleProjectEntities(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	entities, err := db.ListProjectPanelEntities(s.db, projectID)
+	entities, err := s.entities.ListProjectPanel(r.Context(), runmode.LocalDefaultOrgID, projectID)
 	if err != nil {
 		log.Printf("[entities] list for project %s: %v", projectID, err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load entities"})

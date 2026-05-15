@@ -35,11 +35,11 @@ type Manager struct {
 	jiraStop chan struct{}
 }
 
-func NewManager(database *sql.DB, bus *eventbus.Bus, users db.UsersStore, tasks db.TaskStore) *Manager {
+func NewManager(database *sql.DB, bus *eventbus.Bus, users db.UsersStore, tasks db.TaskStore, entities db.EntityStore) *Manager {
 	return &Manager{
 		database: database,
 		bus:      bus,
-		tracker:  tracker.New(database, bus, tasks),
+		tracker:  tracker.New(database, bus, tasks, entities),
 		users:    users,
 	}
 }

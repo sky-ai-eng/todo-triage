@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -259,7 +258,7 @@ func (s *Server) handleFactorySnapshot(w http.ResponseWriter, r *http.Request) {
 		if _, seen := runAuthors[ar.Task.EntityID]; seen {
 			continue
 		}
-		ent, err := db.GetEntity(s.db, ar.Task.EntityID)
+		ent, err := s.entities.Get(r.Context(), runmode.LocalDefaultOrgID, ar.Task.EntityID)
 		if err != nil || ent == nil {
 			runAuthors[ar.Task.EntityID] = ""
 			continue

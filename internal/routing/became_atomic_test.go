@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 	"time"
@@ -26,7 +27,7 @@ func TestHandleEvent_BecameAtomic_ExistingTask_NoDuplicate(t *testing.T) {
 		t.Fatalf("seed event handlers: %v", err)
 	}
 
-	entity, _, err := db.FindOrCreateEntity(database, "jira", "SKY-500", "issue",
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "jira", "SKY-500", "issue",
 		"Epic that went atomic-subtasks-atomic", "https://jira.example.com/browse/SKY-500")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
@@ -71,7 +72,7 @@ func TestHandleEvent_BecameAtomic_ExistingTask_NoDuplicate(t *testing.T) {
 	atomicJSON, _ := json.Marshal(atomicMeta)
 
 	ws := websocket.NewHub()
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, nil, noopScorer{}, ws)
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, nil, noopScorer{}, ws)
 
 	router.HandleEvent(domain.Event{
 		EventType:    domain.EventJiraIssueBecameAtomic,
@@ -107,7 +108,7 @@ func TestHandleEvent_BecameAtomic_NoExistingTask_CreatesTask(t *testing.T) {
 		t.Fatalf("seed event handlers: %v", err)
 	}
 
-	entity, _, err := db.FindOrCreateEntity(database, "jira", "SKY-501", "issue",
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "jira", "SKY-501", "issue",
 		"Epic decomposed then atomic", "https://jira.example.com/browse/SKY-501")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
@@ -122,7 +123,7 @@ func TestHandleEvent_BecameAtomic_NoExistingTask_CreatesTask(t *testing.T) {
 	metaJSON, _ := json.Marshal(meta)
 
 	ws := websocket.NewHub()
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, nil, noopScorer{}, ws)
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, nil, noopScorer{}, ws)
 
 	router.HandleEvent(domain.Event{
 		EventType:    domain.EventJiraIssueBecameAtomic,

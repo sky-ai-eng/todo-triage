@@ -377,7 +377,7 @@ func main() {
 		openBrowser(browserURL)
 	}
 
-	srv := server.New(database, stores.Prompts, stores.Swipes, stores.Dashboard, stores.EventHandlers, stores.Agents, stores.TeamAgents, stores.Users, stores.Chains, stores.Tasks, stores.Factory, stores.AgentRuns)
+	srv := server.New(database, stores.Prompts, stores.Swipes, stores.Dashboard, stores.EventHandlers, stores.Agents, stores.TeamAgents, stores.Users, stores.Chains, stores.Tasks, stores.Factory, stores.AgentRuns, stores.Entities)
 
 	distFS, err := frontendDist()
 	if err != nil {
@@ -552,7 +552,7 @@ func main() {
 	// Actual initialization happens below after the spawner is created.
 	var eventRouter *routing.Router
 
-	scorer := ai.NewRunner(database, stores.Scores, runmode.LocalDefaultOrg, ai.RunnerCallbacks{
+	scorer := ai.NewRunner(database, stores.Scores, stores.Entities, runmode.LocalDefaultOrg, ai.RunnerCallbacks{
 		OnScoringStarted: func(taskIDs []string) {
 			wsHub.Broadcast(websocket.Event{
 				Type: "scoring_started",
@@ -597,7 +597,7 @@ func main() {
 	// discovered entities against existing projects via per-project
 	// Haiku quorum vote. Sticky — only fires on entities with
 	// classified_at IS NULL, so re-polls don't re-classify.
-	classifier := projectclassify.NewRunner(database)
+	classifier := projectclassify.NewRunner(database, stores.Entities)
 	classifier.Start()
 	log.Println("[classify] project classifier started (model: haiku)")
 	bus.Subscribe(eventbus.Subscriber{
@@ -620,7 +620,7 @@ func main() {
 		errorThrottleMu sync.Mutex
 		lastErrorToast  = map[string]time.Time{}
 	)
-	pollerMgr := poller.NewManager(database, bus, stores.Users, stores.Tasks)
+	pollerMgr := poller.NewManager(database, bus, stores.Users, stores.Tasks, stores.Entities)
 	pollerMgr.OnError = func(source string, err error) {
 		errorThrottleMu.Lock()
 		if last, ok := lastErrorToast[source]; ok && time.Since(last) < errorToastMinInterval {
@@ -638,7 +638,7 @@ func main() {
 	}
 
 	// Create spawner once — credentials are hot-swapped in place
-	spawner := delegate.NewSpawner(database, stores.Prompts, stores.Agents, stores.Chains, stores.Tasks, stores.AgentRuns, nil, wsHub, "")
+	spawner := delegate.NewSpawner(database, stores.Prompts, stores.Agents, stores.Chains, stores.Tasks, stores.AgentRuns, stores.Entities, nil, wsHub, "")
 	srv.SetSpawner(spawner)
 
 	// SKY-220: wire the classifier wait into the spawner's setup path.
@@ -683,7 +683,7 @@ func main() {
 	// Event router — records events, creates/bumps tasks, auto-delegates on
 	// matching triggers, runs inline close checks. Also handles post-scoring
 	// re-derive via the scorer callback wired above.
-	eventRouter = routing.NewRouter(database, stores.Prompts, stores.EventHandlers, stores.Agents, stores.TeamAgents, stores.Users, stores.Tasks, stores.AgentRuns, spawner, scorer, wsHub)
+	eventRouter = routing.NewRouter(database, stores.Prompts, stores.EventHandlers, stores.Agents, stores.TeamAgents, stores.Users, stores.Tasks, stores.AgentRuns, stores.Entities, spawner, scorer, wsHub)
 	bus.Subscribe(eventbus.Subscriber{
 		Name:   "router",
 		Filter: []string{"github:", "jira:"},

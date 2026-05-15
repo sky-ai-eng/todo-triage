@@ -1,6 +1,7 @@
 package agentmeta
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -40,7 +41,7 @@ func newTestDB(t *testing.T) *sql.DB {
 // Returns nothing — the test asserts via db.GetAgentRun and Build.
 func seedFooterRun(t *testing.T, database *sql.DB, fix runFooterFixture) {
 	t.Helper()
-	entity, _, err := db.FindOrCreateEntity(database, "github", "owner/repo#"+fix.ID, "pr", "T", "https://x/"+fix.ID)
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#"+fix.ID, "pr", "T", "https://x/"+fix.ID)
 	if err != nil {
 		t.Fatalf("entity: %v", err)
 	}

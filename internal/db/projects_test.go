@@ -348,10 +348,7 @@ func TestDeleteProject_NullsOutEntityProjectID(t *testing.T) {
 	database := newTestDB(t)
 	projectID, _ := CreateProject(database, domain.Project{Name: "P1"})
 
-	entity, _, err := FindOrCreateEntity(database, "github", "owner/repo#1", "pr", "T", "https://example.com/1")
-	if err != nil {
-		t.Fatalf("entity: %v", err)
-	}
+	entity := createEntityForTest(t, database, "github", "owner/repo#1", "pr", "T", "https://example.com/1")
 	if _, err := database.Exec(`UPDATE entities SET project_id = ? WHERE id = ?`, projectID, entity.ID); err != nil {
 		t.Fatalf("tag entity: %v", err)
 	}

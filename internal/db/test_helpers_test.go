@@ -40,14 +40,10 @@ func newTestDB(t *testing.T) *sql.DB {
 // and events tests after factory_test.go was retired in SKY-291.
 func makeEntity(t *testing.T, database *sql.DB, i int) *domain.Entity {
 	t.Helper()
-	e, _, err := FindOrCreateEntity(
-		database, "github", fmt.Sprintf("owner/repo#%d", i), "pr",
+	return createEntityForTest(
+		t, database, "github", fmt.Sprintf("owner/repo#%d", i), "pr",
 		fmt.Sprintf("PR %d", i), fmt.Sprintf("https://github.com/owner/repo/pull/%d", i),
 	)
-	if err != nil {
-		t.Fatalf("FindOrCreateEntity %d: %v", i, err)
-	}
-	return e
 }
 
 // recordEvent inserts a real entity-attached event for tests. Returns

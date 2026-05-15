@@ -53,7 +53,7 @@ func setupReDeriveScenario(t *testing.T, database *sql.DB, minAutonomy float64) 
 	t.Helper()
 
 	// Create entity
-	entity, _, err := db.FindOrCreateEntity(database, "github", "owner/repo#1", "pr", "Test PR", "https://github.com/owner/repo/pull/1")
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#1", "pr", "Test PR", "https://github.com/owner/repo/pull/1")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestReDeriveAfterScoring_AboveThreshold_Delegates(t *testing.T) {
 	// gate-check path runs (suitability >= threshold, predicate matched)
 	// without panicking. The log output confirms the trigger fired.
 	ws := websocket.NewHub()
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, nil, noopScorer{}, ws)
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, nil, noopScorer{}, ws)
 
 	router.ReDeriveAfterScoring([]string{taskID})
 
@@ -160,7 +160,7 @@ func TestReDeriveAfterScoring_BelowThreshold_Skips(t *testing.T) {
 	}
 
 	ws := websocket.NewHub()
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, nil, noopScorer{}, ws)
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, nil, noopScorer{}, ws)
 	router.ReDeriveAfterScoring([]string{taskID})
 
 	// Task should remain queued — trigger was skipped
@@ -212,7 +212,7 @@ func TestReDeriveAfterScoring_BotClaimed_Skips(t *testing.T) {
 	}
 
 	ws := websocket.NewHub()
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, nil, noopScorer{}, ws)
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, nil, noopScorer{}, ws)
 	router.ReDeriveAfterScoring([]string{taskID})
 
 	// Task still bot-claimed, no second firing enqueued.
@@ -258,7 +258,7 @@ func TestReDeriveAfterScoring_UserClaimed_Skips(t *testing.T) {
 	}
 
 	ws := websocket.NewHub()
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, nil, noopScorer{}, ws)
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, nil, noopScorer{}, ws)
 	router.ReDeriveAfterScoring([]string{taskID})
 
 	task, _ := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrg, taskID)
@@ -304,7 +304,7 @@ func TestReDeriveAfterScoring_Snoozed_Skips(t *testing.T) {
 	}
 
 	ws := websocket.NewHub()
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, nil, noopScorer{}, ws)
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, nil, noopScorer{}, ws)
 	router.ReDeriveAfterScoring([]string{taskID})
 
 	task, _ := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrg, taskID)
@@ -327,7 +327,7 @@ func TestReDeriveAfterScoring_ZeroThresholdTrigger_SkippedByReDerive(t *testing.
 	database := newTestDB(t)
 
 	// Create entity + event + task
-	entity2, _, _ := db.FindOrCreateEntity(database, "github", "owner/repo#2", "pr", "Test PR 2", "https://github.com/owner/repo/pull/2")
+	entity2, _, _ := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#2", "pr", "Test PR 2", "https://github.com/owner/repo/pull/2")
 	entityID := entity2.ID
 	meta := events.GitHubPRCICheckFailedMetadata{
 		Author: "aidan", CheckName: "lint", Repo: "owner/repo",
@@ -356,7 +356,7 @@ func TestReDeriveAfterScoring_ZeroThresholdTrigger_SkippedByReDerive(t *testing.
 	}})
 
 	ws := websocket.NewHub()
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, nil, noopScorer{}, ws)
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, nil, noopScorer{}, ws)
 	router.ReDeriveAfterScoring([]string{task.ID})
 
 	// Task should remain queued — zero-threshold trigger is skipped in re-derive
@@ -372,7 +372,7 @@ func TestReDeriveAfterScoring_PredicateMismatch_Skips(t *testing.T) {
 
 	// Create entity + event where the author isn't in the predicate's
 	// author_in allowlist — the rederive pass should skip the trigger.
-	entity3, _, _ := db.FindOrCreateEntity(database, "github", "owner/repo#3", "pr", "Test PR 3", "https://github.com/owner/repo/pull/3")
+	entity3, _, _ := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#3", "pr", "Test PR 3", "https://github.com/owner/repo/pull/3")
 	entityID := entity3.ID
 	meta := events.GitHubPRCICheckFailedMetadata{
 		Author: "someone-else", CheckName: "build", Repo: "owner/repo",
@@ -404,7 +404,7 @@ func TestReDeriveAfterScoring_PredicateMismatch_Skips(t *testing.T) {
 	}})
 
 	ws := websocket.NewHub()
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, nil, noopScorer{}, ws)
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, nil, noopScorer{}, ws)
 	router.ReDeriveAfterScoring([]string{task.ID})
 
 	// Task should stay queued — predicate doesn't match

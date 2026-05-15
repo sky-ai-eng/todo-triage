@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"net/http"
@@ -8,12 +9,14 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 func mustEntity(t *testing.T, database *sql.DB, source, sourceID, kind, title string) *domain.Entity {
 	t.Helper()
-	e, _, err := db.FindOrCreateEntity(database, source, sourceID, kind, title, "https://x/"+sourceID)
+	e, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, source, sourceID, kind, title, "https://x/"+sourceID)
 	if err != nil {
 		t.Fatalf("FindOrCreateEntity %s/%s: %v", source, sourceID, err)
 	}
@@ -120,11 +123,11 @@ func TestBackfillCandidates_ExcludesAlreadyInProject(t *testing.T) {
 	}
 
 	already := mustEntity(t, s.db, "github", "owner/repo#1", "pr", "already in")
-	if err := db.AssignEntityProject(s.db, already.ID, &pid, ""); err != nil {
+	if err := sqlitestore.New(s.db).Entities.AssignProject(context.Background(), runmode.LocalDefaultOrgID, already.ID, &pid, ""); err != nil {
 		t.Fatal(err)
 	}
 	elsewhere := mustEntity(t, s.db, "github", "owner/repo#2", "pr", "elsewhere")
-	if err := db.AssignEntityProject(s.db, elsewhere.ID, &other, ""); err != nil {
+	if err := sqlitestore.New(s.db).Entities.AssignProject(context.Background(), runmode.LocalDefaultOrgID, elsewhere.ID, &other, ""); err != nil {
 		t.Fatal(err)
 	}
 	free := mustEntity(t, s.db, "github", "owner/repo#3", "pr", "unassigned")
@@ -189,7 +192,7 @@ func TestBackfill_BulkAssignPartialSuccess(t *testing.T) {
 		t.Errorf("failed = %+v, want one entry for nonexistent-id", resp.Failed)
 	}
 	for _, e := range []domain.Entity{*a, *b} {
-		got, _ := db.GetEntity(s.db, e.ID)
+		got, _ := sqlitestore.New(s.db).Entities.Get(context.Background(), runmode.LocalDefaultOrgID, e.ID)
 		if got == nil || got.ProjectID == nil || *got.ProjectID != pid {
 			t.Errorf("entity %s not assigned to %s", e.ID, pid)
 			continue
@@ -226,7 +229,7 @@ func TestBackfill_RejectsOutOfScopeAndClosed(t *testing.T) {
 	outScope := mustEntity(t, s.db, "github", "owner/out-of-scope#2", "pr", "wrong repo")
 	wrongJira := mustEntity(t, s.db, "jira", "FOO-9", "issue", "wrong project")
 	closedEnt := mustEntity(t, s.db, "github", "owner/in-scope#3", "pr", "closed")
-	if err := db.MarkEntityClosed(s.db, closedEnt.ID); err != nil {
+	if err := sqlitestore.New(s.db).Entities.MarkClosed(context.Background(), runmode.LocalDefaultOrgID, closedEnt.ID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -263,12 +266,12 @@ func TestBackfill_RejectsOutOfScopeAndClosed(t *testing.T) {
 	}
 
 	// Confirm only the in-scope active entity actually landed.
-	got, _ := db.GetEntity(s.db, inScope.ID)
+	got, _ := sqlitestore.New(s.db).Entities.Get(context.Background(), runmode.LocalDefaultOrgID, inScope.ID)
 	if got == nil || got.ProjectID == nil || *got.ProjectID != pid {
 		t.Errorf("in-scope entity not assigned")
 	}
 	for _, e := range []*domain.Entity{outScope, wrongJira} {
-		got, _ := db.GetEntity(s.db, e.ID)
+		got, _ := sqlitestore.New(s.db).Entities.Get(context.Background(), runmode.LocalDefaultOrgID, e.ID)
 		if got != nil && got.ProjectID != nil {
 			t.Errorf("entity %s should not have been reassigned, got project_id=%q", e.SourceID, *got.ProjectID)
 		}
@@ -287,7 +290,7 @@ func TestBackfill_StampsClassifiedAt(t *testing.T) {
 	}
 	e := mustEntity(t, s.db, "github", "owner/repo#1", "pr", "T")
 
-	pre, err := db.ListUnclassifiedEntities(s.db)
+	pre, err := sqlitestore.New(s.db).Entities.ListUnclassified(context.Background(), runmode.LocalDefaultOrgID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,7 +311,7 @@ func TestBackfill_StampsClassifiedAt(t *testing.T) {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 
-	post, err := db.ListUnclassifiedEntities(s.db)
+	post, err := sqlitestore.New(s.db).Entities.ListUnclassified(context.Background(), runmode.LocalDefaultOrgID)
 	if err != nil {
 		t.Fatal(err)
 	}

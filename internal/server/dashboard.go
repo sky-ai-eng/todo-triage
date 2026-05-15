@@ -1,7 +1,7 @@
 package server
 
 import (
-	"database/sql"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -156,7 +156,7 @@ func (s *Server) handleDashboardPRDraft(w http.ResponseWriter, r *http.Request) 
 	// the audit trail. Revisit if a user reports "my trigger didn't fire
 	// when I dragged the card."
 	sourceID := fmt.Sprintf("%s/%s#%d", parts[0], parts[1], number)
-	if patchErr := patchPRSnapshotDraft(s.db, sourceID, body.Draft); patchErr != nil {
+	if patchErr := patchPRSnapshotDraft(r.Context(), s.entities, sourceID, body.Draft); patchErr != nil {
 		log.Printf("[dashboard] warning: failed to patch snapshot for %s after draft toggle: %v", sourceID, patchErr)
 	}
 
@@ -169,9 +169,10 @@ func (s *Server) handleDashboardPRDraft(w http.ResponseWriter, r *http.Request) 
 // before the first poll) — the poller will populate it eventually.
 // Race window: a concurrent in-flight poll can overwrite our patch with
 // its pre-mutation snapshot. Acceptable for beta — the next poll corrects
-// it, and the window is small.
-func patchPRSnapshotDraft(database *sql.DB, sourceID string, draft bool) error {
-	entity, err := db.GetEntityBySource(database, "github", sourceID)
+// it, and the window is small. PatchSnapshot intentionally does NOT bump
+// last_polled_at so the next poll still refreshes the row.
+func patchPRSnapshotDraft(ctx context.Context, entities db.EntityStore, sourceID string, draft bool) error {
+	entity, err := entities.GetBySource(ctx, runmode.LocalDefaultOrgID, "github", sourceID)
 	if err != nil {
 		return err
 	}
@@ -191,6 +192,5 @@ func patchPRSnapshotDraft(database *sql.DB, sourceID string, draft bool) error {
 	if err != nil {
 		return err
 	}
-	_, err = database.Exec(`UPDATE entities SET snapshot_json = ? WHERE id = ?`, string(patched), entity.ID)
-	return err
+	return entities.PatchSnapshot(ctx, runmode.LocalDefaultOrgID, entity.ID, string(patched))
 }

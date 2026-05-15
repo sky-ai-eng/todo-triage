@@ -75,6 +75,7 @@ func (s *Store) WithTx(ctx context.Context, orgID, userID string, fn func(db.TxS
 		// the outer tx — see Create's pool-routing comment for
 		// why that's the intended semantics.
 		AgentRuns: newAgentRunStore(tx, s.admin),
+		Entities:  newEntityStore(tx),
 	}
 	if err := fn(txStores); err != nil {
 		return err
