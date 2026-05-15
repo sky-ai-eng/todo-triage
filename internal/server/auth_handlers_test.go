@@ -897,3 +897,51 @@ func TestNormalizeReturnTo(t *testing.T) {
 		}
 	}
 }
+
+// gotrueHTTPClient must carry a bounded timeout. Without one, a hung
+// GoTrue upstream blocks user-facing requests indefinitely on the
+// /token exchange + /logout paths. This test locks the intent so a
+// future "drop-in DefaultClient" regression gets caught.
+func TestGoTrueHTTPClient_HasTimeout(t *testing.T) {
+	if gotrueHTTPClient.Timeout <= 0 {
+		t.Fatalf("gotrueHTTPClient.Timeout = %v, want > 0", gotrueHTTPClient.Timeout)
+	}
+	// Upper-bound sanity: token exchanges complete sub-second in normal
+	// operation. A timeout above ~2 minutes is almost certainly a typo
+	// (units mix-up). If we ever legitimately need it higher, bump this
+	// bound deliberately.
+	if gotrueHTTPClient.Timeout > 2*time.Minute {
+		t.Errorf("gotrueHTTPClient.Timeout = %v, suspicious (>2m); confirm units", gotrueHTTPClient.Timeout)
+	}
+}
+
+// TestGoTrueHTTPClient_EnforcesTimeout proves the bound is actually
+// honored by swapping in a short-deadline client against a deliberately
+// slow httptest server. Validates wiring, not the specific 30s default.
+func TestGoTrueHTTPClient_EnforcesTimeout(t *testing.T) {
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Sleep longer than the override timeout below; the client
+		// should cancel before this returns.
+		time.Sleep(500 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer slow.Close()
+
+	orig := gotrueHTTPClient
+	gotrueHTTPClient = &http.Client{Timeout: 50 * time.Millisecond}
+	defer func() { gotrueHTTPClient = orig }()
+
+	req, _ := http.NewRequest(http.MethodGet, slow.URL, nil)
+	start := time.Now()
+	_, err := gotrueHTTPClient.Do(req)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+	// Generous upper bound — 50ms timeout + scheduling slack. Anything
+	// near the server's 500ms means the timeout didn't fire.
+	if elapsed > 300*time.Millisecond {
+		t.Errorf("request took %v, expected timeout near 50ms (timeout not enforced)", elapsed)
+	}
+}

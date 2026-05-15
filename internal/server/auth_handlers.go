@@ -30,6 +30,18 @@ import (
 // with `db *sql.DB` parameter names inside this file.
 var _ = tfdb.Claims{}
 
+// gotrueHTTPClient is the shared client for server-to-server calls to
+// GoTrue (/token exchange, /token refresh, /logout). Bounded timeout so
+// a hung or slow GoTrue can't tie up a user-facing request indefinitely
+// — http.DefaultClient has no timeout, which is the exact wrong default
+// when the upstream is on the request critical path.
+//
+// 30s is generous: real /token calls complete in well under a second.
+// The request context still cancels earlier on client disconnect; this
+// is the upper bound when the context happens to be Background (e.g.
+// reaper, future async revoke).
+var gotrueHTTPClient = &http.Client{Timeout: 30 * time.Second}
+
 // authConfig holds the multi-mode auth flow's configuration. Loaded
 // once at startup and passed to SetAuthDeps; everything in here is
 // publicly resolvable (URLs) or only-meaningful inside our own
@@ -510,7 +522,7 @@ func (s *Server) gotrueRefreshFunc(cfg *authConfig) func(context.Context, string
 			return "", "", 0, err
 		}
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		return decodeTokenResponse(ctx, req, "refresh")
+		return decodeTokenResponse(req, "refresh")
 	}
 }
 
@@ -533,7 +545,7 @@ func (s *Server) gotrueExchangeFunc(cfg *authConfig) func(context.Context, strin
 			return "", "", 0, err
 		}
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		return decodeTokenResponse(ctx, req, "exchange")
+		return decodeTokenResponse(req, "exchange")
 	}
 }
 
@@ -548,7 +560,7 @@ func (s *Server) gotrueLogoutFunc(cfg *authConfig) func(context.Context, string)
 			return err
 		}
 		req.Header.Set("Authorization", "Bearer "+accessToken)
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := gotrueHTTPClient.Do(req)
 		if err != nil {
 			return fmt.Errorf("logout http: %w", err)
 		}
@@ -565,10 +577,11 @@ func (s *Server) gotrueLogoutFunc(cfg *authConfig) func(context.Context, string)
 }
 
 // decodeTokenResponse handles the shared /token response shape used
-// by both refresh and PKCE-exchange. label distinguishes errors.
-func decodeTokenResponse(ctx context.Context, req *http.Request, label string) (string, string, int64, error) {
-	_ = ctx // req already carries the context
-	resp, err := http.DefaultClient.Do(req)
+// by both refresh and PKCE-exchange. label distinguishes errors. The
+// request already carries a context via http.NewRequestWithContext, so
+// cancellation propagates through gotrueHTTPClient.
+func decodeTokenResponse(req *http.Request, label string) (string, string, int64, error) {
+	resp, err := gotrueHTTPClient.Do(req)
 	if err != nil {
 		return "", "", 0, fmt.Errorf("%s http: %w", label, err)
 	}

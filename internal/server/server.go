@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
@@ -53,13 +55,15 @@ type Server struct {
 	authCfg   *authConfig
 	authProxy http.Handler // /auth/v1/* → gotrue:9999/*
 
-	// refreshLocks serializes inline JWT refreshes per session. Keyed by
-	// session UUID → *sync.Mutex. Map grows monotonically with session
-	// count (~8 bytes per entry); cleanup is left to process restart,
-	// matching skynet/authkit's `self._locks` pattern. If memory ever
-	// becomes a concern, the reaper goroutine could sweep entries for
-	// revoked/expired sessions.
-	refreshLocks sync.Map
+	// refreshGroup dedupes concurrent JWT refresh attempts per session.
+	// singleflight.Group is the standard "share-the-call-result-across-
+	// concurrent-callers" primitive: at most one gotrue refresh runs
+	// per session ID at a time, and all waiters receive the same
+	// result. The key is cleared once the in-flight call returns, so
+	// there's no per-session state accumulating over process lifetime
+	// (vs the prior sync.Map[uuid]*Mutex which leaked one entry per
+	// session forever).
+	refreshGroup singleflight.Group
 
 	// inlineScriptHashes is the base64-encoded SHA-256 of each inline
 	// <script> block in the served index.html. Populated by SetStatic;
