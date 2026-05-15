@@ -199,12 +199,12 @@ func (s *Server) handleFactorySnapshot(w http.ResponseWriter, r *http.Request) {
 	ghUsername, _ := s.users.GetGitHubUsername(r.Context(), runmode.LocalDefaultUserID)
 
 	// --- Throughput counters ------------------------------------------------
-	eventCounts, err := db.EventCountsByTypeSince(s.db, since)
+	eventCounts, err := s.factory.EventCountsSince(r.Context(), runmode.LocalDefaultOrg, since)
 	if err != nil {
 		internalError(w, "factory", err)
 		return
 	}
-	taskCounts, err := db.TaskCountsByEventTypeSince(s.db, since)
+	taskCounts, err := s.factory.TaskCountsSince(r.Context(), runmode.LocalDefaultOrg, since)
 	if err != nil {
 		internalError(w, "factory", err)
 		return
@@ -219,7 +219,7 @@ func (s *Server) handleFactorySnapshot(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// --- Active runs --------------------------------------------------------
-	activeRuns, err := db.ListFactoryActiveRuns(s.db)
+	activeRuns, err := s.factory.ActiveRuns(r.Context(), runmode.LocalDefaultOrg)
 	if err != nil {
 		internalError(w, "factory", err)
 		return
@@ -279,7 +279,7 @@ func (s *Server) handleFactorySnapshot(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// --- Active entities ----------------------------------------------------
-	entityRows, err := db.ListFactoryEntities(s.db, factoryEntityLimit)
+	entityRows, err := s.factory.Entities(r.Context(), runmode.LocalDefaultOrg, factoryEntityLimit)
 	if err != nil {
 		internalError(w, "factory", err)
 		return
@@ -289,7 +289,7 @@ func (s *Server) handleFactorySnapshot(w http.ResponseWriter, r *http.Request) {
 	for _, row := range entityRows {
 		entityIDs = append(entityIDs, row.Entity.ID)
 	}
-	recentByEntity, err := db.ListRecentEventsByEntity(s.db, entityIDs, factoryRecentEventsPerEntity)
+	recentByEntity, err := s.factory.RecentEventsByEntity(r.Context(), runmode.LocalDefaultOrg, entityIDs, factoryRecentEventsPerEntity)
 	if err != nil {
 		internalError(w, "factory", err)
 		return

@@ -102,7 +102,13 @@ func New(admin, app *sql.DB) db.Stores {
 		// the admin-pooled ScoreStore for its system-service reads, so
 		// TaskStore doesn't need an admin variant.
 		Tasks: newTaskStore(app),
-		Tx:    s,
+		// Factory wires admin — the snapshot is a system-level view
+		// (no per-user identity, must see every in-flight run
+		// regardless of creator) and the LifetimeDistinctCounter
+		// Hydrate path runs at server startup before any JWT claims
+		// are in scope.
+		Factory: newFactoryReadStore(admin),
+		Tx:      s,
 	}
 	return s.stores
 }
@@ -142,5 +148,6 @@ func NewForTx(tx *sql.Tx) db.TxStores {
 		TeamAgents:    newTxTeamAgentStore(tx),
 		Users:         newUsersStore(tx),
 		Tasks:         newTaskStore(tx),
+		Factory:       newFactoryReadStore(tx),
 	}
 }
