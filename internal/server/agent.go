@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -26,7 +27,7 @@ func (s *Server) handleAgentStatus(w http.ResponseWriter, r *http.Request) {
 		notFound(w, "run")
 		return
 	}
-	writeJSON(w, http.StatusOK, runResponse(s.db, run))
+	writeJSON(w, http.StatusOK, runResponse(r.Context(), s.db, s.reviews, run))
 }
 
 // runResponse projects an AgentRun into the wire shape the frontend
@@ -42,7 +43,7 @@ func (s *Server) handleAgentStatus(w http.ResponseWriter, r *http.Request) {
 // row). Both errors swallow + log — pending_kind is informational
 // for the UI; an erroring lookup shouldn't fail the whole status
 // fetch.
-func runResponse(database *sql.DB, run *domain.AgentRun) map[string]any {
+func runResponse(ctx context.Context, database *sql.DB, reviews db.ReviewStore, run *domain.AgentRun) map[string]any {
 	out := map[string]any{
 		"ID":               run.ID,
 		"TaskID":           run.TaskID,
@@ -66,7 +67,7 @@ func runResponse(database *sql.DB, run *domain.AgentRun) map[string]any {
 	}
 	// pending_kind only relevant when the run is parked.
 	if run.Status == "pending_approval" {
-		if review, err := db.PendingReviewByRunID(database, run.ID); err == nil && review != nil {
+		if review, err := reviews.ByRunID(ctx, runmode.LocalDefaultOrgID, run.ID); err == nil && review != nil {
 			out["pending_kind"] = "review"
 		} else if pr, err := db.PendingPRByRunID(database, run.ID); err == nil && pr != nil {
 			out["pending_kind"] = "pr"
@@ -249,7 +250,7 @@ func (s *Server) handleAgentRuns(w http.ResponseWriter, r *http.Request) {
 	// flicker on first paint and only settle after the per-run fetch.
 	out := make([]map[string]any, len(runs))
 	for i := range runs {
-		out[i] = runResponse(s.db, &runs[i])
+		out[i] = runResponse(r.Context(), s.db, s.reviews, &runs[i])
 	}
 	writeJSON(w, http.StatusOK, out)
 }

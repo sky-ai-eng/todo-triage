@@ -39,6 +39,7 @@ type Server struct {
 	factory         db.FactoryReadStore // SKY-292: factory snapshot reads
 	agentRuns       db.AgentRunStore    // SKY-285: agent run lifecycle + transcript + yields
 	entities        db.EntityStore      // SKY-284: entity reads/writes for dashboard, factory_handler, stock, backfill, project_entities
+	reviews         db.ReviewStore      // SKY-286: pending_reviews CRUD for reviews handler, swipe-discard, agent status payload
 	mux             *http.ServeMux
 	static          fs.FS
 	ws              *websocket.Hub
@@ -159,7 +160,7 @@ func (s *Server) agentEnabledForLocalTeam(ctx context.Context) (*domain.Agent, b
 // argument list grows one store at a time as their callers migrate;
 // raw *sql.DB stays available for handlers that haven't been ported
 // to a store yet.
-func New(database *sql.DB, prompts db.PromptStore, swipes db.SwipeStore, dashboard db.DashboardStore, eventHandlers db.EventHandlerStore, agents db.AgentStore, teamAgents db.TeamAgentStore, users db.UsersStore, chains db.ChainStore, tasks db.TaskStore, factory db.FactoryReadStore, agentRuns db.AgentRunStore, entities db.EntityStore) *Server {
+func New(database *sql.DB, prompts db.PromptStore, swipes db.SwipeStore, dashboard db.DashboardStore, eventHandlers db.EventHandlerStore, agents db.AgentStore, teamAgents db.TeamAgentStore, users db.UsersStore, chains db.ChainStore, tasks db.TaskStore, factory db.FactoryReadStore, agentRuns db.AgentRunStore, entities db.EntityStore, reviews db.ReviewStore) *Server {
 	s := &Server{
 		db:            database,
 		prompts:       prompts,
@@ -174,6 +175,7 @@ func New(database *sql.DB, prompts db.PromptStore, swipes db.SwipeStore, dashboa
 		factory:       factory,
 		agentRuns:     agentRuns,
 		entities:      entities,
+		reviews:       reviews,
 		mux:           http.NewServeMux(),
 		ws:            websocket.NewHub(),
 	}

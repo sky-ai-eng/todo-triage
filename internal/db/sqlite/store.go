@@ -43,6 +43,7 @@ func New(conn *sql.DB) db.Stores {
 		Factory:       newFactoryReadStore(conn),
 		AgentRuns:     newAgentRunStore(conn),
 		Entities:      newEntityStore(conn),
+		Reviews:       newReviewStore(conn),
 		Tx:            s,
 	}
 	return s.stores

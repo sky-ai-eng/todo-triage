@@ -1,6 +1,7 @@
 package gh
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // getDiffShapes fetches the PR diff and returns both representations we
@@ -157,7 +159,7 @@ func prReviewDelete(database *db.DB, args []string) {
 		exitErr("usage: gh pr review-delete <review_id>")
 	}
 	reviewID := args[0]
-	err := db.DeletePendingReview(database.Conn, reviewID)
+	err := sqlitestore.New(database.Conn).Reviews.Delete(context.Background(), runmode.LocalDefaultOrgID, reviewID)
 	exitOnErr(err)
 	printJSON(map[string]any{"ok": true, "review_id": reviewID})
 }
@@ -211,7 +213,7 @@ func prStartReview(client *ghclient.Client, database *db.DB, args []string) {
 	diffHunksJSON, _ := json.Marshal(hunksMap)
 
 	reviewID := uuid.New().String()
-	err = db.CreatePendingReview(database.Conn, domain.PendingReview{
+	err = sqlitestore.New(database.Conn).Reviews.Create(context.Background(), runmode.LocalDefaultOrgID, domain.PendingReview{
 		ID:        reviewID,
 		PRNumber:  number,
 		Owner:     owner,
@@ -252,7 +254,7 @@ func prAddReviewComment(database *db.DB, args []string) {
 	}
 
 	// Verify review exists
-	review, err := db.GetPendingReview(database.Conn, reviewID)
+	review, err := sqlitestore.New(database.Conn).Reviews.Get(context.Background(), runmode.LocalDefaultOrgID, reviewID)
 	exitOnErr(err)
 	if review == nil {
 		exitErr(fmt.Sprintf("pending review %s not found", reviewID))
@@ -323,7 +325,7 @@ func prAddReviewComment(database *db.DB, args []string) {
 		Body:      body,
 	}
 
-	err = db.AddPendingReviewComment(database.Conn, comment)
+	err = sqlitestore.New(database.Conn).Reviews.AddComment(context.Background(), runmode.LocalDefaultOrgID, comment)
 	exitOnErr(err)
 
 	printJSON(map[string]any{
@@ -356,14 +358,14 @@ func prSubmitReview(client *ghclient.Client, database *db.DB, args []string) {
 	}
 
 	// Load pending review
-	review, err := db.GetPendingReview(database.Conn, reviewID)
+	review, err := sqlitestore.New(database.Conn).Reviews.Get(context.Background(), runmode.LocalDefaultOrgID, reviewID)
 	exitOnErr(err)
 	if review == nil {
 		exitErr(fmt.Sprintf("pending review %s not found", reviewID))
 	}
 
 	// Load pending comments
-	pendingComments, err := db.ListPendingReviewComments(database.Conn, reviewID)
+	pendingComments, err := sqlitestore.New(database.Conn).Reviews.ListComments(context.Background(), runmode.LocalDefaultOrgID, reviewID)
 	exitOnErr(err)
 
 	// Convert to GitHub format
@@ -387,7 +389,7 @@ func prSubmitReview(client *ghclient.Client, database *db.DB, args []string) {
 	// the pending_approval response, mistaking it for "still pending,
 	// keep going."
 	if os.Getenv("TRIAGE_FACTORY_REVIEW_PREVIEW") == "1" {
-		err = db.LockPendingReviewSubmission(database.Conn, reviewID, body, ghEvent)
+		err = sqlitestore.New(database.Conn).Reviews.LockSubmission(context.Background(), runmode.LocalDefaultOrgID, reviewID, body, ghEvent)
 		if errors.Is(err, db.ErrPendingReviewAlreadySubmitted) {
 			exitErr(fmt.Sprintf(
 				"review %s has already been queued for human approval. Do not call submit-review again — your work on this review is complete. Finish the run by writing $TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/<run_id>.md and returning your completion JSON.",
@@ -430,7 +432,7 @@ func prSubmitReview(client *ghclient.Client, database *db.DB, args []string) {
 	exitOnErr(err)
 
 	// Clean up local state
-	if err := db.DeletePendingReview(database.Conn, reviewID); err != nil {
+	if err := sqlitestore.New(database.Conn).Reviews.Delete(context.Background(), runmode.LocalDefaultOrgID, reviewID); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: failed to clean up local review state: %v\n", err)
 	}
 
@@ -662,7 +664,7 @@ func prListPending(database *db.DB, args []string) {
 		exitErr("usage: gh pr comment-list-pending <review_id>")
 	}
 	reviewID := args[0]
-	comments, err := db.ListPendingReviewComments(database.Conn, reviewID)
+	comments, err := sqlitestore.New(database.Conn).Reviews.ListComments(context.Background(), runmode.LocalDefaultOrgID, reviewID)
 	exitOnErr(err)
 	if comments == nil {
 		comments = []domain.PendingReviewComment{}
@@ -726,7 +728,7 @@ func prCommentUpdate(client *ghclient.Client, database *db.DB, args []string) {
 
 	// Check if it's a local pending comment (UUID) vs remote (integer)
 	if isLocalID(commentID) {
-		err := db.UpdatePendingReviewComment(database.Conn, commentID, body)
+		err := sqlitestore.New(database.Conn).Reviews.UpdateComment(context.Background(), runmode.LocalDefaultOrgID, commentID, body)
 		exitOnErr(err)
 		printJSON(map[string]any{"ok": true, "scope": "local"})
 	} else {
@@ -745,7 +747,7 @@ func prCommentDelete(client *ghclient.Client, database *db.DB, args []string) {
 	commentID := args[0]
 
 	if isLocalID(commentID) {
-		err := db.DeletePendingReviewComment(database.Conn, commentID)
+		err := sqlitestore.New(database.Conn).Reviews.DeleteComment(context.Background(), runmode.LocalDefaultOrgID, commentID)
 		exitOnErr(err)
 		printJSON(map[string]any{"ok": true, "scope": "local"})
 	} else {

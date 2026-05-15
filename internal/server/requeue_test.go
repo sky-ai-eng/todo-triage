@@ -1,12 +1,14 @@
 package server
 
 import (
+	"context"
 	"database/sql"
 	"net/http"
 	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -72,17 +74,17 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, runID, revi
 	// Pending review with one comment, populated via the same
 	// helpers production uses so the original_* columns get the
 	// real write-once snapshots.
-	if err := db.CreatePendingReview(database, domain.PendingReview{
+	if err := sqlitestore.New(database).Reviews.Create(context.Background(), runmode.LocalDefaultOrgID, domain.PendingReview{
 		ID: "rev_pa", PRNumber: 7, Owner: "owner", Repo: "repo", CommitSHA: "sha", DiffLines: "", RunID: "r_pa",
 	}); err != nil {
 		t.Fatalf("CreatePendingReview: %v", err)
 	}
-	if err := db.AddPendingReviewComment(database, domain.PendingReviewComment{
+	if err := sqlitestore.New(database).Reviews.AddComment(context.Background(), runmode.LocalDefaultOrgID, domain.PendingReviewComment{
 		ID: "c_pa", ReviewID: "rev_pa", Path: "x.go", Line: 1, Body: "agent comment",
 	}); err != nil {
 		t.Fatalf("AddPendingReviewComment: %v", err)
 	}
-	if err := db.SetPendingReviewSubmission(database, "rev_pa", "agent draft body", "APPROVE"); err != nil {
+	if err := sqlitestore.New(database).Reviews.SetSubmission(context.Background(), runmode.LocalDefaultOrgID, "rev_pa", "agent draft body", "APPROVE"); err != nil {
 		t.Fatalf("SetPendingReviewSubmission: %v", err)
 	}
 	return "t_pa", "r_pa", "rev_pa"
@@ -518,7 +520,7 @@ func TestHandleSwipe_ClaimRefusedLeavesNoAuditRow(t *testing.T) {
 // Post: 409, no swipe_events, no state change.
 func TestHandleSwipe_DelegateRefusedLeavesNoAuditRow(t *testing.T) {
 	s := newTestServer(t)
-	s.SetSpawner(delegate.NewSpawner(s.db, s.prompts, nil, nil, s.tasks, s.agentRuns, s.entities, nil, websocket.NewHub(), "haiku"))
+	s.SetSpawner(delegate.NewSpawner(s.db, s.prompts, nil, nil, s.tasks, s.agentRuns, s.entities, s.reviews, nil, websocket.NewHub(), "haiku"))
 	const eventType = "github:pr:opened"
 	const otherUserID = "00000000-0000-0000-0000-0000000004dd"
 
@@ -913,7 +915,7 @@ func TestHandleSnooze_RefusesOnClaimedTask(t *testing.T) {
 // transfer while still refusing different-user theft.
 func TestHandleSwipe_DelegateTransfersOwnUserClaim(t *testing.T) {
 	s := newTestServer(t)
-	s.SetSpawner(delegate.NewSpawner(s.db, s.prompts, nil, nil, s.tasks, s.agentRuns, s.entities, nil, websocket.NewHub(), "haiku"))
+	s.SetSpawner(delegate.NewSpawner(s.db, s.prompts, nil, nil, s.tasks, s.agentRuns, s.entities, s.reviews, nil, websocket.NewHub(), "haiku"))
 
 	// Seed a queued task already claimed by the local user — the
 	// pre-condition right before a You → Agent drag fires the
