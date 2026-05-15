@@ -25,9 +25,33 @@ func TestLifetimeDistinctCounter_HydrateMatchesSQL(t *testing.T) {
 	recordEvent(t, database, c.ID, domain.EventGitHubPROpened)
 	recordEvent(t, database, c.ID, domain.EventGitHubPRMerged)
 
-	want, err := DistinctEntityCountsByEventTypeLifetime(database)
-	if err != nil {
-		t.Fatalf("SQL aggregate: %v", err)
+	// Inline the SQL aggregate that DistinctEntityCountsByEventTypeLifetime
+	// used to expose. Once SKY-291 moved factory reads behind the
+	// FactoryReadStore interface that function lived inside the SQLite
+	// backend impl, which this package can't import without a cycle.
+	// The aggregate is small and stable; inlining preserves the
+	// SQL-vs-Hydrate parity contract without the indirection.
+	want := map[string]int{}
+	{
+		rows, err := database.Query(`
+			SELECT event_type, COUNT(DISTINCT entity_id)
+			FROM events
+			WHERE entity_id IS NOT NULL
+			GROUP BY event_type
+		`)
+		if err != nil {
+			t.Fatalf("SQL aggregate: %v", err)
+		}
+		for rows.Next() {
+			var et string
+			var n int
+			if err := rows.Scan(&et, &n); err != nil {
+				rows.Close()
+				t.Fatalf("scan: %v", err)
+			}
+			want[et] = n
+		}
+		rows.Close()
 	}
 
 	counter := NewLifetimeDistinctCounter()

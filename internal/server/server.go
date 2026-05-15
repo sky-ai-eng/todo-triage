@@ -35,7 +35,8 @@ type Server struct {
 	teamAgents      db.TeamAgentStore // SKY-261 D-Claims: re-checks team_agents.enabled on swipe-delegate / factory-delegate
 	users           db.UsersStore     // SKY-264: github_username + display_name on the synthetic local user row
 	chains          db.ChainStore
-	tasks           db.TaskStore // SKY-283: task lifecycle, claim, queue + factory snapshot reads
+	tasks           db.TaskStore        // SKY-283: task lifecycle, claim, queue + factory snapshot reads
+	factory         db.FactoryReadStore // SKY-291: factory snapshot reads
 	mux             *http.ServeMux
 	static          fs.FS
 	ws              *websocket.Hub
@@ -156,7 +157,7 @@ func (s *Server) agentEnabledForLocalTeam(ctx context.Context) (*domain.Agent, b
 // argument list grows one store at a time as their callers migrate;
 // raw *sql.DB stays available for handlers that haven't been ported
 // to a store yet.
-func New(database *sql.DB, prompts db.PromptStore, swipes db.SwipeStore, dashboard db.DashboardStore, eventHandlers db.EventHandlerStore, agents db.AgentStore, teamAgents db.TeamAgentStore, users db.UsersStore, chains db.ChainStore, tasks db.TaskStore) *Server {
+func New(database *sql.DB, prompts db.PromptStore, swipes db.SwipeStore, dashboard db.DashboardStore, eventHandlers db.EventHandlerStore, agents db.AgentStore, teamAgents db.TeamAgentStore, users db.UsersStore, chains db.ChainStore, tasks db.TaskStore, factory db.FactoryReadStore) *Server {
 	s := &Server{
 		db:            database,
 		prompts:       prompts,
@@ -168,6 +169,7 @@ func New(database *sql.DB, prompts db.PromptStore, swipes db.SwipeStore, dashboa
 		users:         users,
 		chains:        chains,
 		tasks:         tasks,
+		factory:       factory,
 		mux:           http.NewServeMux(),
 		ws:            websocket.NewHub(),
 	}

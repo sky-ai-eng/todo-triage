@@ -85,18 +85,27 @@ func (taskMutForTest) SetClaimedByUser(t *testing.T, database *sql.DB, taskID, u
 	}
 }
 
+// GetTask fetches the minimal task-claim projection the agent tests
+// assert against (id, status, ClaimedByAgentID, ClaimedByUserID).
+// Pre-SKY-291 this scanned the full taskColumnsWithEntity list via
+// the package-shared scan helpers; once those moved to the per-
+// backend TaskStore impls (and the legacy bridge was deleted in this
+// PR), the only remaining consumer is this package's agent_test.go
+// which only ever reads the two claim columns. Trimming the scan
+// keeps the test helper self-contained without re-introducing the
+// legacy column list.
 func (taskMutForTest) GetTask(t *testing.T, database *sql.DB, taskID string) *domain.Task {
 	t.Helper()
 	var task domain.Task
-	var s taskScanState
+	var claimedAgent, claimedUser sql.NullString
 	if err := database.QueryRow(`
-		SELECT `+taskColumnsWithEntity+`
-		FROM tasks t
-		JOIN entities e ON t.entity_id = e.id
-		WHERE t.id = ?
-	`, taskID).Scan(s.targets(&task)...); err != nil {
+		SELECT id, status, claimed_by_agent_id, claimed_by_user_id
+		FROM tasks
+		WHERE id = ?
+	`, taskID).Scan(&task.ID, &task.Status, &claimedAgent, &claimedUser); err != nil {
 		t.Fatalf("test GetTask: %v", err)
 	}
-	s.finalize(&task)
+	task.ClaimedByAgentID = claimedAgent.String
+	task.ClaimedByUserID = claimedUser.String
 	return &task
 }

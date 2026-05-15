@@ -76,6 +76,13 @@ type Stores struct {
 	// ScoreStore.
 	Tasks TaskStore
 
+	// Factory is the read-only projection that backs the
+	// /api/factory/snapshot handler and the LifetimeDistinctCounter
+	// reconciliation path. Admin pool in Postgres — the snapshot is
+	// a system-level view (no per-user identity) and the hydrate
+	// path runs at startup before any JWT claims are in scope.
+	Factory FactoryReadStore
+
 	// Tx is the transaction runner — handlers that need atomic
 	// multi-store writes call Tx.WithTx and receive a TxStores with
 	// every field tx-bound. Postgres impl also sets the JWT claims
@@ -100,6 +107,7 @@ type TxStores struct {
 	TeamAgents    TeamAgentStore
 	Users         UsersStore
 	Tasks         TaskStore
+	Factory       FactoryReadStore
 }
 
 // TxRunner runs fn inside a single database transaction. Postgres

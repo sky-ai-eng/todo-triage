@@ -2,8 +2,10 @@ package db
 
 import (
 	"database/sql"
+	"fmt"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	_ "modernc.org/sqlite"
 )
 
@@ -30,4 +32,33 @@ func newTestDB(t *testing.T) *sql.DB {
 		t.Fatalf("bootstrap schema: %v", err)
 	}
 	return database
+}
+
+// makeEntity inserts a fresh active GitHub PR entity for tests. The
+// (source, source_id) pair must be unique per test run; the i argument
+// gives a stable per-test-row discriminator. Shared by lifetime_counter
+// and events tests after factory_test.go was retired in SKY-291.
+func makeEntity(t *testing.T, database *sql.DB, i int) *domain.Entity {
+	t.Helper()
+	e, _, err := FindOrCreateEntity(
+		database, "github", fmt.Sprintf("owner/repo#%d", i), "pr",
+		fmt.Sprintf("PR %d", i), fmt.Sprintf("https://github.com/owner/repo/pull/%d", i),
+	)
+	if err != nil {
+		t.Fatalf("FindOrCreateEntity %d: %v", i, err)
+	}
+	return e
+}
+
+// recordEvent inserts a real entity-attached event for tests. Returns
+// the event's UUID. Wraps RecordEvent to centralize the t.Fatalf on
+// errors. Shared by lifetime_counter and events tests after
+// factory_test.go was retired in SKY-291.
+func recordEvent(t *testing.T, database *sql.DB, entityID, eventType string) string {
+	t.Helper()
+	id, err := RecordEvent(database, domain.Event{EntityID: &entityID, EventType: eventType})
+	if err != nil {
+		t.Fatalf("RecordEvent(%s, %s): %v", entityID, eventType, err)
+	}
+	return id
 }
