@@ -132,7 +132,14 @@ func New(admin, app *sql.DB) db.Stores {
 		// a request handler. RLS policies pending_reviews_all +
 		// pending_review_comments_all gate every statement.
 		Reviews: newReviewStore(app),
-		Tx:      s,
+		// PendingPRs wires app — same shape as Reviews: every
+		// consumer is request-equivalent (pending_prs handler,
+		// swipe-dismiss cleanup, agent gh-create-pr tool via
+		// cmd/exec, spawner goroutine launched from a request
+		// handler). RLS policy pending_prs_all gates statements via
+		// the runs subquery; org_id defense-in-depth fires alongside.
+		PendingPRs: newPendingPRStore(app),
+		Tx:         s,
 	}
 	return s.stores
 }
@@ -178,8 +185,9 @@ func NewForTx(tx *sql.Tx) db.TxStores {
 		// (event-triggered AgentRunStore.Create) need the
 		// production WithTx wiring instead, which gets the real
 		// admin pool via Store.admin.
-		AgentRuns: newAgentRunStore(tx, tx),
-		Entities:  newEntityStore(tx),
-		Reviews:   newReviewStore(tx),
+		AgentRuns:  newAgentRunStore(tx, tx),
+		Entities:   newEntityStore(tx),
+		Reviews:    newReviewStore(tx),
+		PendingPRs: newPendingPRStore(tx),
 	}
 }

@@ -74,9 +74,10 @@ func (s *Store) WithTx(ctx context.Context, orgID, userID string, fn func(db.TxS
 		// around RLS. The admin write commits autonomously from
 		// the outer tx — see Create's pool-routing comment for
 		// why that's the intended semantics.
-		AgentRuns: newAgentRunStore(tx, s.admin),
-		Entities:  newEntityStore(tx),
-		Reviews:   newReviewStore(tx),
+		AgentRuns:  newAgentRunStore(tx, s.admin),
+		Entities:   newEntityStore(tx),
+		Reviews:    newReviewStore(tx),
+		PendingPRs: newPendingPRStore(tx),
 	}
 	if err := fn(txStores); err != nil {
 		return err

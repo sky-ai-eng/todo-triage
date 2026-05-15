@@ -747,8 +747,8 @@ func (s *Server) cleanupPendingApprovalRun(taskID string, outcome discardOutcome
 	// by_user" — confusing in the UI and breaks any downstream
 	// logic keyed on stop_reason that needs to tell the two apart.
 	kind := "review"
-	if pr, err := db.PendingPRByRunID(s.db, runID); err != nil {
-		log.Printf("[approval-discard] PendingPRByRunID lookup for run %s failed: %v", runID, err)
+	if pr, err := s.pendingPRs.ByRunID(context.Background(), runmode.LocalDefaultOrgID, runID); err != nil {
+		log.Printf("[approval-discard] PendingPRs.ByRunID lookup for run %s failed: %v", runID, err)
 	} else if pr != nil {
 		kind = "pr"
 	}
@@ -793,8 +793,8 @@ func (s *Server) cleanupPendingApprovalRun(taskID string, outcome discardOutcome
 	// runs against the run id without first determining which kind —
 	// so we attempt both deletes. Both are idempotent no-ops when no
 	// row exists, so calling unconditionally is safe.
-	if err := db.DeletePendingPRByRunID(s.db, runID); err != nil {
-		log.Printf("[approval-discard] DeletePendingPRByRunID for run %s failed (run held in pending_approval for retry): %v", runID, err)
+	if err := s.pendingPRs.DeleteByRunID(context.Background(), runmode.LocalDefaultOrgID, runID); err != nil {
+		log.Printf("[approval-discard] pendingPRs.DeleteByRunID for run %s failed (run held in pending_approval for retry): %v", runID, err)
 		return
 	}
 

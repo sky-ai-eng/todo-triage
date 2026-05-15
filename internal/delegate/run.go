@@ -343,7 +343,7 @@ func (s *Spawner) processCompletion(
 		// pattern above — terminal-bookkeeping survives cancellation.
 		if pendingReview, _ := s.reviews.ByRunID(context.Background(), runmode.LocalDefaultOrgID, runID); pendingReview != nil {
 			hasPending = true
-		} else if pendingPR, _ := db.PendingPRByRunID(s.database, runID); pendingPR != nil {
+		} else if pendingPR, _ := s.pendingPRs.ByRunID(context.Background(), runmode.LocalDefaultOrgID, runID); pendingPR != nil {
 			hasPending = true
 		}
 		if hasPending {
