@@ -161,10 +161,20 @@ func (s *Server) ListenAndServe(addr string) error {
 
 func (s *Server) routes() {
 	// API routes
-	s.mux.HandleFunc("POST /api/auth/setup", s.handleAuthSetup)
-	s.mux.HandleFunc("GET /api/auth/status", s.handleAuthStatus)
-	s.mux.HandleFunc("DELETE /api/auth", s.handleAuthDelete)
-	s.mux.HandleFunc("DELETE /api/auth/jira", s.handleAuthDeleteJira)
+	// Integration credentials (GitHub PAT, Jira PAT). Distinct from the
+	// session-auth routes below — these are per-user-stored credentials
+	// for talking to third-party services on the user's behalf, not the
+	// user's own login. Lived under /api/auth/* historically; renamed in
+	// the post-SKY-251 cleanup so /api/auth/* unambiguously means
+	// "session authentication." D9 wires its session middleware to
+	// /api/* — including these, since you need to be logged in to
+	// manage your integration credentials.
+	s.mux.HandleFunc("POST /api/integrations/setup", s.handleIntegrationsSetup)
+	s.mux.HandleFunc("GET /api/integrations/status", s.handleIntegrationsStatus)
+	// DELETE on the collection = nuke all integration credentials.
+	// Targeted clears (Jira only) get explicit subpaths.
+	s.mux.HandleFunc("DELETE /api/integrations", s.handleIntegrationsClear)
+	s.mux.HandleFunc("DELETE /api/integrations/jira", s.handleIntegrationsDeleteJira)
 
 	// Multi-mode OAuth flow. Handlers 404 themselves when authDeps is
 	// nil (local mode), so unconditional mount is safe — the routes

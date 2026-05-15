@@ -8,7 +8,8 @@
 #   TF_GOTRUE_URL=http://localhost:9999 \
 #   TF_GOTRUE_JWKS_URL=http://localhost:9999/.well-known/jwks.json \
 #   TF_GOTRUE_ISSUER=${TF_PUBLIC_URL}/auth/v1 \
-#   TF_SESSION_KEY=<from .env>  ./triagefactory
+#   TF_SESSION_ENCRYPTION_KEY=<from .env> \
+#   TF_COOKIE_SECRET=<from .env>  ./triagefactory
 #
 # Prerequisites — see docs/self-host-setup.md:
 #   1. Create a GitHub OAuth app with callback ${TF_PUBLIC_URL}/auth/v1/callback

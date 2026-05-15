@@ -24,7 +24,8 @@ Fill in:
 - `SUPABASE_AUTH_ADMIN_PASSWORD` — distinct password for the role GoTrue connects as. Keeping it separate from the superuser means a GoTrue compromise doesn't surrender full DB access. **Generate with `openssl rand -hex 32`** — GoTrue's DB library only accepts URL-form connection strings, so the password is interpolated into a `postgres://user:pass@host/...` URL. Plain hex avoids every URL-reserved character (`/`, `?`, `#`, `@`, `+`, `=`) by construction. Do *not* use `openssl rand -base64 32` — base64 includes `/` and `+` which break URL parsing.
 - `TF_PUBLIC_URL` — your public URL (no trailing slash)
 - `GH_CLIENT_ID` / `GH_CLIENT_SECRET` — from step 1
-- `TF_SESSION_KEY` — 32 random bytes that the TF binary uses to AES-GCM the access/refresh tokens stored in `public.sessions`. **Generate with `openssl rand -hex 32`.** Base64 is also accepted, but hex avoids `=`/`+`/`/` surprises in env interpolation contexts. Rotating this key invalidates every session — plan it as a forced re-auth event.
+- `TF_SESSION_ENCRYPTION_KEY` — 32 random bytes; AES-GCM master key for the access/refresh tokens stored at rest in `public.sessions`. **Generate with `openssl rand -hex 32`.** Rotating this key invalidates every existing session (ciphertext can't be decrypted) — plan it as a forced re-auth event.
+- `TF_COOKIE_SECRET` — 32 random bytes; HMAC-SHA256 key for the short-lived OAuth state cookie (carries PKCE verifier + CSRF token). **Generate with `openssl rand -hex 32`.** Kept distinct from `TF_SESSION_ENCRYPTION_KEY` so the two rotate independently — rotating only this one invalidates in-flight OAuth handshakes (10-minute window), not active sessions.
 
 > **Rotating passwords:** edit `.env` and re-run `docker compose up -d`. A short-lived `postgres-postinit` sidecar runs on every boot and reapplies `ALTER USER` for the non-superuser roles, so password changes propagate without wiping the data volume. Rotating `POSTGRES_PASSWORD` itself requires more care — that's the superuser's password and Postgres only honors the env var on first init, so changing it means `ALTER USER postgres WITH PASSWORD '...'` by hand inside the running container.
 
@@ -49,7 +50,7 @@ This starts Postgres + GoTrue. The Postgres image is `supabase/postgres`, which 
 The Triage Factory binary itself runs from the host (D13 will package it as a container image; D9 will wire its own DB connection):
 
 ```sh
-set -a; source .env; set +a   # exports TF_SESSION_KEY + the rest
+set -a; source .env; set +a   # exports TF_SESSION_ENCRYPTION_KEY + TF_COOKIE_SECRET + the rest
 TF_MODE=multi \
   TF_GOTRUE_URL=http://localhost:9999 \
   TF_GOTRUE_JWKS_URL=http://localhost:9999/.well-known/jwks.json \

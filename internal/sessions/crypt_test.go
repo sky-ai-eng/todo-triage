@@ -114,8 +114,8 @@ func TestLoadKeyFromEnv_Hex(t *testing.T) {
 	if _, err := rand.Read(raw); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	t.Setenv(EnvVar, hex.EncodeToString(raw))
-	k, err := LoadKeyFromEnv()
+	t.Setenv(testEnv, hex.EncodeToString(raw))
+	k, err := LoadKeyFromEnv(testEnv)
 	if err != nil {
 		t.Fatalf("LoadKeyFromEnv (hex): %v", err)
 	}
@@ -129,8 +129,8 @@ func TestLoadKeyFromEnv_Base64(t *testing.T) {
 	if _, err := rand.Read(raw); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	t.Setenv(EnvVar, base64.StdEncoding.EncodeToString(raw))
-	k, err := LoadKeyFromEnv()
+	t.Setenv(testEnv, base64.StdEncoding.EncodeToString(raw))
+	k, err := LoadKeyFromEnv(testEnv)
 	if err != nil {
 		t.Fatalf("LoadKeyFromEnv (base64): %v", err)
 	}
@@ -140,8 +140,8 @@ func TestLoadKeyFromEnv_Base64(t *testing.T) {
 }
 
 func TestLoadKeyFromEnv_Empty(t *testing.T) {
-	t.Setenv(EnvVar, "")
-	_, err := LoadKeyFromEnv()
+	t.Setenv(testEnv, "")
+	_, err := LoadKeyFromEnv(testEnv)
 	if err == nil || !strings.Contains(err.Error(), "empty") {
 		t.Fatalf("expected empty-env error, got %v", err)
 	}
@@ -149,25 +149,30 @@ func TestLoadKeyFromEnv_Empty(t *testing.T) {
 
 func TestLoadKeyFromEnv_RejectsShort(t *testing.T) {
 	// 16 bytes hex (AES-128 size) — must be rejected
-	t.Setenv(EnvVar, hex.EncodeToString(make([]byte, 16)))
-	_, err := LoadKeyFromEnv()
+	t.Setenv(testEnv, hex.EncodeToString(make([]byte, 16)))
+	_, err := LoadKeyFromEnv(testEnv)
 	if err == nil || !strings.Contains(err.Error(), "32 bytes") {
 		t.Fatalf("expected wrong-size error, got %v", err)
 	}
 }
 
 func TestLoadKeyFromEnv_RejectsLong(t *testing.T) {
-	t.Setenv(EnvVar, hex.EncodeToString(make([]byte, 64)))
-	_, err := LoadKeyFromEnv()
+	t.Setenv(testEnv, hex.EncodeToString(make([]byte, 64)))
+	_, err := LoadKeyFromEnv(testEnv)
 	if err == nil || !strings.Contains(err.Error(), "32 bytes") {
 		t.Fatalf("expected wrong-size error, got %v", err)
 	}
 }
 
 func TestLoadKeyFromEnv_RejectsGarbage(t *testing.T) {
-	t.Setenv(EnvVar, "not-hex-or-base64-!!!")
-	_, err := LoadKeyFromEnv()
+	t.Setenv(testEnv, "not-hex-or-base64-!!!")
+	_, err := LoadKeyFromEnv(testEnv)
 	if err == nil {
 		t.Fatal("expected decode error, got nil")
 	}
 }
+
+// testEnv is a synthetic var name used by the loader tests. Decoupled
+// from the production constants so a rename of EnvSessionEncryptionKey
+// or EnvCookieSecret doesn't force a test rewrite.
+const testEnv = "TF_TEST_KEY_LOADER"

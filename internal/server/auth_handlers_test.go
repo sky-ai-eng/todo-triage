@@ -104,13 +104,12 @@ func validClaimsFor(userID uuid.UUID) jwt.MapClaims {
 // ---------- test rig: server + JWKS + cleanup ----------
 
 type authRig struct {
-	t         *testing.T
-	h         *pgtest.Harness
-	srv       *Server
-	jwks      *httptest.Server
-	jwksMux   *jwksMux
-	signKey   testKey
-	masterKey [32]byte
+	t       *testing.T
+	h       *pgtest.Harness
+	srv     *Server
+	jwks    *httptest.Server
+	jwksMux *jwksMux
+	signKey testKey
 
 	// gotrueLogoutCalls records the access tokens passed to the
 	// gotrueLogout closure during the test. Lets logout tests assert
@@ -138,11 +137,17 @@ func newAuthRig(t *testing.T) *authRig {
 		t.Fatalf("NewVerifier: %v", err)
 	}
 
-	var masterKey [32]byte
-	if _, err := rand.Read(masterKey[:]); err != nil {
-		t.Fatalf("seed key: %v", err)
+	// Two independent random keys: one for session AES-GCM, one for
+	// the OAuth state cookie HMAC. Production loads these from
+	// TF_SESSION_ENCRYPTION_KEY + TF_COOKIE_SECRET respectively.
+	var encKey, cookieSecret [32]byte
+	if _, err := rand.Read(encKey[:]); err != nil {
+		t.Fatalf("seed enc key: %v", err)
 	}
-	store := sessions.NewStore(h.AdminDB, sessions.Key(masterKey))
+	if _, err := rand.Read(cookieSecret[:]); err != nil {
+		t.Fatalf("seed cookie secret: %v", err)
+	}
+	store := sessions.NewStore(h.AdminDB, sessions.Key(encKey))
 
 	// Construct Server with nil store dependencies — auth tests don't
 	// touch the prompt/swipe/etc. handlers. server.New panics if it
@@ -156,18 +161,17 @@ func newAuthRig(t *testing.T) *authRig {
 	// leaking across test runs.
 	rigCtx, rigCancel := context.WithCancel(context.Background())
 	t.Cleanup(rigCancel)
-	if err := s.SetAuthDeps(rigCtx, v, store, "http://gotrue.unused", "http://tf.test", masterKey); err != nil {
+	if err := s.SetAuthDeps(rigCtx, v, store, "http://gotrue.unused", "http://tf.test", cookieSecret); err != nil {
 		t.Fatalf("SetAuthDeps: %v", err)
 	}
 
 	rig := &authRig{
-		t:         t,
-		h:         h,
-		srv:       s,
-		jwks:      jwks,
-		jwksMux:   mux,
-		signKey:   signKey,
-		masterKey: masterKey,
+		t:       t,
+		h:       h,
+		srv:     s,
+		jwks:    jwks,
+		jwksMux: mux,
+		signKey: signKey,
 	}
 
 	// Default gotrueLogout stub: record the access token and succeed.

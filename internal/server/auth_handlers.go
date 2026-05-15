@@ -49,9 +49,8 @@ type authConfig struct {
 
 	// stateKey signs the short-lived state cookie that carries
 	// return_to + CSRF + PKCE verifier through the OAuth roundtrip.
-	// Derived from TF_SESSION_KEY via HMAC-SHA256 with domain
-	// separation, so the cookie-signing subkey and the AES-GCM master
-	// never share material directly.
+	// Loaded from TF_COOKIE_SECRET, independent of the session
+	// encryption key — rotating one doesn't invalidate the other.
 	stateKey [32]byte
 
 	// secureCookies hardens cookie attributes when the deployment is
@@ -77,15 +76,15 @@ func (s *Server) SetAuthDeps(
 	verifier *verify.Verifier,
 	sessionStore *sessions.Store,
 	gotrueURL, publicURL string,
-	masterKey [32]byte,
+	cookieSecret [32]byte,
 ) error {
 	pub := strings.TrimRight(publicURL, "/")
 	cfg := &authConfig{
 		gotrueURL:     strings.TrimRight(gotrueURL, "/"),
 		publicURL:     pub,
 		secureCookies: strings.HasPrefix(pub, "https://"),
+		stateKey:      cookieSecret,
 	}
-	deriveStateKey(masterKey, &cfg.stateKey)
 
 	proxy, err := newGotrueProxy(cfg.gotrueURL)
 	if err != nil {
@@ -109,15 +108,6 @@ func (s *Server) SetAuthDeps(
 	go sessionStore.RunReaper(ctx, 10*time.Minute, 30*24*time.Hour)
 
 	return nil
-}
-
-// deriveStateKey produces a subkey for the state cookie HMAC. Domain
-// separation via a fixed label so a future need for a second subkey
-// (e.g. for CSRF or pre-auth telemetry) doesn't collide with this one.
-func deriveStateKey(master [32]byte, out *[32]byte) {
-	mac := hmac.New(sha256.New, master[:])
-	mac.Write([]byte("triagefactory:auth:state:v1"))
-	copy(out[:], mac.Sum(nil))
 }
 
 // handleOAuthStart redirects the browser to gotrue's /authorize with
