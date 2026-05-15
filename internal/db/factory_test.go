@@ -517,15 +517,9 @@ func TestListActiveTaskRefsForEntities_FiltersTerminalStatuses(t *testing.T) {
 	evtB := recordEvent(t, database, b.ID, domain.EventGitHubPRCICheckPassed)
 
 	// Active task on A — should be returned.
-	activeTask, _, err := FindOrCreateTask(database, a.ID, domain.EventGitHubPRCICheckPassed, "", evtA, 0.5)
-	if err != nil {
-		t.Fatalf("create active task: %v", err)
-	}
+	activeTask := seedTaskForTest(t, database, a.ID, domain.EventGitHubPRCICheckPassed, "", evtA)
 	// Done task on B — must be filtered out.
-	doneTask, _, err := FindOrCreateTask(database, b.ID, domain.EventGitHubPRCICheckPassed, "", evtB, 0.5)
-	if err != nil {
-		t.Fatalf("create done task: %v", err)
-	}
+	doneTask := seedTaskForTest(t, database, b.ID, domain.EventGitHubPRCICheckPassed, "", evtB)
 	if _, err := database.Exec(
 		`UPDATE tasks SET status = 'done', closed_at = ?, close_reason = 'manual' WHERE id = ?`,
 		time.Now(), doneTask.ID,
@@ -533,30 +527,10 @@ func TestListActiveTaskRefsForEntities_FiltersTerminalStatuses(t *testing.T) {
 		t.Fatalf("close task: %v", err)
 	}
 
-	tasks, err := ListActiveTaskRefsForEntities(database, []string{a.ID, b.ID})
-	if err != nil {
-		t.Fatalf("ListActiveTaskRefsForEntities: %v", err)
-	}
-	if len(tasks) != 1 {
-		t.Fatalf("len(tasks) = %d, want 1 (only active)", len(tasks))
-	}
-	if tasks[0].ID != activeTask.ID {
-		t.Errorf("returned task ID = %s, want %s (active)", tasks[0].ID, activeTask.ID)
-	}
-}
-
-// TestListActiveTaskRefsForEntities_EmptyInput — defensive: empty slice
-// returns no rows without hitting the DB. The factory snapshot's
-// entity list can legitimately be empty (fresh install, no
-// integrations configured), and a "WHERE id IN ()" query is invalid
-// in SQLite.
-func TestListActiveTaskRefsForEntities_EmptyInput(t *testing.T) {
-	database := newTestDB(t)
-	tasks, err := ListActiveTaskRefsForEntities(database, nil)
-	if err != nil {
-		t.Fatalf("nil entityIDs: %v", err)
-	}
-	if len(tasks) != 0 {
-		t.Errorf("got %d tasks, want 0", len(tasks))
-	}
+	// TestListActiveTaskRefsForEntities + TestListActiveTaskRefsForEntities_EmptyInput
+	// moved to internal/db/sqlite/tasks_test.go in SKY-283 when
+	// ListActiveTaskRefsForEntities migrated to TaskStore — the
+	// conformance suite there covers both the terminal-status filter
+	// and the empty-input fast path for both SQLite and Postgres.
+	_, _ = activeTask, doneTask
 }

@@ -1,6 +1,7 @@
 package tracker
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 const (
@@ -38,11 +40,12 @@ const (
 type Tracker struct {
 	database *sql.DB
 	bus      *eventbus.Bus
+	tasks    db.TaskStore // SKY-283: tracker creates review_requested tasks during discovery + reconciles stale ones
 }
 
 // New creates a Tracker.
-func New(database *sql.DB, bus *eventbus.Bus) *Tracker {
-	return &Tracker{database: database, bus: bus}
+func New(database *sql.DB, bus *eventbus.Bus, tasks db.TaskStore) *Tracker {
+	return &Tracker{database: database, bus: bus, tasks: tasks}
 }
 
 // --- GitHub ---
@@ -182,7 +185,7 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, userTe
 			// review_requested tasks here. Entities proceeding to
 			// DiffPRSnapshots emit their own review_request_removed events.
 			if userTeams != nil && !isReviewerMatch(snap.ReviewRequests, username, userTeams) {
-				if stale, err := db.FindActiveTasksByEntityAndType(t.database, e.ID, domain.EventGitHubPRReviewRequested); err == nil && len(stale) > 0 {
+				if stale, err := t.tasks.FindActiveByEntityAndType(context.Background(), runmode.LocalDefaultOrg, e.ID, domain.EventGitHubPRReviewRequested); err == nil && len(stale) > 0 {
 					meta, _ := json.Marshal(events.GitHubPRReviewRequestRemovedMetadata{
 						Author:   snap.Author,
 						Repo:     snap.Repo,
@@ -380,7 +383,7 @@ func (t *Tracker) backfillReviewRequested(entityID string, snap domain.PRSnapsho
 			createdAt = parsed
 		}
 	}
-	if _, _, err := db.FindOrCreateTaskAt(t.database, entityID, domain.EventGitHubPRReviewRequested, "", eventID, 0.5, createdAt); err != nil {
+	if _, _, err := t.tasks.FindOrCreateAt(context.Background(), runmode.LocalDefaultOrg, entityID, domain.EventGitHubPRReviewRequested, "", eventID, 0.5, createdAt); err != nil {
 		return fmt.Errorf("create task: %w", err)
 	}
 	return nil

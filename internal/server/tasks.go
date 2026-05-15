@@ -82,7 +82,7 @@ func taskToJSON(t domain.Task) taskJSON {
 }
 
 func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
-	tasks, err := db.QueuedTasks(s.db)
+	tasks, err := s.tasks.Queued(r.Context(), runmode.LocalDefaultOrg)
 	if err != nil {
 		internalError(w, "tasks", err)
 		return
@@ -99,9 +99,9 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 	var tasks []domain.Task
 	var err error
 	if status != "" {
-		tasks, err = db.TasksByStatus(s.db, status)
+		tasks, err = s.tasks.ByStatus(r.Context(), runmode.LocalDefaultOrg, status)
 	} else {
-		tasks, err = db.QueuedTasks(s.db)
+		tasks, err = s.tasks.Queued(r.Context(), runmode.LocalDefaultOrg)
 	}
 	if err != nil {
 		internalError(w, "tasks", err)
@@ -116,7 +116,7 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleTaskGet(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	task, err := db.GetTask(s.db, id)
+	task, err := s.tasks.Get(r.Context(), runmode.LocalDefaultOrg, id)
 	if err != nil {
 		internalError(w, "tasks", err)
 		return
@@ -174,7 +174,7 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 		// (idempotent same-user, takeover from bot, claim from
 		// unclaimed) and one refuse path (different user owns it).
 		// Refused → 409 with NO state mutation and NO audit row.
-		task, lerr := db.GetTask(s.db, id)
+		task, lerr := s.tasks.Get(r.Context(), runmode.LocalDefaultOrg, id)
 		if lerr != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": lerr.Error()})
 			return
@@ -207,7 +207,7 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		case task.ClaimedByAgentID != "":
-			ok, err := db.TakeoverClaimFromAgent(s.db, id, userID)
+			ok, err := s.tasks.TakeoverClaimFromAgent(r.Context(), runmode.LocalDefaultOrg, id, userID)
 			if err != nil {
 				log.Printf("[swipe] takeover claim flip failed on task %s: %v", id, err)
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "claim stamp failed: " + err.Error()})
@@ -221,7 +221,7 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 			}
 			claimChanged = true
 		default:
-			ok, err := db.ClaimQueuedTaskForUser(s.db, id, userID)
+			ok, err := s.tasks.ClaimQueuedForUser(r.Context(), runmode.LocalDefaultOrg, id, userID)
 			if err != nil {
 				log.Printf("[swipe] user claim stamp failed on task %s: %v", id, err)
 				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "claim stamp failed: " + err.Error()})
@@ -290,7 +290,7 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 		// for the response — 404 for missing, 409 + closed-task
 		// message for terminal, 409 + theft message for different
 		// user. Matches the claim path's load-and-branch shape.
-		task, lerr := db.GetTask(s.db, id)
+		task, lerr := s.tasks.Get(r.Context(), runmode.LocalDefaultOrg, id)
 		if lerr != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": lerr.Error()})
 			return
@@ -305,7 +305,7 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		result, err := db.HandoffAgentClaim(s.db, id, a.ID, runmode.LocalDefaultUserID)
+		result, err := s.tasks.HandoffAgentClaim(r.Context(), runmode.LocalDefaultOrg, id, a.ID, runmode.LocalDefaultUserID)
 		if err != nil {
 			log.Printf("[swipe] failed to stamp agent claim on task %s: %v", id, err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "claim stamp failed: " + err.Error()})
@@ -434,7 +434,7 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 	// "In Review" while canonical is "In Progress", transitioning back to the
 	// canonical would be a spurious status change that would confuse watchers.
 	if req.Action == "claim" && s.jiraClient != nil {
-		task, err := db.GetTask(s.db, id)
+		task, err := s.tasks.Get(r.Context(), runmode.LocalDefaultOrg, id)
 		if err == nil && task != nil && task.EntitySource == "jira" {
 			// config.Load() on the swipe hot path: bounded by O(projects)
 			// settings rows, paced by human swipe rate — sub-millisecond
@@ -475,7 +475,7 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 
 	// Trigger delegation on swipe-up
 	if req.Action == "delegate" && s.spawner != nil {
-		task, err := db.GetTask(s.db, id)
+		task, err := s.tasks.Get(r.Context(), runmode.LocalDefaultOrg, id)
 		if err == nil && task != nil {
 			runID, err := s.spawner.Delegate(*task, req.PromptID, "manual", "")
 			if err != nil {
@@ -514,7 +514,7 @@ func (s *Server) handleSnooze(w http.ResponseWriter, r *http.Request) {
 	// leaking implementation detail and confusing legitimate 404
 	// callers. The pre-check fails fast before the store gets
 	// involved.
-	task, err := db.GetTask(s.db, id)
+	task, err := s.tasks.Get(r.Context(), runmode.LocalDefaultOrg, id)
 	if err != nil {
 		internalError(w, "tasks", err)
 		return
@@ -571,7 +571,7 @@ func (s *Server) handleUndo(w http.ResponseWriter, r *http.Request) {
 	// UndoLastSwipe would still fail on the swipe_events FK, but
 	// we'd surface the SQLite error string as a 500 — leaking
 	// implementation detail and confusing legitimate 404 callers.
-	task, err := db.GetTask(s.db, id)
+	task, err := s.tasks.Get(r.Context(), runmode.LocalDefaultOrg, id)
 	if err != nil {
 		internalError(w, "tasks", err)
 		return
@@ -608,7 +608,7 @@ func (s *Server) handleUndo(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
-	task, err := db.GetTask(s.db, id)
+	task, err := s.tasks.Get(r.Context(), runmode.LocalDefaultOrg, id)
 	if err != nil {
 		internalError(w, "tasks", err)
 		return

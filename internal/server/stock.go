@@ -99,7 +99,7 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 	// Batch-fetch the set of Jira entity IDs that already have an active task
 	// so we don't run N queries inside the loop. If this fails we can't tell
 	// which entities are safe to show, so fail the request outright.
-	taskedEntityIDs, err := db.EntityIDsWithActiveTasks(s.db, "jira")
+	taskedEntityIDs, err := s.tasks.EntityIDsWithActiveTasks(r.Context(), runmode.LocalDefaultOrg, "jira")
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to check active tasks: " + err.Error()})
 		return
@@ -312,7 +312,7 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 	// eligibility checks run in O(1) per action. Fail the request if this
 	// fails — otherwise we'd act on tickets without knowing whether they're
 	// already being tracked.
-	taskedEntityIDs, err := db.EntityIDsWithActiveTasks(s.db, "jira")
+	taskedEntityIDs, err := s.tasks.EntityIDsWithActiveTasks(r.Context(), runmode.LocalDefaultOrg, "jira")
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to check active tasks: " + err.Error()})
 		return
@@ -431,7 +431,7 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 				failed = append(failed, stockFailure{a.IssueKey, a.Action, "record event: " + err.Error()})
 				continue
 			}
-			if _, _, err := db.FindOrCreateTask(s.db, entity.ID, eventType, "", eventID, 0.5); err != nil {
+			if _, _, err := s.tasks.FindOrCreate(r.Context(), runmode.LocalDefaultOrg, entity.ID, eventType, "", eventID, 0.5); err != nil {
 				failed = append(failed, stockFailure{a.IssueKey, a.Action, err.Error()})
 				continue
 			}
@@ -485,7 +485,7 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 				failed = append(failed, stockFailure{a.IssueKey, a.Action, "record event: " + err.Error()})
 				continue
 			}
-			task, _, err := db.FindOrCreateTask(s.db, entity.ID, domain.EventJiraIssueAssigned, "", eventID, 0.5)
+			task, _, err := s.tasks.FindOrCreate(r.Context(), runmode.LocalDefaultOrg, entity.ID, domain.EventJiraIssueAssigned, "", eventID, 0.5)
 			if err != nil {
 				failed = append(failed, stockFailure{a.IssueKey, a.Action, err.Error()})
 				continue
@@ -498,7 +498,7 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 			// non-queued state or was already claimed by someone
 			// else, surface that as a failed action rather than
 			// stealing.
-			ok, err := db.ClaimQueuedTaskForUser(s.db, task.ID, runmode.LocalDefaultUserID)
+			ok, err := s.tasks.ClaimQueuedForUser(r.Context(), runmode.LocalDefaultOrg, task.ID, runmode.LocalDefaultUserID)
 			if err != nil {
 				failed = append(failed, stockFailure{a.IssueKey, a.Action, "claim stamp: " + err.Error()})
 				continue

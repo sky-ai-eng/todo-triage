@@ -160,7 +160,7 @@ func TestHandleFactoryDelegate_400OnMalformedJSON(t *testing.T) {
 // success (claim committed, run didn't fire).
 func TestHandleFactoryDelegate_DelegateErrorPreservesClaim(t *testing.T) {
 	s := newTestServer(t)
-	s.SetSpawner(delegate.NewSpawner(s.db, s.prompts, nil, s.chains, nil, websocket.NewHub(), "haiku"))
+	s.SetSpawner(delegate.NewSpawner(s.db, s.prompts, nil, s.chains, s.tasks, nil, websocket.NewHub(), "haiku"))
 
 	entity, _, err := db.FindOrCreateEntity(s.db, "github", "owner/repo#400p", "pr", "", "")
 	if err != nil {
@@ -206,7 +206,7 @@ func TestHandleFactoryDelegate_DelegateErrorPreservesClaim(t *testing.T) {
 
 	// Verify the claim survives in the DB — the FE relies on this to
 	// surface the bot-claimed-with-failed-run state.
-	task, err := db.GetTask(s.db, resp.TaskID)
+	task, err := s.tasks.Get(t.Context(), runmode.LocalDefaultOrg, resp.TaskID)
 	if err != nil || task == nil {
 		t.Fatalf("read task back: task=%v err=%v", task, err)
 	}
@@ -247,7 +247,7 @@ func TestHandleFactoryDelegate_DelegateErrorPreservesClaim(t *testing.T) {
 // the factory drop UI.
 func TestHandleFactoryDelegate_RefusedWhenBotDisabled(t *testing.T) {
 	s := newTestServer(t)
-	s.SetSpawner(delegate.NewSpawner(s.db, s.prompts, nil, nil, nil, websocket.NewHub(), "haiku"))
+	s.SetSpawner(delegate.NewSpawner(s.db, s.prompts, nil, nil, s.tasks, nil, websocket.NewHub(), "haiku"))
 
 	// Flip the bot OFF on the local team. Production path is
 	// team_agents.SetEnabled via a team-admin gesture; direct
@@ -338,7 +338,7 @@ func TestHandleFactoryDelegate_PendingTasksRoundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record event: %v", err)
 	}
-	task, _, err := db.FindOrCreateTask(s.db, entity.ID, domain.EventGitHubPRCICheckPassed, "", evtID, 0.5)
+	task, _, err := s.tasks.FindOrCreate(t.Context(), runmode.LocalDefaultOrg, entity.ID, domain.EventGitHubPRCICheckPassed, "", evtID, 0.5)
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}

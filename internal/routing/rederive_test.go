@@ -77,7 +77,7 @@ func setupReDeriveScenario(t *testing.T, database *sql.DB, minAutonomy float64) 
 	}
 
 	// Create task
-	task, _, err := db.FindOrCreateTask(database, entityID, domain.EventGitHubPRCICheckFailed, "build", eventID, 0.5)
+	task, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, entityID, domain.EventGitHubPRCICheckFailed, "build", eventID, 0.5)
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
@@ -128,13 +128,13 @@ func TestReDeriveAfterScoring_AboveThreshold_Delegates(t *testing.T) {
 	// gate-check path runs (suitability >= threshold, predicate matched)
 	// without panicking. The log output confirms the trigger fired.
 	ws := websocket.NewHub()
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, nil, noopScorer{}, ws)
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), nil, noopScorer{}, ws)
 
 	router.ReDeriveAfterScoring([]string{taskID})
 
 	// Task stays queued because no spawner is configured, but the trigger
 	// matched (visible in log output: "re-derive: task ... firing").
-	task, _ := db.GetTask(database, taskID)
+	task, _ := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrg, taskID)
 	if task == nil {
 		t.Fatal("task not found")
 	}
@@ -160,11 +160,11 @@ func TestReDeriveAfterScoring_BelowThreshold_Skips(t *testing.T) {
 	}
 
 	ws := websocket.NewHub()
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, nil, noopScorer{}, ws)
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), nil, noopScorer{}, ws)
 	router.ReDeriveAfterScoring([]string{taskID})
 
 	// Task should remain queued — trigger was skipped
-	task, _ := db.GetTask(database, taskID)
+	task, _ := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrg, taskID)
 	if task == nil {
 		t.Fatal("task not found")
 	}
@@ -207,16 +207,16 @@ func TestReDeriveAfterScoring_BotClaimed_Skips(t *testing.T) {
 	}
 	// Stamp the bot claim — task stays status='queued' but the
 	// responsibility axis is committed.
-	if err := db.SetTaskClaimedByAgent(database, taskID, runmode.LocalDefaultAgentID); err != nil {
+	if err := testTaskStore(database).SetClaimedByAgent(t.Context(), runmode.LocalDefaultOrg, taskID, runmode.LocalDefaultAgentID); err != nil {
 		t.Fatalf("stamp agent claim: %v", err)
 	}
 
 	ws := websocket.NewHub()
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, nil, noopScorer{}, ws)
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), nil, noopScorer{}, ws)
 	router.ReDeriveAfterScoring([]string{taskID})
 
 	// Task still bot-claimed, no second firing enqueued.
-	task, _ := db.GetTask(database, taskID)
+	task, _ := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrg, taskID)
 	if task.ClaimedByAgentID != runmode.LocalDefaultAgentID {
 		t.Errorf("ClaimedByAgentID = %q, want %q (re-derive must not clear claim)", task.ClaimedByAgentID, runmode.LocalDefaultAgentID)
 	}
@@ -252,16 +252,16 @@ func TestReDeriveAfterScoring_UserClaimed_Skips(t *testing.T) {
 		t.Fatalf("update scores: %v", err)
 	}
 
-	ok, err := db.ClaimQueuedTaskForUser(database, taskID, runmode.LocalDefaultUserID)
+	ok, err := testTaskStore(database).ClaimQueuedForUser(t.Context(), runmode.LocalDefaultOrg, taskID, runmode.LocalDefaultUserID)
 	if err != nil || !ok {
 		t.Fatalf("stamp user claim: ok=%v err=%v", ok, err)
 	}
 
 	ws := websocket.NewHub()
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, nil, noopScorer{}, ws)
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), nil, noopScorer{}, ws)
 	router.ReDeriveAfterScoring([]string{taskID})
 
-	task, _ := db.GetTask(database, taskID)
+	task, _ := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrg, taskID)
 	if task.ClaimedByUserID != runmode.LocalDefaultUserID {
 		t.Errorf("ClaimedByUserID = %q; want %q (re-derive must not clear user claim)", task.ClaimedByUserID, runmode.LocalDefaultUserID)
 	}
@@ -304,10 +304,10 @@ func TestReDeriveAfterScoring_Snoozed_Skips(t *testing.T) {
 	}
 
 	ws := websocket.NewHub()
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, nil, noopScorer{}, ws)
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), nil, noopScorer{}, ws)
 	router.ReDeriveAfterScoring([]string{taskID})
 
-	task, _ := db.GetTask(database, taskID)
+	task, _ := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrg, taskID)
 	if task.Status != "snoozed" {
 		t.Errorf("Status = %q; want snoozed (re-derive must not touch snoozed task)", task.Status)
 	}
@@ -337,7 +337,7 @@ func TestReDeriveAfterScoring_ZeroThresholdTrigger_SkippedByReDerive(t *testing.
 		EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entityID,
 		DedupKey: "lint", MetadataJSON: string(metaJSON),
 	})
-	task, _, _ := db.FindOrCreateTask(database, entityID, domain.EventGitHubPRCICheckFailed, "lint", eventID, 0.5)
+	task, _, _ := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, entityID, domain.EventGitHubPRCICheckFailed, "lint", eventID, 0.5)
 
 	// Prompt
 	createTestPrompt(t, database, domain.Prompt{ID: "p2", Name: "Test2", Body: "Do", Source: "user"})
@@ -356,12 +356,12 @@ func TestReDeriveAfterScoring_ZeroThresholdTrigger_SkippedByReDerive(t *testing.
 	}})
 
 	ws := websocket.NewHub()
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, nil, noopScorer{}, ws)
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), nil, noopScorer{}, ws)
 	router.ReDeriveAfterScoring([]string{task.ID})
 
 	// Task should remain queued — zero-threshold trigger is skipped in re-derive
 	// (it would have fired already in HandleEvent)
-	got, _ := db.GetTask(database, task.ID)
+	got, _ := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrg, task.ID)
 	if got.Status != "queued" {
 		t.Errorf("expected queued (zero-threshold trigger skipped), got %s", got.Status)
 	}
@@ -382,7 +382,7 @@ func TestReDeriveAfterScoring_PredicateMismatch_Skips(t *testing.T) {
 		EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entityID,
 		DedupKey: "build", MetadataJSON: string(metaJSON),
 	})
-	task, _, _ := db.FindOrCreateTask(database, entityID, domain.EventGitHubPRCICheckFailed, "build", eventID, 0.5)
+	task, _, _ := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, entityID, domain.EventGitHubPRCICheckFailed, "build", eventID, 0.5)
 
 	// Prompt
 	createTestPrompt(t, database, domain.Prompt{ID: "p3", Name: "Test3", Body: "Do", Source: "user"})
@@ -404,11 +404,11 @@ func TestReDeriveAfterScoring_PredicateMismatch_Skips(t *testing.T) {
 	}})
 
 	ws := websocket.NewHub()
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, nil, noopScorer{}, ws)
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), nil, noopScorer{}, ws)
 	router.ReDeriveAfterScoring([]string{task.ID})
 
 	// Task should stay queued — predicate doesn't match
-	got, _ := db.GetTask(database, task.ID)
+	got, _ := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrg, task.ID)
 	if got.Status != "queued" {
 		t.Errorf("expected queued (predicate mismatch), got %s", got.Status)
 	}

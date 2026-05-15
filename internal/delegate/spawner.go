@@ -44,6 +44,7 @@ type Spawner struct {
 	prompts  db.PromptStore
 	agents   db.AgentStore // SKY-261: resolves actor for run.actor_agent_id stamping
 	chains   db.ChainStore
+	tasks    db.TaskStore // SKY-283: re-read tasks for run lifecycle handlers
 	wsHub    *websocket.Hub
 
 	mu                    sync.Mutex
@@ -59,12 +60,13 @@ type Spawner struct {
 	agentToolsCache string
 }
 
-func NewSpawner(database *sql.DB, prompts db.PromptStore, agents db.AgentStore, chains db.ChainStore, ghClient *ghclient.Client, wsHub *websocket.Hub, model string) *Spawner {
+func NewSpawner(database *sql.DB, prompts db.PromptStore, agents db.AgentStore, chains db.ChainStore, tasks db.TaskStore, ghClient *ghclient.Client, wsHub *websocket.Hub, model string) *Spawner {
 	return &Spawner{
 		database:    database,
 		prompts:     prompts,
 		agents:      agents,
 		chains:      chains,
+		tasks:       tasks,
 		ghClient:    ghClient,
 		wsHub:       wsHub,
 		model:       model,

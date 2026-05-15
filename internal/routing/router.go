@@ -54,6 +54,7 @@ type Router struct {
 	agents     dbpkg.AgentStore
 	teamAgents dbpkg.TeamAgentStore // SKY-261: read team_agents.enabled before auto-firing triggers
 	users      dbpkg.UsersStore     // SKY-270: read local user's jira_account_id for inline close gates
+	tasks      dbpkg.TaskStore      // SKY-283: task lifecycle, dedup, claims, breaker
 	spawner    Delegator
 	scorer     Scorer
 	ws         *websocket.Hub
@@ -80,7 +81,7 @@ type Router struct {
 // behavior). users is nil-safe too — the SKY-270 inline-close gate
 // degrades to "treat every reassignment as away-from-me" when missing,
 // which over-closes (acceptable: user can reopen via the next poll).
-func NewRouter(db *sql.DB, prompts dbpkg.PromptStore, handlers dbpkg.EventHandlerStore, agents dbpkg.AgentStore, teamAgents dbpkg.TeamAgentStore, users dbpkg.UsersStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
+func NewRouter(db *sql.DB, prompts dbpkg.PromptStore, handlers dbpkg.EventHandlerStore, agents dbpkg.AgentStore, teamAgents dbpkg.TeamAgentStore, users dbpkg.UsersStore, tasks dbpkg.TaskStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
 	return &Router{
 		db:         db,
 		prompts:    prompts,
@@ -88,6 +89,7 @@ func NewRouter(db *sql.DB, prompts dbpkg.PromptStore, handlers dbpkg.EventHandle
 		agents:     agents,
 		teamAgents: teamAgents,
 		users:      users,
+		tasks:      tasks,
 		spawner:    spawner,
 		scorer:     scorer,
 		ws:         ws,
@@ -170,7 +172,7 @@ func (r *Router) HandleEvent(evt domain.Event) {
 	// stays honest); only task creation and trigger firing are
 	// suppressed.
 	if evt.EventType == domain.EventJiraIssueBecameAtomic {
-		active, err := dbpkg.FindActiveTasksByEntity(r.db, entityID)
+		active, err := r.tasks.FindActiveByEntity(context.Background(), runmode.LocalDefaultOrg, entityID)
 		if err != nil {
 			log.Printf("[router] became_atomic: failed to check active tasks on entity %s: %v", entityID, err)
 			return
@@ -230,22 +232,22 @@ func (r *Router) HandleEvent(evt domain.Event) {
 		}
 	}
 
-	task, created, err := dbpkg.FindOrCreateTask(r.db, entityID, evt.EventType, evt.DedupKey, evt.ID, defaultPriority)
+	task, created, err := r.tasks.FindOrCreate(context.Background(), runmode.LocalDefaultOrg, entityID, evt.EventType, evt.DedupKey, evt.ID, defaultPriority)
 	if err != nil {
 		log.Printf("[router] failed to find/create task for %s on entity %s: %v", evt.EventType, entityID, err)
 		return
 	}
 
 	if created {
-		if err := dbpkg.RecordTaskEvent(r.db, task.ID, evt.ID, "spawned"); err != nil {
+		if err := r.tasks.RecordEvent(context.Background(), runmode.LocalDefaultOrg, task.ID, evt.ID, "spawned"); err != nil {
 			log.Printf("[router] failed to record spawned task_event: %v", err)
 		}
 		log.Printf("[router] created task %s (%s) on entity %s", task.ID, evt.EventType, entityID)
 	} else {
-		if err := dbpkg.BumpTask(r.db, task.ID, evt.ID); err != nil {
+		if err := r.tasks.Bump(context.Background(), runmode.LocalDefaultOrg, task.ID, evt.ID); err != nil {
 			log.Printf("[router] failed to bump task %s: %v", task.ID, err)
 		}
-		if err := dbpkg.RecordTaskEvent(r.db, task.ID, evt.ID, "bumped"); err != nil {
+		if err := r.tasks.RecordEvent(context.Background(), runmode.LocalDefaultOrg, task.ID, evt.ID, "bumped"); err != nil {
 			log.Printf("[router] failed to record bumped task_event: %v", err)
 		}
 	}
@@ -327,7 +329,7 @@ func (r *Router) tryAutoDelegate(task *domain.Task, trigger domain.EventHandler,
 	// is nullable at the schema level (rule rows have NULL); kind='trigger'
 	// rows are guaranteed non-nil by the per-kind CHECK constraint.
 	breakerThreshold := derefIntDefault(trigger.BreakerThreshold, 0)
-	failures, err := dbpkg.CountConsecutiveFailedRuns(r.db, entityID, trigger.PromptID)
+	failures, err := r.tasks.CountConsecutiveFailedRuns(context.Background(), runmode.LocalDefaultOrg, entityID, trigger.PromptID)
 	if err != nil {
 		log.Printf("[router] breaker query error for entity %s prompt %s: %v", entityID, trigger.PromptID, err)
 		return
@@ -424,7 +426,7 @@ func (r *Router) stampAgentClaim(task *domain.Task) {
 	if a == nil {
 		return
 	}
-	ok, err := dbpkg.StampAgentClaimIfUnclaimed(r.db, task.ID, a.ID)
+	ok, err := r.tasks.StampAgentClaimIfUnclaimed(context.Background(), runmode.LocalDefaultOrg, task.ID, a.ID)
 	if err != nil {
 		log.Printf("[router] failed to stamp agent claim on task %s: %v", task.ID, err)
 		return
@@ -476,7 +478,7 @@ func (r *Router) fireDelegate(task *domain.Task, trigger domain.EventHandler) (s
 		task.ID, trigger.ID, trigger.PromptID)
 
 	// Re-read task to get entity-joined display fields the spawner needs.
-	fresh, err := dbpkg.GetTask(r.db, task.ID)
+	fresh, err := r.tasks.Get(context.Background(), runmode.LocalDefaultOrg, task.ID)
 	if err != nil || fresh == nil {
 		if err != nil {
 			return "", fmt.Errorf("re-read task: %w", err)
@@ -653,7 +655,7 @@ func (r *Router) RunDrainSweeper(ctx context.Context, interval time.Duration) {
 // "actually broken, repeated failure" case via run-level failure counts —
 // but only once we've started enough runs to trip it. Until then, retry.
 func (r *Router) attemptDrainOne(firing *domain.PendingFiring) (runID, skipReason string, transientErr error) {
-	task, err := dbpkg.GetTask(r.db, firing.TaskID)
+	task, err := r.tasks.Get(context.Background(), runmode.LocalDefaultOrg, firing.TaskID)
 	if err != nil {
 		return "", "", fmt.Errorf("task lookup: %w", err)
 	}
@@ -689,7 +691,7 @@ func (r *Router) attemptDrainOne(firing *domain.PendingFiring) (runID, skipReaso
 	}
 
 	breakerThreshold := derefIntDefault(trigger.BreakerThreshold, 0)
-	failures, err := dbpkg.CountConsecutiveFailedRuns(r.db, firing.EntityID, trigger.PromptID)
+	failures, err := r.tasks.CountConsecutiveFailedRuns(context.Background(), runmode.LocalDefaultOrg, firing.EntityID, trigger.PromptID)
 	if err != nil {
 		return "", "", fmt.Errorf("breaker query: %w", err)
 	}
@@ -725,7 +727,7 @@ func (r *Router) attemptDrainOne(firing *domain.PendingFiring) (runID, skipReaso
 // completion, swipe-undo) clear the claim cols on their own — they
 // don't go through this helper.
 func (r *Router) revertTaskStatus(taskID, status string) {
-	if err := dbpkg.SetTaskStatus(r.db, taskID, status); err != nil {
+	if err := r.tasks.SetStatus(context.Background(), runmode.LocalDefaultOrg, taskID, status); err != nil {
 		log.Printf("[router] failed to revert task %s to %s: %v", taskID, status, err)
 		return
 	}
@@ -754,7 +756,7 @@ func (r *Router) ReDeriveAfterScoring(taskIDs []string) {
 }
 
 func (r *Router) reDeriveTask(taskID string) {
-	task, err := dbpkg.GetTask(r.db, taskID)
+	task, err := r.tasks.Get(context.Background(), runmode.LocalDefaultOrg, taskID)
 	if err != nil || task == nil {
 		return
 	}
@@ -903,7 +905,7 @@ func (r *Router) cancelActiveRunsForTask(taskID string) {
 // subsequent callers see 'done' immediately, and the run lands on
 // 'cancelled' when its goroutine unwinds.
 func (r *Router) closeEntity(entityID string) (int, error) {
-	if tasks, err := dbpkg.FindActiveTasksByEntity(r.db, entityID); err != nil {
+	if tasks, err := r.tasks.FindActiveByEntity(context.Background(), runmode.LocalDefaultOrg, entityID); err != nil {
 		// Non-fatal: better to cascade-close the entity than to abort
 		// because we couldn't enumerate tasks for cancellation. Any
 		// orphaned runs can be cleaned up by the existing startup
@@ -918,7 +920,7 @@ func (r *Router) closeEntity(entityID string) (int, error) {
 	if err := dbpkg.CloseEntity(r.db, entityID); err != nil {
 		return 0, err
 	}
-	closed, err := dbpkg.CloseAllEntityTasks(r.db, entityID, "entity_closed")
+	closed, err := r.tasks.CloseAllForEntity(context.Background(), runmode.LocalDefaultOrg, entityID, "entity_closed")
 	if err != nil {
 		return closed, err
 	}
@@ -939,11 +941,11 @@ func (r *Router) closeEntity(entityID string) (int, error) {
 // considers resolved.
 func (r *Router) closeTaskWithAudit(taskID, closingEventID, closeReason, closeEventType string) error {
 	r.cancelActiveRunsForTask(taskID)
-	if err := dbpkg.CloseTask(r.db, taskID, closeReason, closeEventType); err != nil {
+	if err := r.tasks.Close(context.Background(), runmode.LocalDefaultOrg, taskID, closeReason, closeEventType); err != nil {
 		return err
 	}
 	if closingEventID != "" {
-		_ = dbpkg.RecordTaskEvent(r.db, taskID, closingEventID, "closed")
+		_ = r.tasks.RecordEvent(context.Background(), runmode.LocalDefaultOrg, taskID, closingEventID, "closed")
 	}
 	return nil
 }
@@ -976,7 +978,7 @@ func (r *Router) closeCheckCIPassed(evt domain.Event, entityID string) bool {
 	}
 
 	// Query: any active ci_check_failed tasks still open on this entity?
-	failedTasks, err := dbpkg.FindActiveTasksByEntityAndType(r.db, entityID, domain.EventGitHubPRCICheckFailed)
+	failedTasks, err := r.tasks.FindActiveByEntityAndType(context.Background(), runmode.LocalDefaultOrg, entityID, domain.EventGitHubPRCICheckFailed)
 	if err != nil || len(failedTasks) == 0 {
 		return false
 	}
@@ -1064,7 +1066,7 @@ func (r *Router) closeCheckReviewResolved(evt domain.Event, entityID string) boo
 	}
 
 	// Close review_changes_requested tasks on this entity.
-	tasks, err := dbpkg.FindActiveTasksByEntityAndType(r.db, entityID, domain.EventGitHubPRReviewChangesRequested)
+	tasks, err := r.tasks.FindActiveByEntityAndType(context.Background(), runmode.LocalDefaultOrg, entityID, domain.EventGitHubPRReviewChangesRequested)
 	if err != nil {
 		return false
 	}
@@ -1093,7 +1095,7 @@ func (r *Router) closeCheckReviewSubmitted(evt domain.Event, entityID string) bo
 		return false
 	}
 
-	tasks, err := dbpkg.FindActiveTasksByEntityAndType(r.db, entityID, domain.EventGitHubPRReviewRequested)
+	tasks, err := r.tasks.FindActiveByEntityAndType(context.Background(), runmode.LocalDefaultOrg, entityID, domain.EventGitHubPRReviewRequested)
 	if err != nil {
 		return false
 	}
@@ -1113,7 +1115,7 @@ func (r *Router) closeCheckReviewSubmitted(evt domain.Event, entityID string) bo
 // reviewers list (reviewed or request rescinded). Close any active
 // review_requested task on this entity.
 func (r *Router) closeCheckReviewRequestRemoved(evt domain.Event, entityID string) bool {
-	tasks, err := dbpkg.FindActiveTasksByEntityAndType(r.db, entityID, domain.EventGitHubPRReviewRequested)
+	tasks, err := r.tasks.FindActiveByEntityAndType(context.Background(), runmode.LocalDefaultOrg, entityID, domain.EventGitHubPRReviewRequested)
 	if err != nil {
 		return false
 	}
@@ -1157,7 +1159,7 @@ func (r *Router) closeCheckJiraReassigned(evt domain.Event, entityID string) boo
 	// Close active assigned tasks.
 	closed := false
 	for _, eventType := range []string{domain.EventJiraIssueAssigned, domain.EventJiraIssueAvailable} {
-		tasks, err := dbpkg.FindActiveTasksByEntityAndType(r.db, entityID, eventType)
+		tasks, err := r.tasks.FindActiveByEntityAndType(context.Background(), runmode.LocalDefaultOrg, entityID, eventType)
 		if err != nil {
 			continue
 		}

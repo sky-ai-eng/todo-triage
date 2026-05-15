@@ -21,10 +21,7 @@ func TestMarkAgentRunAwaitingInput_FlipsRunningRow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record event: %v", err)
 	}
-	task, _, err := FindOrCreateTask(database, entity.ID, domain.EventGitHubPRCICheckFailed, "build", eventID, 0.5)
-	if err != nil {
-		t.Fatalf("create task: %v", err)
-	}
+	task := seedTaskForTest(t, database, entity.ID, domain.EventGitHubPRCICheckFailed, "build", eventID)
 	createPromptForTest(t, database, domain.Prompt{ID: "p", Name: "T", Body: "x", Source: "user"})
 	if err := CreateAgentRun(database, domain.AgentRun{ID: "r1", TaskID: task.ID, PromptID: "p", Status: "running", Model: "m"}); err != nil {
 		t.Fatalf("create run: %v", err)
@@ -64,10 +61,7 @@ func TestMarkAgentRunAwaitingInput_RefusesTerminal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record event: %v", err)
 	}
-	task, _, err := FindOrCreateTask(database, entity.ID, domain.EventGitHubPRCICheckFailed, "k", eventID, 0.5)
-	if err != nil {
-		t.Fatalf("create task: %v", err)
-	}
+	task := seedTaskForTest(t, database, entity.ID, domain.EventGitHubPRCICheckFailed, "k", eventID)
 	createPromptForTest(t, database, domain.Prompt{ID: "p", Name: "T", Body: "x", Source: "user"})
 
 	for _, term := range []string{"completed", "failed", "cancelled", "task_unsolvable", "pending_approval", "taken_over"} {
@@ -92,7 +86,7 @@ func TestMarkAgentRunResuming_OnlyFromAwaitingInput(t *testing.T) {
 	database := newTestDB(t)
 	entity, _, _ := FindOrCreateEntity(database, "github", "owner/repo#3", "pr", "T", "https://example.com/3")
 	eventID, _ := RecordEvent(database, domain.Event{EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entity.ID})
-	task, _, _ := FindOrCreateTask(database, entity.ID, domain.EventGitHubPRCICheckFailed, "x", eventID, 0.5)
+	task := seedTaskForTest(t, database, entity.ID, domain.EventGitHubPRCICheckFailed, "x", eventID)
 	createPromptForTest(t, database, domain.Prompt{ID: "p", Name: "T", Body: "x", Source: "user"})
 
 	_ = CreateAgentRun(database, domain.AgentRun{ID: "r-running", TaskID: task.ID, PromptID: "p", Status: "running", Model: "m"})
@@ -128,7 +122,7 @@ func TestInsertAndLatestYieldRequest_Roundtrip(t *testing.T) {
 	database := newTestDB(t)
 	entity, _, _ := FindOrCreateEntity(database, "github", "owner/repo#4", "pr", "T", "https://example.com/4")
 	eventID, _ := RecordEvent(database, domain.Event{EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entity.ID})
-	task, _, _ := FindOrCreateTask(database, entity.ID, domain.EventGitHubPRCICheckFailed, "x", eventID, 0.5)
+	task := seedTaskForTest(t, database, entity.ID, domain.EventGitHubPRCICheckFailed, "x", eventID)
 	createPromptForTest(t, database, domain.Prompt{ID: "p", Name: "T", Body: "x", Source: "user"})
 	_ = CreateAgentRun(database, domain.AgentRun{ID: "r1", TaskID: task.ID, PromptID: "p", Status: "running", Model: "m"})
 
@@ -174,7 +168,7 @@ func TestInsertYieldResponse_StoresDisplayAndPayload(t *testing.T) {
 	database := newTestDB(t)
 	entity, _, _ := FindOrCreateEntity(database, "github", "owner/repo#5", "pr", "T", "https://example.com/5")
 	eventID, _ := RecordEvent(database, domain.Event{EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entity.ID})
-	task, _, _ := FindOrCreateTask(database, entity.ID, domain.EventGitHubPRCICheckFailed, "x", eventID, 0.5)
+	task := seedTaskForTest(t, database, entity.ID, domain.EventGitHubPRCICheckFailed, "x", eventID)
 	createPromptForTest(t, database, domain.Prompt{ID: "p", Name: "T", Body: "x", Source: "user"})
 	_ = CreateAgentRun(database, domain.AgentRun{ID: "r1", TaskID: task.ID, PromptID: "p", Status: "running", Model: "m"})
 
@@ -215,7 +209,7 @@ func TestEntitiesWithAwaitingInputRuns_FiltersAndScopes(t *testing.T) {
 
 	mkRun := func(entity, runID, status string) {
 		eventID, _ := RecordEvent(database, domain.Event{EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entity})
-		task, _, _ := FindOrCreateTask(database, entity, domain.EventGitHubPRCICheckFailed, runID, eventID, 0.5)
+		task := seedTaskForTest(t, database, entity, domain.EventGitHubPRCICheckFailed, runID, eventID)
 		createPromptForTest(t, database, domain.Prompt{ID: "p-" + runID, Name: "T", Body: "x", Source: "user"})
 		_ = CreateAgentRun(database, domain.AgentRun{ID: runID, TaskID: task.ID, PromptID: "p-" + runID, Status: status, Model: "m"})
 		_, _ = database.Exec(`UPDATE runs SET status = ? WHERE id = ?`, status, runID)
@@ -255,7 +249,7 @@ func TestAddAgentRunPartialTotals_AccumulatesAcrossYields(t *testing.T) {
 	database := newTestDB(t)
 	entity, _, _ := FindOrCreateEntity(database, "github", "owner/repo#20", "pr", "T", "https://example.com/20")
 	eventID, _ := RecordEvent(database, domain.Event{EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entity.ID})
-	task, _, _ := FindOrCreateTask(database, entity.ID, domain.EventGitHubPRCICheckFailed, "x", eventID, 0.5)
+	task := seedTaskForTest(t, database, entity.ID, domain.EventGitHubPRCICheckFailed, "x", eventID)
 	createPromptForTest(t, database, domain.Prompt{ID: "p", Name: "T", Body: "x", Source: "user"})
 	_ = CreateAgentRun(database, domain.AgentRun{ID: "r1", TaskID: task.ID, PromptID: "p", Status: "running", Model: "m"})
 

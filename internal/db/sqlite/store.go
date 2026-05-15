@@ -39,6 +39,7 @@ func New(conn *sql.DB) db.Stores {
 		Agents:        newAgentStore(conn),
 		TeamAgents:    newTeamAgentStore(conn),
 		Users:         users,
+		Tasks:         newTaskStore(conn),
 		Tx:            s,
 	}
 	return s.stores

@@ -97,6 +97,11 @@ func New(admin, app *sql.DB) db.Stores {
 		// tf.user_can_read_user() / tf.user_can_update_user() once
 		// those policies land.
 		Users: newUsersStore(app),
+		// Tasks runs on app — every consumer (server tasks handler,
+		// router, delegate) is request-equivalent. The AI scorer uses
+		// the admin-pooled ScoreStore for its system-service reads, so
+		// TaskStore doesn't need an admin variant.
+		Tasks: newTaskStore(app),
 		Tx:    s,
 	}
 	return s.stores
@@ -136,5 +141,6 @@ func NewForTx(tx *sql.Tx) db.TxStores {
 		Agents:        newTxAgentStore(tx),
 		TeamAgents:    newTxTeamAgentStore(tx),
 		Users:         newUsersStore(tx),
+		Tasks:         newTaskStore(tx),
 	}
 }

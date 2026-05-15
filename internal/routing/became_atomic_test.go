@@ -51,7 +51,7 @@ func TestHandleEvent_BecameAtomic_ExistingTask_NoDuplicate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record assigned event: %v", err)
 	}
-	existingTask, _, err := db.FindOrCreateTask(database, entity.ID,
+	existingTask, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, entity.ID,
 		domain.EventJiraIssueAssigned, "", assignedEventID, 0.5)
 	if err != nil {
 		t.Fatalf("create existing task: %v", err)
@@ -70,7 +70,7 @@ func TestHandleEvent_BecameAtomic_ExistingTask_NoDuplicate(t *testing.T) {
 	atomicJSON, _ := json.Marshal(atomicMeta)
 
 	ws := websocket.NewHub()
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, nil, noopScorer{}, ws)
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), nil, noopScorer{}, ws)
 
 	router.HandleEvent(domain.Event{
 		EventType:    domain.EventJiraIssueBecameAtomic,
@@ -80,7 +80,7 @@ func TestHandleEvent_BecameAtomic_ExistingTask_NoDuplicate(t *testing.T) {
 	})
 
 	// Verify: still exactly one active task on the entity.
-	active, err := db.FindActiveTasksByEntity(database, entity.ID)
+	active, err := testTaskStore(database).FindActiveByEntity(t.Context(), runmode.LocalDefaultOrg, entity.ID)
 	if err != nil {
 		t.Fatalf("list active tasks: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestHandleEvent_BecameAtomic_NoExistingTask_CreatesTask(t *testing.T) {
 	metaJSON, _ := json.Marshal(meta)
 
 	ws := websocket.NewHub()
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, nil, noopScorer{}, ws)
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), nil, noopScorer{}, ws)
 
 	router.HandleEvent(domain.Event{
 		EventType:    domain.EventJiraIssueBecameAtomic,
@@ -130,7 +130,7 @@ func TestHandleEvent_BecameAtomic_NoExistingTask_CreatesTask(t *testing.T) {
 		CreatedAt:    time.Now(),
 	})
 
-	active, err := db.FindActiveTasksByEntity(database, entity.ID)
+	active, err := testTaskStore(database).FindActiveByEntity(t.Context(), runmode.LocalDefaultOrg, entity.ID)
 	if err != nil {
 		t.Fatalf("list active tasks: %v", err)
 	}

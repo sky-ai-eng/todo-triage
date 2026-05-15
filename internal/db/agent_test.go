@@ -56,10 +56,7 @@ func TestCreateAgentRun_CreatorUserIDPairsWithTriggerType(t *testing.T) {
 			if err != nil {
 				t.Fatalf("record event: %v", err)
 			}
-			task, _, err := FindOrCreateTask(database, entity.ID, domain.EventGitHubPRCICheckFailed, tc.name, eventID, 0.5)
-			if err != nil {
-				t.Fatalf("create task: %v", err)
-			}
+			task := seedTaskForTest(t, database, entity.ID, domain.EventGitHubPRCICheckFailed, tc.name, eventID)
 			if _, err := database.Exec(
 				`INSERT OR IGNORE INTO prompts (id, name, body, creator_user_id, team_id) VALUES ('p-creator', 'P', 'x', ?, ?)`,
 				runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID,
@@ -100,7 +97,7 @@ func TestCreateAgentRun_CreatorUserIDPairsWithTriggerType(t *testing.T) {
 		eventID, _ := RecordEvent(database, domain.Event{
 			EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entity.ID, MetadataJSON: `{}`,
 		})
-		task, _, _ := FindOrCreateTask(database, entity.ID, domain.EventGitHubPRCICheckFailed, "neg", eventID, 0.5)
+		task := seedTaskForTest(t, database, entity.ID, domain.EventGitHubPRCICheckFailed, "neg", eventID)
 		if _, err := database.Exec(
 			`INSERT OR IGNORE INTO prompts (id, name, body, creator_user_id, team_id) VALUES ('p-neg', 'P', 'x', ?, ?)`,
 			runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID,
@@ -143,10 +140,7 @@ func TestActiveRunIDsForTask(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record event: %v", err)
 	}
-	task, _, err := FindOrCreateTask(database, entity.ID, domain.EventGitHubPRCICheckFailed, "build", eventID, 0.5)
-	if err != nil {
-		t.Fatalf("create task: %v", err)
-	}
+	task := seedTaskForTest(t, database, entity.ID, domain.EventGitHubPRCICheckFailed, "build", eventID)
 
 	createPromptForTest(t, database, domain.Prompt{ID: "test-prompt", Name: "T", Body: "x", Source: "user"})
 
@@ -244,10 +238,7 @@ func takeoverFixture(t *testing.T, database *sql.DB, runID, status, worktreePath
 	if err != nil {
 		t.Fatalf("record event: %v", err)
 	}
-	task, _, err := FindOrCreateTask(database, entity.ID, domain.EventGitHubPRCICheckFailed, runID, eventID, 0.5)
-	if err != nil {
-		t.Fatalf("create task: %v", err)
-	}
+	task := seedTaskForTest(t, database, entity.ID, domain.EventGitHubPRCICheckFailed, runID, eventID)
 	// Use FindOrCreate semantics for the prompt — multiple fixtures in
 	// one test would otherwise collide on the unique ID.
 	if existing := getPromptForTest(t, database, "test-prompt"); existing == nil {
@@ -303,9 +294,7 @@ func TestMarkAgentRunTakenOver_AtomicWithClaim(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed agent: %v", err)
 	}
-	if err := SetTaskClaimedByAgent(database, taskID, runmode.LocalDefaultAgentID); err != nil {
-		t.Fatalf("seed agent claim: %v", err)
-	}
+	taskMutationsForTest().SetClaimedByAgent(t, database, taskID, runmode.LocalDefaultAgentID)
 
 	const userID = runmode.LocalDefaultUserID
 	dest := "/home/user/.triagefactory/takeovers/run-atomic"
@@ -326,10 +315,7 @@ func TestMarkAgentRunTakenOver_AtomicWithClaim(t *testing.T) {
 	if run.Status != "taken_over" {
 		t.Errorf("run.Status=%q want taken_over", run.Status)
 	}
-	gotTask, err := GetTask(database, taskID)
-	if err != nil {
-		t.Fatalf("GetTask: %v", err)
-	}
+	gotTask := taskMutationsForTest().GetTask(t, database, taskID)
 	if gotTask.ClaimedByAgentID != "" {
 		t.Errorf("task.ClaimedByAgentID=%q want empty (atomic flip should have cleared it)", gotTask.ClaimedByAgentID)
 	}
@@ -353,9 +339,7 @@ func TestMarkAgentRunTakenOver_AtomicRollsBackOnRaceLoss(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed agent: %v", err)
 	}
-	if err := SetTaskClaimedByAgent(database, taskID, runmode.LocalDefaultAgentID); err != nil {
-		t.Fatalf("seed agent claim: %v", err)
-	}
+	taskMutationsForTest().SetClaimedByAgent(t, database, taskID, runmode.LocalDefaultAgentID)
 
 	ok, err := MarkAgentRunTakenOver(database, "run-race-loss", "/dest", runmode.LocalDefaultUserID)
 	if err != nil {
@@ -365,10 +349,7 @@ func TestMarkAgentRunTakenOver_AtomicRollsBackOnRaceLoss(t *testing.T) {
 		t.Fatal("expected ok=false on race-loss (run already completed)")
 	}
 
-	gotTask, err := GetTask(database, taskID)
-	if err != nil {
-		t.Fatalf("GetTask: %v", err)
-	}
+	gotTask := taskMutationsForTest().GetTask(t, database, taskID)
 	if gotTask.ClaimedByAgentID != runmode.LocalDefaultAgentID {
 		t.Errorf("task.ClaimedByAgentID=%q want %q (race-loss must roll back the claim flip too)",
 			gotTask.ClaimedByAgentID, runmode.LocalDefaultAgentID)
@@ -399,9 +380,7 @@ func TestMarkAgentRunTakenOver_AtomicRollsBackOnClaimRace(t *testing.T) {
 		{
 			name: "another_user_already_claimed",
 			stageTask: func(t *testing.T, database *sql.DB, taskID, otherUserID string) {
-				if err := SetTaskClaimedByUser(database, taskID, otherUserID); err != nil {
-					t.Fatalf("stage other-user claim: %v", err)
-				}
+				taskMutationsForTest().SetClaimedByUser(t, database, taskID, otherUserID)
 			},
 		},
 		{
@@ -444,9 +423,7 @@ func TestMarkAgentRunTakenOver_AtomicRollsBackOnClaimRace(t *testing.T) {
 			// shows status='running', so the run UPDATE will pass
 			// its guard; only the task UPDATE's new claim guards
 			// should refuse.
-			if err := SetTaskClaimedByAgent(database, taskID, runmode.LocalDefaultAgentID); err != nil {
-				t.Fatalf("seed agent claim: %v", err)
-			}
+			taskMutationsForTest().SetClaimedByAgent(t, database, taskID, runmode.LocalDefaultAgentID)
 			tc.stageTask(t, database, taskID, otherUserID)
 
 			ok, err := MarkAgentRunTakenOver(database, runID, "/dest", runmode.LocalDefaultUserID)
@@ -468,10 +445,7 @@ func TestMarkAgentRunTakenOver_AtomicRollsBackOnClaimRace(t *testing.T) {
 
 			// Task claim must be unchanged from the staged state
 			// (not the LocalDefaultUserID we tried to flip to).
-			gotTask, err := GetTask(database, taskID)
-			if err != nil {
-				t.Fatalf("GetTask: %v", err)
-			}
+			gotTask := taskMutationsForTest().GetTask(t, database, taskID)
 			if gotTask.ClaimedByUserID == runmode.LocalDefaultUserID {
 				t.Errorf("task.ClaimedByUserID = %q; want preserved (race-loss must not have stamped our user)",
 					gotTask.ClaimedByUserID)

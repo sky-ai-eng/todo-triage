@@ -2,7 +2,6 @@ package sqlite
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"strings"
 
@@ -156,80 +155,7 @@ func assertLocalOrg(orgID string) error {
 	return nil
 }
 
-// --- scan helpers --------------------------------------------------
-//
-// TODO(SKY-246 wave 3a): these duplicate the unexported helpers
-// (taskColumnsWithEntity, taskScanState, scanFields) currently in
-// internal/db/tasks.go. When TaskStore migrates in wave 3a the
-// helpers consolidate under sqlite/tasks_scan.go and this duplication
-// goes away. Kept local for wave 0 so the pilot doesn't churn the
-// still-unconverted package db.
-
-const sqliteTaskColumnsWithEntity = `
-	t.id, t.entity_id, t.event_type, t.dedup_key, t.primary_event_id,
-	t.status, t.priority_score, t.ai_summary, t.autonomy_suitability,
-	t.priority_reasoning, t.scoring_status, t.severity, t.relevance_reason,
-	t.source_status, t.snooze_until, t.close_reason, t.close_event_type,
-	t.closed_at, t.created_at,
-	COALESCE(e.title, ''), COALESCE(e.url, ''), e.source_id, e.source, e.kind,
-	COALESCE(
-		CASE
-			WHEN json_valid(NULLIF(e.snapshot_json, ''))
-				THEN json_extract(NULLIF(e.snapshot_json, ''), '$.open_subtask_count')
-			ELSE NULL
-		END,
-		0
-	)`
-
-type taskScanState struct {
-	priorityScore, autonomySuitability sql.NullFloat64
-	aiSummary, priorityReasoning       sql.NullString
-	severity, relevanceReason          sql.NullString
-	sourceStatus, scoringStatus        sql.NullString
-	closeReason, closeEventType        sql.NullString
-	snoozeUntil, closedAt              sql.NullTime
-}
-
-func (s *taskScanState) targets(t *domain.Task) []any {
-	return []any{
-		&t.ID, &t.EntityID, &t.EventType, &t.DedupKey, &t.PrimaryEventID,
-		&t.Status, &s.priorityScore, &s.aiSummary, &s.autonomySuitability,
-		&s.priorityReasoning, &s.scoringStatus, &s.severity, &s.relevanceReason,
-		&s.sourceStatus, &s.snoozeUntil, &s.closeReason, &s.closeEventType,
-		&s.closedAt, &t.CreatedAt,
-		&t.Title, &t.SourceURL, &t.EntitySourceID, &t.EntitySource, &t.EntityKind,
-		&t.OpenSubtaskCount,
-	}
-}
-
-func (s *taskScanState) finalize(t *domain.Task) {
-	if s.priorityScore.Valid {
-		t.PriorityScore = &s.priorityScore.Float64
-	}
-	if s.autonomySuitability.Valid {
-		t.AutonomySuitability = &s.autonomySuitability.Float64
-	}
-	t.AISummary = s.aiSummary.String
-	t.PriorityReasoning = s.priorityReasoning.String
-	t.Severity = s.severity.String
-	t.RelevanceReason = s.relevanceReason.String
-	t.SourceStatus = s.sourceStatus.String
-	t.ScoringStatus = s.scoringStatus.String
-	t.CloseReason = s.closeReason.String
-	t.CloseEventType = s.closeEventType.String
-	if s.snoozeUntil.Valid {
-		t.SnoozeUntil = &s.snoozeUntil.Time
-	}
-	if s.closedAt.Valid {
-		t.ClosedAt = &s.closedAt.Time
-	}
-}
-
-func scanTaskFields(rows *sql.Rows, t *domain.Task) error {
-	var s taskScanState
-	if err := rows.Scan(s.targets(t)...); err != nil {
-		return err
-	}
-	s.finalize(t)
-	return nil
-}
+// Scan helpers (sqliteTaskColumnsWithEntity, taskScanState,
+// scanTaskFields) live in sqlite/tasks.go now that TaskStore owns
+// task-row scanning. ScoreStore.UnscoredTasks references them via the
+// same-package import.

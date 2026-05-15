@@ -100,7 +100,7 @@ func (s *Spawner) delegateChain(task domain.Task, chainPrompt *domain.Prompt, tr
 				CompletedAt:   &now,
 				WorktreePath:  "",
 			})
-			if cfgEntity := taskEntityID(s.database, task.ID); cfgEntity != "" {
+			if cfgEntity := taskEntityID(s.tasks, task.ID); cfgEntity != "" {
 				s.notifyDrainer(triggerType, cfgEntity)
 			}
 			return
@@ -117,7 +117,7 @@ func (s *Spawner) delegateChain(task domain.Task, chainPrompt *domain.Prompt, tr
 		}); err != nil {
 			log.Printf("[chain] failed to persist chain_run %s: %v", chainRunID, err)
 			s.runChainWorktreeCleanup(chainRunID, cfg)
-			if cfgEntity := taskEntityID(s.database, task.ID); cfgEntity != "" {
+			if cfgEntity := taskEntityID(s.tasks, task.ID); cfgEntity != "" {
 				s.notifyDrainer(triggerType, cfgEntity)
 			}
 			return
@@ -368,7 +368,7 @@ func (s *Spawner) terminateChain(
 
 	if status == domain.ChainRunStatusCompleted {
 		// Mirror single-run behavior: a clean chain finalization closes the task.
-		if err := db.CloseTask(s.database, taskID, "run_completed", ""); err != nil {
+		if err := s.tasks.Close(context.Background(), runmode.LocalDefaultOrg, taskID, "run_completed", ""); err != nil {
 			log.Printf("[chain] close task %s: %v", taskID, err)
 		}
 	}
@@ -382,7 +382,7 @@ func (s *Spawner) terminateChain(
 
 	// Drain the per-entity queue exactly once for the chain (independent
 	// of how many steps ran).
-	if cfgEntity := taskEntityID(s.database, taskID); cfgEntity != "" {
+	if cfgEntity := taskEntityID(s.tasks, taskID); cfgEntity != "" {
 		s.notifyDrainer(triggerType, cfgEntity)
 	}
 
@@ -439,8 +439,8 @@ func (s *Spawner) runChainWorktreeCleanup(chainRunID string, cfg runConfig) {
 
 // taskEntityID resolves the entity_id for a task. Used to drain the
 // per-entity firing queue at chain terminal.
-func taskEntityID(database *sql.DB, taskID string) string {
-	t, err := db.GetTask(database, taskID)
+func taskEntityID(tasks db.TaskStore, taskID string) string {
+	t, err := tasks.Get(context.Background(), runmode.LocalDefaultOrg, taskID)
 	if err != nil {
 		log.Printf("[chain] taskEntityID: failed to resolve entity for task %s: %v", taskID, err)
 		return ""
@@ -546,7 +546,7 @@ func (s *Spawner) CancelChain(chainRunID string) error {
 	// Paused chain: rebuild just enough cfg for terminateChain's worktree
 	// cleanup (mirrors ResumeChainAfterApproval — owner/repo/prNumber
 	// aren't persisted on chain_runs, so CleanupPRConfig is skipped).
-	task, err := db.GetTask(s.database, cr.TaskID)
+	task, err := s.tasks.Get(context.Background(), runmode.LocalDefaultOrg, cr.TaskID)
 	if err != nil || task == nil {
 		log.Printf("[chain] CancelChain: load task for paused chain_run %s: %v", chainRunID, err)
 		_, markErr := s.chains.MarkRunStatus(context.Background(), runmode.LocalDefaultOrg, chainRunID, domain.ChainRunStatusCancelled, "user_cancelled", nil)
@@ -574,7 +574,7 @@ func (s *Spawner) ResumeChainAfterYield(stepRunID string) {
 		return
 	}
 	log.Printf("[chain] yield-resume not yet implemented for chain_run %s step run %s; aborting chain", cr.ID, stepRunID)
-	task, err := db.GetTask(s.database, cr.TaskID)
+	task, err := s.tasks.Get(context.Background(), runmode.LocalDefaultOrg, cr.TaskID)
 	if err != nil || task == nil {
 		log.Printf("[chain] yield-resume: load task for chain_run %s: %v", cr.ID, err)
 		// Fall back to a bare MarkChainRunStatus without full cleanup.
@@ -619,7 +619,7 @@ func (s *Spawner) ResumeChainAfterApproval(stepRunID string) {
 		return
 	}
 
-	task, err := db.GetTask(s.database, cr.TaskID)
+	task, err := s.tasks.Get(context.Background(), runmode.LocalDefaultOrg, cr.TaskID)
 	if err != nil || task == nil {
 		log.Printf("[chain] approval-resume chain_run %s: load task: %v", cr.ID, err)
 		return

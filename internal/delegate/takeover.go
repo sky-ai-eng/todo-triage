@@ -129,7 +129,7 @@ func (s *Spawner) Takeover(runID, baseDir string) (*TakeoverResult, error) {
 	// the agent recorded in its session — out of scope for now. Reject
 	// explicitly via a task-source check rather than papering over with
 	// an empty-path heuristic.
-	task, err := db.GetTask(s.database, run.TaskID)
+	task, err := s.tasks.Get(context.Background(), runmode.LocalDefaultOrg, run.TaskID)
 	if err != nil {
 		return nil, fmt.Errorf("load task for takeover gate: %w", err)
 	}
@@ -445,7 +445,7 @@ func (s *Spawner) Release(runID string) error {
 	headBranch, _ := worktree.WorktreeBranch(takeoverPath)
 
 	// Look up task → entity to derive owner/repo/PR for CleanupPRConfig.
-	task, err := db.GetTask(s.database, run.TaskID)
+	task, err := s.tasks.Get(context.Background(), runmode.LocalDefaultOrg, run.TaskID)
 	if err != nil {
 		return fmt.Errorf("load task for release: %w", err)
 	}
