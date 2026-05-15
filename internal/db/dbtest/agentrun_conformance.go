@@ -114,6 +114,41 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 	})
 
+	t.Run("Create_EventTriggered_PersistsWithNullCreator", func(t *testing.T) {
+		// SKY-285 review: event-triggered Create must succeed and
+		// land creator_user_id=NULL (the runs_creator_matches_trigger_type
+		// CHECK demands NULL for trigger_type='event'). On Postgres
+		// this routes through the admin pool because the runs_insert
+		// RLS policy is incompatible with NULL creator; on SQLite the
+		// pool distinction doesn't exist but the contract is the same.
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		ent := seed.Entity(t, "create-event")
+		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+		runID := uuid.New().String()
+		if err := store.Create(ctx, orgID, domain.AgentRun{
+			ID:          runID,
+			TaskID:      taskID,
+			PromptID:    agentRunTestPrompt(t),
+			Status:      "running",
+			Model:       "claude-test",
+			TriggerType: "event",
+			// CreatorUserID intentionally empty — the CHECK
+			// forces NULL for event-triggered runs and the
+			// store impl must accept that.
+		}); err != nil {
+			t.Fatalf("Create event-triggered: %v", err)
+		}
+		got, err := store.Get(ctx, orgID, runID)
+		if err != nil || got == nil {
+			t.Fatalf("Get: err=%v got=%v", err, got)
+		}
+		if got.Status != "running" {
+			t.Errorf("status = %q, want running", got.Status)
+		}
+	})
+
 	t.Run("Get_ReturnsNilForMissingID", func(t *testing.T) {
 		store, orgID, _, _ := mk(t)
 		got, err := store.Get(context.Background(), orgID, uuid.New().String())

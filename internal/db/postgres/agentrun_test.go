@@ -14,6 +14,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // TestAgentRunStore_Postgres runs the shared conformance suite
@@ -245,6 +246,122 @@ func TestAgentRunStore_Postgres_CrossOrgLeakage(t *testing.T) {
 		t.Fatalf("ListForTask cross-org: %v", err)
 	} else if len(runs) != 0 {
 		t.Errorf("orgB ListForTask(orgA task) returned %d runs; want 0", len(runs))
+	}
+}
+
+// TestAgentRunStore_Postgres_Create_UnderAppPoolRLS pins the two
+// app-pool fixes against actual RLS, not the AdminDB-bypassed
+// conformance setup:
+//
+//  1. Event-triggered Create routes to the admin pool. Wired
+//     against AppDB for app-half + AdminDB for admin-half, calling
+//     Create with trigger_type='event' must succeed even though
+//     the runs_insert RLS policy would reject a null-creator row
+//     under tf_app.
+//
+//  2. Manual Create's COALESCE walks past the LocalDefaultUserID
+//     sentinel. Wired same way, with JWT claims bound to a real
+//     org member; if the caller passes the sentinel as
+//     CreatorUserID, the SQL strips it (via the Go-side filter)
+//     and tf.current_user_id() supplies the right value so the
+//     RLS predicate (creator_user_id = tf.current_user_id())
+//     passes.
+//
+// SKY-285 review findings #5 + #6.
+func TestAgentRunStore_Postgres_Create_UnderAppPoolRLS(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID, _ := seedPgAgentRunOrg(t, h)
+	seedPgAgentRunPromptIn(t, h, "p_rls_test", orgID, userID)
+	// Seed entity + task on the admin side so the FK chain exists
+	// before the app-pool Create lands. (The Create itself is the
+	// thing under test; setup uses admin.)
+	entityID := uuid.New().String()
+	eventID := uuid.New().String()
+	taskID := uuid.New().String()
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
+		VALUES ($1, $2, 'github', $3, 'pr', 'RLS Test', '', '{}'::jsonb, now())
+	`, entityID, orgID, "rls-"+orgID[:8]); err != nil {
+		t.Fatalf("entity: %v", err)
+	}
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO events (id, org_id, entity_id, event_type, dedup_key, metadata_json, created_at)
+		VALUES ($1, $2, $3, 'github:pr:ci_check_failed', '', '{}'::jsonb, now())
+	`, eventID, orgID, entityID); err != nil {
+		t.Fatalf("event: %v", err)
+	}
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO tasks (id, org_id, creator_user_id, team_id, visibility, entity_id, event_type, dedup_key, primary_event_id, status, scoring_status, priority_score)
+		VALUES ($1, $2, $3,
+		        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
+		        'team', $4, 'github:pr:ci_check_failed', '', $5, 'queued', 'pending', 0.5)
+	`, taskID, orgID, userID, entityID, eventID); err != nil {
+		t.Fatalf("task: %v", err)
+	}
+
+	// Wire AgentRunStore against the real admin pool (BYPASSRLS)
+	// for the system-write path and the real app pool (RLS-active
+	// under tf_app via WithTx) for request-equivalent paths. Note
+	// that pgstore.New takes (admin, app) — admin first — so
+	// passing in the order shown matches the production shape.
+	stores := pgstore.New(h.AdminDB, h.AppDB)
+
+	// ---- Event-triggered Create (fix #5) ----
+	// No JWT claims tx needed because the admin pool is used for
+	// the insert. The bare context call should succeed.
+	eventRunID := uuid.New().String()
+	if err := stores.AgentRuns.Create(context.Background(), orgID, domain.AgentRun{
+		ID: eventRunID, TaskID: taskID, PromptID: "p_rls_test", Status: "running", Model: "m",
+		TriggerType: "event",
+		// CreatorUserID empty — CHECK requires NULL for event runs.
+	}); err != nil {
+		t.Fatalf("event-triggered Create under app-pool wiring: %v", err)
+	}
+	// Verify it landed.
+	var landedTrigger string
+	var landedCreator sql.NullString
+	if err := h.AdminDB.QueryRow(
+		`SELECT trigger_type, creator_user_id::text FROM runs WHERE id = $1`,
+		eventRunID,
+	).Scan(&landedTrigger, &landedCreator); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if landedTrigger != "event" {
+		t.Errorf("trigger_type = %q, want event", landedTrigger)
+	}
+	if landedCreator.Valid {
+		t.Errorf("creator_user_id = %q, want NULL (event-trigger CHECK)", landedCreator.String)
+	}
+
+	// ---- Manual Create with LocalDefaultUserID sentinel (fix #6) ----
+	// Run inside WithTx so JWT claims are set; the COALESCE in
+	// Create then resolves tf.current_user_id() to userID. With
+	// the sentinel filter, the manual path lands with the real
+	// claimed user.
+	manualRunID := uuid.New().String()
+	if err := stores.Tx.WithTx(context.Background(), orgID, userID, func(tx db.TxStores) error {
+		return tx.AgentRuns.Create(context.Background(), orgID, domain.AgentRun{
+			ID: manualRunID, TaskID: taskID, PromptID: "p_rls_test", Status: "running", Model: "m",
+			TriggerType:   "manual",
+			CreatorUserID: runmode.LocalDefaultUserID, // the sentinel the pre-store spawner still passes
+		})
+	}); err != nil {
+		t.Fatalf("manual Create with sentinel under app-pool: %v", err)
+	}
+	var manualCreator sql.NullString
+	if err := h.AdminDB.QueryRow(
+		`SELECT creator_user_id::text FROM runs WHERE id = $1`,
+		manualRunID,
+	).Scan(&manualCreator); err != nil {
+		t.Fatalf("read back manual: %v", err)
+	}
+	if !manualCreator.Valid {
+		t.Fatalf("manual creator_user_id is NULL; want %s (resolved from JWT claims)", userID)
+	}
+	if manualCreator.String != userID {
+		t.Errorf("manual creator_user_id = %q, want %q (JWT-claimed user, not the SQLite sentinel)",
+			manualCreator.String, userID)
 	}
 }
 

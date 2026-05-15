@@ -10,22 +10,35 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// agentRunStore is the Postgres impl of db.AgentRunStore. Wired
-// against the app pool (see postgres.New): every consumer is
-// request-equivalent or runs inside a delegate spawner goroutine
-// launched from a request handler. System-service reads of run
-// state are routed through the admin-pooled FactoryReadStore.
+// agentRunStore is the Postgres impl of db.AgentRunStore. Holds two
+// pools (see postgres.New): `q` is the app pool (or a *sql.Tx
+// composed from it via WithTx) — every request-equivalent path
+// runs here, RLS-active under tf_app. `admin` is the supabase_admin
+// BYPASSRLS pool, used for the one write path that can't satisfy
+// the app-pool RLS predicate: event-triggered run inserts. Those
+// rows have creator_user_id NULL by the runs_creator_matches_trigger_type
+// CHECK, but the runs_insert RLS policy requires
+// `creator_user_id = tf.current_user_id()` — mutually exclusive, so
+// the app pool can't insert them at all. Routing event-triggered
+// Create through admin is the same shape PromptStore.SeedOrUpdate
+// uses for its system-write path.
 //
 // SQL is written fresh against D3's schema: org_id in every WHERE
 // clause as defense in depth alongside RLS, $N placeholders, JSONB
 // extraction for tool_calls / metadata, RETURNING id for the
 // run_messages auto-increment (Postgres has a sequence, not
 // AUTOINCREMENT).
-type agentRunStore struct{ q queryer }
+type agentRunStore struct {
+	q     queryer
+	admin queryer
+}
 
-func newAgentRunStore(q queryer) db.AgentRunStore { return &agentRunStore{q: q} }
+func newAgentRunStore(q, admin queryer) db.AgentRunStore {
+	return &agentRunStore{q: q, admin: admin}
+}
 
 var _ db.AgentRunStore = (*agentRunStore)(nil)
 
@@ -36,19 +49,6 @@ func (s *agentRunStore) Create(ctx context.Context, orgID string, run domain.Age
 	if triggerType == "" {
 		triggerType = "manual"
 	}
-	// CreatorUserID default differs from the SQLite impl: the
-	// LocalDefaultUserID sentinel has no FK target in a Postgres
-	// `users` row, so falling back to it here would fail
-	// runs_creator_user_id_fkey on any caller that omits the field.
-	// Postgres callers in production set it explicitly (auth-context
-	// derived); for the trigger_type='manual' fallback path used by
-	// tests and direct-SQL fixtures, the COALESCE inside the SQL
-	// resolves either tf.current_user_id() (set by WithTx's JWT
-	// claims when composed inside a tx) or the org's owner_user_id
-	// — the same pattern TaskStore.FindOrCreate uses. The schema
-	// CHECK pairs trigger_type='manual' ↔ non-NULL creator, so a
-	// real value is required; org-owner is the only universally
-	// available non-null in production multi-mode.
 	var stepIdx any
 	if run.ChainStepIndex != nil {
 		stepIdx = *run.ChainStepIndex
@@ -58,26 +58,89 @@ func (s *agentRunStore) Create(ctx context.Context, orgID string, run domain.Age
 	// attribute the run consistently. Pre-fix this read the org's
 	// oldest team, which misattributed runs whose task belonged to
 	// a different team. SKY-285 review.
+	if triggerType == "event" {
+		return s.createEventTriggered(ctx, orgID, run, stepIdx)
+	}
+	return s.createManual(ctx, orgID, run, stepIdx)
+}
+
+// createEventTriggered routes through the admin pool (BYPASSRLS).
+// Two reasons:
+//
+//   - The runs_creator_matches_trigger_type CHECK requires
+//     trigger_type='event' rows to have creator_user_id IS NULL,
+//     but the runs_insert RLS policy requires
+//     creator_user_id = tf.current_user_id() for every insert under
+//     tf_app — the two conditions are mutually exclusive, so the
+//     app pool can't insert event-triggered runs at all.
+//   - The boundary is also a security guarantee: event runs are
+//     system-emitted (eventbus → spawner). Pool routing enforces
+//     "only server-side code with admin pool access can create
+//     event-triggered runs" rather than relying on application
+//     layer guards. Same pattern as PromptStore.SeedOrUpdate.
+//
+// **Nuance**: the admin pool is a separate connection, so this
+// insert commits autonomously from any outer WithTx the caller
+// might be composed inside. If a future caller wraps an
+// event-triggered Create + another write under WithTx, the run
+// insert will land even if the outer tx rolls back. No caller
+// composes this path today; document the edge for whoever
+// eventually needs atomic event-create + adjacent writes.
+//
+// The SQL is split from the manual path because Postgres needs
+// USAGE on schema `tf` to plan a reference to `tf.current_user_id()`,
+// and the admin role (supabase_admin) running this insert
+// shouldn't need to touch `tf` at all.
+func (s *agentRunStore) createEventTriggered(ctx context.Context, orgID string, run domain.AgentRun, stepIdx any) error {
+	_, err := s.admin.ExecContext(ctx, `
+		INSERT INTO runs (id, org_id, task_id, prompt_id, status, model, worktree_path,
+		                  trigger_type, trigger_id, team_id, visibility, creator_user_id,
+		                  actor_agent_id, chain_run_id, chain_step_index)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, 'event', $8,
+		        (SELECT team_id FROM tasks WHERE id = $3 AND org_id = $2),
+		        'team', NULL,
+		        $9, $10, $11)
+	`, run.ID, orgID, run.TaskID, nullIfEmpty(run.PromptID), run.Status, run.Model, run.WorktreePath,
+		nullIfEmpty(run.TriggerID),
+		nullIfEmpty(run.ActorAgentID), nullIfEmpty(run.ChainRunID), stepIdx)
+	return err
+}
+
+// createManual runs on the app pool (RLS-active under tf_app).
+// CreatorUserID resolution: the SQLite-shaped LocalDefaultUserID
+// sentinel has no FK target in a multi-mode `users` table, so any
+// caller that still passes it (the pre-store-migration spawner does
+// for manual delegations) would fail runs_creator_user_id_fkey.
+// Treat the sentinel as empty here so the COALESCE walks to
+// tf.current_user_id() (the JWT-claimed user, set by WithTx) or
+// the org owner. The schema CHECK requires non-NULL creator for
+// trigger_type='manual'; org-owner is the only universally
+// available non-null in production multi-mode.
+//
+// The sentinel filter is transitional: D9 / SKY-253 will rewire
+// the spawner to pass the request user from auth context, after
+// which this filter becomes dead code.
+func (s *agentRunStore) createManual(ctx context.Context, orgID string, run domain.AgentRun, stepIdx any) error {
+	creatorBind := run.CreatorUserID
+	if creatorBind == runmode.LocalDefaultUserID {
+		creatorBind = ""
+	}
 	_, err := s.q.ExecContext(ctx, `
 		INSERT INTO runs (id, org_id, task_id, prompt_id, status, model, worktree_path,
 		                  trigger_type, trigger_id, team_id, visibility, creator_user_id,
 		                  actor_agent_id, chain_run_id, chain_step_index)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
+		VALUES ($1, $2, $3, $4, $5, $6, $7, 'manual', $8,
 		        (SELECT team_id FROM tasks WHERE id = $3 AND org_id = $2),
 		        'team',
-		        CASE
-		            WHEN $8 = 'manual' THEN
-		                COALESCE(
-		                    NULLIF($10, '')::uuid,
-		                    tf.current_user_id(),
-		                    (SELECT owner_user_id FROM orgs WHERE id = $2)
-		                )
-		            ELSE NULLIF($10, '')::uuid
-		        END,
-		        $11, $12, $13)
+		        COALESCE(
+		            NULLIF($9, '')::uuid,
+		            tf.current_user_id(),
+		            (SELECT owner_user_id FROM orgs WHERE id = $2)
+		        ),
+		        $10, $11, $12)
 	`, run.ID, orgID, run.TaskID, nullIfEmpty(run.PromptID), run.Status, run.Model, run.WorktreePath,
-		triggerType, nullIfEmpty(run.TriggerID),
-		run.CreatorUserID, nullIfEmpty(run.ActorAgentID),
+		nullIfEmpty(run.TriggerID),
+		creatorBind, nullIfEmpty(run.ActorAgentID),
 		nullIfEmpty(run.ChainRunID), stepIdx)
 	return err
 }
