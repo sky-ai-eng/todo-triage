@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"log"
 	"net/http"
 
@@ -144,8 +145,17 @@ func (s *Server) handleReviewSubmit(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Clean up local state
-	if err := s.reviews.Delete(r.Context(), runmode.LocalDefaultOrgID, reviewID); err != nil {
+	// Clean up local state. Use a cancellation-detached context so
+	// post-GitHub bookkeeping completes even if the browser
+	// disconnected after the SubmitReview response landed; the
+	// adjacent raw s.db.Exec updates below are not request-scoped
+	// either, so leaving Delete on r.Context() would create a
+	// half-cleaned state where the runs/tasks rows advance but the
+	// pending_reviews row sticks around. WithoutCancel keeps request
+	// values (logging, future tracing) while breaking the cancel
+	// chain.
+	cleanupCtx := context.WithoutCancel(r.Context())
+	if err := s.reviews.Delete(cleanupCtx, runmode.LocalDefaultOrgID, reviewID); err != nil {
 		log.Printf("[reviews] warning: failed to clean up review %s: %v", reviewID, err)
 	}
 

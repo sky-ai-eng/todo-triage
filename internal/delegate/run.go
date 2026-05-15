@@ -333,7 +333,15 @@ func (s *Spawner) processCompletion(
 		// chain terminates at this step on human approval instead of
 		// advancing past stale handoff narrative into a no-op step.
 		hasPending := false
-		if pendingReview, _ := s.reviews.ByRunID(ctx, runmode.LocalDefaultOrgID, runID); pendingReview != nil {
+		// Use context.Background() for the pending-review lookup —
+		// the run-scoped ctx can be cancelled mid-bookkeeping (the
+		// user cancelled the run after the agent queued a review),
+		// and a context-cancelled lookup would silently leave
+		// hasPending=false and let the run finish 'completed' while
+		// the pending_reviews row strands outside the approval queue.
+		// Matches the agentRuns.Complete(context.Background(), ...)
+		// pattern above — terminal-bookkeeping survives cancellation.
+		if pendingReview, _ := s.reviews.ByRunID(context.Background(), runmode.LocalDefaultOrgID, runID); pendingReview != nil {
 			hasPending = true
 		} else if pendingPR, _ := db.PendingPRByRunID(s.database, runID); pendingPR != nil {
 			hasPending = true

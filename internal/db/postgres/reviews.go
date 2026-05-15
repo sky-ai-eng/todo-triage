@@ -143,9 +143,16 @@ func (s *reviewStore) AddComment(ctx context.Context, orgID string, c domain.Pen
 	if c.StartLine != nil {
 		startLine = *c.StartLine
 	}
+	// Bind created_at = clock_timestamp() rather than rely on the
+	// column's now() default. now() is equivalent to
+	// transaction_timestamp() and is fixed for the lifetime of a
+	// transaction, so batched AddComment calls inside one WithTx
+	// would share the same created_at and ListComments's id
+	// tiebreaker (random UUIDs) would scramble insertion order.
+	// clock_timestamp() advances per row.
 	_, err := s.q.ExecContext(ctx, `
-		INSERT INTO pending_review_comments (id, org_id, review_id, path, line, start_line, body, original_body)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+		INSERT INTO pending_review_comments (id, org_id, review_id, path, line, start_line, body, original_body, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $7, clock_timestamp())
 	`, c.ID, orgID, c.ReviewID, c.Path, c.Line, startLine, c.Body)
 	return err
 }
