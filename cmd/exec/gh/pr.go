@@ -580,7 +580,11 @@ func prCreate(client *ghclient.Client, database *db.DB, args []string) {
 		// teach the agent to stop calling. Check up front so the
 		// agent gets a clear "already queued" message on retry,
 		// matching what submit-review does for reviews.
-		if existing, err := db.PendingPRByRunID(database.Conn, runID); err != nil {
+		// TODO(SKY-254 / D9): replace hardcoded sqlitestore wiring with
+		// the orgID-aware store passed in by the caller once
+		// cmd/exec gets its multi-mode constructor.
+		pendingPRs := sqlitestore.New(database.Conn).PendingPRs
+		if existing, err := pendingPRs.ByRunID(context.Background(), runmode.LocalDefaultOrgID, runID); err != nil {
 			exitErr("lookup existing pending PR for run: " + err.Error())
 		} else if existing != nil {
 			exitErr(fmt.Sprintf(
@@ -590,7 +594,7 @@ func prCreate(client *ghclient.Client, database *db.DB, args []string) {
 		}
 
 		id := uuid.NewString()
-		if err := db.CreatePendingPR(database.Conn, domain.PendingPR{
+		if err := pendingPRs.Create(context.Background(), runmode.LocalDefaultOrgID, domain.PendingPR{
 			ID: id, RunID: runID,
 			Owner: owner, Repo: repo,
 			HeadBranch: head, HeadSHA: headSHA, BaseBranch: base,
@@ -606,7 +610,7 @@ func prCreate(client *ghclient.Client, database *db.DB, args []string) {
 			// the pre-check normally catches and surface the clean
 			// "already queued" message instead of a confusing SQL
 			// error the agent doesn't know how to interpret.
-			if existing, lookupErr := db.PendingPRByRunID(database.Conn, runID); lookupErr == nil && existing != nil {
+			if existing, lookupErr := pendingPRs.ByRunID(context.Background(), runmode.LocalDefaultOrgID, runID); lookupErr == nil && existing != nil {
 				exitErr(fmt.Sprintf(
 					"a PR for run %s has already been queued for human approval. Do not call pr create again — your work is complete. Finish the run by writing $TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/<run_id>.md and returning your completion JSON.",
 					runID,
@@ -621,7 +625,7 @@ func prCreate(client *ghclient.Client, database *db.DB, args []string) {
 		// in two separate connections and both see "no existing
 		// row"). The lock's WHERE locked = 0 gate serializes them at
 		// the DB layer; the loser sees ErrPendingPRAlreadyQueued.
-		if err := db.LockPendingPR(database.Conn, id, title, body); err != nil {
+		if err := pendingPRs.Lock(context.Background(), runmode.LocalDefaultOrgID, id, title, body); err != nil {
 			if errors.Is(err, db.ErrPendingPRAlreadyQueued) {
 				exitErr(fmt.Sprintf(
 					"a PR for run %s has already been queued for human approval. Do not call pr create again — your work is complete. Finish the run by writing $TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/<run_id>.md and returning your completion JSON.",
@@ -632,15 +636,15 @@ func prCreate(client *ghclient.Client, database *db.DB, args []string) {
 		}
 
 		printJSON(map[string]any{
-			"status":     "queued_for_human_approval",
-			"id":         id,
-			"owner":      owner,
-			"repo":       repo,
-			"head":       head,
-			"base":       base,
-			"head_sha":   headSHA,
-			"draft_hint": draft, // not stored — passed through at user-approval time
-			"next_step":  "PR is queued for human approval. Do not call pr create again. Finish the run by writing $TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/<run_id>.md and returning your completion JSON.",
+			"status":    "queued_for_human_approval",
+			"id":        id,
+			"owner":     owner,
+			"repo":      repo,
+			"head":      head,
+			"base":      base,
+			"head_sha":  headSHA,
+			"draft":     draft,
+			"next_step": "PR is queued for human approval. Do not call pr create again. Finish the run by writing $TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/<run_id>.md and returning your completion JSON.",
 		})
 		return
 	}

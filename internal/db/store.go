@@ -103,6 +103,14 @@ type Stores struct {
 	// cmd/exec/gh agent submit gate.
 	Reviews ReviewStore
 
+	// PendingPRs owns the pending_prs table — the agent-drafted PR
+	// that sits in `pending_approval` until the user accepts / edits
+	// / discards / submits. App pool in Postgres; consumers are the
+	// pending_prs handler, the cmd/exec/gh agent pr-create tool, the
+	// spawner's terminal-flip + cleanup paths, and tasks.go's drag-
+	// back-to-queue cleanup. Leaf table — no child rows hang off it.
+	PendingPRs PendingPRStore
+
 	// Tx is the transaction runner — handlers that need atomic
 	// multi-store writes call Tx.WithTx and receive a TxStores with
 	// every field tx-bound. Postgres impl also sets the JWT claims
@@ -131,6 +139,7 @@ type TxStores struct {
 	AgentRuns     AgentRunStore
 	Entities      EntityStore
 	Reviews       ReviewStore
+	PendingPRs    PendingPRStore
 }
 
 // TxRunner runs fn inside a single database transaction. Postgres

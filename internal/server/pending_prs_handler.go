@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"log"
 	"net/http"
@@ -34,7 +35,7 @@ type pendingPRJSON struct {
 func (s *Server) handlePendingPRGet(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
-	pr, err := db.GetPendingPR(s.db, id)
+	pr, err := s.pendingPRs.Get(r.Context(), runmode.LocalDefaultOrgID, id)
 	if err != nil {
 		internalError(w, "pending-prs", err)
 		return
@@ -52,7 +53,7 @@ func (s *Server) handlePendingPRGet(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRunPendingPR(w http.ResponseWriter, r *http.Request) {
 	runID := r.PathValue("runID")
 
-	pr, err := db.PendingPRByRunID(s.db, runID)
+	pr, err := s.pendingPRs.ByRunID(r.Context(), runmode.LocalDefaultOrgID, runID)
 	if err != nil {
 		internalError(w, "pending-prs", err)
 		return
@@ -80,7 +81,7 @@ func (s *Server) handlePendingPRUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pr, err := db.GetPendingPR(s.db, id)
+	pr, err := s.pendingPRs.Get(r.Context(), runmode.LocalDefaultOrgID, id)
 	if err != nil {
 		internalError(w, "pending-prs", err)
 		return
@@ -109,7 +110,7 @@ func (s *Server) handlePendingPRUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := db.UpdatePendingPRTitleBody(s.db, id, title, body); err != nil {
+	if err := s.pendingPRs.UpdateTitleBody(r.Context(), runmode.LocalDefaultOrgID, id, title, body); err != nil {
 		if errors.Is(err, db.ErrPendingPRSubmitted) {
 			// 409 Conflict so the overlay can show the user a clean
 			// "submission in flight, your edit was dropped" message
@@ -132,7 +133,7 @@ func (s *Server) handlePendingPRUpdate(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handlePendingPRDiff(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
-	pr, err := db.GetPendingPR(s.db, id)
+	pr, err := s.pendingPRs.Get(r.Context(), runmode.LocalDefaultOrgID, id)
 	if err != nil {
 		internalError(w, "pending-prs", err)
 		return
@@ -198,7 +199,7 @@ func (s *Server) handlePendingPRSubmit(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	pr, err := db.GetPendingPR(s.db, id)
+	pr, err := s.pendingPRs.Get(r.Context(), runmode.LocalDefaultOrgID, id)
 	if err != nil {
 		internalError(w, "pending-prs", err)
 		return
@@ -212,17 +213,12 @@ func (s *Server) handlePendingPRSubmit(w http.ResponseWriter, r *http.Request) {
 	// on to call GitHub; the loser sees 409 and can retry once the
 	// winner finishes (which will release the guard on failure or
 	// delete the row on success).
-	winner, err := db.MarkPendingPRSubmitted(s.db, id)
-	if err != nil {
+	if err := s.pendingPRs.MarkSubmitted(r.Context(), runmode.LocalDefaultOrgID, id); err != nil {
 		if errors.Is(err, db.ErrPendingPRSubmitInFlight) {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "another submit is in flight or has already completed"})
 			return
 		}
 		internalError(w, "pending-prs", err)
-		return
-	}
-	if !winner {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "another submit is in flight or has already completed"})
 		return
 	}
 
@@ -243,7 +239,13 @@ func (s *Server) handlePendingPRSubmit(w http.ResponseWriter, r *http.Request) {
 		// Release the guard so the user can retry. Pending row stays
 		// in place — they may want to edit title/body or push more
 		// commits and retry without re-queueing.
-		if clearErr := db.ClearPendingPRSubmitted(s.db, id); clearErr != nil {
+		// Release the guard with a cancellation-detached context. The
+		// adjacent CreatePR call already failed, but the user kept the
+		// row queued — if the browser cancels the request after we get
+		// here, r.Context() is dead and the guard never gets cleared,
+		// leaving the row in a permanently "in flight" state that
+		// requires a manual fix. Background lets the user retry.
+		if clearErr := s.pendingPRs.ClearSubmitted(context.WithoutCancel(r.Context()), runmode.LocalDefaultOrgID, id); clearErr != nil {
 			log.Printf("[pending-prs] failed to release submit guard for %s after CreatePR failure: %v", id, clearErr)
 		}
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error: " + err.Error()})
@@ -260,7 +262,14 @@ func (s *Server) handlePendingPRSubmit(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := db.DeletePendingPR(s.db, id); err != nil {
+	// Post-success cleanup uses a cancellation-detached context: the
+	// GitHub PR is already open, so the user's "submit succeeded"
+	// state has landed externally — bailing on r.Context() cancel
+	// would leave the pending row + run/task in a half-cleaned state
+	// (PR opened, queue still shows pending_approval). Matches the
+	// reviews_handler.go SubmitReview pattern.
+	cleanupCtx := context.WithoutCancel(r.Context())
+	if err := s.pendingPRs.Delete(cleanupCtx, runmode.LocalDefaultOrgID, id); err != nil {
 		log.Printf("[pending-prs] warning: failed to clean up pending PR %s after submit: %v", id, err)
 	}
 

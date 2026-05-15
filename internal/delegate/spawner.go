@@ -40,15 +40,16 @@ type QueueDrainer interface {
 
 // Spawner manages delegated agent runs.
 type Spawner struct {
-	database  *sql.DB
-	prompts   db.PromptStore
-	agents    db.AgentStore // SKY-261: resolves actor for run.actor_agent_id stamping
-	chains    db.ChainStore
-	tasks     db.TaskStore     // SKY-283: re-read tasks for run lifecycle handlers
-	agentRuns db.AgentRunStore // SKY-285: run lifecycle + transcript + yields
-	entities  db.EntityStore   // SKY-284: entity reads for project lookup + resume context
-	reviews   db.ReviewStore   // SKY-286: pending review cleanup on discard / cancel paths
-	wsHub     *websocket.Hub
+	database   *sql.DB
+	prompts    db.PromptStore
+	agents     db.AgentStore // SKY-261: resolves actor for run.actor_agent_id stamping
+	chains     db.ChainStore
+	tasks      db.TaskStore      // SKY-283: re-read tasks for run lifecycle handlers
+	agentRuns  db.AgentRunStore  // SKY-285: run lifecycle + transcript + yields
+	entities   db.EntityStore    // SKY-284: entity reads for project lookup + resume context
+	reviews    db.ReviewStore    // SKY-286: pending review cleanup on discard / cancel paths
+	pendingPRs db.PendingPRStore // SKY-287: pending PR lookup on processCompletion / cleanup paths
+	wsHub      *websocket.Hub
 
 	mu                    sync.Mutex
 	ghClient              *ghclient.Client
@@ -63,7 +64,7 @@ type Spawner struct {
 	agentToolsCache string
 }
 
-func NewSpawner(database *sql.DB, prompts db.PromptStore, agents db.AgentStore, chains db.ChainStore, tasks db.TaskStore, agentRuns db.AgentRunStore, entities db.EntityStore, reviews db.ReviewStore, ghClient *ghclient.Client, wsHub *websocket.Hub, model string) *Spawner {
+func NewSpawner(database *sql.DB, prompts db.PromptStore, agents db.AgentStore, chains db.ChainStore, tasks db.TaskStore, agentRuns db.AgentRunStore, entities db.EntityStore, reviews db.ReviewStore, pendingPRs db.PendingPRStore, ghClient *ghclient.Client, wsHub *websocket.Hub, model string) *Spawner {
 	return &Spawner{
 		database:    database,
 		prompts:     prompts,
@@ -73,6 +74,7 @@ func NewSpawner(database *sql.DB, prompts db.PromptStore, agents db.AgentStore, 
 		agentRuns:   agentRuns,
 		entities:    entities,
 		reviews:     reviews,
+		pendingPRs:  pendingPRs,
 		ghClient:    ghClient,
 		wsHub:       wsHub,
 		model:       model,
