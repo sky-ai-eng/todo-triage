@@ -52,6 +52,14 @@ type Server struct {
 	authCfg   *authConfig
 	authProxy http.Handler // /auth/v1/* → gotrue:9999/*
 
+	// refreshLocks serializes inline JWT refreshes per session. Keyed by
+	// session UUID → *sync.Mutex. Map grows monotonically with session
+	// count (~8 bytes per entry); cleanup is left to process restart,
+	// matching skynet/authkit's `self._locks` pattern. If memory ever
+	// becomes a concern, the reaper goroutine could sweep entries for
+	// revoked/expired sessions.
+	refreshLocks sync.Map
+
 	// Jira poll readiness — used by /api/jira/stock to decide whether the
 	// poller has completed its first cycle after a restart. Carry-over reads
 	// from the DB and needs snapshots to be populated before showing tickets.
@@ -186,6 +194,10 @@ func (s *Server) routes() {
 	// drive-by-log-the-user-out. D9 will apply the same wrapper to
 	// every retrofitted mutating endpoint.
 	s.mux.Handle("POST /api/auth/logout", s.withCSRFOriginCheck(http.HandlerFunc(s.handleLogout)))
+	// Logout-everywhere: must be authenticated to use it (you can only
+	// nuke your own sessions). Wrapped in withSession + the same
+	// CSRF guard as /logout.
+	s.mux.Handle("POST /api/auth/logout/all", s.withCSRFOriginCheck(s.withSession(http.HandlerFunc(s.handleLogoutAll))))
 	// /api/me is the session-protected identity endpoint. withSession
 	// passes through in local mode (no authDeps), so a local-mode
 	// /api/me hit would reach the handler with nil claims and write

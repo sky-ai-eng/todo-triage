@@ -293,6 +293,88 @@ func TestStore_TouchLastSeen(t *testing.T) {
 	}
 }
 
+func TestStore_ListActiveForUser_AndRevokeAll(t *testing.T) {
+	store, h, uid := newStoreForTest(t)
+	ctx := context.Background()
+
+	// Three sessions for the same user. Mix of states:
+	//   active1, active2 — show up in ListActive
+	//   revoked          — pre-revoked, filtered out
+	active1, _ := store.Create(ctx, uid, "jwt-1", "ref-1",
+		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "ua-1", "1.1.1.1")
+	active2, _ := store.Create(ctx, uid, "jwt-2", "ref-2",
+		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "ua-2", "2.2.2.2")
+	revoked, _ := store.Create(ctx, uid, "jwt-3", "ref-3",
+		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "", "")
+	if err := store.Revoke(ctx, revoked.ID); err != nil {
+		t.Fatalf("pre-revoke: %v", err)
+	}
+
+	// Another user's session — must NOT appear in our list.
+	other := seedUser(t, h)
+	otherSess, _ := store.Create(ctx, other, "jwt-other", "ref-other",
+		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "", "")
+
+	got, err := store.ListActiveForUser(ctx, uid)
+	if err != nil {
+		t.Fatalf("ListActiveForUser: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d sessions, want 2 (active1 + active2 only)", len(got))
+	}
+	// Both decrypted — list shouldn't return ciphertext.
+	seenJWTs := map[string]bool{}
+	for _, s := range got {
+		seenJWTs[s.JWT] = true
+		if s.UserID != uid {
+			t.Errorf("session %s has user_id %s, want %s", s.ID, s.UserID, uid)
+		}
+	}
+	for _, want := range []string{"jwt-1", "jwt-2"} {
+		if !seenJWTs[want] {
+			t.Errorf("missing decrypted jwt %q in list", want)
+		}
+	}
+
+	// Revoke all for uid. Returns 2 (active1 + active2).
+	n, err := store.RevokeAllForUser(ctx, uid)
+	if err != nil {
+		t.Fatalf("RevokeAllForUser: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("revoked %d rows, want 2", n)
+	}
+
+	// Both active sessions are now unfindable via Lookup.
+	for _, sess := range []*Session{active1, active2} {
+		got, err := store.Lookup(ctx, sess.ID)
+		if err != nil {
+			t.Fatalf("post-revoke Lookup: %v", err)
+		}
+		if got != nil {
+			t.Errorf("session %s still active after revoke-all", sess.ID)
+		}
+	}
+
+	// Other user's session is untouched.
+	stillThere, err := store.Lookup(ctx, otherSess.ID)
+	if err != nil {
+		t.Fatalf("other-user Lookup: %v", err)
+	}
+	if stillThere == nil {
+		t.Error("revoke-all bled across users — other user's session got revoked")
+	}
+
+	// Calling RevokeAllForUser again is a no-op (idempotent).
+	n2, err := store.RevokeAllForUser(ctx, uid)
+	if err != nil {
+		t.Fatalf("RevokeAllForUser #2: %v", err)
+	}
+	if n2 != 0 {
+		t.Errorf("second revoke-all returned %d, want 0 (idempotent)", n2)
+	}
+}
+
 func TestStore_ReapExpired(t *testing.T) {
 	store, h, uid := newStoreForTest(t)
 	ctx := context.Background()

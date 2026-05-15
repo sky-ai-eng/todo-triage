@@ -199,6 +199,77 @@ func (s *Store) Revoke(ctx context.Context, sid uuid.UUID) error {
 	return nil
 }
 
+// ListActiveForUser returns all non-revoked, non-expired sessions for
+// the given user, with tokens already decrypted. Used by the
+// logout-everywhere flow to know which upstream gotrue sessions to
+// invalidate before flipping revoked_at locally.
+//
+// Order: most recently active first, so a caller that only wants the
+// "current device" can take the head without sorting.
+func (s *Store) ListActiveForUser(ctx context.Context, userID uuid.UUID) ([]Session, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, user_id,
+		       jwt_enc, jwt_nonce, refresh_token_enc, refresh_nonce,
+		       jwt_expires_at, expires_at, created_at, last_seen_at, revoked_at,
+		       COALESCE(user_agent, ''), COALESCE(host(ip_addr), '')
+		  FROM public.sessions
+		 WHERE user_id = $1
+		   AND revoked_at IS NULL
+		   AND expires_at > now()
+		 ORDER BY last_seen_at DESC
+	`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("query sessions: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Session
+	for rows.Next() {
+		var (
+			sess                               Session
+			jwtEnc, jwtNonce, refEnc, refNonce []byte
+		)
+		if err := rows.Scan(
+			&sess.ID, &sess.UserID,
+			&jwtEnc, &jwtNonce, &refEnc, &refNonce,
+			&sess.JWTExpiresAt, &sess.ExpiresAt, &sess.CreatedAt, &sess.LastSeenAt, &sess.RevokedAt,
+			&sess.UserAgent, &sess.IPAddr,
+		); err != nil {
+			return nil, fmt.Errorf("scan session: %w", err)
+		}
+		// Decrypt per row. If one row fails to decrypt (post-key-rotation
+		// state), skip it rather than failing the whole list — the caller
+		// will revoke it locally regardless, and we'd rather drop a
+		// stale row than 500 the logout-everywhere flow.
+		jwtBytes, jerr := s.key.Decrypt(jwtEnc, jwtNonce)
+		refBytes, rerr := s.key.Decrypt(refEnc, refNonce)
+		if jerr != nil || rerr != nil {
+			continue
+		}
+		sess.JWT = string(jwtBytes)
+		sess.RefreshToken = string(refBytes)
+		out = append(out, sess)
+	}
+	return out, rows.Err()
+}
+
+// RevokeAllForUser flips revoked_at on every active session for the
+// user. Returns the count of newly-revoked rows (already-revoked rows
+// are not counted again).
+func (s *Store) RevokeAllForUser(ctx context.Context, userID uuid.UUID) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE public.sessions
+		   SET revoked_at = now()
+		 WHERE user_id = $1
+		   AND revoked_at IS NULL
+	`, userID)
+	if err != nil {
+		return 0, fmt.Errorf("revoke all for user %s: %w", userID, err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // TouchLastSeen bumps last_seen_at to now(). Best-effort — errors are
 // swallowed by the caller (middleware fires this in a goroutine).
 func (s *Store) TouchLastSeen(ctx context.Context, sid uuid.UUID) error {

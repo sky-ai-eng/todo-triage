@@ -327,6 +327,70 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleLogoutAll revokes every active session for the caller and
+// best-effort invalidates each one upstream at gotrue. Use case: "I
+// think my account is compromised, kill everything." Cookie on the
+// current response is cleared too — the caller is effectively logged
+// out on this device as well as all others.
+//
+// Wrapped at mount time in withSession (must be authenticated) +
+// withCSRFOriginCheck (same-origin only).
+//
+// POST /api/auth/logout/all
+func (s *Server) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
+	if s.authDeps == nil {
+		http.NotFound(w, r)
+		return
+	}
+	claims := ClaimsFrom(r.Context())
+	if claims == nil {
+		writeUnauth(w)
+		return
+	}
+	userID, err := uuid.Parse(claims.Subject)
+	if err != nil {
+		http.Error(w, "invalid sub", http.StatusBadRequest)
+		return
+	}
+
+	// List BEFORE revoking — we need the decrypted JWTs for upstream
+	// logout calls. If we revoke first, the rows are filtered out
+	// of the active-set query.
+	active, err := s.authDeps.sessions.ListActiveForUser(r.Context(), userID)
+	if err != nil {
+		log.Printf("[auth] logout-all list user=%s: %v", userID, err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	// Best-effort upstream logout for each. We don't fail the request
+	// on upstream errors — local revocation is the load-bearing step,
+	// and the caller's expectation is "kill all my sessions" which is
+	// satisfied either way. Sequential rather than parallel because
+	// N is typically tiny (1-5) and gotrue's rate limits prefer it.
+	for _, sess := range active {
+		if uerr := s.authDeps.gotrueLogout(r.Context(), sess.JWT); uerr != nil {
+			log.Printf("[auth] upstream logout-all session: %v", uerr)
+		}
+	}
+
+	n, err := s.authDeps.sessions.RevokeAllForUser(r.Context(), userID)
+	if err != nil {
+		log.Printf("[auth] revoke-all user=%s: %v", userID, err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	log.Printf("[auth] logout-all user=%s: revoked %d session(s)", userID, n)
+
+	// Clear the cookie on this response too — the caller's current
+	// session is one of the ones we just revoked.
+	http.SetCookie(w, &http.Cookie{
+		Name: s.sidCookieName(), Value: "", Path: "/",
+		MaxAge: -1, HttpOnly: true, Secure: s.cookieSecure(r), SameSite: http.SameSiteLaxMode,
+	})
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // handleMe returns the authenticated user's identity + org list.
 // Wrapped in SessionMiddleware at mount time.
 //

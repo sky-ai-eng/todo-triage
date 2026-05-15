@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -236,13 +238,49 @@ var nowUnix = func() int64 {
 	return timeNow().Unix()
 }
 
-// refreshSessionInline runs the refresh dance and re-encrypts the new
-// tokens into the session row. The Session struct is updated in place
-// so subsequent steps in the middleware see the new JWT.
+// refreshSessionInline runs the refresh dance under a per-session
+// mutex. The lock + double-checked re-fetch is the safe pattern:
+//
+//  1. Request A and B both Lookup before either acquires the lock.
+//     Both see a session that needs refresh.
+//  2. Request A wins the lock race, calls gotrue, gets new tokens,
+//     persists them, releases the lock.
+//  3. Request B acquires the lock, re-fetches the session (now fresh
+//     in the DB), and sees needsRefresh == false. It skips the
+//     refresh call and proceeds with the new JWT.
+//
+// Without the re-fetch + re-check, Request B would call gotrue with
+// the now-rotated refresh token and fail — GoTrue's refresh-token-
+// family rotation invalidates the original on use.
+//
+// The Session struct passed in is mutated in place to point at the
+// fresh JWT so subsequent middleware steps see it.
 func (s *Server) refreshSessionInline(ctx context.Context, sess *sessions.Session) error {
 	if s.authDeps == nil || s.authDeps.gotrueRefresh == nil {
 		return errors.New("refresh not wired")
 	}
+
+	unlock := s.acquireRefreshLock(sess.ID)
+	defer unlock()
+
+	// Re-fetch under the lock. Whoever won the race may have already
+	// refreshed; we must observe their work before deciding to call
+	// gotrue ourselves.
+	fresh, err := s.authDeps.sessions.Lookup(ctx, sess.ID)
+	if err != nil {
+		return fmt.Errorf("re-fetch session: %w", err)
+	}
+	if fresh == nil {
+		return errors.New("session revoked during refresh wait")
+	}
+	*sess = *fresh
+
+	if !needsRefresh(sess) {
+		// The race winner already refreshed. We have the fresh JWT;
+		// nothing to do.
+		return nil
+	}
+
 	newJWT, newRefresh, newExp, err := s.authDeps.gotrueRefresh(ctx, sess.RefreshToken)
 	if err != nil {
 		return err
@@ -255,6 +293,16 @@ func (s *Server) refreshSessionInline(ctx context.Context, sess *sessions.Sessio
 	sess.RefreshToken = newRefresh
 	sess.JWTExpiresAt = newExpTime
 	return nil
+}
+
+// acquireRefreshLock returns a function that unlocks the per-session
+// mutex. The mutex is created on first use via LoadOrStore — concurrent
+// first-callers see the same mutex thanks to sync.Map's atomicity.
+func (s *Server) acquireRefreshLock(sid uuid.UUID) func() {
+	v, _ := s.refreshLocks.LoadOrStore(sid, &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
 }
 
 // withCSRFOriginCheck rejects mutating requests (POST/PUT/PATCH/DELETE)

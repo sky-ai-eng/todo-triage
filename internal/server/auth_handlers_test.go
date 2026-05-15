@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -504,6 +505,182 @@ func TestAuthFlow_GarbageSidCookie_Returns401(t *testing.T) {
 	got := r.requestWithSid("GET", "/api/me", "not-a-uuid").StatusCode
 	if got != http.StatusUnauthorized {
 		t.Errorf("garbage cookie /api/me = %d, want 401", got)
+	}
+}
+
+// Concurrent requests against a session in its JWT-refresh window
+// must serialize through the per-session mutex: the gotrue refresh
+// call happens exactly once, and all concurrent callers end up using
+// the new JWT. Without serialization, GoTrue's refresh-token-family
+// rotation invalidates the second caller's refresh attempt and the
+// user gets a spurious 401.
+//
+// Deterministic by:
+//   - stubbing the refresh closure to block on a release channel
+//   - launching N goroutines that hit /api/me
+//   - waiting until all N are stuck on the lock OR in gotrueRefresh
+//   - releasing the channel — first caller's refresh completes, the
+//     rest acquire the lock in turn, observe the fresh DB row, and
+//     skip the refresh
+//   - asserting refresh-call count == 1 and all N responses == 200
+func TestAuthFlow_ConcurrentRefresh_SerializesAndDedupes(t *testing.T) {
+	r := newAuthRig(t)
+	userID := r.seedUser()
+	r.seedOrg(userID, "alice-org")
+
+	// Mint a JWT whose exp is inside the refresh window so the
+	// middleware decides it needs to refresh. We can't use
+	// driveCallback because that sets a 1-hour exp; we need to
+	// bypass the helper and mint by hand.
+	jwtBefore := r.signKey.mintJWT(t, validClaimsFor(userID))
+
+	// Create the session directly via the store with a near-expiry
+	// JWT exp. Bypasses the callback handler entirely so we control
+	// the timing precisely.
+	encStore := r.srv.authDeps.sessions
+	sess, err := encStore.Create(context.Background(), userID, jwtBefore, "refresh-token-original",
+		time.Now().Add(30*time.Second).UTC(),  // JWT expires in 30s → needsRefresh = true
+		time.Now().Add(30*24*time.Hour).UTC(), // session valid for 30d
+		"test-ua", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+
+	// Stub gotrueRefresh: count invocations, block on a release channel
+	// until the test gives the signal.
+	var (
+		refreshCalls atomic.Int32
+		release      = make(chan struct{})
+	)
+	newJWT := r.signKey.mintJWT(t, validClaimsFor(userID))
+	r.srv.authDeps.gotrueRefresh = func(ctx context.Context, refresh string) (string, string, int64, error) {
+		refreshCalls.Add(1)
+		<-release
+		return newJWT, "refresh-token-rotated", time.Now().Add(1 * time.Hour).Unix(), nil
+	}
+
+	// Launch N concurrent requests.
+	const n = 5
+	results := make(chan int, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			results <- r.requestWithSid("GET", "/api/me", sess.ID.String()).StatusCode
+		}()
+	}
+
+	// Wait until the first refresh call has landed. After that, the
+	// remaining n-1 goroutines are either waiting on the per-session
+	// mutex or have re-fetched and skipped (race-dependent — both are
+	// correct).
+	deadline := time.Now().Add(3 * time.Second)
+	for refreshCalls.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if refreshCalls.Load() == 0 {
+		t.Fatal("first refresh never started — middleware didn't enter the refresh branch")
+	}
+
+	// Release the refresh — first call completes, lock unlocks, queued
+	// goroutines acquire-and-re-fetch-and-skip.
+	close(release)
+
+	// Collect all results.
+	statuses := make([]int, 0, n)
+	for i := 0; i < n; i++ {
+		select {
+		case s := <-results:
+			statuses = append(statuses, s)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("request %d/%d timed out after refresh release", i+1, n)
+		}
+	}
+
+	// Every request should have succeeded (no spurious 401s).
+	for i, s := range statuses {
+		if s != http.StatusOK {
+			t.Errorf("request %d: status=%d, want 200 (refresh-race caused spurious 401)", i, s)
+		}
+	}
+
+	// gotrueRefresh called exactly once across all N requests. The
+	// remaining n-1 saw the fresh DB row and skipped.
+	if got := refreshCalls.Load(); got != 1 {
+		t.Errorf("refresh calls = %d, want 1 (lock didn't dedupe concurrent refreshes)", got)
+	}
+}
+
+// Logout-everywhere revokes all of the caller's sessions, invokes
+// gotrue /logout for each (best-effort), and clears the current
+// request's cookie. Subsequent access via ANY previously-issued sid
+// returns 401.
+func TestAuthFlow_LogoutAll_RevokesEverySessionForUser(t *testing.T) {
+	r := newAuthRig(t)
+	userID := r.seedUser()
+	r.seedOrg(userID, "alice-org")
+
+	// Create two sessions directly via the store to simulate
+	// "logged in on two devices" — driving the callback handler
+	// twice would also work but is heavier.
+	jwt1 := r.signKey.mintJWT(t, validClaimsFor(userID))
+	jwt2 := r.signKey.mintJWT(t, validClaimsFor(userID))
+	encStore := r.srv.authDeps.sessions
+	s1, err := encStore.Create(t.Context(), userID, jwt1, "refresh-1",
+		time.Now().Add(1*time.Hour), time.Now().Add(30*24*time.Hour), "device-1", "1.1.1.1")
+	if err != nil {
+		t.Fatalf("Create s1: %v", err)
+	}
+	s2, err := encStore.Create(t.Context(), userID, jwt2, "refresh-2",
+		time.Now().Add(1*time.Hour), time.Now().Add(30*24*time.Hour), "device-2", "2.2.2.2")
+	if err != nil {
+		t.Fatalf("Create s2: %v", err)
+	}
+
+	// Sanity: both sessions accept /api/me.
+	for label, sid := range map[string]string{"s1": s1.ID.String(), "s2": s2.ID.String()} {
+		if got := r.requestWithSid("GET", "/api/me", sid).StatusCode; got != http.StatusOK {
+			t.Fatalf("pre-logout-all /api/me with %s = %d, want 200", label, got)
+		}
+	}
+
+	// POST /api/auth/logout/all using s1's cookie. The handler kills
+	// both s1 and s2.
+	logoutResp := r.requestWithSid("POST", "/api/auth/logout/all", s1.ID.String())
+	if logoutResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("logout/all status=%d, want 204", logoutResp.StatusCode)
+	}
+
+	// Both sids now 401.
+	for label, sid := range map[string]string{"s1": s1.ID.String(), "s2": s2.ID.String()} {
+		if got := r.requestWithSid("GET", "/api/me", sid).StatusCode; got != http.StatusUnauthorized {
+			t.Errorf("post-logout-all /api/me with %s = %d, want 401", label, got)
+		}
+	}
+
+	// Upstream gotrue /logout called twice (once per session).
+	if len(r.gotrueLogoutCalls) != 2 {
+		t.Errorf("upstream logout calls = %d, want 2", len(r.gotrueLogoutCalls))
+	}
+
+	// Cookie cleared on the response (MaxAge<0 → browser deletes).
+	var cleared bool
+	for _, c := range logoutResp.Cookies() {
+		if c.Name == r.srv.sidCookieName() && c.MaxAge < 0 {
+			cleared = true
+			break
+		}
+	}
+	if !cleared {
+		t.Error("logout/all didn't clear the sid cookie on the response")
+	}
+}
+
+// Logout-everywhere requires authentication (otherwise anyone could
+// nuke an arbitrary user's sessions). No sid cookie → 401, NOT 204.
+func TestAuthFlow_LogoutAll_RequiresAuth(t *testing.T) {
+	r := newAuthRig(t)
+	got := r.requestWithSid("POST", "/api/auth/logout/all", "").StatusCode
+	if got != http.StatusUnauthorized {
+		t.Errorf("unauthed logout/all = %d, want 401", got)
 	}
 }
 
