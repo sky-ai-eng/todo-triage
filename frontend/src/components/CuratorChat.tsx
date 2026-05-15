@@ -11,6 +11,7 @@ import {
 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { useCuratorChat } from '../hooks/useCuratorChat'
+import { useOrgHref } from '../hooks/useOrgHref'
 import { linkifyMarkdown, type LinkifyContext } from '../lib/linkify'
 import { toast } from './Toast/toastStore'
 import PromptPicker from './PromptPicker'
@@ -52,6 +53,7 @@ export default function CuratorChat({ project, onPatch }: Props) {
   const projectId = project.id
   const chat = useCuratorChat(projectId)
   const navigate = useNavigate()
+  const orgHref = useOrgHref()
 
   // Lazy-fetch the prompts list so the header control can resolve the
   // active prompt's name for supporting UI (for example the button's
@@ -266,7 +268,7 @@ export default function CuratorChat({ project, onPatch }: Props) {
         selectedId={effectiveSpecPromptID}
         onSelect={handleSpecSelect}
         onClose={() => setPickerOpen(false)}
-        onEditPrompts={() => navigate('/prompts')}
+        onEditPrompts={() => navigate(orgHref('/prompts'))}
       />
     </section>
   )

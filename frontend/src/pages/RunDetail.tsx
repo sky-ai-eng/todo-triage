@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { ArrowLeft } from 'lucide-react'
 import type { AgentRun } from '../types'
 import { useRunDetail } from '../hooks/useRunDetail'
+import { useOrgHref } from '../hooks/useOrgHref'
 import { formatDurationMs, formatElapsed, isActiveRun, statusDisplay } from '../lib/runStatus'
 import Transcript, { type ViewMode } from '../components/Transcript'
 import ChainStepsRail from '../components/ChainStepsRail'
@@ -31,6 +32,7 @@ function loadInitialMode(): ViewMode {
 export default function RunDetail() {
   const { runID } = useParams<{ runID: string }>()
   const navigate = useNavigate()
+  const orgHref = useOrgHref()
   const { run, task, messages, loading, notFound, error } = useRunDetail(runID)
   const [chainSteps, setChainSteps] = useState<AgentRun[] | null>(null)
   const [mode, setMode] = useState<ViewMode>(() => loadInitialMode())
@@ -165,7 +167,7 @@ export default function RunDetail() {
       }
       if (e.key === 'Escape') {
         e.preventDefault()
-        navigate('/board')
+        navigate(orgHref('/board'))
       } else if (e.key === '1') {
         setMode('conversation')
       } else if (e.key === '2') {
@@ -180,7 +182,7 @@ export default function RunDetail() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [navigate, run?.Status, run?.SessionID, takeoverPending])
+  }, [navigate, orgHref, run?.Status, run?.SessionID, takeoverPending])
 
   const handleTakeover = useCallback(async () => {
     if (!run) return
@@ -218,11 +220,11 @@ export default function RunDetail() {
         toast.error(await readError(res, 'Failed to return to queue'))
         return
       }
-      navigate('/board')
+      navigate(orgHref('/board'))
     } catch (err) {
       toast.error(`Failed to return to queue: ${(err as Error).message}`)
     }
-  }, [navigate, run?.TaskID])
+  }, [navigate, orgHref, run?.TaskID])
 
   const elapsed = useMemo(() => {
     if (!run) return ''
@@ -245,7 +247,7 @@ export default function RunDetail() {
     return (
       <div className="flex flex-col items-center justify-center min-h-[60vh] gap-3">
         <p className="text-[13px] text-dismiss">Failed to load: {error}</p>
-        <Link to="/board" className="text-[12px] text-accent hover:underline">
+        <Link to={orgHref('/board')} className="text-[12px] text-accent hover:underline">
           ← Back to board
         </Link>
       </div>
@@ -256,7 +258,7 @@ export default function RunDetail() {
     return (
       <div className="flex flex-col items-center justify-center min-h-[60vh] gap-3">
         <p className="text-[13px] text-text-tertiary">Run not found.</p>
-        <Link to="/board" className="text-[12px] text-accent hover:underline">
+        <Link to={orgHref('/board')} className="text-[12px] text-accent hover:underline">
           ← Back to board
         </Link>
       </div>
@@ -281,7 +283,7 @@ export default function RunDetail() {
       <div className="sticky top-0 z-20 bg-surface-raised/90 backdrop-blur-xl border-b border-border-glass px-6 py-3">
         <div className="flex items-center gap-3 flex-wrap">
           <Link
-            to="/board"
+            to={orgHref('/board')}
             aria-label="Back to board"
             className="shrink-0 inline-flex items-center justify-center w-8 h-8 rounded-lg text-text-tertiary hover:text-text-primary hover:bg-black/[0.04] transition-colors"
             title="Back to board (Esc)"

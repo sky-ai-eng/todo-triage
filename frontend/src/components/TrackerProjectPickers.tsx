@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
+import { useOrgHref } from '../hooks/useOrgHref'
 
 interface SettingsResponse {
   jira: {
@@ -41,6 +42,7 @@ export default function TrackerProjectPickers({
   const [jiraProjects, setJiraProjects] = useState<string[]>([])
   const [jiraEnabled, setJiraEnabled] = useState(false)
   const [loading, setLoading] = useState(true)
+  const orgHref = useOrgHref()
 
   useEffect(() => {
     const controller = new AbortController()
@@ -99,7 +101,7 @@ export default function TrackerProjectPickers({
             Jira
           </span>
           {!loading && !jiraEnabled && (
-            <Link to="/settings" className="text-[11px] text-accent hover:underline">
+            <Link to={orgHref('/settings')} className="text-[11px] text-accent hover:underline">
               Configure Jira
             </Link>
           )}

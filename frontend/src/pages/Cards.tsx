@@ -5,6 +5,7 @@ import * as Tooltip from '@radix-ui/react-tooltip'
 import { useNavigate } from 'react-router-dom'
 import type { Task, WSEvent } from '../types'
 import { useWebSocket } from '../hooks/useWebSocket'
+import { useOrgHref } from '../hooks/useOrgHref'
 import { SlidersHorizontal } from 'lucide-react'
 import EventBadge from '../components/EventBadge'
 import SourceBadge from '../components/SourceBadge'
@@ -26,6 +27,7 @@ export default function Cards() {
   const [rulesOpen, setRulesOpen] = useState(false)
   const hasFetched = useRef(false)
   const navigate = useNavigate()
+  const orgHref = useOrgHref()
 
   const fetchQueue = useCallback(async (preserveCurrent = false) => {
     const res = await fetch('/api/queue')
@@ -297,7 +299,7 @@ export default function Cards() {
         onClose={() => setShowPromptPicker(false)}
         onEditPrompts={() => {
           setShowPromptPicker(false)
-          navigate('/prompts')
+          navigate(orgHref('/prompts'))
         }}
       />
 

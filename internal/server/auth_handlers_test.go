@@ -21,6 +21,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/sessions"
 )
 
@@ -1035,6 +1036,81 @@ func TestGoTrueHTTPClient_HasTimeout(t *testing.T) {
 	// bound deliberately.
 	if gotrueHTTPClient.Timeout > 2*time.Minute {
 		t.Errorf("gotrueHTTPClient.Timeout = %v, suspicious (>2m); confirm units", gotrueHTTPClient.Timeout)
+	}
+}
+
+// TestHandleConfig_MultiMode_Unauthenticated returns deployment_mode=multi
+// with an empty current_user when no session cookie is present. AuthGate
+// on the SPA calls /api/config before the user logs in to decide which
+// auth flow to render, so the endpoint must succeed without auth.
+func TestHandleConfig_MultiMode_Unauthenticated(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	r := newAuthRig(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+	rec := httptest.NewRecorder()
+	r.srv.mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp configResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.DeploymentMode != string(runmode.ModeMulti) {
+		t.Errorf("deployment_mode=%q want %q", resp.DeploymentMode, runmode.ModeMulti)
+	}
+	if resp.CurrentUser.ID != "" {
+		t.Errorf("current_user.id=%q want empty (unauthenticated)", resp.CurrentUser.ID)
+	}
+	if resp.CurrentUser.GitHubUsername != nil {
+		t.Errorf("current_user.github_username=%v want nil (unauthenticated)", *resp.CurrentUser.GitHubUsername)
+	}
+	if resp.TeamSize != 0 {
+		t.Errorf("team_size=%d want 0 (unauthenticated)", resp.TeamSize)
+	}
+}
+
+// TestHandleConfig_MultiMode_WithSession populates current_user from
+// JWT claims when the caller has a valid sid cookie. Exercises the
+// softPeekUser path — the handler is not session-middleware-wrapped,
+// so failures must degrade silently rather than 401.
+func TestHandleConfig_MultiMode_WithSession(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	r := newAuthRig(t)
+
+	userID := r.seedUser()
+	r.seedOrg(userID, "alice-org")
+
+	resp, _ := r.driveCallback(userID)
+	sid := r.sidFromResp(resp)
+
+	configResp := r.requestWithSid(http.MethodGet, "/api/config", sid)
+	if configResp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d", configResp.StatusCode)
+	}
+	var body configResponse
+	if err := json.NewDecoder(configResp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.DeploymentMode != string(runmode.ModeMulti) {
+		t.Errorf("deployment_mode=%q want %q", body.DeploymentMode, runmode.ModeMulti)
+	}
+	if body.CurrentUser.ID != userID.String() {
+		t.Errorf("current_user.id=%q want %q", body.CurrentUser.ID, userID)
+	}
+	if body.CurrentUser.GitHubUsername == nil {
+		t.Fatal("current_user.github_username = nil; expected populated from JWT claims")
+	}
+	// The JWT user_metadata.user_name is set by validClaimsFor —
+	// matches the github_username surfaced by /api/me in the same flow.
+	wantGH := "test-user-" + userID.String()[:8]
+	if *body.CurrentUser.GitHubUsername != wantGH {
+		t.Errorf("current_user.github_username=%q want %q", *body.CurrentUser.GitHubUsername, wantGH)
+	}
+	if body.TeamSize != 1 {
+		t.Errorf("team_size=%d want 1", body.TeamSize)
 	}
 }
 
