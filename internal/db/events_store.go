@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"sync"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -99,8 +100,62 @@ func SetOnEventRecorded(fn func(domain.Event)) {
 // successful INSERT so the SetOnEventRecorded hook fires uniformly
 // regardless of dialect. evt.ID must be populated (the generated or
 // caller-supplied UUID) so consumers see the persisted identity.
+//
+// Non-tx writes (request handler outside WithTx, background admin-
+// pool RecordSystem) call this directly because the INSERT is durable
+// the moment ExecContext returns nil. Tx-bound writes route through
+// PendingEventHooks below so the hook waits for the surrounding
+// commit.
 func NotifyEventRecorded(evt domain.Event) {
 	if onEventRecorded != nil {
 		onEventRecorded(evt)
+	}
+}
+
+// PendingEventHooks accumulates events recorded inside a tx-bound
+// Record / RecordSystem call so the SetOnEventRecorded hook fires
+// only after the surrounding transaction commits. The TxRunner
+// allocates one per WithTx call, hands it to the tx-bound EventStore
+// constructor, and invokes Fire() after Commit() returns nil. On
+// rollback the buffered events are dropped — the LifetimeDistinctCounter
+// never observes a row the DB never persisted.
+//
+// Concurrency: WithTx callbacks routinely fan out work into
+// goroutines that all hold the same tx-bound store, so Add must
+// be safe for concurrent use even though the transaction itself
+// serializes the underlying INSERTs.
+type PendingEventHooks struct {
+	mu     sync.Mutex
+	events []domain.Event
+}
+
+// NewPendingEventHooks allocates an empty buffer. The TxRunner
+// allocates one per WithTx invocation; non-tx wiring doesn't use
+// this at all and passes nil to the store constructor instead.
+func NewPendingEventHooks() *PendingEventHooks {
+	return &PendingEventHooks{}
+}
+
+// Add enqueues an event for post-commit hook firing.
+func (p *PendingEventHooks) Add(evt domain.Event) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.events = append(p.events, evt)
+}
+
+// Fire drains the buffer and invokes the global hook for each
+// queued event in the order they were Add'd. Called by the
+// TxRunner after Commit returns nil. Safe to call on a nil
+// receiver — non-tx paths bypass this entirely.
+func (p *PendingEventHooks) Fire() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	events := p.events
+	p.events = nil
+	p.mu.Unlock()
+	for _, evt := range events {
+		NotifyEventRecorded(evt)
 	}
 }

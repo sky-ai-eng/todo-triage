@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -174,6 +175,93 @@ func TestEventStore_Postgres_RLS_AppPoolRequiresClaims(t *testing.T) {
 			t.Errorf("expected RLS violation (42501), got code %s: %v", pgErr.Code, err)
 		}
 	})
+}
+
+// TestEventStore_Postgres_HookDeferredUntilCommit pins the SKY-305
+// rollback-safety invariant on the Postgres WithTx path:
+// SetOnEventRecorded only fires for app-pool Record calls after the
+// surrounding tx commits successfully. On rollback the
+// LifetimeDistinctCounter must not observe the event.
+//
+// RecordSystem routes through the autonomous admin pool — its hook
+// fires immediately on a successful INSERT regardless of the outer
+// tx's fate — and is intentionally not exercised here.
+func TestEventStore_Postgres_HookDeferredUntilCommit(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+
+	orgID := seedPgOrgForEvents(t, h)
+	ownerID := mustOwnerUserForOrg(t, h, orgID)
+	entityID := seedPgEntityForEvents(t, h, orgID, "hook-deferred")
+	eid := entityID
+
+	var mu sync.Mutex
+	var fired []domain.Event
+	db.SetOnEventRecorded(func(evt domain.Event) {
+		mu.Lock()
+		defer mu.Unlock()
+		fired = append(fired, evt)
+	})
+	t.Cleanup(func() { db.SetOnEventRecorded(nil) })
+
+	stores := pgstore.New(h.AdminDB, h.AppDB)
+	ctx := context.Background()
+
+	// Rollback path: fn returns an error after Record. Hook must
+	// NOT fire — the row was written into the tx but never
+	// committed; firing would inflate the LifetimeDistinctCounter
+	// with a non-existent row.
+	rollbackErr := errors.New("intentional rollback")
+	err := stores.Tx.WithTx(ctx, orgID, ownerID, func(tx db.TxStores) error {
+		if _, err := tx.Events.Record(ctx, orgID, domain.Event{
+			EntityID: &eid, EventType: domain.EventGitHubPROpened,
+		}); err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+		return rollbackErr
+	})
+	if !errors.Is(err, rollbackErr) {
+		t.Fatalf("WithTx err = %v, want %v", err, rollbackErr)
+	}
+	mu.Lock()
+	if len(fired) != 0 {
+		t.Errorf("hook fired %d times after rollback; want 0", len(fired))
+	}
+	mu.Unlock()
+
+	// Confirm the row really didn't land — defense against a future
+	// refactor that silently breaks rollback. Read via admin pool to
+	// bypass RLS / ownerID-claims wiring.
+	var count int
+	if err := h.AdminDB.QueryRowContext(ctx,
+		`SELECT count(*) FROM events WHERE org_id = $1 AND entity_id = $2 AND event_type = $3`,
+		orgID, entityID, domain.EventGitHubPROpened,
+	).Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("event row count = %d after rollback; want 0", count)
+	}
+
+	// Commit path: same Record, fn returns nil. Hook fires exactly
+	// once after commit, with the persisted event's ID.
+	err = stores.Tx.WithTx(ctx, orgID, ownerID, func(tx db.TxStores) error {
+		_, err := tx.Events.Record(ctx, orgID, domain.Event{
+			EntityID: &eid, EventType: domain.EventGitHubPRMerged,
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("WithTx commit: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(fired) != 1 {
+		t.Fatalf("hook fired %d times after commit; want 1", len(fired))
+	}
+	if fired[0].EventType != domain.EventGitHubPRMerged {
+		t.Errorf("hook saw event_type=%q, want %q", fired[0].EventType, domain.EventGitHubPRMerged)
+	}
 }
 
 // seedPgOrgForEvents stages (user, org, org_membership, team) so

@@ -3,7 +3,9 @@ package sqlite_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -58,6 +60,70 @@ func TestEventStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	}
 	if _, err := stores.Events.GetMetadataSystem(ctx, badOrg, "any"); err == nil {
 		t.Error("GetMetadataSystem(non-local org) should error")
+	}
+}
+
+// TestEventStore_SQLite_HookDeferredUntilCommit pins the SKY-305
+// rollback-safety invariant: SetOnEventRecorded must not fire for
+// Record calls inside a WithTx that rolls back. Without this, the
+// LifetimeDistinctCounter cache observes an event the DB never
+// persisted and stays inflated until restart hydration.
+func TestEventStore_SQLite_HookDeferredUntilCommit(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	stores := sqlitestore.New(conn)
+
+	var mu sync.Mutex
+	var fired []domain.Event
+	db.SetOnEventRecorded(func(evt domain.Event) {
+		mu.Lock()
+		defer mu.Unlock()
+		fired = append(fired, evt)
+	})
+	t.Cleanup(func() { db.SetOnEventRecorded(nil) })
+
+	entityID := seedSQLiteEntityForEvents(t, conn, "hook-deferred")
+	eid := entityID
+
+	// Rollback path: fn returns an error after recording an event.
+	// Hook must NOT fire.
+	rollbackErr := errors.New("intentional rollback")
+	err := stores.Tx.WithTx(context.Background(), runmode.LocalDefaultOrg, runmode.LocalDefaultUserID,
+		func(tx db.TxStores) error {
+			if _, err := tx.Events.Record(context.Background(), runmode.LocalDefaultOrg, domain.Event{
+				EntityID: &eid, EventType: domain.EventGitHubPROpened,
+			}); err != nil {
+				t.Fatalf("Record: %v", err)
+			}
+			return rollbackErr
+		})
+	if !errors.Is(err, rollbackErr) {
+		t.Fatalf("WithTx err = %v, want %v", err, rollbackErr)
+	}
+	mu.Lock()
+	if len(fired) != 0 {
+		t.Errorf("hook fired %d times after rollback; want 0 — counter would observe a row the DB never persisted", len(fired))
+	}
+	mu.Unlock()
+
+	// Commit path: same Record, fn returns nil. Hook must fire
+	// exactly once after the commit.
+	err = stores.Tx.WithTx(context.Background(), runmode.LocalDefaultOrg, runmode.LocalDefaultUserID,
+		func(tx db.TxStores) error {
+			_, err := tx.Events.Record(context.Background(), runmode.LocalDefaultOrg, domain.Event{
+				EntityID: &eid, EventType: domain.EventGitHubPRMerged,
+			})
+			return err
+		})
+	if err != nil {
+		t.Fatalf("WithTx commit: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(fired) != 1 {
+		t.Fatalf("hook fired %d times after commit; want 1", len(fired))
+	}
+	if fired[0].EventType != domain.EventGitHubPRMerged {
+		t.Errorf("hook saw event_type=%q, want %q", fired[0].EventType, domain.EventGitHubPRMerged)
 	}
 }
 

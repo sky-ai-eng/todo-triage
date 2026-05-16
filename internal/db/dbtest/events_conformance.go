@@ -227,6 +227,80 @@ func RunEventStoreConformance(t *testing.T, mk EventStoreFactory) {
 		}
 	})
 
+	t.Run("Latest_orders_by_insertion_without_sleep", func(t *testing.T) {
+		// Regression for the same-tx tiebreaker bug: the Postgres
+		// schema defaults created_at to now() which is the tx start
+		// timestamp, so two INSERTs in one tx tie on the column and
+		// the LIMIT-1 ORDER BY falls through to the UUID tiebreaker
+		// (random). SQLite has the analogous problem at second
+		// resolution. Bind from Go-side time.Now() so back-to-back
+		// records always sort by insertion order without needing a
+		// sleep between them.
+		s, orgID, seed := mk(t)
+		entityID := seed.Entity(t, "latest-no-sleep")
+		eid := entityID
+		// 8 back-to-back records with no sleep. With monotonic ns
+		// clocks the latest always wins regardless of tiebreaker
+		// shape.
+		var lastID string
+		for i := 0; i < 8; i++ {
+			id, err := s.Record(ctx, orgID, domain.Event{
+				EntityID: &eid, EventType: domain.EventGitHubPRCICheckPassed,
+			})
+			if err != nil {
+				t.Fatalf("Record %d: %v", i, err)
+			}
+			lastID = id
+		}
+		got, err := s.LatestForEntityTypeAndDedupKey(ctx, orgID, entityID, domain.EventGitHubPRCICheckPassed, "")
+		if err != nil || got == nil {
+			t.Fatalf("Latest: got=%v err=%v", got, err)
+		}
+		if got.ID != lastID {
+			t.Errorf("Latest.ID = %q, want %q (last inserted of 8 same-burst records)", got.ID, lastID)
+		}
+	})
+
+	t.Run("Latest_prefers_occurred_at_when_set", func(t *testing.T) {
+		// occurred_at is the source-reported event time (check
+		// completion, review submission); when populated it's
+		// strictly better than created_at for ordering because it
+		// reflects underlying event order rather than our
+		// observation order. Pin that the impl honors it: insert
+		// an event whose occurred_at is in the past last so it
+		// would win on insertion order, but a second event with
+		// the further-in-the-past occurred_at must lose to a first
+		// event whose occurred_at is newer.
+		s, orgID, seed := mk(t)
+		entityID := seed.Entity(t, "latest-occurred")
+		eid := entityID
+		newer := time.Now().UTC().Truncate(time.Second).Add(-1 * time.Hour)
+		older := newer.Add(-1 * time.Hour)
+		// Insert the "newer occurrence" event first.
+		newerID, err := s.Record(ctx, orgID, domain.Event{
+			EntityID: &eid, EventType: domain.EventGitHubPRCICheckPassed,
+			OccurredAt: newer,
+		})
+		if err != nil {
+			t.Fatalf("Record newer: %v", err)
+		}
+		// Insert the "older occurrence" event second — wins on
+		// created_at (insertion order) but must lose on occurred_at.
+		if _, err := s.Record(ctx, orgID, domain.Event{
+			EntityID: &eid, EventType: domain.EventGitHubPRCICheckPassed,
+			OccurredAt: older,
+		}); err != nil {
+			t.Fatalf("Record older: %v", err)
+		}
+		got, err := s.LatestForEntityTypeAndDedupKey(ctx, orgID, entityID, domain.EventGitHubPRCICheckPassed, "")
+		if err != nil || got == nil {
+			t.Fatalf("Latest: got=%v err=%v", got, err)
+		}
+		if got.ID != newerID {
+			t.Errorf("Latest.ID = %q, want %q (newer occurred_at should win regardless of insertion order)", got.ID, newerID)
+		}
+	})
+
 	t.Run("Latest_returns_most_recent_match", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		entityID := seed.Entity(t, "latest-most-recent")
