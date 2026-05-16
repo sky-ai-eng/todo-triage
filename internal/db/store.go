@@ -142,6 +142,15 @@ type Stores struct {
 	// re-derive, delegate post-run metadata enrichment).
 	Events EventStore
 
+	// TaskMemory owns the run_memory table — per-run agent narrative
+	// + human verdict, read back by the delegate spawner to
+	// materialize prior context into fresh worktrees. Holds both
+	// pools: app for request-handler equivalents (review/PR submit,
+	// swipe-discard cleanup, factory/run-summary reads) and admin for
+	// the spawner's runAgent goroutine (post-completion upsert + run-
+	// start materializer, both without a JWT-claims context).
+	TaskMemory TaskMemoryStore
+
 	// Tx is the transaction runner — handlers that need atomic
 	// multi-store writes call Tx.WithTx and receive a TxStores with
 	// every field tx-bound. Postgres impl also sets the JWT claims
@@ -175,6 +184,7 @@ type TxStores struct {
 	PendingFirings PendingFiringsStore
 	Projects       ProjectStore
 	Events         EventStore
+	TaskMemory     TaskMemoryStore
 }
 
 // TxRunner runs fn inside a single database transaction. Postgres

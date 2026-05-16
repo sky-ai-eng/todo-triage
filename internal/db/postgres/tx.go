@@ -165,5 +165,12 @@ func (s *Store) txStoresFromTx(tx *sql.Tx, pending *db.PendingEventHooks) db.TxS
 		// those writes commit autonomously and fire their hook
 		// immediately via db.NotifyEventRecorded.
 		Events: newTxEventStore(tx, s.admin, pending.Add, db.NotifyEventRecorded),
+		// TaskMemory: app-side write routes through the tx; admin
+		// half stays pinned to the real admin pool so
+		// UpsertAgentMemorySystem / GetMemoriesForEntitySystem inside
+		// WithTx routes outside the tx — those writes commit
+		// autonomously, same shape Events / AgentRuns use for their
+		// admin-pool halves.
+		TaskMemory: newTaskMemoryStore(tx, s.admin),
 	}
 }

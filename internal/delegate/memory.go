@@ -7,7 +7,6 @@ package delegate
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"io"
 	"log"
@@ -173,14 +172,14 @@ func (s *Spawner) runMemoryGate(
 // cross-run memory benefit. This "advisory" posture only holds for
 // the read side — the write-before-finish gate is enforced separately
 // for NEW memories produced during the run.
-func materializePriorMemories(database *sql.DB, cwd, entityID string) {
+func materializePriorMemories(taskMemory db.TaskMemoryStore, cwd, entityID string) {
 	memDir := filepath.Join(cwd, "_scratch", "entity-memory")
 	if err := os.MkdirAll(memDir, 0755); err != nil {
 		log.Printf("[delegate] warning: failed to create entity-memory dir at %s: %v", memDir, err)
 		return
 	}
 
-	memories, err := db.GetMemoriesForEntity(database, entityID)
+	memories, err := taskMemory.GetMemoriesForEntitySystem(context.Background(), runmode.LocalDefaultOrg, entityID)
 	if err != nil {
 		log.Printf("[delegate] warning: failed to load prior memories for entity %s: %v", entityID, err)
 		return

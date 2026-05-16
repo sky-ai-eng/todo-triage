@@ -50,6 +50,11 @@ type Spawner struct {
 	reviews    db.ReviewStore    // SKY-286: pending review cleanup on discard / cancel paths
 	pendingPRs db.PendingPRStore // SKY-287: pending PR lookup on processCompletion / cleanup paths
 	events     db.EventStore     // SKY-305: admin-pool GetMetadataSystem for post-run prompt building
+	// taskMemory routes the post-completion UpsertAgentMemorySystem
+	// and the run-start GetMemoriesForEntitySystem through the dual-
+	// pool store. Both fire inside the runAgent goroutine, which has
+	// no JWT-claims context, so they hit the admin pool in Postgres.
+	taskMemory db.TaskMemoryStore
 	wsHub      *websocket.Hub
 
 	mu                    sync.Mutex
@@ -65,7 +70,7 @@ type Spawner struct {
 	agentToolsCache string
 }
 
-func NewSpawner(database *sql.DB, prompts db.PromptStore, agents db.AgentStore, chains db.ChainStore, tasks db.TaskStore, agentRuns db.AgentRunStore, entities db.EntityStore, reviews db.ReviewStore, pendingPRs db.PendingPRStore, events db.EventStore, ghClient *ghclient.Client, wsHub *websocket.Hub, model string) *Spawner {
+func NewSpawner(database *sql.DB, prompts db.PromptStore, agents db.AgentStore, chains db.ChainStore, tasks db.TaskStore, agentRuns db.AgentRunStore, entities db.EntityStore, reviews db.ReviewStore, pendingPRs db.PendingPRStore, events db.EventStore, taskMemory db.TaskMemoryStore, ghClient *ghclient.Client, wsHub *websocket.Hub, model string) *Spawner {
 	return &Spawner{
 		database:    database,
 		prompts:     prompts,
@@ -77,6 +82,7 @@ func NewSpawner(database *sql.DB, prompts db.PromptStore, agents db.AgentStore, 
 		reviews:     reviews,
 		pendingPRs:  pendingPRs,
 		events:      events,
+		taskMemory:  taskMemory,
 		ghClient:    ghClient,
 		wsHub:       wsHub,
 		model:       model,

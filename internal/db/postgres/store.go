@@ -181,7 +181,17 @@ func New(admin, app *sql.DB) db.Stores {
 		// enrichment). events_all RLS gates the app side; admin
 		// bypasses, org_id is bound everywhere as defense in depth.
 		Events: newEventStore(app, admin),
-		Tx:     s,
+		// TaskMemory wires both pools: app for request-handler
+		// equivalents (review/PR submit, swipe-discard cleanup,
+		// factory + run-summary reads) and admin for the delegate
+		// spawner's runAgent goroutine — the post-completion gate
+		// teardown's UpsertAgentMemorySystem and the run-start
+		// GetMemoriesForEntitySystem both fire without a JWT-claims
+		// context. run_memory_all RLS gates the app side via an
+		// EXISTS subquery against runs; admin bypasses RLS, and
+		// org_id stays in every WHERE clause as defense in depth.
+		TaskMemory: newTaskMemoryStore(app, admin),
+		Tx:         s,
 	}
 	return s.stores
 }
@@ -236,5 +246,6 @@ func NewForTx(tx *sql.Tx) db.TxStores {
 		PendingFirings: newPendingFiringsStore(tx),
 		Projects:       newProjectStore(tx, tx),
 		Events:         newEventStore(tx, tx),
+		TaskMemory:     newTaskMemoryStore(tx, tx),
 	}
 }

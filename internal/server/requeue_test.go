@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -67,7 +66,7 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, runID, revi
 	// run_memory: agent finished and wrote its self-report (the
 	// SKY-204 termination upsert). We assert below that
 	// human_content lands without trampling agent_content.
-	if err := db.UpsertAgentMemory(database, "r_pa", "e_pa", "agent self-report"); err != nil {
+	if err := sqlitestore.New(database).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrg, "r_pa", "e_pa", "agent self-report"); err != nil {
 		t.Fatalf("UpsertAgentMemory: %v", err)
 	}
 
@@ -175,7 +174,7 @@ func assertPendingApprovalCleanedUp(
 	// Read-side check: GetRunMemory's materialization must produce
 	// the heading exactly once, anchoring the boundary the next
 	// agent's prompt parser scans for.
-	mem, err := db.GetRunMemory(database, runID)
+	mem, err := sqlitestore.New(database).TaskMemory.GetRunMemory(context.Background(), runmode.LocalDefaultOrg, runID)
 	if err != nil {
 		t.Fatalf("GetRunMemory: %v", err)
 	}
@@ -520,7 +519,7 @@ func TestHandleSwipe_ClaimRefusedLeavesNoAuditRow(t *testing.T) {
 // Post: 409, no swipe_events, no state change.
 func TestHandleSwipe_DelegateRefusedLeavesNoAuditRow(t *testing.T) {
 	s := newTestServer(t)
-	s.SetSpawner(delegate.NewSpawner(s.db, s.prompts, nil, nil, s.tasks, s.agentRuns, s.entities, s.reviews, s.pendingPRs, s.events, nil, websocket.NewHub(), "haiku"))
+	s.SetSpawner(delegate.NewSpawner(s.db, s.prompts, nil, nil, s.tasks, s.agentRuns, s.entities, s.reviews, s.pendingPRs, s.events, s.taskMemory, nil, websocket.NewHub(), "haiku"))
 	const eventType = "github:pr:opened"
 	const otherUserID = "00000000-0000-0000-0000-0000000004dd"
 
@@ -915,7 +914,7 @@ func TestHandleSnooze_RefusesOnClaimedTask(t *testing.T) {
 // transfer while still refusing different-user theft.
 func TestHandleSwipe_DelegateTransfersOwnUserClaim(t *testing.T) {
 	s := newTestServer(t)
-	s.SetSpawner(delegate.NewSpawner(s.db, s.prompts, nil, nil, s.tasks, s.agentRuns, s.entities, s.reviews, s.pendingPRs, s.events, nil, websocket.NewHub(), "haiku"))
+	s.SetSpawner(delegate.NewSpawner(s.db, s.prompts, nil, nil, s.tasks, s.agentRuns, s.entities, s.reviews, s.pendingPRs, s.events, s.taskMemory, nil, websocket.NewHub(), "haiku"))
 
 	// Seed a queued task already claimed by the local user — the
 	// pre-condition right before a You → Agent drag fires the

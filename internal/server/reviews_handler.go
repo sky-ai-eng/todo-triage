@@ -6,7 +6,6 @@ import (
 	"net/http"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentmeta"
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
@@ -140,7 +139,7 @@ func (s *Server) handleReviewSubmit(w http.ResponseWriter, r *http.Request) {
 	// surface as a 5xx and confuse the user about what landed.
 	if review.RunID != "" {
 		humanContent := FormatHumanFeedback(buildHumanFeedbackInput(review, comments, actualEvent))
-		if err := db.UpdateRunMemoryHumanContent(s.db, review.RunID, humanContent); err != nil {
+		if err := s.taskMemory.UpdateRunMemoryHumanContent(r.Context(), runmode.LocalDefaultOrg, review.RunID, humanContent); err != nil {
 			log.Printf("[reviews] warning: failed to record human verdict for run %s: %v", review.RunID, err)
 		}
 	}
