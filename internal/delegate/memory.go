@@ -102,6 +102,7 @@ func readAgentMemoryFile(cwd, runID string) (string, memoryFileState) {
 // memory file and flag memory_missing.
 func (s *Spawner) runMemoryGate(
 	ctx context.Context,
+	router *writeRouter,
 	runID, taskID, cwd string,
 	initial *agentproc.Result,
 	sessionID, model, repoEnv, extraAllowedTools string,
@@ -129,7 +130,7 @@ func (s *Spawner) runMemoryGate(
 				"your completion JSON again.",
 			runID,
 		)
-		outcome, err := s.ResumeWithMessage(ctx, runID, sessionID, cwd, msg, resumeOpts)
+		outcome, err := s.ResumeWithMessage(ctx, router, runID, sessionID, cwd, msg, resumeOpts)
 		if err != nil {
 			log.Printf("[delegate] run %s: resume attempt %d failed: %v", runID, attempt, err)
 			// Give up on further retries — the caller will mark

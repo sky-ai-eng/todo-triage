@@ -63,16 +63,46 @@ type runConfig struct {
 	appendSysPrompt string
 }
 
+// DelegateOpts carries the per-call inputs to Delegate that grew past
+// the comfortable positional-arg threshold. The struct exists so
+// adding a field (CreatorUserID, future multi-mode session context)
+// doesn't force every handler call site to rewrite its positional
+// list.
+type DelegateOpts struct {
+	// ExplicitPromptID forces a specific prompt instead of letting
+	// resolvePrompt walk the entity-type → default chain. Empty for
+	// the default path.
+	ExplicitPromptID string
+
+	// TriggerType is "manual" (user clicked Delegate) or "event"
+	// (router auto-fired from a matched event_handler). Drives the
+	// routing decision inside the goroutine: synthetic-claims for
+	// manual, admin pool for event. Defaults to "manual" if empty.
+	TriggerType string
+
+	// TriggerID is the event_handler ID for event-triggered runs,
+	// empty for manual. Recorded on the runs row for audit.
+	TriggerID string
+
+	// CreatorUserID is the user who initiated this Delegate call.
+	// Required when TriggerType == "manual"; ignored otherwise (the
+	// schema CHECK refuses non-NULL creator_user_id for event-
+	// triggered runs). In local mode this is
+	// runmode.LocalDefaultUserID; in multi-mode the handler extracts
+	// it from JWT claims.
+	CreatorUserID string
+}
+
 // Delegate kicks off an async agent run for any task type.
 // Routes to the appropriate worktree setup based on task source.
-func (s *Spawner) Delegate(task domain.Task, explicitPromptID string, triggerType string, triggerID string) (string, error) {
+func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) {
 	s.mu.Lock()
 	ghClient := s.ghClient
 	defaultModel := s.model
 	s.mu.Unlock()
 
 	// Resolve prompt
-	resolved, err := s.resolvePrompt(task, explicitPromptID)
+	resolved, err := s.resolvePrompt(task, opts.ExplicitPromptID)
 	if err != nil {
 		return "", err
 	}
@@ -90,38 +120,43 @@ func (s *Spawner) Delegate(task domain.Task, explicitPromptID string, triggerTyp
 		log.Printf("[delegate] warning: failed to increment usage for prompt %s: %v", promptID, err)
 	}
 
+	triggerType := opts.TriggerType
 	if triggerType == "" {
 		triggerType = "manual"
 	}
+	triggerID := opts.TriggerID
 
-	if resolved.Kind == domain.PromptKindChain {
-		return s.delegateChain(task, resolved, triggerType, triggerID, ghClient, model)
+	// Pair creator_user_id with trigger_type per the audit-honesty
+	// invariant. Manual runs (swipe-delegate / drag-to-Agent / factory
+	// drop) carry the initiating user's id as the creator. Event-
+	// triggered runs carry NULL — there's no human delegator. The
+	// schema CHECK enforces this pairing so the seeder can't drift.
+	creatorUserID := ""
+	if triggerType == "manual" {
+		creatorUserID = opts.CreatorUserID
+		if creatorUserID == "" {
+			// Local-mode fallback. Multi-mode handlers extract this
+			// from JWT claims and pass it explicitly; an empty value
+			// here in multi-mode would FK-fail at Create time.
+			creatorUserID = runmode.LocalDefaultUserID
+		}
 	}
 
-	// SKY-261 D-Claims: stamp actor_agent_id at run start. Prefer the
-	// task's stamped claim (set by router on trigger match, or by the
-	// user-delegate handler when the user drags a queued task to the
-	// bot). Falls back to GetForOrg for unclaimed tasks and manual
-	// runs. Stays empty (NULL on the row) only in the seam between
-	// db init and agent bootstrap, which is transient.
+	if resolved.Kind == domain.PromptKindChain {
+		return s.delegateChain(task, resolved, triggerType, triggerID, creatorUserID, ghClient, model)
+	}
+
+	// Stamp actor_agent_id at run start. Prefer the task's stamped
+	// claim (set by router on trigger match, or by the user-delegate
+	// handler when the user drags a queued task to the bot). Falls
+	// back to GetForOrg for unclaimed tasks and manual runs. Stays
+	// empty (NULL on the row) only in the seam between db init and
+	// agent bootstrap, which is transient.
 	actorAgentID := task.ClaimedByAgentID
 	if actorAgentID == "" && s.agents != nil {
 		if a, err := s.agents.GetForOrg(context.Background(), runmode.LocalDefaultOrg); err == nil && a != nil {
 			actorAgentID = a.ID
 		}
-	}
-
-	// SKY-261 D-Claims: pair creator_user_id with trigger_type per the
-	// audit-honesty invariant. Manual runs (swipe-delegate / drag-to-
-	// Agent / factory drop) carry the local user's id as the creator.
-	// Trigger-spawned runs ('event' type) carry NULL — there's no
-	// human delegator. The schema CHECK enforces this pairing so the
-	// seeder can't drift. In multi-mode (SKY-251) the manual branch
-	// will pull from the request's auth context instead of the
-	// LocalDefaultUserID sentinel.
-	creatorUserID := ""
-	if triggerType == "manual" {
-		creatorUserID = runmode.LocalDefaultUserID
 	}
 
 	runID := uuid.New().String()
@@ -200,15 +235,10 @@ func (s *Spawner) Delegate(task domain.Task, explicitPromptID string, triggerTyp
 			verb = "Auto-fired"
 		}
 		toast.Info(s.wsHub, fmt.Sprintf("%s: %s (%s)", verb, truncateToastMsg(task.Title, 80), shortRunID(runID)))
-		s.runAgent(ctx, runID, task, mission, cfg, startTime, model, triggerType)
+		s.runAgent(ctx, runID, task, mission, cfg, startTime, model, triggerType, creatorUserID)
 	}()
 
 	return runID, nil
-}
-
-// DelegatePR is a convenience wrapper that calls Delegate for backward compatibility.
-func (s *Spawner) DelegatePR(task domain.Task, explicitPromptID string) (string, error) {
-	return s.Delegate(task, explicitPromptID, "manual", "")
 }
 
 // setupGitHub prepares a worktree for a GitHub PR task.

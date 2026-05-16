@@ -99,6 +99,11 @@ func (s *Spawner) ResumeAfterYield(runID, agentMessage string) error {
 	if triggerType == "" {
 		triggerType = "manual"
 	}
+	// Resume inherits the run's identity: manual runs route writes
+	// under the original creator's synthetic claims; event-triggered
+	// runs continue to use the admin pool. CreatorUserID is empty for
+	// event runs by schema invariant.
+	router := newWriteRouter(s, triggerType, run.CreatorUserID)
 
 	// Step 1: register the cancel handle synchronously. Once this
 	// runs, a concurrent Cancel(runID) finds the entry and calls
@@ -180,7 +185,7 @@ func (s *Spawner) ResumeAfterYield(runID, agentMessage string) error {
 			repoEnv = owner + "/" + repo
 		}
 
-		outcome, err := s.ResumeWithMessage(ctx, runID, sessionID, cwd, agentMessage, ResumeOptions{
+		outcome, err := s.ResumeWithMessage(ctx, router, runID, sessionID, cwd, agentMessage, ResumeOptions{
 			Model:             model,
 			RepoEnv:           repoEnv,
 			ExtraAllowedTools: extraTools,
@@ -201,7 +206,7 @@ func (s *Spawner) ResumeAfterYield(runID, agentMessage string) error {
 			return
 		}
 
-		s.processCompletion(ctx, runID, taskCopy, outcome.Completion, cwd, sessionID, model, owner, repo, triggerType, extraTools)
+		s.processCompletion(ctx, router, runID, taskCopy, outcome.Completion, cwd, sessionID, model, owner, repo, triggerType, extraTools)
 	}()
 	return nil
 }
@@ -275,7 +280,7 @@ type ResumeOutcome struct {
 // gives up. Mirroring the initial invocation's status updates here
 // would produce double CompleteAgentRun writes with stale
 // cost/duration fields overwriting the real totals.
-func (s *Spawner) ResumeWithMessage(ctx context.Context, runID, sessionID, cwd, message string, opts ResumeOptions) (*ResumeOutcome, error) {
+func (s *Spawner) ResumeWithMessage(ctx context.Context, router *writeRouter, runID, sessionID, cwd, message string, opts ResumeOptions) (*ResumeOutcome, error) {
 	if sessionID == "" {
 		return nil, fmt.Errorf("resume: missing session id")
 	}
@@ -329,7 +334,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, runID, sessionID, cwd, 
 		MaxTurns:     100,
 		ExtraEnv:     extraEnv,
 		TraceID:      runID,
-	}, newRunSink(s, runID))
+	}, newRunSink(s, router, runID))
 
 	outcome := &ResumeOutcome{}
 	if apOutcome != nil {

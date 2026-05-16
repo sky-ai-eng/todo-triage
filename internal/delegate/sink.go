@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -20,6 +21,7 @@ import (
 // servicing many runs concurrently.
 type runSink struct {
 	spawner *Spawner
+	router  *writeRouter
 	runID   string
 
 	// sessionDelivered suppresses repeated OnSession handling within
@@ -32,8 +34,8 @@ type runSink struct {
 	sessionDelivered bool
 }
 
-func newRunSink(s *Spawner, runID string) *runSink {
-	return &runSink{spawner: s, runID: runID}
+func newRunSink(s *Spawner, router *writeRouter, runID string) *runSink {
+	return &runSink{spawner: s, router: router, runID: runID}
 }
 
 // OnSession persists the captured session_id and re-broadcasts the
@@ -46,7 +48,20 @@ func (k *runSink) OnSession(sessionID string) error {
 		return nil
 	}
 	k.sessionDelivered = true
-	if err := k.spawner.agentRuns.SetSession(context.Background(), runmode.LocalDefaultOrg, k.runID, sessionID); err != nil {
+	// Per-message tx for manual (synthetic-claims under user
+	// identity); direct admin-pool System call for event runs. The
+	// long-running stream rules out a goroutine-lifetime tx —
+	// SyntheticClaimsWithTx scopes the JWT claims to one Postgres
+	// connection's transaction, which the agent subprocess would
+	// stream past on the next OnMessage.
+	bgCtx := context.Background()
+	if ok, err := k.router.manualBatch(bgCtx, func(ts db.TxStores) error {
+		return ts.AgentRuns.SetSession(bgCtx, runmode.LocalDefaultOrg, k.runID, sessionID)
+	}); ok {
+		if err != nil {
+			return fmt.Errorf("persist session_id: %w", err)
+		}
+	} else if err := k.spawner.agentRuns.SetSessionSystem(bgCtx, runmode.LocalDefaultOrg, k.runID, sessionID); err != nil {
 		return fmt.Errorf("persist session_id: %w", err)
 	}
 	k.spawner.broadcastRunUpdate(k.runID, "running")
@@ -58,9 +73,25 @@ func (k *runSink) OnSession(sessionID string) error {
 // are returned to agentproc, which logs and continues — losing one
 // row is preferable to abandoning the run.
 func (k *runSink) OnMessage(msg *domain.AgentMessage) error {
-	id, err := k.spawner.agentRuns.InsertMessage(context.Background(), runmode.LocalDefaultOrg, msg)
-	if err != nil {
-		return fmt.Errorf("insert message: %w", err)
+	bgCtx := context.Background()
+	var id int64
+	if ok, batchErr := k.router.manualBatch(bgCtx, func(ts db.TxStores) error {
+		i, ierr := ts.AgentRuns.InsertMessage(bgCtx, runmode.LocalDefaultOrg, msg)
+		if ierr != nil {
+			return ierr
+		}
+		id = i
+		return nil
+	}); ok {
+		if batchErr != nil {
+			return fmt.Errorf("insert message: %w", batchErr)
+		}
+	} else {
+		i, ierr := k.spawner.agentRuns.InsertMessageSystem(bgCtx, runmode.LocalDefaultOrg, msg)
+		if ierr != nil {
+			return fmt.Errorf("insert message: %w", ierr)
+		}
+		id = i
 	}
 	msg.ID = int(id)
 	k.spawner.broadcastMessage(k.runID, msg)

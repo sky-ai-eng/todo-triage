@@ -10,6 +10,7 @@ import (
 	"time"
 
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
@@ -23,17 +24,18 @@ type stubDelegator struct {
 	calls int64
 }
 
-func (s *stubDelegator) Delegate(task domain.Task, promptID, triggerType, triggerID string) (string, error) {
+func (s *stubDelegator) Delegate(task domain.Task, opts delegate.DelegateOpts) (string, error) {
 	atomic.AddInt64(&s.calls, 1)
 	runID := fmt.Sprintf("stub-run-%d", time.Now().UnixNano())
 	if err := sqlitestore.New(s.db).AgentRuns.Create(context.Background(), runmode.LocalDefaultOrg, domain.AgentRun{
-		ID:          runID,
-		TaskID:      task.ID,
-		PromptID:    promptID,
-		Status:      "running",
-		Model:       "stub",
-		TriggerType: triggerType,
-		TriggerID:   triggerID,
+		ID:            runID,
+		TaskID:        task.ID,
+		PromptID:      opts.ExplicitPromptID,
+		Status:        "running",
+		Model:         "stub",
+		TriggerType:   opts.TriggerType,
+		TriggerID:     opts.TriggerID,
+		CreatorUserID: opts.CreatorUserID,
 	}); err != nil {
 		return "", err
 	}

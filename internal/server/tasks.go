@@ -9,6 +9,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/config"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
@@ -478,7 +479,11 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 	if req.Action == "delegate" && s.spawner != nil {
 		task, err := s.tasks.Get(r.Context(), runmode.LocalDefaultOrg, id)
 		if err == nil && task != nil {
-			runID, err := s.spawner.Delegate(*task, req.PromptID, "manual", "")
+			runID, err := s.spawner.Delegate(*task, delegate.DelegateOpts{
+				ExplicitPromptID: req.PromptID,
+				TriggerType:      "manual",
+				CreatorUserID:    runmode.LocalDefaultUserID,
+			})
 			if err != nil {
 				response["delegate_error"] = err.Error()
 			} else {

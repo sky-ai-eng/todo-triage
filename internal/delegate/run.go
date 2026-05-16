@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
@@ -22,7 +23,14 @@ import (
 )
 
 // runAgent is the generic agent execution loop. Works for any task type.
-func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, mission string, cfg runConfig, startTime time.Time, model string, triggerType string) {
+//
+// creatorUserID carries the user identity for manual runs; it's the
+// synthetic-claims subject the goroutine's write batches run under so
+// RLS policies on the writes pass under tf_app. Empty for event-
+// triggered runs (those write through the admin-pool `...System`
+// methods, no JWT-claims context).
+func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, mission string, cfg runConfig, startTime time.Time, model string, triggerType string, creatorUserID string) {
+	router := newWriteRouter(s, triggerType, creatorUserID)
 	if cfg.hasWT {
 		// GitHub PR cleanup. Best-effort cleanup on return; the worktree ID is unique per run
 		// so a failed remove just leaves a dangling directory under _worktrees.
@@ -182,7 +190,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 		ExtraEnv:     extraEnv,
 		TraceID:      runID,
 		SystemPrompt: cfg.appendSysPrompt,
-	}, newRunSink(s, runID))
+	}, newRunSink(s, router, runID))
 
 	// If Takeover() flipped the takenOver flag while we were streaming,
 	// every code path below — completion ingestion, status updates, fail
@@ -193,7 +201,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	}
 
 	if outcome != nil && outcome.Result != nil {
-		s.processCompletion(ctx, runID, task, outcome.Result, claudeCwd, outcome.SessionID, model, cfg.owner, cfg.repo, triggerType, cfg.extraAllowedTools)
+		s.processCompletion(ctx, router, runID, task, outcome.Result, claudeCwd, outcome.SessionID, model, cfg.owner, cfg.repo, triggerType, cfg.extraAllowedTools)
 		return
 	}
 
@@ -226,6 +234,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 // operates on the parsed completion.
 func (s *Spawner) processCompletion(
 	ctx context.Context,
+	router *writeRouter,
 	runID string,
 	task domain.Task,
 	completion *agentproc.Result,
@@ -243,7 +252,7 @@ func (s *Spawner) processCompletion(
 	// not an intentional pause.
 	if !completion.IsError {
 		if parsed := parseAgentResult(completion.Result); parsed != nil && parsed.Status == "yield" && parsed.Yield != nil {
-			if err := s.persistYield(runID, parsed.Yield, completion); err != nil {
+			if err := s.persistYield(ctx, router, runID, parsed.Yield, completion); err != nil {
 				log.Printf("[delegate] failed to persist yield for run %s: %v", runID, err)
 				s.failRun(runID, task.ID, triggerType, "failed to record yield: "+err.Error())
 			}
@@ -266,7 +275,7 @@ func (s *Spawner) processCompletion(
 	if owner != "" && repo != "" {
 		repoEnv = owner + "/" + repo
 	}
-	completion = s.runMemoryGate(ctx, runID, task.ID, claudeCwd, completion, sessionID, model, repoEnv, extraAllowedTools)
+	completion = s.runMemoryGate(ctx, router, runID, task.ID, claudeCwd, completion, sessionID, model, repoEnv, extraAllowedTools)
 
 	// Unconditional upsert of the run_memory row at termination
 	// (SKY-204): row presence === "termination passed through the
@@ -300,7 +309,16 @@ func (s *Spawner) processCompletion(
 			status = "task_unsolvable"
 		}
 	}
-	if err := s.agentRuns.Complete(context.Background(), runmode.LocalDefaultOrg, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultSummary); err != nil {
+	// Detached context: the run's ctx may have been cancelled (user
+	// cancel mid-stream) but the terminal write still needs to record.
+	bgCtx := context.Background()
+	if ok, err := router.manualBatch(bgCtx, func(ts db.TxStores) error {
+		return ts.AgentRuns.Complete(bgCtx, runmode.LocalDefaultOrg, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultSummary)
+	}); ok {
+		if err != nil {
+			log.Printf("[delegate] warning: failed to record completion for run %s: %v", runID, err)
+		}
+	} else if err := s.agentRuns.CompleteSystem(bgCtx, runmode.LocalDefaultOrg, runID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, completion.StopReason, resultSummary); err != nil {
 		log.Printf("[delegate] warning: failed to record completion for run %s: %v", runID, err)
 	}
 
@@ -339,14 +357,18 @@ func (s *Spawner) processCompletion(
 		// the pending_reviews row strands outside the approval queue.
 		// Matches the agentRuns.Complete(context.Background(), ...)
 		// pattern above — terminal-bookkeeping survives cancellation.
-		if pendingReview, _ := s.reviews.ByRunID(context.Background(), runmode.LocalDefaultOrgID, runID); pendingReview != nil {
+		// Side-table lookups use admin-pool System variants — no JWT
+		// claims in scope at this point in the goroutine, and the
+		// pending-approval bookkeeping survives ctx cancellation
+		// (matches the agentRuns.Complete pattern above).
+		if pendingReview, _ := s.reviews.ByRunIDSystem(bgCtx, runmode.LocalDefaultOrgID, runID); pendingReview != nil {
 			hasPending = true
-		} else if pendingPR, _ := s.pendingPRs.ByRunID(context.Background(), runmode.LocalDefaultOrgID, runID); pendingPR != nil {
+		} else if pendingPR, _ := s.pendingPRs.ByRunIDSystem(bgCtx, runmode.LocalDefaultOrgID, runID); pendingPR != nil {
 			hasPending = true
 		}
 		if hasPending {
 			if s.isNonFinalChainStep(runID) {
-				verdict, _ := s.chains.GetLatestVerdict(ctx, runmode.LocalDefaultOrg, runID)
+				verdict, _ := s.chains.GetLatestVerdictSystem(bgCtx, runmode.LocalDefaultOrg, runID)
 				if verdict == nil || verdict.Outcome != domain.ChainVerdictFinal {
 					synthetic := domain.ChainVerdict{
 						Outcome:   domain.ChainVerdictFinal,
@@ -354,7 +376,16 @@ func (s *Spawner) processCompletion(
 						Synthetic: true,
 					}
 					if payload, err := json.Marshal(synthetic); err == nil {
-						if insertErr := s.chains.InsertVerdict(ctx, runmode.LocalDefaultOrg, runID, string(payload)); insertErr != nil {
+						payloadStr := string(payload)
+						var insertErr error
+						if ok, batchErr := router.manualBatch(bgCtx, func(ts db.TxStores) error {
+							return ts.Chains.InsertVerdict(bgCtx, runmode.LocalDefaultOrg, runID, payloadStr)
+						}); ok {
+							insertErr = batchErr
+						} else {
+							insertErr = s.chains.InsertVerdictSystem(bgCtx, runmode.LocalDefaultOrg, runID, payloadStr)
+						}
+						if insertErr != nil {
 							log.Printf("[delegate] warning: insert synthetic --final verdict for run %s: %v", runID, insertErr)
 						} else {
 							log.Printf("[delegate] run %s: non-final chain step submitted pending artifact; auto-promoted verdict to --final", runID)
@@ -366,10 +397,20 @@ func (s *Spawner) processCompletion(
 			// row is still 'completed'. A racing cancel/takeover after
 			// agentRuns.Complete would otherwise be silently clobbered
 			// by an unconditional UPDATE.
-			ok, err := s.agentRuns.MarkPendingApprovalIfCompletedSystem(context.Background(), runmode.LocalDefaultOrg, runID)
-			if err != nil {
-				log.Printf("[delegate] warning: failed to set pending_approval for run %s: %v", runID, err)
-			} else if ok {
+			var flippedToPending bool
+			var flipErr error
+			if ok, batchErr := router.manualBatch(bgCtx, func(ts db.TxStores) error {
+				f, ferr := ts.AgentRuns.MarkPendingApprovalIfCompleted(bgCtx, runmode.LocalDefaultOrg, runID)
+				flippedToPending = f
+				return ferr
+			}); ok {
+				flipErr = batchErr
+			} else {
+				flippedToPending, flipErr = s.agentRuns.MarkPendingApprovalIfCompletedSystem(bgCtx, runmode.LocalDefaultOrg, runID)
+			}
+			if flipErr != nil {
+				log.Printf("[delegate] warning: failed to set pending_approval for run %s: %v", runID, flipErr)
+			} else if flippedToPending {
 				status = "pending_approval"
 			}
 		}
@@ -389,14 +430,22 @@ func (s *Spawner) processCompletion(
 		//    the active-run check because the chain orchestrator creates
 		//    them sequentially (step N+1's row doesn't exist yet when
 		//    step N completes).
-		run, _ := s.agentRuns.GetSystem(context.Background(), runmode.LocalDefaultOrg, runID)
+		run, _ := s.agentRuns.GetSystem(bgCtx, runmode.LocalDefaultOrg, runID)
 		if run != nil && run.ChainRunID != "" {
 			// Chain step — skip; terminateChain handles task closure.
 		} else {
-			hasOtherActiveRun, _ := s.agentRuns.HasOtherActiveRunForTaskSystem(context.Background(), runmode.LocalDefaultOrg, task.ID, runID)
+			hasOtherActiveRun, _ := s.agentRuns.HasOtherActiveRunForTaskSystem(bgCtx, runmode.LocalDefaultOrg, task.ID, runID)
 			if !hasOtherActiveRun {
-				if err := s.tasks.SetStatusSystem(context.Background(), runmode.LocalDefaultOrg, task.ID, "done"); err != nil {
-					log.Printf("[delegate] warning: failed to update task %s to done: %v", task.ID, err)
+				var setErr error
+				if ok, batchErr := router.manualBatch(bgCtx, func(ts db.TxStores) error {
+					return ts.Tasks.SetStatus(bgCtx, runmode.LocalDefaultOrg, task.ID, "done")
+				}); ok {
+					setErr = batchErr
+				} else {
+					setErr = s.tasks.SetStatusSystem(bgCtx, runmode.LocalDefaultOrg, task.ID, "done")
+				}
+				if setErr != nil {
+					log.Printf("[delegate] warning: failed to update task %s to done: %v", task.ID, setErr)
 				}
 			}
 		}
@@ -428,20 +477,61 @@ func (s *Spawner) processCompletion(
 // yield_request message for transcript completeness but skip the
 // status flip and the toast. The terminal status the racing path set
 // stands.
-func (s *Spawner) persistYield(runID string, req *domain.YieldRequest, completion *agentproc.Result) error {
-	if err := s.agentRuns.AddPartialTotals(context.Background(), runmode.LocalDefaultOrg, runID, completion.CostUSD, completion.DurationMs, completion.NumTurns); err != nil {
+func (s *Spawner) persistYield(_ context.Context, router *writeRouter, runID string, req *domain.YieldRequest, completion *agentproc.Result) error {
+	// Detached context — yield bookkeeping must survive ctx cancel
+	// (a user cancel mid-yield-emit still needs the transcript
+	// row recorded for audit).
+	bgCtx := context.Background()
+
+	if ok, err := router.manualBatch(bgCtx, func(ts db.TxStores) error {
+		return ts.AgentRuns.AddPartialTotals(bgCtx, runmode.LocalDefaultOrg, runID, completion.CostUSD, completion.DurationMs, completion.NumTurns)
+	}); ok {
+		if err != nil {
+			log.Printf("[delegate] warning: failed to record partial totals for run %s: %v", runID, err)
+		}
+	} else if err := s.agentRuns.AddPartialTotalsSystem(bgCtx, runmode.LocalDefaultOrg, runID, completion.CostUSD, completion.DurationMs, completion.NumTurns); err != nil {
 		log.Printf("[delegate] warning: failed to record partial totals for run %s: %v", runID, err)
 	}
 
-	msg, err := s.agentRuns.InsertYieldRequest(context.Background(), runmode.LocalDefaultOrg, runID, req)
-	if err != nil {
-		return fmt.Errorf("insert yield request: %w", err)
+	var msg *domain.AgentMessage
+	if ok, batchErr := router.manualBatch(bgCtx, func(ts db.TxStores) error {
+		m, ierr := ts.AgentRuns.InsertYieldRequest(bgCtx, runmode.LocalDefaultOrg, runID, req)
+		if ierr != nil {
+			return ierr
+		}
+		msg = m
+		return nil
+	}); ok {
+		if batchErr != nil {
+			return fmt.Errorf("insert yield request: %w", batchErr)
+		}
+	} else {
+		m, ierr := s.agentRuns.InsertYieldRequestSystem(bgCtx, runmode.LocalDefaultOrg, runID, req)
+		if ierr != nil {
+			return fmt.Errorf("insert yield request: %w", ierr)
+		}
+		msg = m
 	}
 	s.broadcastMessage(runID, msg)
 
-	flipped, err := s.agentRuns.MarkAwaitingInput(context.Background(), runmode.LocalDefaultOrg, runID)
-	if err != nil {
-		return fmt.Errorf("mark awaiting_input: %w", err)
+	var flipped bool
+	if ok, batchErr := router.manualBatch(bgCtx, func(ts db.TxStores) error {
+		f, ferr := ts.AgentRuns.MarkAwaitingInput(bgCtx, runmode.LocalDefaultOrg, runID)
+		if ferr != nil {
+			return ferr
+		}
+		flipped = f
+		return nil
+	}); ok {
+		if batchErr != nil {
+			return fmt.Errorf("mark awaiting_input: %w", batchErr)
+		}
+	} else {
+		f, ferr := s.agentRuns.MarkAwaitingInputSystem(bgCtx, runmode.LocalDefaultOrg, runID)
+		if ferr != nil {
+			return fmt.Errorf("mark awaiting_input: %w", ferr)
+		}
+		flipped = f
 	}
 	if !flipped {
 		// Terminal status was already set by a racing path (cancel,

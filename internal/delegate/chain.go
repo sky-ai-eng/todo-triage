@@ -38,7 +38,7 @@ var chainStepSystemPrompt string
 // the caller already has the chain_run id and the UI subscribes to
 // the chain row by id, so a synchronous error wouldn't be reflected
 // anywhere visible.
-func (s *Spawner) delegateChain(task domain.Task, chainPrompt *domain.Prompt, triggerType, triggerID string, gh *ghclient.Client, model string) (string, error) {
+func (s *Spawner) delegateChain(task domain.Task, chainPrompt *domain.Prompt, triggerType, triggerID, creatorUserID string, gh *ghclient.Client, model string) (string, error) {
 	steps, err := s.chains.ListSteps(context.Background(), runmode.LocalDefaultOrg, chainPrompt.ID)
 	if err != nil {
 		return "", fmt.Errorf("load chain steps: %w", err)
@@ -129,7 +129,7 @@ func (s *Spawner) delegateChain(task domain.Task, chainPrompt *domain.Prompt, tr
 		toast.Info(s.wsHub, fmt.Sprintf("%s: %s (%s)",
 			verb, truncateToastMsg(chainPrompt.Name, 60), shortRunID(chainRunID)))
 
-		s.runChain(ctx, chainRunID, task, chainPrompt, steps, cfg, startTime, model, triggerType)
+		s.runChain(ctx, chainRunID, task, chainPrompt, steps, cfg, startTime, model, triggerType, creatorUserID)
 	}()
 
 	return chainRunID, nil
@@ -156,6 +156,7 @@ func (s *Spawner) runChain(
 	startTime time.Time,
 	model string,
 	triggerType string,
+	creatorUserID string,
 ) {
 	if len(steps) == 0 {
 		s.terminateChain(chainRunID, task.ID, triggerType, startTime, cfg, domain.ChainRunStatusFailed,
@@ -244,7 +245,7 @@ func (s *Spawner) runChain(
 		toast.Info(s.wsHub, fmt.Sprintf("Chain step %d/%d: %s (%s)",
 			i+1, len(steps), truncateToastMsg(stepPrompt.Name, 60), shortRunID(stepRunID)))
 
-		s.runAgent(stepCtx, stepRunID, task, mission, stepCfg, time.Now(), model, triggerType)
+		s.runAgent(stepCtx, stepRunID, task, mission, stepCfg, time.Now(), model, triggerType, creatorUserID)
 
 		// Clear the cancel handle now that the step has returned.
 		s.mu.Lock()
