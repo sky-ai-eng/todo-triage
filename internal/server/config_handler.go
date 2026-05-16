@@ -107,7 +107,7 @@ func (s *Server) softPeekUser(r *http.Request) (configResponseUser, bool) {
 	if err != nil {
 		return configResponseUser{}, false
 	}
-	sess, err := s.authDeps.sessions.Lookup(r.Context(), sid)
+	sess, err := s.authDeps.sessions.LookupSystem(r.Context(), sid)
 	if err != nil {
 		log.Printf("[config] soft session lookup: %v", err)
 		return configResponseUser{}, false

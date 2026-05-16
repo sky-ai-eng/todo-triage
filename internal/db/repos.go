@@ -98,4 +98,7 @@ type RepoStore interface {
 	ListSystem(ctx context.Context, orgID string) ([]domain.RepoProfile, error)
 	ListConfiguredNamesSystem(ctx context.Context, orgID string) ([]string, error)
 	UpdateCloneStatusSystem(ctx context.Context, orgID, owner, repo, status, errMsg, errKind string) error
+	CountConfiguredSystem(ctx context.Context, orgID string) (int, error)
+	GetSystem(ctx context.Context, orgID, repoID string) (*domain.RepoProfile, error)
+	UpsertSystem(ctx context.Context, orgID string, p domain.RepoProfile) error
 }

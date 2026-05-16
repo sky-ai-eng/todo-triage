@@ -246,6 +246,18 @@ func (s *repoStore) UpdateCloneStatusSystem(ctx context.Context, orgID, owner, r
 	return s.UpdateCloneStatus(ctx, orgID, owner, repo, status, errMsg, errKind)
 }
 
+func (s *repoStore) CountConfiguredSystem(ctx context.Context, orgID string) (int, error) {
+	return s.CountConfigured(ctx, orgID)
+}
+
+func (s *repoStore) GetSystem(ctx context.Context, orgID, repoID string) (*domain.RepoProfile, error) {
+	return s.Get(ctx, orgID, repoID)
+}
+
+func (s *repoStore) UpsertSystem(ctx context.Context, orgID string, p domain.RepoProfile) error {
+	return s.Upsert(ctx, orgID, p)
+}
+
 // rowScanner is the common Scan surface of *sql.Row and *sql.Rows.
 // We need both because Get scans a single row from QueryRowContext
 // while List scans repeatedly from QueryContext.

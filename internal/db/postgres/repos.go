@@ -55,11 +55,19 @@ func newRepoStore(q, admin queryer) db.RepoStore {
 var _ db.RepoStore = (*repoStore)(nil)
 
 func (s *repoStore) Upsert(ctx context.Context, orgID string, p domain.RepoProfile) error {
+	return upsertRepoProfile(ctx, s.q, orgID, p)
+}
+
+func (s *repoStore) UpsertSystem(ctx context.Context, orgID string, p domain.RepoProfile) error {
+	return upsertRepoProfile(ctx, s.admin, orgID, p)
+}
+
+func upsertRepoProfile(ctx context.Context, q queryer, orgID string, p domain.RepoProfile) error {
 	// On conflict refresh profiling metadata only — base_branch and
 	// clone-status fields are user/clone-hook owned and shouldn't be
 	// clobbered by a re-profile. Matches the SQLite impl's exclude
 	// list verbatim.
-	_, err := s.q.ExecContext(ctx, `
+	_, err := q.ExecContext(ctx, `
 		INSERT INTO repo_profiles
 		  (org_id, owner, repo, description, has_readme, has_claude_md, has_agents_md,
 		   profile_text, clone_url, default_branch, profiled_at)
@@ -242,8 +250,16 @@ func listConfiguredRepoNames(ctx context.Context, q queryer, orgID string) ([]st
 }
 
 func (s *repoStore) CountConfigured(ctx context.Context, orgID string) (int, error) {
+	return countConfiguredRepos(ctx, s.q, orgID)
+}
+
+func (s *repoStore) CountConfiguredSystem(ctx context.Context, orgID string) (int, error) {
+	return countConfiguredRepos(ctx, s.admin, orgID)
+}
+
+func countConfiguredRepos(ctx context.Context, q queryer, orgID string) (int, error) {
 	var count int
-	err := s.q.QueryRowContext(ctx,
+	err := q.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM repo_profiles WHERE org_id = $1`, orgID,
 	).Scan(&count)
 	return count, err
@@ -263,11 +279,19 @@ func (s *repoStore) UpdateBaseBranch(ctx context.Context, orgID, repoID, baseBra
 }
 
 func (s *repoStore) Get(ctx context.Context, orgID, repoID string) (*domain.RepoProfile, error) {
+	return getRepoProfile(ctx, s.q, orgID, repoID)
+}
+
+func (s *repoStore) GetSystem(ctx context.Context, orgID, repoID string) (*domain.RepoProfile, error) {
+	return getRepoProfile(ctx, s.admin, orgID, repoID)
+}
+
+func getRepoProfile(ctx context.Context, q queryer, orgID, repoID string) (*domain.RepoProfile, error) {
 	owner, repo := splitRepoSlug(repoID)
 	if owner == "" || repo == "" {
 		return nil, nil
 	}
-	row := s.q.QueryRowContext(ctx, `
+	row := q.QueryRowContext(ctx, `
 		SELECT owner, repo, description, has_readme, has_claude_md, has_agents_md,
 		       profile_text, clone_url, default_branch, base_branch, profiled_at,
 		       clone_status, clone_error, clone_error_kind
