@@ -88,7 +88,7 @@ func (p *Profiler) Run(ctx context.Context, repos []string, force bool) error {
 
 		// Skip repos that were recently profiled (unless forced)
 		if !force {
-			existing, err := p.repos.Get(ctx, runmode.LocalDefaultOrgID, name)
+			existing, err := p.repos.GetSystem(ctx, runmode.LocalDefaultOrgID, name)
 			if err != nil {
 				log.Printf("[repoprofile] %s: failed to check profile: %v", name, err)
 				continue
@@ -146,7 +146,7 @@ func (p *Profiler) Run(ctx context.Context, repos []string, force bool) error {
 		}
 
 		// Persist docs flags immediately so the UI can show them before profiling completes
-		if err := p.repos.Upsert(ctx, runmode.LocalDefaultOrgID, prof); err != nil {
+		if err := p.repos.UpsertSystem(ctx, runmode.LocalDefaultOrgID, prof); err != nil {
 			log.Printf("[repoprofile] upsert %s (docs flags): %v", name, err)
 		}
 		if p.ws != nil {
@@ -194,7 +194,7 @@ func (p *Profiler) Run(ctx context.Context, repos []string, force bool) error {
 			toast.Warning(p.ws, fmt.Sprintf("Profiling failed for %s — rows saved without AI summary", strings.Join(repoNames, ", ")))
 			// Fallback: upsert without profile_text so the row at least exists.
 			for _, d := range batch {
-				if uErr := p.repos.Upsert(ctx, runmode.LocalDefaultOrgID, d.profile); uErr != nil {
+				if uErr := p.repos.UpsertSystem(ctx, runmode.LocalDefaultOrgID, d.profile); uErr != nil {
 					log.Printf("[repoprofile] upsert %s (fallback): %v", d.profile.ID, uErr)
 				}
 			}
@@ -213,7 +213,7 @@ func (p *Profiler) Run(ctx context.Context, repos []string, force bool) error {
 				prof.ProfileText = text
 				prof.ProfiledAt = &now
 			}
-			if err := p.repos.Upsert(ctx, runmode.LocalDefaultOrgID, prof); err != nil {
+			if err := p.repos.UpsertSystem(ctx, runmode.LocalDefaultOrgID, prof); err != nil {
 				log.Printf("[repoprofile] upsert %s: %v", prof.ID, err)
 				continue
 			}

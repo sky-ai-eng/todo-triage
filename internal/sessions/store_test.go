@@ -52,7 +52,7 @@ func TestStore_CreateLookupRoundtrip(t *testing.T) {
 	jwtExp := time.Now().Add(1 * time.Hour).UTC()
 	sessExp := time.Now().Add(30 * 24 * time.Hour).UTC()
 
-	created, err := store.Create(ctx, uid, jwt, refresh, jwtExp, sessExp, "test-ua", "127.0.0.1")
+	created, err := store.CreateSystem(ctx, uid, jwt, refresh, jwtExp, sessExp, "test-ua", "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestStore_CreateLookupRoundtrip(t *testing.T) {
 		t.Fatal("Create returned nil id")
 	}
 
-	got, err := store.Lookup(ctx, created.ID)
+	got, err := store.LookupSystem(ctx, created.ID)
 	if err != nil {
 		t.Fatalf("Lookup: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestStore_CiphertextAtRest(t *testing.T) {
 	ctx := context.Background()
 
 	plainJWT := "header.payload.signature"
-	created, err := store.Create(ctx, uid, plainJWT, "ref",
+	created, err := store.CreateSystem(ctx, uid, plainJWT, "ref",
 		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "", "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -121,7 +121,7 @@ func TestStore_CiphertextAtRest(t *testing.T) {
 
 func TestStore_Lookup_NotFound(t *testing.T) {
 	store, _, _ := newStoreForTest(t)
-	got, err := store.Lookup(context.Background(), uuid.New())
+	got, err := store.LookupSystem(context.Background(), uuid.New())
 	if err != nil {
 		t.Fatalf("Lookup: %v", err)
 	}
@@ -133,15 +133,15 @@ func TestStore_Lookup_NotFound(t *testing.T) {
 func TestStore_Lookup_FiltersRevoked(t *testing.T) {
 	store, _, uid := newStoreForTest(t)
 	ctx := context.Background()
-	c, err := store.Create(ctx, uid, "j", "r",
+	c, err := store.CreateSystem(ctx, uid, "j", "r",
 		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "", "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := store.Revoke(ctx, c.ID); err != nil {
+	if err := store.RevokeSystem(ctx, c.ID); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
-	got, err := store.Lookup(ctx, c.ID)
+	got, err := store.LookupSystem(ctx, c.ID)
 	if err != nil {
 		t.Fatalf("Lookup: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestStore_Lookup_FiltersExpired(t *testing.T) {
 	// still future, expires_at in the past forces re-login.
 	store, h, uid := newStoreForTest(t)
 	ctx := context.Background()
-	c, err := store.Create(ctx, uid, "j", "r",
+	c, err := store.CreateSystem(ctx, uid, "j", "r",
 		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "", "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -172,7 +172,7 @@ func TestStore_Lookup_FiltersExpired(t *testing.T) {
 		 WHERE id = $1`, c.ID); err != nil {
 		t.Fatalf("backdate: %v", err)
 	}
-	got, err := store.Lookup(ctx, c.ID)
+	got, err := store.LookupSystem(ctx, c.ID)
 	if err != nil {
 		t.Fatalf("Lookup: %v", err)
 	}
@@ -184,18 +184,18 @@ func TestStore_Lookup_FiltersExpired(t *testing.T) {
 func TestStore_UpdateJWT(t *testing.T) {
 	store, _, uid := newStoreForTest(t)
 	ctx := context.Background()
-	c, err := store.Create(ctx, uid, "old-jwt", "old-ref",
+	c, err := store.CreateSystem(ctx, uid, "old-jwt", "old-ref",
 		time.Now().Add(1*time.Minute), time.Now().Add(24*time.Hour), "", "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
 	newExp := time.Now().Add(2 * time.Hour).UTC()
-	if err := store.UpdateJWT(ctx, c.ID, "new-jwt", "new-ref", newExp); err != nil {
+	if err := store.UpdateJWTSystem(ctx, c.ID, "new-jwt", "new-ref", newExp); err != nil {
 		t.Fatalf("UpdateJWT: %v", err)
 	}
 
-	got, err := store.Lookup(ctx, c.ID)
+	got, err := store.LookupSystem(ctx, c.ID)
 	if err != nil {
 		t.Fatalf("Lookup: %v", err)
 	}
@@ -213,15 +213,15 @@ func TestStore_UpdateJWT(t *testing.T) {
 func TestStore_UpdateJWT_OnRevokedReturnsErr(t *testing.T) {
 	store, _, uid := newStoreForTest(t)
 	ctx := context.Background()
-	c, err := store.Create(ctx, uid, "j", "r",
+	c, err := store.CreateSystem(ctx, uid, "j", "r",
 		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "", "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := store.Revoke(ctx, c.ID); err != nil {
+	if err := store.RevokeSystem(ctx, c.ID); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
-	err = store.UpdateJWT(ctx, c.ID, "x", "y", time.Now().Add(1*time.Hour))
+	err = store.UpdateJWTSystem(ctx, c.ID, "x", "y", time.Now().Add(1*time.Hour))
 	if !errors.Is(err, ErrSessionGone) {
 		t.Fatalf("expected ErrSessionGone, got %v", err)
 	}
@@ -231,12 +231,12 @@ func TestStore_Revoke_PreservesRow(t *testing.T) {
 	// Acceptance bullet: logout flips revoked_at; row persists for audit.
 	store, h, uid := newStoreForTest(t)
 	ctx := context.Background()
-	c, err := store.Create(ctx, uid, "j", "r",
+	c, err := store.CreateSystem(ctx, uid, "j", "r",
 		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "", "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := store.Revoke(ctx, c.ID); err != nil {
+	if err := store.RevokeSystem(ctx, c.ID); err != nil {
 		t.Fatalf("Revoke: %v", err)
 	}
 	var revokedAt sql.NullTime
@@ -253,15 +253,15 @@ func TestStore_Revoke_PreservesRow(t *testing.T) {
 func TestStore_Revoke_Idempotent(t *testing.T) {
 	store, _, uid := newStoreForTest(t)
 	ctx := context.Background()
-	c, err := store.Create(ctx, uid, "j", "r",
+	c, err := store.CreateSystem(ctx, uid, "j", "r",
 		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "", "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := store.Revoke(ctx, c.ID); err != nil {
+	if err := store.RevokeSystem(ctx, c.ID); err != nil {
 		t.Fatalf("Revoke #1: %v", err)
 	}
-	if err := store.Revoke(ctx, c.ID); err != nil {
+	if err := store.RevokeSystem(ctx, c.ID); err != nil {
 		t.Fatalf("Revoke #2: %v", err)
 	}
 }
@@ -269,7 +269,7 @@ func TestStore_Revoke_Idempotent(t *testing.T) {
 func TestStore_TouchLastSeen(t *testing.T) {
 	store, h, uid := newStoreForTest(t)
 	ctx := context.Background()
-	c, err := store.Create(ctx, uid, "j", "r",
+	c, err := store.CreateSystem(ctx, uid, "j", "r",
 		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "", "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -279,7 +279,7 @@ func TestStore_TouchLastSeen(t *testing.T) {
 		`UPDATE public.sessions SET last_seen_at = now() - interval '1 hour' WHERE id = $1`, c.ID); err != nil {
 		t.Fatalf("backdate: %v", err)
 	}
-	if err := store.TouchLastSeen(ctx, c.ID); err != nil {
+	if err := store.TouchLastSeenSystem(ctx, c.ID); err != nil {
 		t.Fatalf("TouchLastSeen: %v", err)
 	}
 	var lastSeen time.Time
@@ -300,22 +300,22 @@ func TestStore_ListActiveForUser_AndRevokeAll(t *testing.T) {
 	// Three sessions for the same user. Mix of states:
 	//   active1, active2 — show up in ListActive
 	//   revoked          — pre-revoked, filtered out
-	active1, _ := store.Create(ctx, uid, "jwt-1", "ref-1",
+	active1, _ := store.CreateSystem(ctx, uid, "jwt-1", "ref-1",
 		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "ua-1", "1.1.1.1")
-	active2, _ := store.Create(ctx, uid, "jwt-2", "ref-2",
+	active2, _ := store.CreateSystem(ctx, uid, "jwt-2", "ref-2",
 		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "ua-2", "2.2.2.2")
-	revoked, _ := store.Create(ctx, uid, "jwt-3", "ref-3",
+	revoked, _ := store.CreateSystem(ctx, uid, "jwt-3", "ref-3",
 		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "", "")
-	if err := store.Revoke(ctx, revoked.ID); err != nil {
+	if err := store.RevokeSystem(ctx, revoked.ID); err != nil {
 		t.Fatalf("pre-revoke: %v", err)
 	}
 
 	// Another user's session — must NOT appear in our list.
 	other := seedUser(t, h)
-	otherSess, _ := store.Create(ctx, other, "jwt-other", "ref-other",
+	otherSess, _ := store.CreateSystem(ctx, other, "jwt-other", "ref-other",
 		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "", "")
 
-	got, err := store.ListActiveForUser(ctx, uid)
+	got, err := store.ListActiveForUserSystem(ctx, uid)
 	if err != nil {
 		t.Fatalf("ListActiveForUser: %v", err)
 	}
@@ -337,7 +337,7 @@ func TestStore_ListActiveForUser_AndRevokeAll(t *testing.T) {
 	}
 
 	// Revoke all for uid. Returns 2 (active1 + active2).
-	n, err := store.RevokeAllForUser(ctx, uid)
+	n, err := store.RevokeAllForUserSystem(ctx, uid)
 	if err != nil {
 		t.Fatalf("RevokeAllForUser: %v", err)
 	}
@@ -347,7 +347,7 @@ func TestStore_ListActiveForUser_AndRevokeAll(t *testing.T) {
 
 	// Both active sessions are now unfindable via Lookup.
 	for _, sess := range []*Session{active1, active2} {
-		got, err := store.Lookup(ctx, sess.ID)
+		got, err := store.LookupSystem(ctx, sess.ID)
 		if err != nil {
 			t.Fatalf("post-revoke Lookup: %v", err)
 		}
@@ -357,7 +357,7 @@ func TestStore_ListActiveForUser_AndRevokeAll(t *testing.T) {
 	}
 
 	// Other user's session is untouched.
-	stillThere, err := store.Lookup(ctx, otherSess.ID)
+	stillThere, err := store.LookupSystem(ctx, otherSess.ID)
 	if err != nil {
 		t.Fatalf("other-user Lookup: %v", err)
 	}
@@ -366,7 +366,7 @@ func TestStore_ListActiveForUser_AndRevokeAll(t *testing.T) {
 	}
 
 	// Calling RevokeAllForUser again is a no-op (idempotent).
-	n2, err := store.RevokeAllForUser(ctx, uid)
+	n2, err := store.RevokeAllForUserSystem(ctx, uid)
 	if err != nil {
 		t.Fatalf("RevokeAllForUser #2: %v", err)
 	}
@@ -383,11 +383,11 @@ func TestStore_ReapExpired(t *testing.T) {
 	//   keep — fresh, non-revoked
 	//   reap-rev — revoked 31 days ago (older than retention)
 	//   reap-exp — expired 31 days ago, never revoked
-	keep, _ := store.Create(ctx, uid, "j", "r",
+	keep, _ := store.CreateSystem(ctx, uid, "j", "r",
 		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "", "")
-	reapRev, _ := store.Create(ctx, uid, "j", "r",
+	reapRev, _ := store.CreateSystem(ctx, uid, "j", "r",
 		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "", "")
-	reapExp, _ := store.Create(ctx, uid, "j", "r",
+	reapExp, _ := store.CreateSystem(ctx, uid, "j", "r",
 		time.Now().Add(1*time.Hour), time.Now().Add(24*time.Hour), "", "")
 
 	if _, err := h.AdminDB.Exec(
@@ -405,7 +405,7 @@ func TestStore_ReapExpired(t *testing.T) {
 		t.Fatalf("backdate expires_at: %v", err)
 	}
 
-	n, err := store.ReapExpired(ctx, 30*24*time.Hour)
+	n, err := store.ReapExpiredSystem(ctx, 30*24*time.Hour)
 	if err != nil {
 		t.Fatalf("ReapExpired: %v", err)
 	}

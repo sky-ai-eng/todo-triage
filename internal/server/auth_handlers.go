@@ -274,7 +274,7 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	jwtExp := claims.ExpiresAt
 
 	sessExp := timeNow().Add(30 * 24 * time.Hour)
-	sess, err := s.authDeps.sessions.Create(r.Context(), userUUID,
+	sess, err := s.authDeps.sessions.CreateSystem(r.Context(), userUUID,
 		accessToken, refreshToken, jwtExp, sessExp,
 		r.UserAgent(), clientIP(r),
 	)
@@ -322,13 +322,13 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 			// Look up the session so we have the access token for
 			// the upstream call. Lookup ignores revoked rows, so a
 			// double-logout naturally no-ops here.
-			if sess, lerr := s.authDeps.sessions.Lookup(r.Context(), sid); lerr == nil && sess != nil {
+			if sess, lerr := s.authDeps.sessions.LookupSystem(r.Context(), sid); lerr == nil && sess != nil {
 				if uerr := s.authDeps.gotrueLogout(r.Context(), sess.JWT); uerr != nil {
 					log.Printf("[auth] upstream logout: %v", uerr)
 					// Continue — local revoke still happens.
 				}
 			}
-			if rerr := s.authDeps.sessions.Revoke(r.Context(), sid); rerr != nil {
+			if rerr := s.authDeps.sessions.RevokeSystem(r.Context(), sid); rerr != nil {
 				log.Printf("[auth] revoke session: %v", rerr)
 			}
 		}
@@ -369,7 +369,7 @@ func (s *Server) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
 	// List BEFORE revoking — we need the decrypted JWTs for upstream
 	// logout calls. If we revoke first, the rows are filtered out
 	// of the active-set query.
-	active, err := s.authDeps.sessions.ListActiveForUser(r.Context(), userID)
+	active, err := s.authDeps.sessions.ListActiveForUserSystem(r.Context(), userID)
 	if err != nil {
 		log.Printf("[auth] logout-all list user=%s: %v", userID, err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -387,7 +387,7 @@ func (s *Server) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	n, err := s.authDeps.sessions.RevokeAllForUser(r.Context(), userID)
+	n, err := s.authDeps.sessions.RevokeAllForUserSystem(r.Context(), userID)
 	if err != nil {
 		log.Printf("[auth] revoke-all user=%s: %v", userID, err)
 		http.Error(w, "internal error", http.StatusInternalServerError)

@@ -17,6 +17,13 @@ import (
 // table's RLS policies can't be relied on for the lookup itself.
 // (RLS on the table still defends against the eventual app-pool
 // reader for the "list my sessions" UI surface in D11.)
+//
+// Every method on this type carries the `…System` suffix to make the
+// admin-pool routing explicit at call sites (matches the convention
+// used across the dual-pool store framework in internal/db). The
+// whole type is admin-only by construction, so the suffix advertises
+// the contract rather than disambiguating between two pools;
+// non-System counterparts do not exist.
 type Store struct {
 	db  *sql.DB
 	key Key
@@ -47,7 +54,7 @@ type Session struct {
 
 // Create encrypts the tokens and inserts a fresh row. Returns the
 // session ID (the opaque value we'll set on the sid cookie).
-func (s *Store) Create(
+func (s *Store) CreateSystem(
 	ctx context.Context,
 	userID uuid.UUID,
 	jwt, refresh string,
@@ -101,7 +108,7 @@ func (s *Store) Create(
 // than (nil, nil): callers shouldn't quietly treat "session existed but
 // we can't read it" the same as "no session." Rotation of the master
 // key requires explicit handling (drain sessions, re-issue).
-func (s *Store) Lookup(ctx context.Context, sid uuid.UUID) (*Session, error) {
+func (s *Store) LookupSystem(ctx context.Context, sid uuid.UUID) (*Session, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, user_id,
 		       jwt_enc, jwt_nonce, refresh_token_enc, refresh_nonce,
@@ -146,7 +153,7 @@ func (s *Store) Lookup(ctx context.Context, sid uuid.UUID) (*Session, error) {
 // UpdateJWT rewrites the access + refresh tokens after a successful
 // refresh dance with GoTrue. Does not touch expires_at — the session's
 // own 30-day window keeps ticking; only the inner JWT/refresh rotate.
-func (s *Store) UpdateJWT(
+func (s *Store) UpdateJWTSystem(
 	ctx context.Context,
 	sid uuid.UUID,
 	jwt, refresh string,
@@ -186,7 +193,7 @@ var ErrSessionGone = errors.New("session no longer exists or was revoked")
 
 // Revoke flips revoked_at to now() on a session. Soft-delete: row stays
 // for audit. Idempotent — calling on an already-revoked row is a no-op.
-func (s *Store) Revoke(ctx context.Context, sid uuid.UUID) error {
+func (s *Store) RevokeSystem(ctx context.Context, sid uuid.UUID) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE public.sessions
 		   SET revoked_at = now()
@@ -206,7 +213,7 @@ func (s *Store) Revoke(ctx context.Context, sid uuid.UUID) error {
 //
 // Order: most recently active first, so a caller that only wants the
 // "current device" can take the head without sorting.
-func (s *Store) ListActiveForUser(ctx context.Context, userID uuid.UUID) ([]Session, error) {
+func (s *Store) ListActiveForUserSystem(ctx context.Context, userID uuid.UUID) ([]Session, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, user_id,
 		       jwt_enc, jwt_nonce, refresh_token_enc, refresh_nonce,
@@ -256,7 +263,7 @@ func (s *Store) ListActiveForUser(ctx context.Context, userID uuid.UUID) ([]Sess
 // RevokeAllForUser flips revoked_at on every active session for the
 // user. Returns the count of newly-revoked rows (already-revoked rows
 // are not counted again).
-func (s *Store) RevokeAllForUser(ctx context.Context, userID uuid.UUID) (int64, error) {
+func (s *Store) RevokeAllForUserSystem(ctx context.Context, userID uuid.UUID) (int64, error) {
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE public.sessions
 		   SET revoked_at = now()
@@ -272,7 +279,7 @@ func (s *Store) RevokeAllForUser(ctx context.Context, userID uuid.UUID) (int64, 
 
 // TouchLastSeen bumps last_seen_at to now(). Best-effort — errors are
 // swallowed by the caller (middleware fires this in a goroutine).
-func (s *Store) TouchLastSeen(ctx context.Context, sid uuid.UUID) error {
+func (s *Store) TouchLastSeenSystem(ctx context.Context, sid uuid.UUID) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE public.sessions SET last_seen_at = now() WHERE id = $1
 	`, sid)
@@ -306,7 +313,7 @@ func (s *Store) RunReaper(ctx context.Context, interval, retention time.Duration
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			n, err := s.ReapExpired(ctx, retention)
+			n, err := s.ReapExpiredSystem(ctx, retention)
 			if err != nil && ctx.Err() == nil {
 				// Filter out ctx-cancelled errors (those are just
 				// shutdown noise). Real DB errors get logged for
@@ -326,7 +333,7 @@ func (s *Store) RunReaper(ctx context.Context, interval, retention time.Duration
 //   - naturally-expired rows older than retention (sat unrenewed past the session window)
 //
 // Returns total rows deleted across both categories.
-func (s *Store) ReapExpired(ctx context.Context, retention time.Duration) (int64, error) {
+func (s *Store) ReapExpiredSystem(ctx context.Context, retention time.Duration) (int64, error) {
 	res, err := s.db.ExecContext(ctx, `
 		DELETE FROM public.sessions
 		 WHERE (revoked_at IS NOT NULL AND revoked_at <  now() - $1::interval)

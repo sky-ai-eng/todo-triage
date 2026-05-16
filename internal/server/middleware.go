@@ -115,7 +115,7 @@ func (s *Server) withSession(next http.Handler) http.Handler {
 			return
 		}
 
-		sess, err := s.authDeps.sessions.Lookup(r.Context(), sid)
+		sess, err := s.authDeps.sessions.LookupSystem(r.Context(), sid)
 		if err != nil {
 			log.Printf("[auth] session lookup: %v", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
@@ -151,8 +151,14 @@ func (s *Server) withSession(next http.Handler) http.Handler {
 		// Best-effort last-seen bump; intentionally backgrounded so
 		// the slow DB doesn't lengthen the request critical path.
 		// Errors are logged inside the goroutine.
+		//
+		// context.Background() is safe here: the underlying
+		// sessions.Store is constructed with the admin pool (see the
+		// type docstring) because session validation is the auth path
+		// itself and can't depend on the very claims it's validating.
+		// No JWT-claims context is needed for the UPDATE.
 		go func(id uuid.UUID) {
-			if err := s.authDeps.sessions.TouchLastSeen(context.Background(), id); err != nil {
+			if err := s.authDeps.sessions.TouchLastSeenSystem(context.Background(), id); err != nil {
 				log.Printf("[auth] touch last_seen for sid=%s: %v", sessions.LogID(id), err)
 			}
 		}(sid)
@@ -280,10 +286,15 @@ func (s *Server) refreshSessionInline(ctx context.Context, sess *sessions.Sessio
 	_ = ctx // caller's ctx intentionally not propagated into fn; see comment above.
 
 	v, err, _ := s.refreshGroup.Do(sess.ID.String(), func() (any, error) {
+		// Detached background ctx with a 35s hard cap so a stuck refresh
+		// can't pin the singleflight group forever. The sessions.Lookup /
+		// UpdateJWT calls inside route through the admin pool by Store
+		// construction (see internal/sessions docstring) — no JWT
+		// claims required for the refresh dance.
 		fnCtx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
 		defer cancel()
 
-		fresh, err := s.authDeps.sessions.Lookup(fnCtx, sess.ID)
+		fresh, err := s.authDeps.sessions.LookupSystem(fnCtx, sess.ID)
 		if err != nil {
 			return nil, fmt.Errorf("re-fetch session: %w", err)
 		}
@@ -301,7 +312,7 @@ func (s *Server) refreshSessionInline(ctx context.Context, sess *sessions.Sessio
 			return nil, err
 		}
 		newExpTime := unixToTime(newExp)
-		if err := s.authDeps.sessions.UpdateJWT(fnCtx, sess.ID, newJWT, newRefresh, newExpTime); err != nil {
+		if err := s.authDeps.sessions.UpdateJWTSystem(fnCtx, sess.ID, newJWT, newRefresh, newExpTime); err != nil {
 			return nil, err
 		}
 		return refreshTokens{jwt: newJWT, refresh: newRefresh, jwtExp: newExpTime}, nil

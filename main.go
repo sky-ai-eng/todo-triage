@@ -81,7 +81,7 @@ func pluralize(n int, singular, plural string) string {
 // clone inside CreateForPR / CreateForBranch will recover the
 // affected delegations on next run.
 func bootstrapBareClones(database *sql.DB, repos db.RepoStore) {
-	profiles, err := repos.List(context.Background(), runmode.LocalDefaultOrgID)
+	profiles, err := repos.ListSystem(context.Background(), runmode.LocalDefaultOrgID)
 	if err != nil {
 		log.Printf("[worktree] bootstrap: load profiles: %v", err)
 		return
@@ -395,7 +395,7 @@ func main() {
 	// distinguish a taken-over run's session JSONL from a regular
 	// orphan, and silently nuking a JSONL would break the user's ability
 	// to resume.
-	preserveIDs, err := stores.AgentRuns.ListTakenOverIDs(context.Background(), runmode.LocalDefaultOrg)
+	preserveIDs, err := stores.AgentRuns.ListTakenOverIDsSystem(context.Background(), runmode.LocalDefaultOrg)
 	if err != nil {
 		log.Printf("[server] WARNING: failed to load taken_over run ids — sweeping worktree dirs but skipping ~/.claude/projects cleanup to avoid clobbering active takeover sessions: %v", err)
 		worktree.CleanupWithOptions(worktree.CleanupOptions{SkipClaudeProjectCleanup: true})
@@ -443,10 +443,17 @@ func main() {
 		log.Fatalf("[bootstrap] local agent: %v (auto-delegation depends on this; refusing to start)", err)
 	}
 
-	// Auto-import Claude Code skill files as prompts. context.Background
-	// at startup — no request to inherit from, the import runs to
-	// completion or fails of its own accord.
-	skills.ImportAll(context.Background(), database, stores.Prompts)
+	// Auto-import Claude Code skill files as prompts. Local mode
+	// only: the importer's store calls run as the boot process with
+	// no user identity, which works against SQLite (no RLS) but
+	// would fail against Postgres tf_app for lack of claims. Multi-
+	// mode users will import prompts via the request-driven CRUD
+	// surface, where the handler has claims; auto-import on boot
+	// doesn't make sense there anyway because SKILL.md files live
+	// on the user's machine, not the server's.
+	if runmode.Current() == runmode.ModeLocal {
+		skills.ImportAll(context.Background(), database, stores.Prompts)
+	}
 
 	// Event bus — central pub/sub replacing direct callbacks
 	bus := eventbus.New()
@@ -463,7 +470,7 @@ func main() {
 	// ("Fix in Settings" for SSH issues, raw stderr otherwise).
 	worktree.SetOnCloneResult(func(owner, repo string, cloneErr error) {
 		if cloneErr == nil {
-			if err := stores.Repos.UpdateCloneStatus(context.Background(), runmode.LocalDefaultOrgID, owner, repo, "ok", "", ""); err != nil {
+			if err := stores.Repos.UpdateCloneStatusSystem(context.Background(), runmode.LocalDefaultOrgID, owner, repo, "ok", "", ""); err != nil {
 				log.Printf("[clone-status] update %s/%s ok: %v", owner, repo, err)
 			}
 			wsHub.Broadcast(websocket.Event{
@@ -497,7 +504,7 @@ func main() {
 			log.Printf("[clone-status] %s/%s load config to classify: %v (defaulting to kind=other)", owner, repo, cErr)
 		}
 
-		if err := stores.Repos.UpdateCloneStatus(context.Background(), runmode.LocalDefaultOrgID, owner, repo, "failed", cloneErr.Error(), kind); err != nil {
+		if err := stores.Repos.UpdateCloneStatusSystem(context.Background(), runmode.LocalDefaultOrgID, owner, repo, "failed", cloneErr.Error(), kind); err != nil {
 			log.Printf("[clone-status] update %s/%s failed: %v", owner, repo, err)
 		}
 		wsHub.Broadcast(websocket.Event{
@@ -754,7 +761,7 @@ func main() {
 			// Re-profile, then signal ready and restart all pollers
 			go func() {
 				profiler := repoprofile.NewProfiler(ghClient, database, stores.Repos, wsHub)
-				repos, _ := stores.Repos.ListConfiguredNames(context.Background(), runmode.LocalDefaultOrgID)
+				repos, _ := stores.Repos.ListConfiguredNamesSystem(context.Background(), runmode.LocalDefaultOrgID)
 				if err := profiler.Run(context.Background(), repos, true); err != nil {
 					log.Printf("[repoprofile] profiling failed: %v", err)
 				}
@@ -843,7 +850,7 @@ func main() {
 	// Initial start with current credentials
 	cfg, _ := config.Load()
 	creds, _ := auth.Load()
-	repoCount, _ := stores.Repos.CountConfigured(context.Background(), runmode.LocalDefaultOrgID)
+	repoCount, _ := stores.Repos.CountConfiguredSystem(context.Background(), runmode.LocalDefaultOrgID)
 
 	if cfg.GitHub.Ready(creds.GitHubPAT, creds.GitHubURL) && repoCount > 0 {
 		ghClient := ghclient.NewClient(creds.GitHubURL, creds.GitHubPAT)
@@ -855,7 +862,7 @@ func main() {
 		// Profile repos, then signal ready, start pollers, and trigger scoring
 		go func() {
 			profiler := repoprofile.NewProfiler(ghClient, database, stores.Repos, wsHub)
-			repos, _ := stores.Repos.ListConfiguredNames(context.Background(), runmode.LocalDefaultOrgID)
+			repos, _ := stores.Repos.ListConfiguredNamesSystem(context.Background(), runmode.LocalDefaultOrgID)
 			if err := profiler.Run(context.Background(), repos, false); err != nil {
 				log.Printf("[repoprofile] initial profiling failed: %v", err)
 			}
