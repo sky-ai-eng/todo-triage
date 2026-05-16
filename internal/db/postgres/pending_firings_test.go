@@ -11,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // TestPendingFiringsStore_Postgres runs the shared conformance suite
@@ -96,6 +97,46 @@ func TestPendingFiringsStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	rowsAAfter, _ := stores.PendingFirings.ListForEntity(ctx, orgA, tupA.EntityID)
 	if rowsAAfter[0].Status != "pending" {
 		t.Errorf("orgA's firing was mutated by cross-org Mark*: status=%q, want pending", rowsAAfter[0].Status)
+	}
+}
+
+// TestPendingFiringsStore_Postgres_EnqueueWithLocalSentinelUser is the
+// regression test for the SQLite-only LocalDefaultUserID sentinel
+// leaking into Postgres. The router still passes runmode.LocalDefault
+// UserID until D9 retrofits handler-level claims; binding it directly
+// would trip pending_firings_creator_user_id_fkey because that uuid
+// has no row in the multi-mode users table. The store normalizes the
+// sentinel to empty so the COALESCE walks to org-owner.
+func TestPendingFiringsStore_Postgres_EnqueueWithLocalSentinelUser(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	ctx := context.Background()
+
+	orgID, ownerUserID, _ := seedPgPendingFiringsOrg(t, h)
+	tup := newPgPendingFiringsSeeder(h, orgID, ownerUserID).Tuple(t)
+
+	// Caller passes the SQLite-only sentinel rather than ownerUserID.
+	inserted, err := stores.PendingFirings.Enqueue(ctx, orgID, runmode.LocalDefaultUserID,
+		tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID)
+	if err != nil {
+		t.Fatalf("Enqueue with LocalDefaultUserID sentinel: %v (FK would trip if sentinel weren't filtered)", err)
+	}
+	if !inserted {
+		t.Fatal("Enqueue should report inserted=true on fresh row")
+	}
+
+	// Verify creator_user_id resolved to the org owner, not the sentinel.
+	var creator string
+	if err := h.AdminDB.QueryRow(
+		`SELECT creator_user_id FROM pending_firings WHERE task_id = $1 AND trigger_id = $2`,
+		tup.TaskID, tup.TriggerID,
+	).Scan(&creator); err != nil {
+		t.Fatalf("read creator_user_id: %v", err)
+	}
+	if creator != ownerUserID {
+		t.Errorf("creator_user_id = %q, want org owner %q (sentinel should fall through COALESCE to org-owner)",
+			creator, ownerUserID)
 	}
 }
 

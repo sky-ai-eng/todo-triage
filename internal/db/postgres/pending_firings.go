@@ -6,6 +6,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // pendingFiringsStore is the Postgres impl of db.PendingFiringsStore.
@@ -36,13 +37,24 @@ func (s *pendingFiringsStore) Enqueue(ctx context.Context, orgID, userID, entity
 	// userID, fall back to the org owner. tf.current_user_id() is
 	// intentionally skipped — admin-pool inserts run without JWT
 	// claims, so the helper would return NULL and the COALESCE would
-	// walk straight to org owner anyway. The router passes
-	// runmode.LocalDefaultUserID today; D9 / SKY-253 retrofits this
-	// to the request user once handler-level claims are wired.
+	// walk straight to org owner anyway.
+	//
+	// LocalDefaultUserID sentinel handling: the router still passes
+	// runmode.LocalDefaultUserID until D9 / SKY-253 retrofits handler-
+	// level claims. That sentinel UUID has no FK target in a multi-
+	// mode users table, so binding it directly would trip
+	// pending_firings_creator_user_id_fkey on every busy-entity
+	// enqueue. Normalize to empty here so NULLIF collapses to NULL
+	// and COALESCE walks to the org-owner fallback. Same shape as
+	// AgentRunStore.createManual.
 	//
 	// queued_at uses the schema default (now()) so the insert and
 	// the index agree on the timestamp source — no clock skew between
 	// app-side time.Now() and the partial index's FIFO ordering.
+	creatorBind := userID
+	if creatorBind == runmode.LocalDefaultUserID {
+		creatorBind = ""
+	}
 	res, err := s.q.ExecContext(ctx, `
 		INSERT INTO pending_firings
 		  (org_id, creator_user_id, entity_id, task_id, trigger_id, triggering_event_id, status)
@@ -51,7 +63,7 @@ func (s *pendingFiringsStore) Enqueue(ctx context.Context, orgID, userID, entity
 		   COALESCE(NULLIF($2, '')::uuid, (SELECT owner_user_id FROM orgs WHERE id = $1)),
 		   $3, $4, $5, $6, 'pending')
 		ON CONFLICT (task_id, trigger_id) WHERE status = 'pending' DO NOTHING
-	`, orgID, userID, entityID, taskID, triggerID, triggeringEventID)
+	`, orgID, creatorBind, entityID, taskID, triggerID, triggeringEventID)
 	if err != nil {
 		return false, err
 	}
