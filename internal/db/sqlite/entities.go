@@ -398,6 +398,10 @@ func (s *entityStore) ReactivateSystem(ctx context.Context, orgID, id string) (b
 	return s.Reactivate(ctx, orgID, id)
 }
 
+func (s *entityStore) DescriptionsSystem(ctx context.Context, orgID string, ids []string) (map[string]string, error) {
+	return s.Descriptions(ctx, orgID, ids)
+}
+
 // scanEntityRow / scanEntityFromRows return a fresh domain.Entity per
 // invocation. The two flavors mirror database/sql's *Row vs *Rows
 // types since Scan signatures aren't unifiable through a common

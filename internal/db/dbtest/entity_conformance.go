@@ -512,6 +512,29 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		}
 	})
 
+	t.Run("DescriptionsSystem_matches_Descriptions", func(t *testing.T) {
+		s, orgID, _ := mk(t)
+		withDesc, _, _ := s.FindOrCreate(ctx, orgID, "github", "owner/repo#sys-desc", "pr", "T", "")
+		if err := s.UpdateDescription(ctx, orgID, withDesc.ID, "scorer-bound body"); err != nil {
+			t.Fatalf("UpdateDescription: %v", err)
+		}
+		got, err := s.DescriptionsSystem(ctx, orgID, []string{withDesc.ID, withDesc.ID, ""})
+		if err != nil {
+			t.Fatalf("DescriptionsSystem: %v", err)
+		}
+		if got[withDesc.ID] != "scorer-bound body" {
+			t.Errorf("DescriptionsSystem missing body for %s: %q", withDesc.ID, got[withDesc.ID])
+		}
+		// Empty input slice fast-path mirrors Descriptions.
+		empty, err := s.DescriptionsSystem(ctx, orgID, nil)
+		if err != nil {
+			t.Fatalf("DescriptionsSystem(nil): %v", err)
+		}
+		if len(empty) != 0 {
+			t.Errorf("DescriptionsSystem(nil) = %v, want empty map", empty)
+		}
+	})
+
 	t.Run("System_variants_match_non_System_for_list", func(t *testing.T) {
 		s, orgID, _ := mk(t)
 		gh, _, _ := s.FindOrCreate(ctx, orgID, "github", "owner/repo#sys-la", "pr", "A", "")

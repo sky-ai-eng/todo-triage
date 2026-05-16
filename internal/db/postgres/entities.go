@@ -81,6 +81,14 @@ func getEntityBySource(ctx context.Context, q queryer, orgID, source, sourceID s
 }
 
 func (s *entityStore) Descriptions(ctx context.Context, orgID string, ids []string) (map[string]string, error) {
+	return entityDescriptions(ctx, s.q, orgID, ids)
+}
+
+func (s *entityStore) DescriptionsSystem(ctx context.Context, orgID string, ids []string) (map[string]string, error) {
+	return entityDescriptions(ctx, s.admin, orgID, ids)
+}
+
+func entityDescriptions(ctx context.Context, q queryer, orgID string, ids []string) (map[string]string, error) {
 	out := make(map[string]string, len(ids))
 	if len(ids) == 0 {
 		return out, nil
@@ -106,7 +114,7 @@ func (s *entityStore) Descriptions(ctx context.Context, orgID string, ids []stri
 	// chunking needed (the parameter count cap that drives SQLite's
 	// chunked path doesn't apply when the list is a single array
 	// bind).
-	rows, err := s.q.QueryContext(ctx, `
+	rows, err := q.QueryContext(ctx, `
 		SELECT id, COALESCE(description, '')
 		FROM entities
 		WHERE org_id = $1 AND id = ANY($2)

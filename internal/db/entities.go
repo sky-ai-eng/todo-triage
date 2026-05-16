@@ -180,4 +180,14 @@ type EntityStore interface {
 	AssignProjectSystem(ctx context.Context, orgID, id string, projectID *string, rationale string) error
 	MarkClosedSystem(ctx context.Context, orgID, id string) error
 	ReactivateSystem(ctx context.Context, orgID, id string) (bool, error)
+
+	// DescriptionsSystem mirrors Descriptions for the AI scorer —
+	// a background/system service that bulk-loads entity body text
+	// to enrich task prompt context. The scorer has no JWT-claims
+	// context (it runs in a singleton goroutine triggered by event-
+	// bus sentinels), so the system variant routes through the
+	// admin pool. Failing this read under app-pool RLS would degrade
+	// every scored task to title-only context, materially changing
+	// prioritization; the System variant prevents that.
+	DescriptionsSystem(ctx context.Context, orgID string, ids []string) (map[string]string, error)
 }

@@ -104,7 +104,12 @@ func ScoreTasks(ctx context.Context, database *sql.DB, entities db.EntityStore, 
 	}
 	descriptions := map[string]string{}
 	if entities != nil {
-		if descs, err := entities.Descriptions(ctx, orgID, entityIDs); err != nil {
+		// The scorer is a singleton background goroutine triggered
+		// by event-bus sentinels — no JWT-claims context. Route the
+		// bulk description read through the admin pool variant
+		// (SKY-296) so Postgres multi-mode doesn't degrade every
+		// scored task to title-only context under RLS.
+		if descs, err := entities.DescriptionsSystem(ctx, orgID, entityIDs); err != nil {
 			log.Printf("[ai] warning: failed to load entity descriptions for scoring: %v", err)
 		} else {
 			descriptions = descs
