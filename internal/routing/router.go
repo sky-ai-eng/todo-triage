@@ -414,7 +414,22 @@ func (r *Router) tryAutoDelegate(task *domain.Task, trigger domain.EventHandler,
 			log.Printf("[router] auto-trigger skipped on task %s: no agent bootstrapped", task.ID)
 			return
 		}
-		ta, err := r.teamAgents.GetForTeam(context.Background(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, a.ID)
+		// SKY-295: read the bot-enabled flag for THIS task's team, not
+		// the local sentinel. The pre-SKY-295 single-team router could
+		// hardcode LocalDefaultTeamID here because every task lived in
+		// that team; with per-team fanout the caller passes the task
+		// for each matched team and the gate must read each team's
+		// own team_agents row. A two-team org with team B's bot
+		// disabled would otherwise auto-fire on team B by reading
+		// team A's flag (or vice-versa). Fall back to LocalDefaultTeamID
+		// only when task.TeamID is empty — pre-SKY-295 fixtures and
+		// the handlerTeamID warn-path; in steady state every task
+		// carries a real team_id.
+		teamID := task.TeamID
+		if teamID == "" {
+			teamID = runmode.LocalDefaultTeamID
+		}
+		ta, err := r.teamAgents.GetForTeam(context.Background(), runmode.LocalDefaultOrg, teamID, a.ID)
 		if err != nil {
 			log.Printf("[router] auto-trigger skipped on task %s: team_agents lookup: %v", task.ID, err)
 			return
