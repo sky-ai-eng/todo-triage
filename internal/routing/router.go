@@ -169,23 +169,32 @@ func (r *Router) HandleEvent(evt domain.Event) {
 	}
 
 	// became_atomic is the belated-discovery path for parents whose
-	// subtasks just closed. Only create a task when none exists on the
-	// entity — otherwise an atomic ticket that gained and then lost
-	// subtasks would end up with two cards for the same entity. The
-	// dedup index doesn't catch this because the existing task's
-	// event_type is jira:issue:assigned while the new one would be
-	// jira:issue:became_atomic. Event is still recorded (audit trail
-	// stays honest); only task creation and trigger firing are
-	// suppressed.
+	// subtasks just closed. Only create a task when none exists for
+	// the target team on the entity — otherwise an atomic ticket that
+	// gained and then lost subtasks would end up with two cards in
+	// the same team's queue. The dedup index doesn't catch this
+	// because the existing task's event_type is jira:issue:assigned
+	// while the new one would be jira:issue:became_atomic.
+	//
+	// SKY-295: the suppression is per-team. Pre-SKY-295 a single
+	// FindActiveByEntity check sat above the handler-match loop, so
+	// if any team had an active task on the entity, no team got a
+	// new one. With per-team fanout that over-suppresses: team B's
+	// rule on the same entity must still fire even when team A
+	// already has an active task. We compute the set of teams that
+	// already have an active task here and let the per-team loop
+	// below skip just those teams. Event is still recorded (audit
+	// trail stays honest); only task creation in suppressed teams
+	// is skipped.
+	teamsToSkip := map[string]struct{}{}
 	if evt.EventType == domain.EventJiraIssueBecameAtomic {
 		active, err := r.tasks.FindActiveByEntity(context.Background(), runmode.LocalDefaultOrg, entityID)
 		if err != nil {
 			log.Printf("[router] became_atomic: failed to check active tasks on entity %s: %v", entityID, err)
 			return
 		}
-		if len(active) > 0 {
-			log.Printf("[router] became_atomic: entity %s has %d active task(s), skipping duplicate creation", entityID, len(active))
-			return
+		for _, a := range active {
+			teamsToSkip[a.TeamID] = struct{}{}
 		}
 	}
 
@@ -228,34 +237,95 @@ func (r *Router) HandleEvent(evt domain.Event) {
 		return
 	}
 
-	// Step 7: Find or create task via dedup index.
-	// Use the highest-priority matching rule's default_priority, or 0.5 if
-	// only triggers matched (forgiving path).
-	defaultPriority := 0.5
-	for _, rule := range matchedRules {
-		if rule.DefaultPriority != nil && *rule.DefaultPriority > defaultPriority {
-			defaultPriority = *rule.DefaultPriority
-		}
+	// Step 7: Find or create one task per matching team (SKY-295).
+	// Group matched rules + triggers by team_id so the same event
+	// matching N teams' rules fans out to N tasks, one per team.
+	// Org-visibility handlers (system-shipped rules with team_id NULL)
+	// route to LocalDefaultTeamID — the single team in local mode.
+	// In multi-mode they'd need a per-team broadcast that hasn't
+	// landed yet (SKY-294's UX territory); for now they collapse onto
+	// LocalDefaultTeamID and the Postgres impl's sentinel filter
+	// surfaces this as a clear error.
+	teamRules := map[string][]domain.EventHandler{}
+	teamTriggers := map[string][]domain.EventHandler{}
+	for _, h := range matchedRules {
+		teamRules[handlerTeamID(h)] = append(teamRules[handlerTeamID(h)], h)
+	}
+	for _, h := range matchedTriggers {
+		teamTriggers[handlerTeamID(h)] = append(teamTriggers[handlerTeamID(h)], h)
 	}
 
-	task, created, err := r.tasks.FindOrCreate(context.Background(), runmode.LocalDefaultOrg, entityID, evt.EventType, evt.DedupKey, evt.ID, defaultPriority)
-	if err != nil {
-		log.Printf("[router] failed to find/create task for %s on entity %s: %v", evt.EventType, entityID, err)
+	// Union of teams that had any matching handler — drives the
+	// per-team task-creation loop. A team with only triggers (no
+	// rules) still gets a task with the trigger-fallback priority.
+	teamSet := map[string]struct{}{}
+	for t := range teamRules {
+		teamSet[t] = struct{}{}
+	}
+	for t := range teamTriggers {
+		teamSet[t] = struct{}{}
+	}
+
+	// Track which tasks got created/bumped per team so the
+	// auto-delegate step (step 9) can fire each team's matched
+	// triggers against that team's task.
+	tasksByTeam := make(map[string]*domain.Task, len(teamSet))
+
+	for teamID := range teamSet {
+		// SKY-295: skip teams that already have an active task on
+		// this entity in the became_atomic case (see teamsToSkip
+		// computation above). Per-team suppression preserves the
+		// "no duplicate card for one team" intent without blocking
+		// sibling teams whose rules matched the same event.
+		if _, suppressed := teamsToSkip[teamID]; suppressed {
+			log.Printf("[router] became_atomic: team %s already has an active task on entity %s, skipping duplicate creation", teamID, entityID)
+			continue
+		}
+		// Use the highest-priority matching rule's default_priority
+		// within this team, or 0.5 if only triggers matched.
+		defaultPriority := 0.5
+		for _, rule := range teamRules[teamID] {
+			if rule.DefaultPriority != nil && *rule.DefaultPriority > defaultPriority {
+				defaultPriority = *rule.DefaultPriority
+			}
+		}
+
+		// SKY-295 (P1.2): task createdAt = OccurredAt when the source
+		// reported a time, falling back to time.Now(). The router used
+		// to call FindOrCreate (→ time.Now()) for every event, which
+		// regressed the backfill path's "stamp the task with the PR's
+		// CreatedAt for week-old review requests" semantic.
+		// OccurredAt-when-set is the right rule across the board:
+		// the queue ordering reflects when the world said the event
+		// happened, not when we noticed.
+		createdAt := time.Now()
+		if !evt.OccurredAt.IsZero() {
+			createdAt = evt.OccurredAt
+		}
+		task, created, err := r.tasks.FindOrCreateAt(context.Background(), runmode.LocalDefaultOrg, teamID, entityID, evt.EventType, evt.DedupKey, evt.ID, defaultPriority, createdAt)
+		if err != nil {
+			log.Printf("[router] failed to find/create task for %s on entity %s (team %s): %v", evt.EventType, entityID, teamID, err)
+			continue
+		}
+
+		if created {
+			if err := r.tasks.RecordEvent(context.Background(), runmode.LocalDefaultOrg, task.ID, evt.ID, "spawned"); err != nil {
+				log.Printf("[router] failed to record spawned task_event: %v", err)
+			}
+			log.Printf("[router] created task %s (%s) on entity %s (team %s)", task.ID, evt.EventType, entityID, teamID)
+		} else {
+			if err := r.tasks.Bump(context.Background(), runmode.LocalDefaultOrg, task.ID, evt.ID); err != nil {
+				log.Printf("[router] failed to bump task %s: %v", task.ID, err)
+			}
+			if err := r.tasks.RecordEvent(context.Background(), runmode.LocalDefaultOrg, task.ID, evt.ID, "bumped"); err != nil {
+				log.Printf("[router] failed to record bumped task_event: %v", err)
+			}
+		}
+		tasksByTeam[teamID] = task
+	}
+
+	if len(tasksByTeam) == 0 {
 		return
-	}
-
-	if created {
-		if err := r.tasks.RecordEvent(context.Background(), runmode.LocalDefaultOrg, task.ID, evt.ID, "spawned"); err != nil {
-			log.Printf("[router] failed to record spawned task_event: %v", err)
-		}
-		log.Printf("[router] created task %s (%s) on entity %s", task.ID, evt.EventType, entityID)
-	} else {
-		if err := r.tasks.Bump(context.Background(), runmode.LocalDefaultOrg, task.ID, evt.ID); err != nil {
-			log.Printf("[router] failed to bump task %s: %v", task.ID, err)
-		}
-		if err := r.tasks.RecordEvent(context.Background(), runmode.LocalDefaultOrg, task.ID, evt.ID, "bumped"); err != nil {
-			log.Printf("[router] failed to record bumped task_event: %v", err)
-		}
 	}
 
 	// Step 8: Enqueue AI scoring (always — produces UI metadata regardless).
@@ -272,14 +342,37 @@ func (r *Router) HandleEvent(evt domain.Event) {
 	// the cooldown was protecting against). Triggers with
 	// min_autonomy_suitability > 0 still defer to post-scoring re-derive.
 	if cfg, err := config.Load(); err == nil && cfg.AI.AutoDelegateEnabled {
-		for _, trigger := range matchedTriggers {
-			if trigger.MinAutonomySuitability != nil && *trigger.MinAutonomySuitability > 0 {
-				continue // deferred to post-scoring handler
+		for teamID, triggers := range teamTriggers {
+			task, ok := tasksByTeam[teamID]
+			if !ok {
+				continue // FindOrCreate failed for this team
 			}
-			r.tryAutoDelegate(task, trigger, entityID, evt.ID)
+			for _, trigger := range triggers {
+				if trigger.MinAutonomySuitability != nil && *trigger.MinAutonomySuitability > 0 {
+					continue // deferred to post-scoring handler
+				}
+				r.tryAutoDelegate(task, trigger, entityID, evt.ID)
+			}
 		}
 	}
 
+}
+
+// handlerTeamID resolves the team a matched event_handler routes its
+// tasks to. Post-SKY-295 every handler is team-scoped — user-source
+// rows carry the user's team, system-source rows are materialized
+// into each team at boot / team-create time. An empty TeamID here
+// indicates a pre-SKY-295 org-visibility row that survived a partial
+// migration or a test fixture that bypassed the materialization
+// path; we log it once per call but fall back to
+// runmode.LocalDefaultTeamID so the router keeps functioning. In
+// steady state this branch is unreachable.
+func handlerTeamID(h domain.EventHandler) string {
+	if h.TeamID != "" {
+		return h.TeamID
+	}
+	log.Printf("[router] WARNING handler %s (%s) has no team_id — falling back to LocalDefaultTeamID; check that EventHandlerStore.Seed was called with a real teamID", h.ID, h.Kind)
+	return runmode.LocalDefaultTeamID
 }
 
 // tryAutoDelegate decides whether a matched (task, trigger) fires now or
@@ -321,7 +414,22 @@ func (r *Router) tryAutoDelegate(task *domain.Task, trigger domain.EventHandler,
 			log.Printf("[router] auto-trigger skipped on task %s: no agent bootstrapped", task.ID)
 			return
 		}
-		ta, err := r.teamAgents.GetForTeam(context.Background(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, a.ID)
+		// SKY-295: read the bot-enabled flag for THIS task's team, not
+		// the local sentinel. The pre-SKY-295 single-team router could
+		// hardcode LocalDefaultTeamID here because every task lived in
+		// that team; with per-team fanout the caller passes the task
+		// for each matched team and the gate must read each team's
+		// own team_agents row. A two-team org with team B's bot
+		// disabled would otherwise auto-fire on team B by reading
+		// team A's flag (or vice-versa). Fall back to LocalDefaultTeamID
+		// only when task.TeamID is empty — pre-SKY-295 fixtures and
+		// the handlerTeamID warn-path; in steady state every task
+		// carries a real team_id.
+		teamID := task.TeamID
+		if teamID == "" {
+			teamID = runmode.LocalDefaultTeamID
+		}
+		ta, err := r.teamAgents.GetForTeam(context.Background(), runmode.LocalDefaultOrg, teamID, a.ID)
 		if err != nil {
 			log.Printf("[router] auto-trigger skipped on task %s: team_agents lookup: %v", task.ID, err)
 			return
@@ -829,6 +937,18 @@ func (r *Router) reDeriveTask(taskID string) {
 
 	for _, trigger := range handlers {
 		if trigger.Kind != domain.EventHandlerKindTrigger {
+			continue
+		}
+		// SKY-295: re-derive only fires triggers that belong to this
+		// task's team. Without this guard a team B deferred trigger
+		// could match the same primary event and fire against team
+		// A's task — leaking work across team boundaries the
+		// HandleEvent fanout took care to keep separate. handlerTeamID
+		// applies the same org-rule → LocalDefaultTeamID fallback the
+		// upstream fanout uses; once shipped rules are team-
+		// materialised in steady state, this comparison is just
+		// trigger.TeamID == task.TeamID.
+		if handlerTeamID(trigger) != task.TeamID {
 			continue
 		}
 		minAutonomy := derefFloatDefault(trigger.MinAutonomySuitability, 0)

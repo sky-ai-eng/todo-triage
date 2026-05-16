@@ -77,7 +77,7 @@ func setupReDeriveScenario(t *testing.T, database *sql.DB, minAutonomy float64) 
 	}
 
 	// Create task
-	task, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, entityID, domain.EventGitHubPRCICheckFailed, "build", eventID, 0.5)
+	task, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, entityID, domain.EventGitHubPRCICheckFailed, "build", eventID, 0.5)
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
@@ -323,6 +323,71 @@ func TestReDeriveAfterScoring_Snoozed_Skips(t *testing.T) {
 	}
 }
 
+// TestReDeriveAfterScoring_CrossTeamTrigger_Skips pins SKY-295 (P1.1):
+// when a task is created for team A and team B has its own deferred
+// trigger matching the same event type + predicate, the re-derive
+// pass must NOT fire team B's trigger against team A's task. Pre-
+// SKY-295 reDeriveTask loaded all enabled triggers for the event
+// type and matched on predicate alone, leaking cross-team after
+// scoring landed.
+func TestReDeriveAfterScoring_CrossTeamTrigger_Skips(t *testing.T) {
+	database := newTestDB(t)
+	taskID, _ := setupReDeriveScenario(t, database, 0.6)
+
+	// Add a second team and stage a competing deferred trigger
+	// directly in that team's scope. createTriggerForTestRouting
+	// hard-codes LocalDefaultTeamID, so we insert raw.
+	teamB := "00000000-0000-0000-0000-0000000000b0"
+	if _, err := database.Exec(
+		`INSERT INTO teams (id, org_id, slug, name) VALUES (?, ?, ?, ?)`,
+		teamB, runmode.LocalDefaultOrgID, "team-b-rederive", "Team B Rederive",
+	); err != nil {
+		t.Fatalf("seed team B: %v", err)
+	}
+	createTestPrompt(t, database, domain.Prompt{ID: "p-teamB", Name: "Team B Prompt", Body: "x", Source: "user"})
+	if _, err := database.Exec(`
+		INSERT INTO event_handlers
+			(id, org_id, team_id, creator_user_id, visibility, kind, event_type,
+			 scope_predicate_json, enabled, source,
+			 prompt_id, breaker_threshold, min_autonomy_suitability,
+			 created_at, updated_at)
+		VALUES (?, ?, ?, ?, 'team', 'trigger', ?,
+		        NULL, 1, 'user',
+		        ?, 4, 0.6,
+		        datetime('now'), datetime('now'))
+	`, "trigger-teamB", runmode.LocalDefaultOrg, teamB, runmode.LocalDefaultUserID,
+		domain.EventGitHubPRCICheckFailed, "p-teamB"); err != nil {
+		t.Fatalf("seed team B trigger: %v", err)
+	}
+
+	// Score above both teams' thresholds so the only reason to skip
+	// team B is the team-mismatch guard.
+	if err := updateScores(t, database, []domain.TaskScoreUpdate{{
+		ID: taskID, PriorityScore: 0.5, AutonomySuitability: 0.9, Summary: "test",
+	}}); err != nil {
+		t.Fatalf("update scores: %v", err)
+	}
+
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, nil, noopScorer{}, websocket.NewHub())
+	router.ReDeriveAfterScoring([]string{taskID})
+
+	// Inspect pending_firings: team B's trigger must not have fired
+	// against team A's task. The team A trigger from
+	// setupReDeriveScenario may or may not have fired depending on
+	// spawner wiring (nil → fireDelegate exits early without
+	// enqueueing); what we pin here is the cross-team negative.
+	task, _ := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrg, taskID)
+	firings, err := sqlitestore.New(database).PendingFirings.ListForEntity(t.Context(), runmode.LocalDefaultOrg, task.EntityID)
+	if err != nil {
+		t.Fatalf("list firings: %v", err)
+	}
+	for _, f := range firings {
+		if f.TriggerID == "trigger-teamB" {
+			t.Errorf("team B trigger fired against team A task; want re-derive to filter by team")
+		}
+	}
+}
+
 func TestReDeriveAfterScoring_ZeroThresholdTrigger_SkippedByReDerive(t *testing.T) {
 	database := newTestDB(t)
 
@@ -337,7 +402,7 @@ func TestReDeriveAfterScoring_ZeroThresholdTrigger_SkippedByReDerive(t *testing.
 		EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entityID,
 		DedupKey: "lint", MetadataJSON: string(metaJSON),
 	})
-	task, _, _ := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, entityID, domain.EventGitHubPRCICheckFailed, "lint", eventID, 0.5)
+	task, _, _ := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, entityID, domain.EventGitHubPRCICheckFailed, "lint", eventID, 0.5)
 
 	// Prompt
 	createTestPrompt(t, database, domain.Prompt{ID: "p2", Name: "Test2", Body: "Do", Source: "user"})
@@ -382,7 +447,7 @@ func TestReDeriveAfterScoring_PredicateMismatch_Skips(t *testing.T) {
 		EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entityID,
 		DedupKey: "build", MetadataJSON: string(metaJSON),
 	})
-	task, _, _ := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, entityID, domain.EventGitHubPRCICheckFailed, "build", eventID, 0.5)
+	task, _, _ := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, entityID, domain.EventGitHubPRCICheckFailed, "build", eventID, 0.5)
 
 	// Prompt
 	createTestPrompt(t, database, domain.Prompt{ID: "p3", Name: "Test3", Body: "Do", Source: "user"})

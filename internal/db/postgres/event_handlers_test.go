@@ -21,10 +21,15 @@ import (
 func TestEventHandlerStore_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
 
-	dbtest.RunEventHandlerStoreConformance(t, func(t *testing.T) (db.EventHandlerStore, string, dbtest.PromptSeeder) {
+	dbtest.RunEventHandlerStoreConformance(t, func(t *testing.T) (db.EventHandlerStore, string, string, dbtest.PromptSeeder) {
 		t.Helper()
 		h.Reset(t)
 		orgID := seedPgOrgForAgents(t, h)
+		// SKY-295: Seed now requires a team. seedPgOrgForAgents
+		// already stages the org's default team (via
+		// seedPgDefaultTeam); firstTeamForOrg picks it up by the same
+		// created_at ordering production used to do implicitly.
+		teamID := firstTeamForOrg(t, h, orgID)
 		stores := pgstore.New(h.AdminDB, h.AdminDB)
 		seed := func(t *testing.T, ids ...string) {
 			t.Helper()
@@ -42,6 +47,6 @@ func TestEventHandlerStore_Postgres(t *testing.T) {
 				}
 			}
 		}
-		return stores.EventHandlers, orgID, seed
+		return stores.EventHandlers, orgID, teamID, seed
 	})
 }

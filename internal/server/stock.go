@@ -431,7 +431,7 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 				failed = append(failed, stockFailure{a.IssueKey, a.Action, "record event: " + err.Error()})
 				continue
 			}
-			if _, _, err := s.tasks.FindOrCreate(r.Context(), runmode.LocalDefaultOrg, entity.ID, eventType, "", eventID, 0.5); err != nil {
+			if _, _, err := s.tasks.FindOrCreate(r.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, entity.ID, eventType, "", eventID, 0.5); err != nil {
 				failed = append(failed, stockFailure{a.IssueKey, a.Action, err.Error()})
 				continue
 			}
@@ -485,7 +485,7 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 				failed = append(failed, stockFailure{a.IssueKey, a.Action, "record event: " + err.Error()})
 				continue
 			}
-			task, _, err := s.tasks.FindOrCreate(r.Context(), runmode.LocalDefaultOrg, entity.ID, domain.EventJiraIssueAssigned, "", eventID, 0.5)
+			task, _, err := s.tasks.FindOrCreate(r.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, entity.ID, domain.EventJiraIssueAssigned, "", eventID, 0.5)
 			if err != nil {
 				failed = append(failed, stockFailure{a.IssueKey, a.Action, err.Error()})
 				continue

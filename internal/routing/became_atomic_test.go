@@ -23,7 +23,7 @@ import (
 func TestHandleEvent_BecameAtomic_ExistingTask_NoDuplicate(t *testing.T) {
 	database := newTestDB(t)
 	seedHandlerFKTargets(t, database)
-	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrg); err != nil {
+	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID); err != nil {
 		t.Fatalf("seed event handlers: %v", err)
 	}
 
@@ -53,7 +53,7 @@ func TestHandleEvent_BecameAtomic_ExistingTask_NoDuplicate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record assigned event: %v", err)
 	}
-	existingTask, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, entity.ID,
+	existingTask, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, entity.ID,
 		domain.EventJiraIssueAssigned, "", assignedEventID, 0.5)
 	if err != nil {
 		t.Fatalf("create existing task: %v", err)
@@ -104,7 +104,7 @@ func TestHandleEvent_BecameAtomic_NoExistingTask_CreatesTask(t *testing.T) {
 	// flow.
 	database := newTestDB(t)
 	seedHandlerFKTargets(t, database)
-	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrg); err != nil {
+	if err := testEventHandlerStore(database).Seed(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID); err != nil {
 		t.Fatalf("seed event handlers: %v", err)
 	}
 

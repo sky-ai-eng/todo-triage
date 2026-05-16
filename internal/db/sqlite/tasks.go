@@ -10,7 +10,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // taskStore is the SQLite impl of db.TaskStore. SQL bodies are moved
@@ -213,24 +212,29 @@ func (s *taskStore) EntityIDsWithActiveTasks(ctx context.Context, orgID, source 
 
 // --- Lifecycle ---
 
-func (s *taskStore) FindOrCreate(ctx context.Context, orgID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64) (*domain.Task, bool, error) {
-	return s.FindOrCreateAt(ctx, orgID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, time.Now())
+func (s *taskStore) FindOrCreate(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64) (*domain.Task, bool, error) {
+	return s.FindOrCreateAt(ctx, orgID, teamID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, time.Now())
 }
 
-func (s *taskStore) FindOrCreateAt(ctx context.Context, orgID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error) {
+func (s *taskStore) FindOrCreateAt(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, false, err
 	}
-	// Try to find an existing active task first.
+	if teamID == "" {
+		return nil, false, fmt.Errorf("sqlite task store: team_id required (SKY-295: dedup is per-team; caller must thread the matched event_handler's team or runmode.LocalDefaultTeamID)")
+	}
+	// Try to find an existing active task first. Dedup is per-team
+	// (SKY-295) — same (entity, event_type, dedup_key) in another
+	// team gets its own task.
 	var existing domain.Task
 	err := scanTaskFromRow(s.q.QueryRowContext(ctx, `
 		SELECT `+sqliteTaskColumnsWithEntity+`
 		FROM tasks t
 		JOIN entities e ON t.entity_id = e.id
-		WHERE t.entity_id = ? AND t.event_type = ? AND t.dedup_key = ?
+		WHERE t.entity_id = ? AND t.event_type = ? AND t.dedup_key = ? AND t.team_id = ?
 			AND t.status NOT IN ('done', 'dismissed')
 		LIMIT 1
-	`, entityID, eventType, dedupKey), &existing)
+	`, entityID, eventType, dedupKey, teamID), &existing)
 	if err == nil {
 		return &existing, false, nil
 	}
@@ -239,7 +243,7 @@ func (s *taskStore) FindOrCreateAt(ctx context.Context, orgID, entityID, eventTy
 	}
 
 	// Create new task. The partial unique index on
-	// (entity_id, event_type, dedup_key) WHERE status NOT IN
+	// (entity_id, event_type, dedup_key, team_id) WHERE status NOT IN
 	// ('done', 'dismissed') is the race backstop: a concurrent
 	// goroutine that races past the SELECT will get rejected on
 	// INSERT, and we re-read to return the winner's row.
@@ -252,17 +256,17 @@ func (s *taskStore) FindOrCreateAt(ctx context.Context, orgID, entityID, eventTy
 		                   status, priority_score, scoring_status, created_at,
 		                   team_id, visibility)
 		VALUES (?, ?, ?, ?, ?, 'queued', ?, 'pending', ?, ?, 'team')
-	`, id, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt, runmode.LocalDefaultTeamID)
+	`, id, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt, teamID)
 	if err != nil {
 		var raced domain.Task
 		err2 := scanTaskFromRow(s.q.QueryRowContext(ctx, `
 			SELECT `+sqliteTaskColumnsWithEntity+`
 			FROM tasks t
 			JOIN entities e ON t.entity_id = e.id
-			WHERE t.entity_id = ? AND t.event_type = ? AND t.dedup_key = ?
+			WHERE t.entity_id = ? AND t.event_type = ? AND t.dedup_key = ? AND t.team_id = ?
 				AND t.status NOT IN ('done', 'dismissed')
 			LIMIT 1
-		`, entityID, eventType, dedupKey), &raced)
+		`, entityID, eventType, dedupKey, teamID), &raced)
 		if err2 == nil {
 			return &raced, false, nil
 		}
@@ -574,6 +578,7 @@ func (s *taskStore) CountConsecutiveFailedRuns(ctx context.Context, orgID, entit
 // the same-package import.
 const sqliteTaskColumnsWithEntity = `
 	t.id, t.entity_id, t.event_type, t.dedup_key, t.primary_event_id,
+	t.team_id,
 	t.status, t.priority_score, t.ai_summary, t.autonomy_suitability,
 	t.priority_reasoning, t.scoring_status, t.severity, t.relevance_reason,
 	t.source_status, t.snooze_until, t.close_reason, t.close_event_type,
@@ -597,6 +602,7 @@ const sqliteTaskColumnsWithEntity = `
 // dependency runs in one direction (queries → scan) and lives in one
 // file.
 type taskScanState struct {
+	teamID                             sql.NullString
 	priorityScore, autonomySuitability sql.NullFloat64
 	aiSummary, priorityReasoning       sql.NullString
 	severity, relevanceReason          sql.NullString
@@ -609,6 +615,7 @@ type taskScanState struct {
 func (s *taskScanState) targets(t *domain.Task) []any {
 	return []any{
 		&t.ID, &t.EntityID, &t.EventType, &t.DedupKey, &t.PrimaryEventID,
+		&s.teamID,
 		&t.Status, &s.priorityScore, &s.aiSummary, &s.autonomySuitability,
 		&s.priorityReasoning, &s.scoringStatus, &s.severity, &s.relevanceReason,
 		&s.sourceStatus, &s.snoozeUntil, &s.closeReason, &s.closeEventType,
@@ -620,6 +627,9 @@ func (s *taskScanState) targets(t *domain.Task) []any {
 }
 
 func (s *taskScanState) finalize(t *domain.Task) {
+	if s.teamID.Valid {
+		t.TeamID = s.teamID.String
+	}
 	if s.priorityScore.Valid {
 		t.PriorityScore = &s.priorityScore.Float64
 	}

@@ -78,7 +78,7 @@ func TestMaterializePriorMemories_WritesPriors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("event: %v", err)
 	}
-	task, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, entity.ID, domain.EventJiraIssueAssigned, "", evt, 0.5)
+	task, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, entity.ID, domain.EventJiraIssueAssigned, "", evt, 0.5)
 	if err != nil {
 		t.Fatalf("task: %v", err)
 	}

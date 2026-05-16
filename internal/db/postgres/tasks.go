@@ -11,6 +11,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // taskStore is the Postgres impl of db.TaskStore. SQL is written fresh
@@ -180,24 +181,48 @@ func (s *taskStore) EntityIDsWithActiveTasks(ctx context.Context, orgID, source 
 
 // --- Lifecycle ---
 
-func (s *taskStore) FindOrCreate(ctx context.Context, orgID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64) (*domain.Task, bool, error) {
-	return s.FindOrCreateAt(ctx, orgID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, time.Now())
+func (s *taskStore) FindOrCreate(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64) (*domain.Task, bool, error) {
+	return s.FindOrCreateAt(ctx, orgID, teamID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, time.Now())
 }
 
-func (s *taskStore) FindOrCreateAt(ctx context.Context, orgID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error) {
+func (s *taskStore) FindOrCreateAt(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error) {
+	// SKY-295: team_id is caller-supplied. User-source handlers carry a
+	// real team UUID. Org-visible handlers (visibility='org', team_id NULL)
+	// collapse to runmode.LocalDefaultTeamID in handlerTeamID(); resolve
+	// that sentinel to the org's canonical team (oldest by created_at) so
+	// shipped system rules create tasks in Postgres mode. A truly-empty
+	// teamBind (caller passed "") still trips the guard below.
+	teamBind := teamID
+	if teamBind == runmode.LocalDefaultTeamID {
+		var canonical string
+		if err := s.q.QueryRowContext(ctx,
+			`SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1`,
+			orgID,
+		).Scan(&canonical); err != nil {
+			return nil, false, fmt.Errorf("task store: resolve canonical team for org %s: %w", orgID, err)
+		}
+		teamBind = canonical
+	}
+	if teamBind == "" {
+		return nil, false, fmt.Errorf("task store: team_id required for Postgres FindOrCreate (router must thread the user-selected team from the matched event_handler)")
+	}
+
 	// SELECT first so the common path (task already exists) stays a
 	// single round-trip. The partial unique index on
-	// (org_id, entity_id, event_type, dedup_key) WHERE status NOT IN
-	// ('done', 'dismissed') is the race backstop on INSERT.
+	// (org_id, entity_id, event_type, dedup_key, team_id) WHERE
+	// status NOT IN ('done', 'dismissed') is the race backstop on
+	// INSERT — SKY-295 made it per-team so the same event matching
+	// N teams' rules fans out to N tasks.
 	var existing domain.Task
 	err := scanTaskFromRow(s.q.QueryRowContext(ctx, `
 		SELECT `+pgTaskColumnsWithEntity+`
 		FROM tasks t
 		JOIN entities e ON t.entity_id = e.id AND e.org_id = t.org_id
 		WHERE t.org_id = $1 AND t.entity_id = $2 AND t.event_type = $3 AND t.dedup_key = $4
+			AND t.team_id = $5::uuid
 			AND t.status NOT IN ('done', 'dismissed')
 		LIMIT 1
-	`, orgID, entityID, eventType, dedupKey), &existing)
+	`, orgID, entityID, eventType, dedupKey, teamBind), &existing)
 	if err == nil {
 		return &existing, false, nil
 	}
@@ -205,10 +230,8 @@ func (s *taskStore) FindOrCreateAt(ctx context.Context, orgID, entityID, eventTy
 		return nil, false, err
 	}
 
-	// team_id is required by the schema (SKY-262); resolve the org's
-	// canonical team inline so the call sites stay flat and don't have
-	// to thread an extra arg. ON CONFLICT keys off the partial unique
-	// index — on a lost race the INSERT no-ops and we re-read.
+	// ON CONFLICT keys off the partial unique index — on a lost race
+	// the INSERT no-ops and we re-read.
 	taskID := uuid.New().String()
 	res, err := s.q.ExecContext(ctx, `
 		INSERT INTO tasks (id, org_id, entity_id, event_type, dedup_key, primary_event_id,
@@ -217,11 +240,11 @@ func (s *taskStore) FindOrCreateAt(ctx context.Context, orgID, entityID, eventTy
 		                   creator_user_id)
 		VALUES ($1, $2, $3, $4, $5, $6,
 		        'queued', $7, 'pending', $8,
-		        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
+		        $9::uuid,
 		        'team',
 		        COALESCE(tf.current_user_id(), (SELECT owner_user_id FROM orgs WHERE id = $2)))
 		ON CONFLICT DO NOTHING
-	`, taskID, orgID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt)
+	`, taskID, orgID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt, teamBind)
 	if err != nil {
 		return nil, false, err
 	}
@@ -235,9 +258,10 @@ func (s *taskStore) FindOrCreateAt(ctx context.Context, orgID, entityID, eventTy
 			FROM tasks t
 			JOIN entities e ON t.entity_id = e.id AND e.org_id = t.org_id
 			WHERE t.org_id = $1 AND t.entity_id = $2 AND t.event_type = $3 AND t.dedup_key = $4
+				AND t.team_id = $5::uuid
 				AND t.status NOT IN ('done', 'dismissed')
 			LIMIT 1
-		`, orgID, entityID, eventType, dedupKey), &raced)
+		`, orgID, entityID, eventType, dedupKey, teamBind), &raced)
 		if err2 != nil {
 			return nil, false, fmt.Errorf("findorcreate: race reread: %w", err2)
 		}
@@ -523,6 +547,7 @@ func (s *taskStore) CountConsecutiveFailedRuns(ctx context.Context, orgID, entit
 //   - Time columns are TIMESTAMPTZ; sql.NullTime scans them directly.
 const pgTaskColumnsWithEntity = `
 	t.id, t.entity_id, t.event_type, t.dedup_key, t.primary_event_id,
+	t.team_id,
 	t.status, t.priority_score, t.ai_summary, t.autonomy_suitability,
 	t.priority_reasoning, t.scoring_status, t.severity, t.relevance_reason,
 	t.source_status, t.snooze_until, t.close_reason, t.close_event_type,
@@ -532,6 +557,7 @@ const pgTaskColumnsWithEntity = `
 	COALESCE((e.snapshot_json->>'open_subtask_count')::int, 0)`
 
 type taskScanState struct {
+	teamID                             sql.NullString
 	priorityScore, autonomySuitability sql.NullFloat64
 	aiSummary, priorityReasoning       sql.NullString
 	severity, relevanceReason          sql.NullString
@@ -544,6 +570,7 @@ type taskScanState struct {
 func (s *taskScanState) targets(t *domain.Task) []any {
 	return []any{
 		&t.ID, &t.EntityID, &t.EventType, &t.DedupKey, &t.PrimaryEventID,
+		&s.teamID,
 		&t.Status, &s.priorityScore, &s.aiSummary, &s.autonomySuitability,
 		&s.priorityReasoning, &s.scoringStatus, &s.severity, &s.relevanceReason,
 		&s.sourceStatus, &s.snoozeUntil, &s.closeReason, &s.closeEventType,
@@ -555,6 +582,9 @@ func (s *taskScanState) targets(t *domain.Task) []any {
 }
 
 func (s *taskScanState) finalize(t *domain.Task) {
+	if s.teamID.Valid {
+		t.TeamID = s.teamID.String
+	}
 	if s.priorityScore.Valid {
 		t.PriorityScore = &s.priorityScore.Float64
 	}

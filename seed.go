@@ -11,20 +11,28 @@ import (
 )
 
 // seedDefaultPrompts seeds the shipped system prompts via PromptStore
-// AND the shipped system rules + triggers via EventHandlerStore per org.
-// Post-SKY-259 rules and triggers are one table; Seed iterates both
-// kinds together. Local mode iterates a single synthetic org
-// (runmode.LocalDefaultOrg); multi mode will iterate stores.Orgs.ListAll
-// once Wave 4 lands OrgStore.
+// AND the shipped system rules + triggers via EventHandlerStore per
+// (org, team). Post-SKY-259 rules and triggers are one table; post-
+// SKY-295 system rules + triggers materialize as team-scoped rows
+// (visibility='team', team_id=<team>) rather than org-visible — so the
+// router can route each matched handler to its team's queue without a
+// membership-blind fallback. Local mode iterates a single synthetic
+// (org, team); multi mode will iterate stores.Orgs.ListAll + each
+// org's teams once Wave 4 lands OrgStore. Multi-mode team creation
+// (when that flow ships) also calls EventHandlerStore.Seed for the
+// new team so it inherits the shipped defaults.
 //
 // Calls into:
 //   - PromptStore.SeedOrUpdate — SQLite: single conn; Postgres: admin
 //     pool internally (the system_prompt_versions sidecar is REVOKE'd
-//     from tf_app per D3).
+//     from tf_app per D3). Prompts stay org-visible: they're
+//     referenced by triggers across teams via the composite FK
+//     (prompt_id, org_id), so duplicating per-team would proliferate
+//     identical rows for no benefit.
 //   - EventHandlerStore.Seed — admin-pool routing in Postgres because
-//     shipped rows have NULL creator_user_id + visibility='org' and
-//     the modify policies gate org-visible writes on
-//     tf.user_is_org_admin().
+//     shipped rows have NULL creator_user_id and the modify policies
+//     gate user-visible writes on tf.current_user_id() which is
+//     unset at boot.
 //
 // Order matters: prompts seed first so the FK from
 // event_handlers.prompt_id → prompts.id is satisfied for shipped
@@ -33,9 +41,11 @@ func seedDefaultPrompts(prompts db.PromptStore, handlers db.EventHandlerStore) {
 	ctx := context.Background()
 
 	// TODO(SKY-246 wave 4): when OrgStore lands, replace this hard-coded
-	// slice with stores.Orgs.ListAll(ctx). Until then multi mode is
-	// fatal at startup so the local-only slice is correct.
-	orgs := []string{runmode.LocalDefaultOrg}
+	// slice with stores.Orgs.ListAll(ctx) × per-org teams. Until then
+	// multi mode is fatal at startup so the local-only (org, team)
+	// pair is correct.
+	type orgTeam struct{ orgID, teamID string }
+	orgs := []orgTeam{{runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID}}
 
 	shipped := []domain.Prompt{
 		// Default PR review prompt — manual only. The user picks when
@@ -71,18 +81,21 @@ func seedDefaultPrompts(prompts db.PromptStore, handlers db.EventHandlerStore) {
 		{ID: domain.SystemTicketSpecPromptID, Name: "Curator: Ticket as a Spec", Body: ai.TicketSpecPromptTemplate, Source: "system"},
 	}
 
-	for _, orgID := range orgs {
+	for _, ot := range orgs {
 		for _, p := range shipped {
-			if err := prompts.SeedOrUpdate(ctx, orgID, p); err != nil {
-				log.Printf("[seed] warning: failed to seed %s in org %s: %v", p.ID, orgID, err)
+			if err := prompts.SeedOrUpdate(ctx, ot.orgID, p); err != nil {
+				log.Printf("[seed] warning: failed to seed %s in org %s: %v", p.ID, ot.orgID, err)
 			}
 		}
 		// Event handlers (rules + triggers, post-SKY-259) ship after
-		// prompts in the same orgID iteration so the FK from
+		// prompts in the same org iteration so the FK from
 		// event_handlers.prompt_id → prompts.id resolves in Postgres
 		// (the constraint is composite on (prompt_id, org_id)).
-		if err := handlers.Seed(ctx, orgID); err != nil {
-			log.Printf("[seed] warning: failed to seed event_handlers in org %s: %v", orgID, err)
+		// SKY-295: materialize per team — handler rows carry team_id
+		// so the router can route directly to the correct team's
+		// queue.
+		if err := handlers.Seed(ctx, ot.orgID, ot.teamID); err != nil {
+			log.Printf("[seed] warning: failed to seed event_handlers in org %s team %s: %v", ot.orgID, ot.teamID, err)
 		}
 	}
 	// The shipped rule + trigger entries live in db.ShippedEventHandlers

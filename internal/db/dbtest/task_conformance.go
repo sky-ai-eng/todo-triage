@@ -13,6 +13,9 @@ import (
 //   - the wired TaskStore impl
 //   - the orgID to pass to every method (sqlite returns
 //     runmode.LocalDefaultOrg, postgres returns a fresh org UUID)
+//   - the teamID — caller-supplied team_id for FindOrCreate
+//     (SKY-295). SQLite returns runmode.LocalDefaultTeamID; Postgres
+//     returns the seeded default team's UUID.
 //   - the agentID + userID the backend test has seeded — claim
 //     transitions need real FK-resolvable ids (auth.users / agents
 //     rows already in place for the harness's chosen org)
@@ -23,8 +26,9 @@ import (
 //     harness stays schema-blind.
 type TaskStoreFactory func(t *testing.T) (
 	store db.TaskStore,
-	orgID, agentID, userID string,
+	orgID, teamID, agentID, userID string,
 	seed TaskSeeder,
+	seedTeam TeamSeeder,
 )
 
 // TaskSeeder produces a fresh (entity, event, task) chain for one
@@ -37,6 +41,16 @@ type TaskStoreFactory func(t *testing.T) (
 // collapse independent assertions).
 type TaskSeeder func(t *testing.T, suffix string) (entityID, eventID, taskID string)
 
+// TeamSeeder creates a secondary team inside the harness's org and
+// returns its ID, so the per-team dedup conformance subtest can
+// exercise the SKY-295 fanout. Local-mode (SQLite) seeds a real
+// teams row alongside the LocalDefaultTeamID baseline; Postgres
+// seeds a fresh team UUID in the same org as the factory's primary
+// teamID. The harness only calls this in the multi-team subtests
+// so backends with stricter team-FK requirements (Postgres'
+// memberships graph) can stay simple in the single-team path.
+type TeamSeeder func(t *testing.T, suffix string) (teamID string)
+
 // RunTaskStoreConformance is the shared assertion suite for any
 // db.TaskStore implementation. Backend tests invoke it with their
 // factory; both backends run the same subtests.
@@ -45,7 +59,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 	ctx := context.Background()
 
 	t.Run("Get_returns_nil_for_missing_id", func(t *testing.T) {
-		s, orgID, _, _, _ := mk(t)
+		s, orgID, _, _, _, _, _ := mk(t)
 		task, err := s.Get(ctx, orgID, "00000000-0000-0000-0000-000000000bad")
 		if err != nil {
 			t.Fatalf("Get on missing id: %v", err)
@@ -56,7 +70,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 	})
 
 	t.Run("Get_returns_seeded_task_with_entity_join", func(t *testing.T) {
-		s, orgID, _, _, seed := mk(t)
+		s, orgID, _, _, _, seed, _ := mk(t)
 		_, _, taskID := seed(t, "get-happy")
 		task, err := s.Get(ctx, orgID, taskID)
 		if err != nil {
@@ -74,7 +88,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 	})
 
 	t.Run("Queued_returns_unclaimed_queued_tasks", func(t *testing.T) {
-		s, orgID, _, _, seed := mk(t)
+		s, orgID, _, _, _, seed, _ := mk(t)
 		seed(t, "q1")
 		seed(t, "q2")
 		out, err := s.Queued(ctx, orgID)
@@ -95,7 +109,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 	})
 
 	t.Run("ByStatus_with_done_excludes_active", func(t *testing.T) {
-		s, orgID, _, _, seed := mk(t)
+		s, orgID, _, _, _, seed, _ := mk(t)
 		_, _, taskID := seed(t, "bs-done")
 		// Active task should not appear in done list.
 		done, err := s.ByStatus(ctx, orgID, "done")
@@ -128,20 +142,20 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 	})
 
 	t.Run("FindOrCreate_idempotent_on_dedup_key", func(t *testing.T) {
-		s, orgID, _, _, seed := mk(t)
+		s, orgID, teamID, _, _, seed, _ := mk(t)
 		entityID, eventID, _ := seed(t, "foc-dedup")
 		// Re-call with the seed's eventType+dedupKey would collide on
 		// the existing seeded task. Use a different eventType so the
 		// first FindOrCreate creates a new row, and a second call with
 		// the same args returns it idempotently.
-		task1, created1, err := s.FindOrCreate(ctx, orgID, entityID, domain.EventGitHubPRCICheckPassed, "dedup-x", eventID, 0.5)
+		task1, created1, err := s.FindOrCreate(ctx, orgID, teamID, entityID, domain.EventGitHubPRCICheckPassed, "dedup-x", eventID, 0.5)
 		if err != nil {
 			t.Fatalf("FindOrCreate first call: %v", err)
 		}
 		if !created1 {
 			t.Error("first FindOrCreate should return created=true")
 		}
-		task2, created2, err := s.FindOrCreate(ctx, orgID, entityID, domain.EventGitHubPRCICheckPassed, "dedup-x", eventID, 0.5)
+		task2, created2, err := s.FindOrCreate(ctx, orgID, teamID, entityID, domain.EventGitHubPRCICheckPassed, "dedup-x", eventID, 0.5)
 		if err != nil {
 			t.Fatalf("FindOrCreate second call: %v", err)
 		}
@@ -153,8 +167,85 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		}
 	})
 
+	// --- SKY-295: per-team task fanout + dedup ---
+
+	t.Run("FindOrCreate_single_team_one_task", func(t *testing.T) {
+		// Regression baseline: in a single-team scenario the
+		// per-team dedup index collapses repeat calls to one task.
+		s, orgID, teamID, _, _, seed, _ := mk(t)
+		entityID, eventID, _ := seed(t, "single-team")
+		task, created, err := s.FindOrCreate(ctx, orgID, teamID, entityID, domain.EventGitHubPRCICheckPassed, "build", eventID, 0.5)
+		if err != nil {
+			t.Fatalf("FindOrCreate: %v", err)
+		}
+		if !created {
+			t.Fatal("expected created=true on first call")
+		}
+		if task.ID == "" {
+			t.Fatal("FindOrCreate returned task with empty ID")
+		}
+	})
+
+	t.Run("FindOrCreate_per_team_fans_out", func(t *testing.T) {
+		// Same (entity, event_type, dedup_key) in two teams → two
+		// distinct tasks. This is the load-bearing change in SKY-295:
+		// the dedup index now includes team_id, so cross-team dedup
+		// must NOT collapse.
+		s, orgID, teamA, _, _, seed, seedTeam := mk(t)
+		if seedTeam == nil {
+			t.Skip("backend factory did not provide a TeamSeeder; multi-team test skipped")
+		}
+		teamB := seedTeam(t, "fanout")
+		entityID, eventID, _ := seed(t, "per-team-fanout")
+
+		taskA, createdA, err := s.FindOrCreate(ctx, orgID, teamA, entityID, domain.EventGitHubPRCICheckPassed, "build", eventID, 0.5)
+		if err != nil {
+			t.Fatalf("FindOrCreate(teamA): %v", err)
+		}
+		if !createdA {
+			t.Error("teamA FindOrCreate should create the task")
+		}
+
+		taskB, createdB, err := s.FindOrCreate(ctx, orgID, teamB, entityID, domain.EventGitHubPRCICheckPassed, "build", eventID, 0.5)
+		if err != nil {
+			t.Fatalf("FindOrCreate(teamB): %v", err)
+		}
+		if !createdB {
+			t.Error("teamB FindOrCreate should create a SECOND task (cross-team dedup must not collapse)")
+		}
+		if taskA.ID == taskB.ID {
+			t.Errorf("expected distinct task IDs across teams; got %q == %q", taskA.ID, taskB.ID)
+		}
+	})
+
+	t.Run("FindOrCreate_same_team_dedup_collapses", func(t *testing.T) {
+		// Within one team, repeat calls on the same key still
+		// collapse to one task. Pins that the per-team change to the
+		// dedup index didn't accidentally loosen intra-team dedup.
+		s, orgID, teamID, _, _, seed, _ := mk(t)
+		entityID, eventID, _ := seed(t, "same-team-dedup")
+
+		task1, created1, err := s.FindOrCreate(ctx, orgID, teamID, entityID, domain.EventGitHubPRCICheckPassed, "build", eventID, 0.5)
+		if err != nil {
+			t.Fatalf("first FindOrCreate: %v", err)
+		}
+		if !created1 {
+			t.Error("first call should create")
+		}
+		task2, created2, err := s.FindOrCreate(ctx, orgID, teamID, entityID, domain.EventGitHubPRCICheckPassed, "build", eventID, 0.5)
+		if err != nil {
+			t.Fatalf("second FindOrCreate: %v", err)
+		}
+		if created2 {
+			t.Error("second call within same team should dedup (created=false)")
+		}
+		if task1.ID != task2.ID {
+			t.Errorf("same-team second call returned different ID %q (want %q)", task2.ID, task1.ID)
+		}
+	})
+
 	t.Run("Bump_wakes_snoozed_task", func(t *testing.T) {
-		s, orgID, _, _, seed := mk(t)
+		s, orgID, _, _, _, seed, _ := mk(t)
 		_, eventID, taskID := seed(t, "bump-wake")
 		// Force task into snoozed via SetStatus (sufficient for this
 		// invariant — claim cols stay empty, satisfying the
@@ -175,7 +266,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 	})
 
 	t.Run("Close_terminates_task", func(t *testing.T) {
-		s, orgID, _, _, seed := mk(t)
+		s, orgID, _, _, _, seed, _ := mk(t)
 		_, _, taskID := seed(t, "close")
 		if err := s.Close(ctx, orgID, taskID, "test_close", ""); err != nil {
 			t.Fatalf("Close: %v", err)
@@ -190,7 +281,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 	})
 
 	t.Run("CloseAllForEntity_counts_and_closes", func(t *testing.T) {
-		s, orgID, _, _, seed := mk(t)
+		s, orgID, _, _, _, seed, _ := mk(t)
 		entityID, _, taskID := seed(t, "closeall")
 		closed, err := s.CloseAllForEntity(ctx, orgID, entityID, "entity_closed")
 		if err != nil {
@@ -206,7 +297,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 	})
 
 	t.Run("FindActiveByEntity_excludes_terminal", func(t *testing.T) {
-		s, orgID, _, _, seed := mk(t)
+		s, orgID, _, _, _, seed, _ := mk(t)
 		entityID, _, taskID := seed(t, "fab")
 		active, err := s.FindActiveByEntity(ctx, orgID, entityID)
 		if err != nil {
@@ -223,7 +314,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 	})
 
 	t.Run("ListActiveRefsForEntities_empty_input", func(t *testing.T) {
-		s, orgID, _, _, _ := mk(t)
+		s, orgID, _, _, _, _, _ := mk(t)
 		refs, err := s.ListActiveRefsForEntities(ctx, orgID, nil)
 		if err != nil {
 			t.Fatalf("ListActiveRefsForEntities(nil): %v", err)
@@ -234,7 +325,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 	})
 
 	t.Run("ListActiveRefsForEntities_filters_terminal", func(t *testing.T) {
-		s, orgID, _, _, seed := mk(t)
+		s, orgID, _, _, _, seed, _ := mk(t)
 		entityA, _, taskA := seed(t, "ref-a")
 		entityB, _, taskB := seed(t, "ref-b")
 		// Close B; only A should remain.
@@ -254,7 +345,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 	})
 
 	t.Run("EntityIDsWithActiveTasks_filters_by_source", func(t *testing.T) {
-		s, orgID, _, _, seed := mk(t)
+		s, orgID, _, _, _, seed, _ := mk(t)
 		entityID, _, _ := seed(t, "eida")
 		ids, err := s.EntityIDsWithActiveTasks(ctx, orgID, "github")
 		if err != nil {
@@ -276,7 +367,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 	// --- Claim invariants ---
 
 	t.Run("ClaimQueuedForUser_lands_then_refuses_steal", func(t *testing.T) {
-		s, orgID, _, userID, seed := mk(t)
+		s, orgID, _, _, userID, seed, _ := mk(t)
 		_, _, taskID := seed(t, "cqfu")
 		ok, err := s.ClaimQueuedForUser(ctx, orgID, taskID, userID)
 		if err != nil {
@@ -302,7 +393,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 	})
 
 	t.Run("ClaimQueuedForUser_rejects_terminal_task", func(t *testing.T) {
-		s, orgID, _, userID, seed := mk(t)
+		s, orgID, _, _, userID, seed, _ := mk(t)
 		_, _, taskID := seed(t, "cqfu-term")
 		if err := s.Close(ctx, orgID, taskID, "test", ""); err != nil {
 			t.Fatalf("Close: %v", err)
@@ -317,7 +408,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 	})
 
 	t.Run("StampAgentClaimIfUnclaimed_lands_then_skips_same_agent", func(t *testing.T) {
-		s, orgID, agentID, _, seed := mk(t)
+		s, orgID, _, agentID, _, seed, _ := mk(t)
 		_, _, taskID := seed(t, "stamp")
 		ok, err := s.StampAgentClaimIfUnclaimed(ctx, orgID, taskID, agentID)
 		if err != nil {
@@ -337,7 +428,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 	})
 
 	t.Run("StampAgentClaimIfUnclaimed_refuses_terminal", func(t *testing.T) {
-		s, orgID, agentID, _, seed := mk(t)
+		s, orgID, _, agentID, _, seed, _ := mk(t)
 		_, _, taskID := seed(t, "stamp-term")
 		if err := s.Close(ctx, orgID, taskID, "test", ""); err != nil {
 			t.Fatalf("Close: %v", err)
@@ -352,7 +443,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 	})
 
 	t.Run("HandoffAgentClaim_three_outcomes", func(t *testing.T) {
-		s, orgID, agentID, userID, seed := mk(t)
+		s, orgID, _, agentID, userID, seed, _ := mk(t)
 		_, _, taskID := seed(t, "handoff")
 		// Unclaimed → bot: HandoffChanged.
 		result, err := s.HandoffAgentClaim(ctx, orgID, taskID, agentID, userID)
@@ -384,7 +475,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 	})
 
 	t.Run("TakeoverClaimFromAgent_succeeds_on_bot_claim", func(t *testing.T) {
-		s, orgID, agentID, userID, seed := mk(t)
+		s, orgID, _, agentID, userID, seed, _ := mk(t)
 		_, _, taskID := seed(t, "takeover")
 		// Set up bot claim first.
 		if _, err := s.StampAgentClaimIfUnclaimed(ctx, orgID, taskID, agentID); err != nil {
@@ -409,7 +500,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 	// --- Empty-arg / ctx-cancel quick guards ---
 
 	t.Run("CtxCancellation_fails_fast", func(t *testing.T) {
-		s, orgID, _, _, _ := mk(t)
+		s, orgID, _, _, _, _, _ := mk(t)
 		cancelled, cancel := context.WithCancel(ctx)
 		cancel()
 		if _, err := s.Queued(cancelled, orgID); err == nil {
@@ -418,7 +509,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 	})
 
 	t.Run("ListActiveRefs_empty_orgID_check_does_not_panic", func(t *testing.T) {
-		s, orgID, _, _, _ := mk(t)
+		s, orgID, _, _, _, _, _ := mk(t)
 		refs, err := s.ListActiveRefsForEntities(ctx, orgID, []string{})
 		if err != nil {
 			t.Fatalf("empty slice: %v", err)

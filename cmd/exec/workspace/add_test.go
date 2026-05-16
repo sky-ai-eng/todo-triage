@@ -83,7 +83,7 @@ func seedJiraRun(t *testing.T, database *db.DB, runID, issueKey string) {
 	if err != nil {
 		t.Fatalf("event: %v", err)
 	}
-	task, _, err := sqlitestore.New(database.Conn).Tasks.FindOrCreate(t.Context(), runmode.LocalDefaultOrg, entity.ID, domain.EventJiraIssueAssigned, runID, evt, 0.5)
+	task, _, err := sqlitestore.New(database.Conn).Tasks.FindOrCreate(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, entity.ID, domain.EventJiraIssueAssigned, runID, evt, 0.5)
 	if err != nil {
 		t.Fatalf("task: %v", err)
 	}
@@ -112,7 +112,7 @@ func seedGitHubRun(t *testing.T, database *db.DB, runID string) {
 	if err != nil {
 		t.Fatalf("event: %v", err)
 	}
-	task, _, err := sqlitestore.New(database.Conn).Tasks.FindOrCreate(t.Context(), runmode.LocalDefaultOrg, entity.ID, domain.EventGitHubPRCICheckFailed, runID, evt, 0.5)
+	task, _, err := sqlitestore.New(database.Conn).Tasks.FindOrCreate(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, entity.ID, domain.EventGitHubPRCICheckFailed, runID, evt, 0.5)
 	if err != nil {
 		t.Fatalf("task: %v", err)
 	}

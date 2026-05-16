@@ -64,7 +64,7 @@ func seedRun(t *testing.T, database *sql.DB, runID, sessionID, worktreePath stri
 	if err != nil {
 		t.Fatalf("record event: %v", err)
 	}
-	task, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, entity.ID, domain.EventGitHubPRCICheckFailed, runID, eventID, 0.5)
+	task, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, entity.ID, domain.EventGitHubPRCICheckFailed, runID, eventID, 0.5)
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
@@ -101,7 +101,7 @@ func seedJiraRun(t *testing.T, database *sql.DB, runID, sessionID, worktreePath 
 	if err != nil {
 		t.Fatalf("record event: %v", err)
 	}
-	task, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, entity.ID, domain.EventJiraIssueAssigned, runID, eventID, 0.5)
+	task, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, entity.ID, domain.EventJiraIssueAssigned, runID, eventID, 0.5)
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}

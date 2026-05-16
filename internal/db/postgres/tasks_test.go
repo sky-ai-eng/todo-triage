@@ -13,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // TestTaskStore_Postgres runs the shared conformance suite against
@@ -33,15 +34,31 @@ func TestTaskStore_Postgres(t *testing.T) {
 	// directly. Same pattern as TestSwipeStore_Postgres.
 	stores := pgstore.New(h.AdminDB, h.AdminDB)
 
-	dbtest.RunTaskStoreConformance(t, func(t *testing.T) (db.TaskStore, string, string, string, dbtest.TaskSeeder) {
+	dbtest.RunTaskStoreConformance(t, func(t *testing.T) (db.TaskStore, string, string, string, string, dbtest.TaskSeeder, dbtest.TeamSeeder) {
 		t.Helper()
 		h.Reset(t)
 		orgID, userID, agentID := seedPgOrgUserAgent(t, h)
+		// The org's default team — seeded by seedPgDefaultTeam inside
+		// seedPgOrgUserAgent — is the teamID the conformance subtests
+		// thread into FindOrCreate. firstTeamForOrg picks it up via
+		// the same created_at ordering production used to do
+		// implicitly.
+		teamID := firstTeamForOrg(t, h, orgID)
 		seeder := func(t *testing.T, suffix string) (entityID, eventID, taskID string) {
 			t.Helper()
 			return seedPgTaskChain(t, h.AdminDB, orgID, userID, suffix)
 		}
-		return stores.Tasks, orgID, agentID, userID, seeder
+		// SKY-295: per-team conformance subtest needs a second team
+		// inside the same org so the partial unique index fans out
+		// instead of collapsing. Seed the team + a membership for
+		// the harness's user so memberships-aware code paths stay
+		// happy (RLS-bypassing AdminDB doesn't strictly need the
+		// membership, but the canonical shape mirrors production).
+		teamSeeder := func(t *testing.T, suffix string) string {
+			t.Helper()
+			return seedPgDefaultTeam(t, h, orgID, userID)
+		}
+		return stores.Tasks, orgID, teamID, agentID, userID, seeder, teamSeeder
 	})
 }
 
@@ -175,4 +192,74 @@ func TestTaskStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	if len(refs) != 0 {
 		t.Errorf("orgB looking at entA returned %d refs; want 0 (cross-org leak)", len(refs))
 	}
+}
+
+// TestTaskStore_Postgres_OrgHandlerSentinel pins the fix for the case
+// where org-visible event handlers (visibility='org', team_id NULL)
+// route through handlerTeamID to runmode.LocalDefaultTeamID. The
+// Postgres FindOrCreate used to reject that sentinel; this test
+// verifies it now resolves to the org's canonical team and creates the
+// task successfully.
+func TestTaskStore_Postgres_OrgHandlerSentinel(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, _, _ := seedPgOrgUserAgent(t, h)
+	entityID, eventID := seedPgEntityEvent(t, h.AdminDB, orgID, "sentinel")
+
+	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	ctx := context.Background()
+
+	task, created, err := stores.Tasks.FindOrCreate(
+		ctx, orgID, runmode.LocalDefaultTeamID,
+		entityID, "github:pr:ci_check_failed", "", eventID, 0.5,
+	)
+	if err != nil {
+		t.Fatalf("FindOrCreate with LocalDefaultTeamID sentinel: %v", err)
+	}
+	if !created {
+		t.Error("expected task to be created, got created=false")
+	}
+	if task == nil {
+		t.Fatal("FindOrCreate returned nil task")
+	}
+
+	// Idempotent: second call with the same sentinel should find the
+	// existing task, not create a second one.
+	task2, created2, err := stores.Tasks.FindOrCreate(
+		ctx, orgID, runmode.LocalDefaultTeamID,
+		entityID, "github:pr:ci_check_failed", "", eventID, 0.5,
+	)
+	if err != nil {
+		t.Fatalf("FindOrCreate sentinel idempotent: %v", err)
+	}
+	if created2 {
+		t.Error("expected task to be found (not created) on second call")
+	}
+	if task2 == nil || task2.ID != task.ID {
+		t.Errorf("idempotent call returned task %v, want %s", task2, task.ID)
+	}
+}
+
+// seedPgEntityEvent inserts a bare entity + event (no task) and
+// returns their IDs. Used by tests that call FindOrCreate themselves.
+func seedPgEntityEvent(t *testing.T, conn *sql.DB, orgID, suffix string) (entityID, eventID string) {
+	t.Helper()
+	now := time.Now().UTC()
+	entityID = uuid.New().String()
+	eventID = uuid.New().String()
+	sourceID := fmt.Sprintf("sentinel-%s-%d", suffix, now.UnixNano())
+
+	if _, err := conn.Exec(`
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
+		VALUES ($1, $2, 'github', $3, 'pr', $4, $5, '{}'::jsonb, $6)
+	`, entityID, orgID, sourceID, "Sentinel "+suffix, "https://example/"+sourceID, now); err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	if _, err := conn.Exec(`
+		INSERT INTO events (id, org_id, entity_id, event_type, dedup_key, metadata_json, created_at)
+		VALUES ($1, $2, $3, 'github:pr:ci_check_failed', '', '{}'::jsonb, $4)
+	`, eventID, orgID, entityID, now); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	return entityID, eventID
 }

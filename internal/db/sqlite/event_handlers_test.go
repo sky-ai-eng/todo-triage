@@ -15,11 +15,12 @@ import (
 // the seedPrompts hook inserts the named rows via PromptStore so the
 // harness stays schema-blind.
 func TestEventHandlerStore_SQLite(t *testing.T) {
-	dbtest.RunEventHandlerStoreConformance(t, func(t *testing.T) (db.EventHandlerStore, string, dbtest.PromptSeeder) {
+	dbtest.RunEventHandlerStoreConformance(t, func(t *testing.T) (db.EventHandlerStore, string, string, dbtest.PromptSeeder) {
 		t.Helper()
 		conn := openSQLiteForTest(t)
 		stores := sqlitestore.New(conn)
 		orgID := runmode.LocalDefaultOrgID
+		teamID := runmode.LocalDefaultTeamID
 		// Closure captures orgID rather than referring to
 		// runmode.LocalDefaultOrgID directly — same shape as the
 		// Postgres factory (which gets a per-test UUID) and keeps the
@@ -35,6 +36,6 @@ func TestEventHandlerStore_SQLite(t *testing.T) {
 				}
 			}
 		}
-		return stores.EventHandlers, orgID, seed
+		return stores.EventHandlers, orgID, teamID, seed
 	})
 }
