@@ -156,7 +156,7 @@ func newAuthRig(t *testing.T) *authRig {
 	// tries to do anything with them at construction time, but a
 	// quick scan of New shows it only stashes the pointers, doesn't
 	// call methods.
-	s := New(h.AdminDB, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	s := New(h.AdminDB, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 
 	// Per-test context bound to t.Cleanup so the reaper goroutine
 	// spawned inside SetAuthDeps exits with the test rather than

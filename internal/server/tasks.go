@@ -411,7 +411,12 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 		case "claim":
 			outcome = discardOutcomeClaimed
 		}
-		s.cleanupPendingApprovalRun(id, outcome)
+		// Cleanup runs detached from r.Context() so a client
+		// disconnect after the swipe response doesn't strand the
+		// run in pending_approval. WithoutCancel inherits request
+		// values (claims, eventually).
+		cleanupCtx := context.WithoutCancel(r.Context())
+		s.cleanupPendingApprovalRun(cleanupCtx, runmode.LocalDefaultOrg, runmode.LocalDefaultUserID, id, outcome)
 		if s.spawner != nil {
 			ids, err := s.agentRuns.ActiveIDsForTask(r.Context(), runmode.LocalDefaultOrg, id)
 			if err != nil {
@@ -592,7 +597,7 @@ func (s *Server) handleUndo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.finalizeRequeue(id, task)
+	s.finalizeRequeue(r, id, task)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "queued"})
 }
@@ -634,7 +639,7 @@ func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.finalizeRequeue(id, task)
+	s.finalizeRequeue(r, id, task)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "queued"})
 }
@@ -705,8 +710,15 @@ const (
 // deleted concurrently) would silently strand the very state this
 // helper is meant to clean up. Jira reversal needs the loaded row so
 // it nil-guards internally.
-func (s *Server) finalizeRequeue(taskID string, task *domain.Task) {
-	s.cleanupPendingApprovalRun(taskID, discardOutcomeRequeued)
+func (s *Server) finalizeRequeue(r *http.Request, taskID string, task *domain.Task) {
+	// Cleanup must outlive the request — the user already committed
+	// to requeueing via the surrounding /undo or /requeue handler,
+	// and bailing on browser close would strand the run in
+	// pending_approval. WithoutCancel inherits values from
+	// r.Context() (D9 will put request claims there) while breaking
+	// the cancel chain.
+	cleanupCtx := context.WithoutCancel(r.Context())
+	s.cleanupPendingApprovalRun(cleanupCtx, runmode.LocalDefaultOrg, runmode.LocalDefaultUserID, taskID, discardOutcomeRequeued)
 	s.revertJiraStateIfApplicable(task)
 }
 
@@ -736,92 +748,94 @@ func (s *Server) finalizeRequeue(taskID string, task *domain.Task) {
 // reflect that. Idempotent — a repeat call against an already-
 // cancelled run finds no pending_approval row (the lookup filters on
 // status='pending_approval') and exits silently.
-func (s *Server) cleanupPendingApprovalRun(taskID string, outcome discardOutcome) {
-	runID, err := s.agentRuns.PendingApprovalIDForTask(context.Background(), runmode.LocalDefaultOrg, taskID)
-	if err != nil {
-		log.Printf("[approval-discard] pending_approval lookup for task %s failed: %v", taskID, err)
-		return
-	}
-	if runID == "" {
-		return
-	}
-
-	// Detect which side-table held the row BEFORE deleting, so the
-	// stop_reason and human_content can name the right kind.
-	// Without this, a discarded PR ends up tagged "review_discarded_
-	// by_user" — confusing in the UI and breaks any downstream
-	// logic keyed on stop_reason that needs to tell the two apart.
-	kind := "review"
-	if pr, err := s.pendingPRs.ByRunID(context.Background(), runmode.LocalDefaultOrgID, runID); err != nil {
-		log.Printf("[approval-discard] PendingPRs.ByRunID lookup for run %s failed: %v", runID, err)
-	} else if pr != nil {
-		kind = "pr"
-	}
-
-	// Write the discard outcome to run_memory.human_content BEFORE
-	// the row teardown. The next agent reading memory on this
-	// entity should see the human's verdict as authoritative —
-	// alongside the existing agent_content (the agent's self-
-	// report) — so it can recalibrate. Format mirrors the SKY-205
-	// submit-time block so the parsing contract is uniform.
-	humanContent := buildDiscardHumanContent(outcome, kind)
-	if err := s.taskMemory.UpdateRunMemoryHumanContent(context.Background(), runmode.LocalDefaultOrg, runID, humanContent); err != nil {
-		log.Printf("[approval-discard] human_content write for run %s failed: %v", runID, err)
-	}
-
-	// Tear down the pending review by run_id directly. Older shape
-	// did a separate PendingReviewByRunID + DeletePendingReview
-	// two-step, which left the review row stranded if the lookup
-	// failed transiently — exactly the stale-state bug this whole
-	// path is meant to fix. The DELETE-by-run-id helper is
-	// transactional across comments + review and is a no-op when
-	// no review exists.
+func (s *Server) cleanupPendingApprovalRun(ctx context.Context, orgID, userID, taskID string, outcome discardOutcome) {
+	// The whole cleanup runs as one tx-bound batch under the
+	// requesting user's claims: in multi-mode every store call must
+	// see request.jwt.claims set so RLS gates on creator/visibility
+	// pass. Callers pass a cancellation-detached cleanupCtx
+	// (context.WithoutCancel of r.Context()) so a client disconnect
+	// mid-handler doesn't roll the cleanup back.
 	//
-	// On delete failure (transient SQLite lock, etc.) bail BEFORE
-	// MarkAgentRunDiscarded. The flip off status='pending_approval'
-	// is the cleanup's only hand-off back to the entry-point
-	// query: PendingApprovalRunIDForTask filters on it, so once the
-	// run is cancelled no subsequent user action can rediscover
-	// this run for retry. Holding the run in pending_approval when
-	// the delete fails keeps the next /undo, /requeue, or dismiss
-	// on this task able to re-enter here and retry the delete +
-	// mark together. UpdateRunMemoryHumanContent above is
-	// idempotent on re-entry (UPDATE overwrites with the same or
-	// refined verdict).
-	if err := s.reviews.DeleteByRunID(context.Background(), runmode.LocalDefaultOrgID, runID); err != nil {
-		log.Printf("[approval-discard] DeleteByRunID for run %s failed (run held in pending_approval for retry): %v", runID, err)
-		return
-	}
-	// Same hold-for-retry semantics for the pending-PR side table.
-	// A run can have at most one pending entry across the two tables
-	// (the spawner flips on either), but cleanupPendingApprovalRun
-	// runs against the run id without first determining which kind —
-	// so we attempt both deletes. Both are idempotent no-ops when no
-	// row exists, so calling unconditionally is safe.
-	if err := s.pendingPRs.DeleteByRunID(context.Background(), runmode.LocalDefaultOrgID, runID); err != nil {
-		log.Printf("[approval-discard] pendingPRs.DeleteByRunID for run %s failed (run held in pending_approval for retry): %v", runID, err)
-		return
-	}
+	// All-or-nothing semantics: any DB error inside the closure
+	// rolls back the human_content write + side-table deletes + the
+	// status flip. The run stays in pending_approval, and a
+	// subsequent /undo, /requeue, or dismiss re-enters here to
+	// retry. UpdateRunMemoryHumanContent is idempotent (UPDATE)
+	// and the deletes are no-ops when no row exists, so retry is
+	// safe.
+	var (
+		runID         string
+		flippedToDone bool
+	)
+	err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		var lookupErr error
+		runID, lookupErr = tx.AgentRuns.PendingApprovalIDForTask(ctx, orgID, taskID)
+		if lookupErr != nil {
+			return fmt.Errorf("pending_approval lookup: %w", lookupErr)
+		}
+		if runID == "" {
+			return nil
+		}
 
-	// Discriminating stop_reason: review vs PR. Existing review
-	// callers / tests still see "review_discarded_by_user"; PR
-	// discards become a distinct value so downstream queries can
-	// tell them apart.
-	stopReason := "review_discarded_by_user"
-	if kind == "pr" {
-		stopReason = "pr_discarded_by_user"
-	}
+		// Detect which side-table held the row BEFORE deleting, so
+		// the stop_reason and human_content can name the right
+		// kind. Without this, a discarded PR ends up tagged
+		// "review_discarded_by_user" — confusing in the UI and
+		// breaks any downstream logic keyed on stop_reason that
+		// needs to tell the two apart.
+		kind := "review"
+		if pr, prErr := tx.PendingPRs.ByRunID(ctx, runmode.LocalDefaultOrgID, runID); prErr != nil {
+			return fmt.Errorf("pendingPRs.ByRunID: %w", prErr)
+		} else if pr != nil {
+			kind = "pr"
+		}
 
-	// Flip the run row terminal. ok=false here means the row was
-	// already cancelled by a concurrent path (idempotent re-call,
-	// rare race) — skip the broadcast in that case so we don't
-	// double-fire.
-	ok, err := s.agentRuns.MarkDiscarded(context.Background(), runmode.LocalDefaultOrg, runID, stopReason)
+		// Write the discard outcome to run_memory.human_content
+		// BEFORE the row teardown. The next agent reading memory
+		// on this entity should see the human's verdict as
+		// authoritative — alongside the existing agent_content
+		// (the agent's self-report) — so it can recalibrate.
+		humanContent := buildDiscardHumanContent(outcome, kind)
+		if err := tx.TaskMemory.UpdateRunMemoryHumanContent(ctx, orgID, runID, humanContent); err != nil {
+			return fmt.Errorf("human_content write: %w", err)
+		}
+
+		// Tear down the pending review by run_id directly. The
+		// DELETE-by-run-id helper is transactional across
+		// comments + review and is a no-op when no review exists.
+		if err := tx.Reviews.DeleteByRunID(ctx, runmode.LocalDefaultOrgID, runID); err != nil {
+			return fmt.Errorf("reviews.DeleteByRunID: %w", err)
+		}
+		// Same idempotent no-op when no pending_prs row exists.
+		// A run can have at most one pending entry across the two
+		// tables (the spawner flips on either), but
+		// cleanupPendingApprovalRun runs against the run id without
+		// first determining which kind — so we attempt both deletes.
+		if err := tx.PendingPRs.DeleteByRunID(ctx, runmode.LocalDefaultOrgID, runID); err != nil {
+			return fmt.Errorf("pendingPRs.DeleteByRunID: %w", err)
+		}
+
+		stopReason := "review_discarded_by_user"
+		if kind == "pr" {
+			stopReason = "pr_discarded_by_user"
+		}
+
+		// Flip the run row terminal. ok=false means the row was
+		// already cancelled by a concurrent path (idempotent
+		// re-call, rare race) — skip the broadcast in that case
+		// so we don't double-fire.
+		ok, markErr := tx.AgentRuns.MarkDiscarded(ctx, orgID, runID, stopReason)
+		if markErr != nil {
+			return fmt.Errorf("MarkDiscarded: %w", markErr)
+		}
+		flippedToDone = ok
+		return nil
+	})
 	if err != nil {
-		log.Printf("[approval-discard] MarkAgentRunDiscarded %s failed: %v", runID, err)
+		log.Printf("[approval-discard] task %s cleanup (run held in pending_approval for retry): %v", taskID, err)
 		return
 	}
-	if !ok {
+	if !flippedToDone || runID == "" {
 		return
 	}
 

@@ -123,6 +123,15 @@ type AgentRunStore interface {
 	// takeover) so the racing path's status stands.
 	MarkPendingApprovalIfCompleted(ctx context.Context, orgID, runID string) (bool, error)
 
+	// MarkCompletedIfPendingApproval is the inverse transition: flips
+	// a 'pending_approval' run back to 'completed' iff the row is
+	// currently 'pending_approval'. The reviews / pending_prs handlers
+	// call this after the user submits the artifact (review posted or
+	// PR opened) so the run row leaves the approval queue. The guard
+	// prevents racing terminal writes (cancel, takeover, discard) from
+	// being clobbered if they reach the row first.
+	MarkCompletedIfPendingApproval(ctx context.Context, orgID, runID string) (bool, error)
+
 	// MarkDiscarded marks a pending_approval run as cancelled
 	// when the user requeues / dismisses the task without
 	// submitting the review the agent prepared. The agent process

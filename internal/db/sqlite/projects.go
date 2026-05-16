@@ -178,6 +178,17 @@ func (s *projectStore) Delete(ctx context.Context, orgID, id string) error {
 	return nil
 }
 
+func (s *projectStore) BumpUpdatedAt(ctx context.Context, orgID, id string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	_, err := s.q.ExecContext(ctx,
+		`UPDATE projects SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		id,
+	)
+	return err
+}
+
 // scanSqliteProjectRow reads a SELECT … FROM projects row into a
 // *domain.Project. (nil, nil) on sql.ErrNoRows so callers can map
 // missing rows to a 404 without a sentinel comparison.
