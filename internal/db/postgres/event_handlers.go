@@ -63,9 +63,12 @@ const pgEventHandlerColumns = `id, kind, event_type, scope_predicate_json::text,
        prompt_id, breaker_threshold, min_autonomy_suitability,
        created_at, updated_at`
 
-func (s *eventHandlerStore) Seed(ctx context.Context, orgID string) error {
+func (s *eventHandlerStore) Seed(ctx context.Context, orgID, teamID string) error {
 	if s.inTx {
 		return errors.New("postgres event_handlers: Seed must not be called inside WithTx; call stores.EventHandlers.Seed directly")
+	}
+	if teamID == "" {
+		return errors.New("postgres event_handlers Seed: teamID required (SKY-295: shipped rules are team-scoped; caller must thread the target team — local mode passes runmode.LocalDefaultTeamID, multi mode passes the new team's UUID on team creation)")
 	}
 	now := time.Now().UTC()
 	var inserted int64
@@ -75,26 +78,27 @@ func (s *eventHandlerStore) Seed(ctx context.Context, orgID string) error {
 			pred = h.Predicate
 		}
 
+		// SKY-295: system rows materialize as visibility='team' with
+		// team_id=teamID. event_handlers_system_has_no_creator allows
+		// creator_user_id NULL on source='system' regardless of
+		// visibility; team_visibility_requires_team is satisfied
+		// because team_id is non-NULL.
 		switch h.Kind {
 		case domain.EventHandlerKindRule:
-			// Rule: name + default_priority + sort_order populated;
-			// trigger-only columns NULL. Shipped rules are
-			// source='system', visibility='org', creator NULL.
-			// enabled=TRUE (rules are not opt-in).
 			res, err := s.admin.ExecContext(ctx, `
 				INSERT INTO event_handlers
-					(id, org_id, creator_user_id, kind, event_type,
+					(id, org_id, team_id, creator_user_id, kind, event_type,
 					 scope_predicate_json, enabled, source, visibility,
 					 name, default_priority, sort_order,
 					 created_at, updated_at)
 				VALUES (
-					$1, $2, NULL, 'rule', $3,
-					$4::jsonb, TRUE, 'system', 'org',
-					$5, $6, $7,
-					$8, $8
+					$1, $2, $3::uuid, NULL, 'rule', $4,
+					$5::jsonb, TRUE, 'system', 'team',
+					$6, $7, $8,
+					$9, $9
 				)
 				ON CONFLICT (org_id, id) DO NOTHING
-			`, h.UUIDFor(orgID), orgID, h.EventType,
+			`, h.UUIDFor(orgID), orgID, teamID, h.EventType,
 				pred, h.Name, h.DefaultPriority, h.SortOrder, now)
 			if err != nil {
 				return fmt.Errorf("seed event_handler rule %s: %w", h.ID, err)
@@ -112,18 +116,18 @@ func (s *eventHandlerStore) Seed(ctx context.Context, orgID string) error {
 			// users opt in).
 			res, err := s.admin.ExecContext(ctx, `
 				INSERT INTO event_handlers
-					(id, org_id, creator_user_id, kind, event_type,
+					(id, org_id, team_id, creator_user_id, kind, event_type,
 					 scope_predicate_json, enabled, source, visibility,
 					 prompt_id, breaker_threshold, min_autonomy_suitability,
 					 created_at, updated_at)
 				VALUES (
-					$1, $2, NULL, 'trigger', $3,
-					$4::jsonb, FALSE, 'system', 'org',
-					$5, $6, $7,
-					$8, $8
+					$1, $2, $3::uuid, NULL, 'trigger', $4,
+					$5::jsonb, FALSE, 'system', 'team',
+					$6, $7, $8,
+					$9, $9
 				)
 				ON CONFLICT (org_id, id) DO NOTHING
-			`, h.UUIDFor(orgID), orgID, h.EventType,
+			`, h.UUIDFor(orgID), orgID, teamID, h.EventType,
 				pred, h.PromptID, h.BreakerThreshold, h.MinAutonomySuitability, now)
 			if err != nil {
 				return fmt.Errorf("seed event_handler trigger %s: %w", h.ID, err)

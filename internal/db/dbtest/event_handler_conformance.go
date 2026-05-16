@@ -11,12 +11,13 @@ import (
 )
 
 // EventHandlerStoreFactory is what a per-backend test file hands to
-// RunEventHandlerStoreConformance. The factory returns the wired store
-// + the orgID to pass to every method + a seedPrompts hook the harness
-// invokes before any test that creates trigger rows (triggers FK to
-// prompts on (prompt_id, org_id); each backend wires its own prompt-
-// seeding shape against its connection).
-type EventHandlerStoreFactory func(t *testing.T) (store db.EventHandlerStore, orgID string, seedPrompts PromptSeeder)
+// RunEventHandlerStoreConformance. The factory returns the wired
+// store + the orgID + the teamID Seed should materialize into
+// (SKY-295: shipped rules are team-scoped, no longer org-visible) +
+// a seedPrompts hook the harness invokes before any test that creates
+// trigger rows (triggers FK to prompts on (prompt_id, org_id); each
+// backend wires its own prompt-seeding shape against its connection).
+type EventHandlerStoreFactory func(t *testing.T) (store db.EventHandlerStore, orgID, teamID string, seedPrompts PromptSeeder)
 
 // PromptSeeder inserts prompts into the harness DB at known IDs so
 // trigger rows can reference them. Returns the inserted prompt IDs in
@@ -45,7 +46,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	t.Helper()
 
 	t.Run("Seed_InsertsBothKinds", func(t *testing.T) {
-		store, orgID, seedPrompts := factory(t)
+		store, orgID, teamID, seedPrompts := factory(t)
 		// Trigger rows in ShippedEventHandlers reference these prompts.
 		seedPrompts(t,
 			"system-pr-review",
@@ -54,7 +55,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 			"system-jira-implement",
 			"system-fix-review-feedback",
 		)
-		if err := store.Seed(context.Background(), orgID); err != nil {
+		if err := store.Seed(context.Background(), orgID, teamID); err != nil {
 			t.Fatalf("Seed: %v", err)
 		}
 		all, err := store.List(context.Background(), orgID, "")
@@ -79,16 +80,16 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	})
 
 	t.Run("Seed_IsIdempotent", func(t *testing.T) {
-		store, orgID, seedPrompts := factory(t)
+		store, orgID, teamID, seedPrompts := factory(t)
 		seedPrompts(t,
 			"system-pr-review", "system-conflict-resolution", "system-ci-fix",
 			"system-jira-implement", "system-fix-review-feedback",
 		)
-		if err := store.Seed(context.Background(), orgID); err != nil {
+		if err := store.Seed(context.Background(), orgID, teamID); err != nil {
 			t.Fatalf("Seed #1: %v", err)
 		}
 		first, _ := store.List(context.Background(), orgID, "")
-		if err := store.Seed(context.Background(), orgID); err != nil {
+		if err := store.Seed(context.Background(), orgID, teamID); err != nil {
 			t.Fatalf("Seed #2: %v", err)
 		}
 		second, _ := store.List(context.Background(), orgID, "")
@@ -98,7 +99,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	})
 
 	t.Run("Create_Rule_RoundTrip", func(t *testing.T) {
-		store, orgID, _ := factory(t)
+		store, orgID, _, _ := factory(t)
 		ctx := context.Background()
 		priority := 0.75
 		sortOrder := 3
@@ -133,7 +134,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	})
 
 	t.Run("Create_Trigger_RoundTrip", func(t *testing.T) {
-		store, orgID, seedPrompts := factory(t)
+		store, orgID, _, seedPrompts := factory(t)
 		ctx := context.Background()
 		seedPrompts(t, "p-trigger-test")
 		breaker := 2
@@ -169,7 +170,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	})
 
 	t.Run("Create_RejectsRuleWithTriggerFields", func(t *testing.T) {
-		store, orgID, _ := factory(t)
+		store, orgID, _, _ := factory(t)
 		ctx := context.Background()
 		priority := 0.5
 		sortOrder := 0
@@ -189,7 +190,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	})
 
 	t.Run("Create_RejectsTriggerWithoutPromptID", func(t *testing.T) {
-		store, orgID, _ := factory(t)
+		store, orgID, _, _ := factory(t)
 		breaker := 4
 		minAutonomy := 0.0
 		h := domain.EventHandler{
@@ -210,7 +211,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		// kind='trigger' with a non-NULL name. validateForCreate
 		// rejects the same shape earlier so the user gets a clearer
 		// error than the SQL integrity-violation surface.
-		store, orgID, seedPrompts := factory(t)
+		store, orgID, _, seedPrompts := factory(t)
 		seedPrompts(t, "p-name-on-trigger")
 		breaker := 4
 		minAutonomy := 0.0
@@ -229,7 +230,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	})
 
 	t.Run("List_KindFilter", func(t *testing.T) {
-		store, orgID, seedPrompts := factory(t)
+		store, orgID, _, seedPrompts := factory(t)
 		ctx := context.Background()
 		seedPrompts(t, "p-list-trigger")
 
@@ -282,7 +283,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	})
 
 	t.Run("GetEnabledForEvent_OrdersRulesBeforeTriggers", func(t *testing.T) {
-		store, orgID, seedPrompts := factory(t)
+		store, orgID, _, seedPrompts := factory(t)
 		ctx := context.Background()
 		seedPrompts(t, "p-order-test")
 
@@ -333,7 +334,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	})
 
 	t.Run("SetEnabled_Toggles", func(t *testing.T) {
-		store, orgID, _ := factory(t)
+		store, orgID, _, _ := factory(t)
 		ctx := context.Background()
 		priority, sortOrder := 0.5, 0
 		h := domain.EventHandler{
@@ -354,7 +355,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	})
 
 	t.Run("Delete_RemovesRow", func(t *testing.T) {
-		store, orgID, _ := factory(t)
+		store, orgID, _, _ := factory(t)
 		ctx := context.Background()
 		priority, sortOrder := 0.5, 0
 		h := domain.EventHandler{
@@ -375,7 +376,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	})
 
 	t.Run("Promote_RuleToTrigger", func(t *testing.T) {
-		store, orgID, seedPrompts := factory(t)
+		store, orgID, _, seedPrompts := factory(t)
 		ctx := context.Background()
 		seedPrompts(t, "p-promote-target")
 
@@ -416,7 +417,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 	})
 
 	t.Run("Promote_RejectsTriggerSource", func(t *testing.T) {
-		store, orgID, seedPrompts := factory(t)
+		store, orgID, _, seedPrompts := factory(t)
 		ctx := context.Background()
 		seedPrompts(t, "p-already-trigger")
 

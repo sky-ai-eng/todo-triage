@@ -13,6 +13,12 @@ type Task struct {
 	EventType      string `json:"event_type"`       // FK to events_catalog.id — the event that spawned this task
 	DedupKey       string `json:"dedup_key"`        // open-set discriminator; empty for most event types
 	PrimaryEventID string `json:"primary_event_id"` // FK to events.id — the specific event that spawned/last bumped
+	// TeamID is the owning team for this task. SKY-295 made dedup per
+	// team, so the team is part of the task's identity — surfaces so
+	// downstream consumers (re-derive's trigger filter, future
+	// per-team UI scoping) can decide cross-team boundaries without
+	// joining back to teams.
+	TeamID string `json:"team_id"`
 
 	// Status + lifecycle.
 	Status         string     `json:"status"`           // queued | claimed | delegated | done | dismissed | snoozed

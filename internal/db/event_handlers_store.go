@@ -35,13 +35,25 @@ import (
 //
 // SQLite: one connection; orgID is the local sentinel for local mode.
 type EventHandlerStore interface {
-	// Seed inserts every row in ShippedEventHandlers if it isn't already
-	// present, leaving existing rows untouched so user customizations
-	// (renames, disables, predicate edits, re-enables) survive across
-	// restarts. INSERT-OR-IGNORE semantics. Shipped trigger rows ship
-	// with Enabled=false per project convention (system triggers are
-	// reference examples — users opt in).
-	Seed(ctx context.Context, orgID string) error
+	// Seed materializes every row in ShippedEventHandlers into the
+	// given team if it isn't already present, leaving existing rows
+	// untouched so user customizations (renames, disables, predicate
+	// edits, re-enables) survive across restarts. INSERT-OR-IGNORE
+	// semantics. Shipped trigger rows ship with Enabled=false per
+	// project convention (system triggers are reference examples —
+	// users opt in).
+	//
+	// Post-SKY-295 system rows are team-scoped (visibility='team',
+	// team_id=teamID) rather than org-visible. The router routes
+	// matched handlers to team-scoped tasks; carrying team_id on the
+	// handler row itself lets every handler answer "which team does
+	// this fire for?" without falling back to a sentinel. In local
+	// mode the caller passes runmode.LocalDefaultTeamID. In multi
+	// mode new teams should call Seed at team creation time to
+	// inherit the shipped defaults; future shipped rules added in a
+	// later release auto-appear on next boot via the same INSERT OR
+	// IGNORE.
+	Seed(ctx context.Context, orgID, teamID string) error
 
 	// List returns handlers in the order:
 	//   rules first by sort_order ASC, then name ASC,

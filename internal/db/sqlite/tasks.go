@@ -578,6 +578,7 @@ func (s *taskStore) CountConsecutiveFailedRuns(ctx context.Context, orgID, entit
 // the same-package import.
 const sqliteTaskColumnsWithEntity = `
 	t.id, t.entity_id, t.event_type, t.dedup_key, t.primary_event_id,
+	t.team_id,
 	t.status, t.priority_score, t.ai_summary, t.autonomy_suitability,
 	t.priority_reasoning, t.scoring_status, t.severity, t.relevance_reason,
 	t.source_status, t.snooze_until, t.close_reason, t.close_event_type,
@@ -601,6 +602,7 @@ const sqliteTaskColumnsWithEntity = `
 // dependency runs in one direction (queries → scan) and lives in one
 // file.
 type taskScanState struct {
+	teamID                             sql.NullString
 	priorityScore, autonomySuitability sql.NullFloat64
 	aiSummary, priorityReasoning       sql.NullString
 	severity, relevanceReason          sql.NullString
@@ -613,6 +615,7 @@ type taskScanState struct {
 func (s *taskScanState) targets(t *domain.Task) []any {
 	return []any{
 		&t.ID, &t.EntityID, &t.EventType, &t.DedupKey, &t.PrimaryEventID,
+		&s.teamID,
 		&t.Status, &s.priorityScore, &s.aiSummary, &s.autonomySuitability,
 		&s.priorityReasoning, &s.scoringStatus, &s.severity, &s.relevanceReason,
 		&s.sourceStatus, &s.snoozeUntil, &s.closeReason, &s.closeEventType,
@@ -624,6 +627,9 @@ func (s *taskScanState) targets(t *domain.Task) []any {
 }
 
 func (s *taskScanState) finalize(t *domain.Task) {
+	if s.teamID.Valid {
+		t.TeamID = s.teamID.String
+	}
 	if s.priorityScore.Valid {
 		t.PriorityScore = &s.priorityScore.Float64
 	}

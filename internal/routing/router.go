@@ -169,23 +169,32 @@ func (r *Router) HandleEvent(evt domain.Event) {
 	}
 
 	// became_atomic is the belated-discovery path for parents whose
-	// subtasks just closed. Only create a task when none exists on the
-	// entity — otherwise an atomic ticket that gained and then lost
-	// subtasks would end up with two cards for the same entity. The
-	// dedup index doesn't catch this because the existing task's
-	// event_type is jira:issue:assigned while the new one would be
-	// jira:issue:became_atomic. Event is still recorded (audit trail
-	// stays honest); only task creation and trigger firing are
-	// suppressed.
+	// subtasks just closed. Only create a task when none exists for
+	// the target team on the entity — otherwise an atomic ticket that
+	// gained and then lost subtasks would end up with two cards in
+	// the same team's queue. The dedup index doesn't catch this
+	// because the existing task's event_type is jira:issue:assigned
+	// while the new one would be jira:issue:became_atomic.
+	//
+	// SKY-295: the suppression is per-team. Pre-SKY-295 a single
+	// FindActiveByEntity check sat above the handler-match loop, so
+	// if any team had an active task on the entity, no team got a
+	// new one. With per-team fanout that over-suppresses: team B's
+	// rule on the same entity must still fire even when team A
+	// already has an active task. We compute the set of teams that
+	// already have an active task here and let the per-team loop
+	// below skip just those teams. Event is still recorded (audit
+	// trail stays honest); only task creation in suppressed teams
+	// is skipped.
+	teamsToSkip := map[string]struct{}{}
 	if evt.EventType == domain.EventJiraIssueBecameAtomic {
 		active, err := r.tasks.FindActiveByEntity(context.Background(), runmode.LocalDefaultOrg, entityID)
 		if err != nil {
 			log.Printf("[router] became_atomic: failed to check active tasks on entity %s: %v", entityID, err)
 			return
 		}
-		if len(active) > 0 {
-			log.Printf("[router] became_atomic: entity %s has %d active task(s), skipping duplicate creation", entityID, len(active))
-			return
+		for _, a := range active {
+			teamsToSkip[a.TeamID] = struct{}{}
 		}
 	}
 
@@ -263,6 +272,15 @@ func (r *Router) HandleEvent(evt domain.Event) {
 	tasksByTeam := make(map[string]*domain.Task, len(teamSet))
 
 	for teamID := range teamSet {
+		// SKY-295: skip teams that already have an active task on
+		// this entity in the became_atomic case (see teamsToSkip
+		// computation above). Per-team suppression preserves the
+		// "no duplicate card for one team" intent without blocking
+		// sibling teams whose rules matched the same event.
+		if _, suppressed := teamsToSkip[teamID]; suppressed {
+			log.Printf("[router] became_atomic: team %s already has an active task on entity %s, skipping duplicate creation", teamID, entityID)
+			continue
+		}
 		// Use the highest-priority matching rule's default_priority
 		// within this team, or 0.5 if only triggers matched.
 		defaultPriority := 0.5
@@ -272,7 +290,19 @@ func (r *Router) HandleEvent(evt domain.Event) {
 			}
 		}
 
-		task, created, err := r.tasks.FindOrCreate(context.Background(), runmode.LocalDefaultOrg, teamID, entityID, evt.EventType, evt.DedupKey, evt.ID, defaultPriority)
+		// SKY-295 (P1.2): task createdAt = OccurredAt when the source
+		// reported a time, falling back to time.Now(). The router used
+		// to call FindOrCreate (→ time.Now()) for every event, which
+		// regressed the backfill path's "stamp the task with the PR's
+		// CreatedAt for week-old review requests" semantic.
+		// OccurredAt-when-set is the right rule across the board:
+		// the queue ordering reflects when the world said the event
+		// happened, not when we noticed.
+		createdAt := time.Now()
+		if !evt.OccurredAt.IsZero() {
+			createdAt = evt.OccurredAt
+		}
+		task, created, err := r.tasks.FindOrCreateAt(context.Background(), runmode.LocalDefaultOrg, teamID, entityID, evt.EventType, evt.DedupKey, evt.ID, defaultPriority, createdAt)
 		if err != nil {
 			log.Printf("[router] failed to find/create task for %s on entity %s (team %s): %v", evt.EventType, entityID, teamID, err)
 			continue
@@ -329,17 +359,19 @@ func (r *Router) HandleEvent(evt domain.Event) {
 }
 
 // handlerTeamID resolves the team a matched event_handler routes its
-// tasks to. User-source handlers carry visibility='team' + team_id set;
-// system-shipped org-wide handlers (visibility='org', team_id NULL)
-// collapse to runmode.LocalDefaultTeamID — the only available team in
-// local mode. Multi-mode org-rule fanout across all member teams is
-// SKY-294 territory; for now the Postgres impl's sentinel filter
-// surfaces this as a clear error rather than silently picking the
-// wrong team.
+// tasks to. Post-SKY-295 every handler is team-scoped — user-source
+// rows carry the user's team, system-source rows are materialized
+// into each team at boot / team-create time. An empty TeamID here
+// indicates a pre-SKY-295 org-visibility row that survived a partial
+// migration or a test fixture that bypassed the materialization
+// path; we log it once per call but fall back to
+// runmode.LocalDefaultTeamID so the router keeps functioning. In
+// steady state this branch is unreachable.
 func handlerTeamID(h domain.EventHandler) string {
 	if h.TeamID != "" {
 		return h.TeamID
 	}
+	log.Printf("[router] WARNING handler %s (%s) has no team_id — falling back to LocalDefaultTeamID; check that EventHandlerStore.Seed was called with a real teamID", h.ID, h.Kind)
 	return runmode.LocalDefaultTeamID
 }
 
@@ -890,6 +922,18 @@ func (r *Router) reDeriveTask(taskID string) {
 
 	for _, trigger := range handlers {
 		if trigger.Kind != domain.EventHandlerKindTrigger {
+			continue
+		}
+		// SKY-295: re-derive only fires triggers that belong to this
+		// task's team. Without this guard a team B deferred trigger
+		// could match the same primary event and fire against team
+		// A's task — leaking work across team boundaries the
+		// HandleEvent fanout took care to keep separate. handlerTeamID
+		// applies the same org-rule → LocalDefaultTeamID fallback the
+		// upstream fanout uses; once shipped rules are team-
+		// materialised in steady state, this comparison is just
+		// trigger.TeamID == task.TeamID.
+		if handlerTeamID(trigger) != task.TeamID {
 			continue
 		}
 		minAutonomy := derefFloatDefault(trigger.MinAutonomySuitability, 0)

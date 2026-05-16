@@ -47,7 +47,10 @@ const sqliteEventHandlerColumns = `id, kind, event_type, scope_predicate_json, e
        prompt_id, breaker_threshold, min_autonomy_suitability,
        created_at, updated_at`
 
-func (s *eventHandlerStore) Seed(ctx context.Context, orgID string) error {
+func (s *eventHandlerStore) Seed(ctx context.Context, orgID, teamID string) error {
+	if teamID == "" {
+		return fmt.Errorf("sqlite event_handlers Seed: teamID required (SKY-295: shipped rules are team-scoped; local mode passes runmode.LocalDefaultTeamID)")
+	}
 	now := time.Now().UTC()
 	var inserted int64
 
@@ -83,21 +86,24 @@ func (s *eventHandlerStore) Seed(ctx context.Context, orgID string) error {
 			pred = predStr
 		}
 
+		// SKY-295: system rows materialize as visibility='team' with
+		// team_id=teamID. The event_handlers_system_has_no_creator
+		// CHECK still allows creator_user_id NULL when source='system',
+		// and team_visibility_requires_team is satisfied because team_id
+		// is non-NULL.
 		switch h.Kind {
 		case domain.EventHandlerKindRule:
-			// Shipped rules ship enabled; visibility='org', source='system',
-			// creator_user_id NULL — same shape as Postgres.
 			res, err := s.q.ExecContext(ctx, `
 				INSERT OR IGNORE INTO event_handlers
-					(id, org_id, creator_user_id, visibility, kind, event_type,
+					(id, org_id, team_id, creator_user_id, visibility, kind, event_type,
 					 scope_predicate_json, enabled, source,
 					 name, default_priority, sort_order,
 					 created_at, updated_at)
-				VALUES (?, ?, NULL, 'org', 'rule', ?,
+				VALUES (?, ?, ?, NULL, 'team', 'rule', ?,
 				        ?, 1, 'system',
 				        ?, ?, ?,
 				        ?, ?)
-			`, h.ID, orgID, h.EventType,
+			`, h.ID, orgID, teamID, h.EventType,
 				pred,
 				h.Name, h.DefaultPriority, h.SortOrder,
 				now, now)
@@ -112,19 +118,18 @@ func (s *eventHandlerStore) Seed(ctx context.Context, orgID string) error {
 
 		case domain.EventHandlerKindTrigger:
 			// Shipped triggers ship disabled (project convention —
-			// users opt in or replace). visibility='org', source='system',
-			// creator_user_id NULL.
+			// users opt in or replace).
 			res, err := s.q.ExecContext(ctx, `
 				INSERT OR IGNORE INTO event_handlers
-					(id, org_id, creator_user_id, visibility, kind, event_type,
+					(id, org_id, team_id, creator_user_id, visibility, kind, event_type,
 					 scope_predicate_json, enabled, source,
 					 prompt_id, breaker_threshold, min_autonomy_suitability,
 					 created_at, updated_at)
-				VALUES (?, ?, NULL, 'org', 'trigger', ?,
+				VALUES (?, ?, ?, NULL, 'team', 'trigger', ?,
 				        ?, 0, 'system',
 				        ?, ?, ?,
 				        ?, ?)
-			`, h.ID, orgID, h.EventType,
+			`, h.ID, orgID, teamID, h.EventType,
 				pred,
 				h.PromptID, h.BreakerThreshold, h.MinAutonomySuitability,
 				now, now)

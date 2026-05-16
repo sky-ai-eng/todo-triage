@@ -203,8 +203,8 @@ func TestTaskStore_Postgres_CrossOrgLeakage(t *testing.T) {
 func TestTaskStore_Postgres_OrgHandlerSentinel(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
-	orgID, userID, _ := seedPgOrgUserAgent(t, h)
-	entityID, eventID, _ := seedPgEntityEvent(t, h.AdminDB, orgID, "sentinel")
+	orgID, _, _ := seedPgOrgUserAgent(t, h)
+	entityID, eventID := seedPgEntityEvent(t, h.AdminDB, orgID, "sentinel")
 
 	stores := pgstore.New(h.AdminDB, h.AdminDB)
 	ctx := context.Background()
