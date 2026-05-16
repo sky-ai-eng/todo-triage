@@ -128,7 +128,7 @@ func (m *Manager) startGitHub(cfg config.Config, creds auth.Credentials) {
 		return
 	}
 
-	repos, err := m.repos.ListConfiguredNames(context.Background(), runmode.LocalDefaultOrgID)
+	repos, err := m.repos.ListConfiguredNamesSystem(context.Background(), runmode.LocalDefaultOrgID)
 	if err != nil {
 		log.Printf("[github] error loading configured repos: %v", err)
 		return
@@ -141,7 +141,7 @@ func (m *Manager) startGitHub(cfg config.Config, creds auth.Credentials) {
 	// NULL/empty github_username means identity hasn't been captured
 	// yet (fresh install before first Settings save) — short-circuit
 	// so the tracker doesn't start without knowing who "me" is.
-	username, err := m.users.GetGitHubUsername(context.Background(), runmode.LocalDefaultUserID)
+	username, err := m.users.GetGitHubUsernameSystem(context.Background(), runmode.LocalDefaultUserID)
 	if err != nil {
 		log.Printf("[github] failed to read users.github_username: %v", err)
 		return

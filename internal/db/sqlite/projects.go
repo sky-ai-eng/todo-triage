@@ -24,9 +24,14 @@ import (
 // column DEFAULT and pins team_id to LocalDefaultTeamID at insert
 // time (matches the projects_team_visibility_requires_team CHECK
 // under the default visibility='team').
+//
+// The constructor takes two queryers for signature parity with the
+// Postgres impl (SKY-297), but SQLite has one connection — both
+// arguments collapse onto the same queryer. The `...System` admin-
+// pool variants are thin wrappers around the non-System methods.
 type projectStore struct{ q queryer }
 
-func newProjectStore(q queryer) db.ProjectStore { return &projectStore{q: q} }
+func newProjectStore(q, _ queryer) db.ProjectStore { return &projectStore{q: q} }
 
 var _ db.ProjectStore = (*projectStore)(nil)
 
@@ -145,6 +150,14 @@ func (s *projectStore) Update(ctx context.Context, orgID string, p domain.Projec
 		return sql.ErrNoRows
 	}
 	return nil
+}
+
+// ListSystem mirrors List. SKY-297: the project classifier consumes
+// this through the admin pool in Postgres; SQLite has one connection,
+// so this delegates straight through with the same assertLocalOrg
+// gate.
+func (s *projectStore) ListSystem(ctx context.Context, orgID string) ([]domain.Project, error) {
+	return s.List(ctx, orgID)
 }
 
 func (s *projectStore) Delete(ctx context.Context, orgID, id string) error {

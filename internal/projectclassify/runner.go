@@ -86,7 +86,7 @@ func (r *Runner) run(ctx context.Context) {
 		r.mu.Unlock()
 	}()
 
-	entities, err := r.entities.ListUnclassified(ctx, runmode.LocalDefaultOrgID)
+	entities, err := r.entities.ListUnclassifiedSystem(ctx, runmode.LocalDefaultOrgID)
 	if err != nil {
 		log.Printf("[classify] list unclassified entities: %v", err)
 		return
@@ -95,7 +95,7 @@ func (r *Runner) run(ctx context.Context) {
 		return
 	}
 
-	projects, err := r.projects.List(ctx, runmode.LocalDefaultOrgID)
+	projects, err := r.projects.ListSystem(ctx, runmode.LocalDefaultOrgID)
 	if err != nil {
 		log.Printf("[classify] list projects: %v", err)
 		return
@@ -107,7 +107,7 @@ func (r *Runner) run(ctx context.Context) {
 		// project-creation popup is the path to retro-assign these once
 		// projects exist.
 		for _, e := range entities {
-			if err := r.entities.AssignProject(ctx, runmode.LocalDefaultOrgID, e.ID, nil, ""); err != nil {
+			if err := r.entities.AssignProjectSystem(ctx, runmode.LocalDefaultOrgID, e.ID, nil, ""); err != nil {
 				log.Printf("[classify] stamp classified_at for %s: %v", e.ID, err)
 			}
 		}
@@ -142,7 +142,7 @@ func (r *Runner) run(ctx context.Context) {
 			}
 			log.Printf("[classify] %s unassigned (best score: %d, threshold: %d)", e.ID, best, ConfidenceThreshold)
 		}
-		if err := r.entities.AssignProject(ctx, runmode.LocalDefaultOrgID, e.ID, winner, rationale); err != nil {
+		if err := r.entities.AssignProjectSystem(ctx, runmode.LocalDefaultOrgID, e.ID, winner, rationale); err != nil {
 			log.Printf("[classify] assign %s: %v", e.ID, err)
 		}
 	}

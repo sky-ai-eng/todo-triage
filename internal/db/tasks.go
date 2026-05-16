@@ -60,6 +60,16 @@ type TaskStore interface {
 	// checks to find sibling tasks to close.
 	FindActiveByEntityAndType(ctx context.Context, orgID, entityID, eventType string) ([]domain.Task, error)
 
+	// FindActiveByEntityAndTypeSystem mirrors FindActiveByEntityAndType
+	// but routes through the admin pool in Postgres. The consumer is
+	// the tracker (SKY-297) — a background goroutine that reconciles
+	// stale review_requested tasks when the user is no longer in a
+	// PR's reviewer list. The tracker has no JWT-claims context, so
+	// this read needs to bypass RLS the same way the sibling entity
+	// reads do. org_id stays in the WHERE clause as defense in
+	// depth; behavior matches the non-System variant.
+	FindActiveByEntityAndTypeSystem(ctx context.Context, orgID, entityID, eventType string) ([]domain.Task, error)
+
 	// FindActiveByEntity returns non-terminal tasks for an entity
 	// regardless of event type. Used by entity lifecycle to close
 	// everything when the underlying entity (PR / ticket) closes.

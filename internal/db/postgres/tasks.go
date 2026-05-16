@@ -18,16 +18,30 @@ import (
 // against D3's schema: org_id in every WHERE clause as defense in depth
 // alongside RLS, $N placeholders, JSONB extraction for snapshot_json.
 //
-// Wired against the app pool (RLS-active) — every TaskStore consumer
-// is a request-handler equivalent (server tasks handler, router,
-// delegate). The scorer reads tasks via the admin-pooled ScoreStore.
+// Holds two pools (SKY-297):
+//
+//   - q: app pool (tf_app, RLS-active). Every request-equivalent
+//     consumer (server tasks handler, router, delegate) runs here.
+//     The scorer reads tasks via the admin-pooled ScoreStore — not
+//     this store.
+//
+//   - admin: admin pool (supabase_admin, BYPASSRLS). The tracker's
+//     stale-review reconciliation read (`FindActiveByEntityAndTypeSystem`)
+//     routes through admin because the tracker is a background
+//     goroutine with no JWT-claims context. org_id stays in the
+//     WHERE clause as defense in depth.
 //
 // Slice binds pass `[]string` directly into ANY($N) — pgx's
 // database/sql adapter handles slice-to-array conversion natively,
 // same as scoreStore.MarkScoring's taskIDs binding.
-type taskStore struct{ q queryer }
+type taskStore struct {
+	q     queryer
+	admin queryer
+}
 
-func newTaskStore(q queryer) db.TaskStore { return &taskStore{q: q} }
+func newTaskStore(q, admin queryer) db.TaskStore {
+	return &taskStore{q: q, admin: admin}
+}
 
 var _ db.TaskStore = (*taskStore)(nil)
 
@@ -106,7 +120,15 @@ func (s *taskStore) ByStatus(ctx context.Context, orgID, status string) ([]domai
 }
 
 func (s *taskStore) FindActiveByEntityAndType(ctx context.Context, orgID, entityID, eventType string) ([]domain.Task, error) {
-	return queryTasksCtx(ctx, s.q, `
+	return findActiveTasksByEntityAndType(ctx, s.q, orgID, entityID, eventType)
+}
+
+func (s *taskStore) FindActiveByEntityAndTypeSystem(ctx context.Context, orgID, entityID, eventType string) ([]domain.Task, error) {
+	return findActiveTasksByEntityAndType(ctx, s.admin, orgID, entityID, eventType)
+}
+
+func findActiveTasksByEntityAndType(ctx context.Context, q queryer, orgID, entityID, eventType string) ([]domain.Task, error) {
+	return queryTasksCtx(ctx, q, `
 		SELECT `+pgTaskColumnsWithEntity+`
 		FROM tasks t
 		JOIN entities e ON t.entity_id = e.id AND e.org_id = t.org_id

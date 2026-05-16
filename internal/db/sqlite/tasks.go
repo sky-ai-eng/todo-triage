@@ -20,9 +20,14 @@ import (
 // every UPDATE/INSERT, but rejecting an unexpected orgID at the entry
 // point is the safety net for a caller that's confused about which
 // mode it's in.
+//
+// The constructor takes two queryers for signature parity with the
+// Postgres impl (SKY-297), but SQLite has one connection — both
+// arguments collapse onto the same queryer. The `...System` admin-
+// pool variants are thin wrappers around the non-System methods.
 type taskStore struct{ q queryer }
 
-func newTaskStore(q queryer) db.TaskStore { return &taskStore{q: q} }
+func newTaskStore(q, _ queryer) db.TaskStore { return &taskStore{q: q} }
 
 var _ db.TaskStore = (*taskStore)(nil)
 
@@ -117,6 +122,14 @@ func (s *taskStore) FindActiveByEntityAndType(ctx context.Context, orgID, entity
 		JOIN entities e ON t.entity_id = e.id
 		WHERE t.entity_id = ? AND t.event_type = ? AND t.status NOT IN ('done', 'dismissed')
 	`, entityID, eventType)
+}
+
+// FindActiveByEntityAndTypeSystem mirrors FindActiveByEntityAndType.
+// SKY-297: the tracker consumes this through the admin pool in
+// Postgres; SQLite has one connection, so this delegates straight
+// through with the same assertLocalOrg gate.
+func (s *taskStore) FindActiveByEntityAndTypeSystem(ctx context.Context, orgID, entityID, eventType string) ([]domain.Task, error) {
+	return s.FindActiveByEntityAndType(ctx, orgID, entityID, eventType)
 }
 
 func (s *taskStore) FindActiveByEntity(ctx context.Context, orgID, entityID string) ([]domain.Task, error) {

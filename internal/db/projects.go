@@ -62,4 +62,16 @@ type ProjectStore interface {
 	// are NOT removed here — the handler owns that to keep this layer
 	// pure DB. Same split as the rest of the codebase.
 	Delete(ctx context.Context, orgID, id string) error
+
+	// --- Admin-pool variants (`...System`) ---
+	//
+	// ListSystem mirrors List but routes through the admin pool in
+	// Postgres. The consumer is the project classifier (SKY-297) —
+	// a background goroutine spawned from main.go that pairs each
+	// org's unclassified entities against that org's project set.
+	// The classifier has no JWT-claims context, so the read needs
+	// to bypass RLS the same way EntityStore.ListUnclassifiedSystem
+	// does for the sibling read on the entity side. org_id stays in
+	// the WHERE clause as defense in depth; behavior matches List.
+	ListSystem(ctx context.Context, orgID string) ([]domain.Project, error)
 }

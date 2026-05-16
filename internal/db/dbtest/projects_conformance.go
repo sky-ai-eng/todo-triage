@@ -252,6 +252,50 @@ func RunProjectStoreConformance(t *testing.T, mk ProjectStoreFactory) {
 			t.Errorf("Delete on missing id: err=%v, want sql.ErrNoRows", err)
 		}
 	})
+
+	// --- SKY-297 `...System` admin-pool variants ---
+	//
+	// ListSystem mirrors List but routes through the admin pool in
+	// Postgres. The project classifier consumes this — a background
+	// goroutine without JWT-claims context. SQLite has one connection
+	// so the System variant collapses to List; the behavioral contract
+	// is identical either way.
+
+	t.Run("ListSystem_matches_List", func(t *testing.T) {
+		s, orgID, teamID := mk(t)
+		names := []string{"alpha", "beta"}
+		for _, n := range names {
+			if _, err := s.Create(ctx, orgID, teamID, domain.Project{Name: n}); err != nil {
+				t.Fatalf("Create %q: %v", n, err)
+			}
+		}
+		got, err := s.ListSystem(ctx, orgID)
+		if err != nil {
+			t.Fatalf("ListSystem: %v", err)
+		}
+		gotNames := make([]string, len(got))
+		for i, p := range got {
+			gotNames[i] = p.Name
+		}
+		want := []string{"alpha", "beta"}
+		if !reflect.DeepEqual(gotNames, want) {
+			t.Errorf("ListSystem order = %v, want %v", gotNames, want)
+		}
+	})
+
+	t.Run("ListSystem_empty_returns_empty_slice", func(t *testing.T) {
+		s, orgID, _ := mk(t)
+		got, err := s.ListSystem(ctx, orgID)
+		if err != nil {
+			t.Fatalf("ListSystem: %v", err)
+		}
+		if got == nil {
+			t.Errorf("ListSystem on empty org returned nil; want non-nil empty slice")
+		}
+		if len(got) != 0 {
+			t.Errorf("ListSystem on empty org = %v, want empty", got)
+		}
+	})
 }
 
 func lowerSlice(in []string) []string {
