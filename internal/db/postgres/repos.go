@@ -32,9 +32,25 @@ import (
 //     leaks across the boundary.
 //
 // Upsert uses ON CONFLICT (org_id, owner, repo) for the same reason.
-type repoStore struct{ q queryer }
+//
+// # Pool split (SKY-296)
+//
+// Holds two pools: q is the app pool (request-equivalent consumers —
+// repos handler, settings, projects, curator) and admin is the
+// admin pool (system services — poller bootstrap reading every
+// configured repo at startup, clone-status writes from the startup
+// clone path before any JWT-claims context can exist). The
+// `...System` methods route through admin; everything else stays on
+// q. org_id filtering is in every WHERE clause as defense in depth
+// on both pools.
+type repoStore struct {
+	q     queryer
+	admin queryer
+}
 
-func newRepoStore(q queryer) db.RepoStore { return &repoStore{q: q} }
+func newRepoStore(q, admin queryer) db.RepoStore {
+	return &repoStore{q: q, admin: admin}
+}
 
 var _ db.RepoStore = (*repoStore)(nil)
 
@@ -70,7 +86,15 @@ func (s *repoStore) Upsert(ctx context.Context, orgID string, p domain.RepoProfi
 }
 
 func (s *repoStore) List(ctx context.Context, orgID string) ([]domain.RepoProfile, error) {
-	rows, err := s.q.QueryContext(ctx, `
+	return listRepoProfiles(ctx, s.q, orgID)
+}
+
+func (s *repoStore) ListSystem(ctx context.Context, orgID string) ([]domain.RepoProfile, error) {
+	return listRepoProfiles(ctx, s.admin, orgID)
+}
+
+func listRepoProfiles(ctx context.Context, q queryer, orgID string) ([]domain.RepoProfile, error) {
+	rows, err := q.QueryContext(ctx, `
 		SELECT owner, repo, description, has_readme, has_claude_md, has_agents_md,
 		       profile_text, clone_url, default_branch, base_branch, profiled_at,
 		       clone_status, clone_error, clone_error_kind
@@ -189,7 +213,15 @@ func (s *repoStore) SetConfigured(ctx context.Context, orgID string, repoNames [
 }
 
 func (s *repoStore) ListConfiguredNames(ctx context.Context, orgID string) ([]string, error) {
-	rows, err := s.q.QueryContext(ctx,
+	return listConfiguredRepoNames(ctx, s.q, orgID)
+}
+
+func (s *repoStore) ListConfiguredNamesSystem(ctx context.Context, orgID string) ([]string, error) {
+	return listConfiguredRepoNames(ctx, s.admin, orgID)
+}
+
+func listConfiguredRepoNames(ctx context.Context, q queryer, orgID string) ([]string, error) {
+	rows, err := q.QueryContext(ctx,
 		`SELECT owner, repo FROM repo_profiles WHERE org_id = $1 ORDER BY owner, repo`,
 		orgID,
 	)
@@ -252,7 +284,15 @@ func (s *repoStore) Get(ctx context.Context, orgID, repoID string) (*domain.Repo
 }
 
 func (s *repoStore) UpdateCloneStatus(ctx context.Context, orgID, owner, repo, status, errMsg, errKind string) error {
-	_, err := s.q.ExecContext(ctx, `
+	return updateRepoCloneStatus(ctx, s.q, orgID, owner, repo, status, errMsg, errKind)
+}
+
+func (s *repoStore) UpdateCloneStatusSystem(ctx context.Context, orgID, owner, repo, status, errMsg, errKind string) error {
+	return updateRepoCloneStatus(ctx, s.admin, orgID, owner, repo, status, errMsg, errKind)
+}
+
+func updateRepoCloneStatus(ctx context.Context, q queryer, orgID, owner, repo, status, errMsg, errKind string) error {
+	_, err := q.ExecContext(ctx, `
 		UPDATE repo_profiles
 		   SET clone_status = $1, clone_error = NULLIF($2, ''), clone_error_kind = NULLIF($3, '')
 		 WHERE org_id = $4 AND owner = $5 AND repo = $6

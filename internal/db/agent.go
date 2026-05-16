@@ -138,6 +138,14 @@ type AgentRunStore interface {
 	// the corresponding ~/.claude/projects entries.
 	ListTakenOverIDs(ctx context.Context, orgID string) ([]string, error)
 
+	// ListTakenOverIDsSystem mirrors ListTakenOverIDs but routes
+	// through the admin pool in Postgres. The startup worktree-
+	// cleanup gate reads this before any JWT-claims context could
+	// exist — it has to see every user's taken-over runs to know
+	// which worktrees on disk to preserve. Same SKY-296 admin/app
+	// split as the rest of this wave.
+	ListTakenOverIDsSystem(ctx context.Context, orgID string) ([]string, error)
+
 	// ListTakenOverForResume returns every taken-over run in the
 	// local DB, joined with its task + entity for display,
 	// ordered newest-first. Used by the CLI's resume command.

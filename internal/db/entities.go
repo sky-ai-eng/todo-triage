@@ -151,4 +151,33 @@ type EntityStore interface {
 	// as open (reopened PR, reopened Jira issue). Returns true
 	// when the row actually changed.
 	Reactivate(ctx context.Context, orgID, id string) (bool, error)
+
+	// --- Admin-pool variants (`...System`) ---
+	//
+	// These mirror the per-method shape of the corresponding app-pool
+	// methods but route through the admin pool (BYPASSRLS) in
+	// Postgres. They exist for system services that need to operate
+	// on every user's entities without impersonating any one of them
+	// — the tracker (which writes entities for every polled repo
+	// regardless of which user configured it) and the project
+	// classifier (which reads every org's unclassified entities to
+	// triage them). Same SKY-296 pattern as AgentRunStore's
+	// admin/app split.
+	//
+	// Behavior contract is identical to the non-System variants:
+	// org_id is still filtered in every WHERE clause as defense in
+	// depth, return shapes are identical. The only difference is
+	// which Postgres pool the statement runs on; SQLite has one
+	// connection and the two variants collapse.
+
+	GetSystem(ctx context.Context, orgID, id string) (*domain.Entity, error)
+	ListActiveSystem(ctx context.Context, orgID, source string) ([]domain.Entity, error)
+	ListUnclassifiedSystem(ctx context.Context, orgID string) ([]domain.Entity, error)
+	FindOrCreateSystem(ctx context.Context, orgID, source, sourceID, kind, title, url string) (*domain.Entity, bool, error)
+	UpdateSnapshotSystem(ctx context.Context, orgID, id, snapshotJSON string) error
+	UpdateTitleSystem(ctx context.Context, orgID, id, title string) error
+	UpdateDescriptionSystem(ctx context.Context, orgID, id, description string) error
+	AssignProjectSystem(ctx context.Context, orgID, id string, projectID *string, rationale string) error
+	MarkClosedSystem(ctx context.Context, orgID, id string) error
+	ReactivateSystem(ctx context.Context, orgID, id string) (bool, error)
 }

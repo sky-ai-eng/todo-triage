@@ -478,4 +478,137 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			t.Errorf("Descriptions(nil) = %v, want empty map", got)
 		}
 	})
+
+	// --- SKY-296 `...System` admin-pool variants ---
+	//
+	// The admin variants bypass RLS in Postgres but still filter by
+	// org_id in every WHERE clause as defense in depth. SQLite has
+	// one connection so each System variant delegates to its non-
+	// System counterpart — behavior is identical in local mode.
+	// These subtests pin the "same behavior" contract; the cross-
+	// org leakage assertion lives in the per-backend test file
+	// because it needs to seed rows in two distinct orgs.
+
+	t.Run("System_variants_match_non_System_for_lookup", func(t *testing.T) {
+		s, orgID, _ := mk(t)
+		ent, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#sys-get", "pr", "Sys Get", "")
+		if err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		got, err := s.GetSystem(ctx, orgID, ent.ID)
+		if err != nil || got == nil {
+			t.Fatalf("GetSystem: %v, got=%+v", err, got)
+		}
+		if got.ID != ent.ID || got.Source != ent.Source {
+			t.Errorf("GetSystem returned mismatched entity: %+v vs %+v", got, ent)
+		}
+
+		miss, err := s.GetSystem(ctx, orgID, uuid.New().String())
+		if err != nil {
+			t.Fatalf("GetSystem(miss): %v", err)
+		}
+		if miss != nil {
+			t.Errorf("GetSystem on miss returned %+v, want nil", miss)
+		}
+	})
+
+	t.Run("System_variants_match_non_System_for_list", func(t *testing.T) {
+		s, orgID, _ := mk(t)
+		gh, _, _ := s.FindOrCreate(ctx, orgID, "github", "owner/repo#sys-la", "pr", "A", "")
+		ji, _, _ := s.FindOrCreate(ctx, orgID, "jira", "SKY-sys-la", "issue", "B", "")
+		_ = ji
+
+		got, err := s.ListActiveSystem(ctx, orgID, "github")
+		if err != nil {
+			t.Fatalf("ListActiveSystem: %v", err)
+		}
+		ids := map[string]bool{}
+		for _, e := range got {
+			ids[e.ID] = true
+		}
+		if !ids[gh.ID] {
+			t.Errorf("ListActiveSystem missing %s", gh.ID)
+		}
+		if ids[ji.ID] {
+			t.Errorf("ListActiveSystem leaked jira entity %s", ji.ID)
+		}
+
+		unclassified, err := s.ListUnclassifiedSystem(ctx, orgID)
+		if err != nil {
+			t.Fatalf("ListUnclassifiedSystem: %v", err)
+		}
+		// gh + ji are both fresh + unassigned → both visible.
+		uids := map[string]bool{}
+		for _, e := range unclassified {
+			uids[e.ID] = true
+		}
+		if !uids[gh.ID] || !uids[ji.ID] {
+			t.Errorf("ListUnclassifiedSystem missing fresh entities: %v", uids)
+		}
+	})
+
+	t.Run("System_variants_round_trip_mutations", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+
+		// FindOrCreateSystem then mutate everything via *System paths;
+		// re-read via the non-System Get to confirm both backends
+		// observe identical persistence regardless of which pool the
+		// write went through.
+		ent, created, err := s.FindOrCreateSystem(ctx, orgID, "github", "owner/repo#sys-mut", "pr", "Init", "https://e/sys-mut")
+		if err != nil {
+			t.Fatalf("FindOrCreateSystem: %v", err)
+		}
+		if !created {
+			t.Fatalf("FindOrCreateSystem created=false on first call")
+		}
+
+		if err := s.UpdateTitleSystem(ctx, orgID, ent.ID, "New Title"); err != nil {
+			t.Fatalf("UpdateTitleSystem: %v", err)
+		}
+		if err := s.UpdateDescriptionSystem(ctx, orgID, ent.ID, "Body"); err != nil {
+			t.Fatalf("UpdateDescriptionSystem: %v", err)
+		}
+		if err := s.UpdateSnapshotSystem(ctx, orgID, ent.ID, `{"sys":true}`); err != nil {
+			t.Fatalf("UpdateSnapshotSystem: %v", err)
+		}
+
+		pid := seed.Project(t, "SysProj")
+		if err := s.AssignProjectSystem(ctx, orgID, ent.ID, &pid, "sys rationale"); err != nil {
+			t.Fatalf("AssignProjectSystem: %v", err)
+		}
+
+		got, err := s.Get(ctx, orgID, ent.ID)
+		if err != nil || got == nil {
+			t.Fatalf("re-read: %v, got=%+v", err, got)
+		}
+		if got.Title != "New Title" || got.Description != "Body" {
+			t.Errorf("System mutations not persisted: %+v", got)
+		}
+		if got.ProjectID == nil || *got.ProjectID != pid {
+			t.Errorf("AssignProjectSystem did not stamp project_id")
+		}
+		if got.ClassificationRationale != "sys rationale" {
+			t.Errorf("AssignProjectSystem did not stamp rationale: %q", got.ClassificationRationale)
+		}
+
+		if err := s.MarkClosedSystem(ctx, orgID, ent.ID); err != nil {
+			t.Fatalf("MarkClosedSystem: %v", err)
+		}
+		got, _ = s.Get(ctx, orgID, ent.ID)
+		if got.State != "closed" {
+			t.Errorf("MarkClosedSystem: state=%q want closed", got.State)
+		}
+
+		ok, err := s.ReactivateSystem(ctx, orgID, ent.ID)
+		if err != nil {
+			t.Fatalf("ReactivateSystem: %v", err)
+		}
+		if !ok {
+			t.Errorf("ReactivateSystem returned ok=false")
+		}
+		got, _ = s.Get(ctx, orgID, ent.ID)
+		if got.State != "active" {
+			t.Errorf("ReactivateSystem: state=%q want active", got.State)
+		}
+	})
 }

@@ -8,15 +8,37 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 )
 
-type usersStore struct{ q queryer }
+// usersStore is the Postgres impl of db.UsersStore. Holds two pools
+// (SKY-296):
+//
+//   - q: app pool (tf_app, RLS-active). Every request-equivalent
+//     consumer hits this side. RLS policies gate by user_id
+//     identity once they land (SKY-251 territory).
+//   - admin: admin pool (BYPASSRLS). The single consumer is the
+//     poller bootstrap's GetGitHubUsernameSystem read at startup,
+//     before any JWT claims context can exist.
+type usersStore struct {
+	q     queryer
+	admin queryer
+}
 
-func newUsersStore(q queryer) db.UsersStore { return &usersStore{q: q} }
+func newUsersStore(q, admin queryer) db.UsersStore {
+	return &usersStore{q: q, admin: admin}
+}
 
 var _ db.UsersStore = (*usersStore)(nil)
 
 func (s *usersStore) GetGitHubUsername(ctx context.Context, userID string) (string, error) {
+	return getGitHubUsername(ctx, s.q, userID)
+}
+
+func (s *usersStore) GetGitHubUsernameSystem(ctx context.Context, userID string) (string, error) {
+	return getGitHubUsername(ctx, s.admin, userID)
+}
+
+func getGitHubUsername(ctx context.Context, q queryer, userID string) (string, error) {
 	var login sql.NullString
-	err := s.q.QueryRowContext(ctx,
+	err := q.QueryRowContext(ctx,
 		`SELECT github_username FROM users WHERE id = $1`,
 		userID,
 	).Scan(&login)

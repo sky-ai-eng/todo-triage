@@ -8,9 +8,13 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 )
 
+// usersStore — SQLite impl. The constructor accepts two queryers for
+// signature parity with the Postgres impl (SKY-296); SQLite has one
+// connection so both collapse to the same queryer. The
+// `...System` variants delegate to their non-System counterparts.
 type usersStore struct{ q queryer }
 
-func newUsersStore(q queryer) db.UsersStore { return &usersStore{q: q} }
+func newUsersStore(q, _ queryer) db.UsersStore { return &usersStore{q: q} }
 
 var _ db.UsersStore = (*usersStore)(nil)
 
@@ -79,6 +83,10 @@ func (s *usersStore) GetJiraIdentity(ctx context.Context, userID string) (string
 		return "", "", fmt.Errorf("read users.jira_account_id/jira_display_name: %w", err)
 	}
 	return accountID.String, displayName.String, nil
+}
+
+func (s *usersStore) GetGitHubUsernameSystem(ctx context.Context, userID string) (string, error) {
+	return s.GetGitHubUsername(ctx, userID)
 }
 
 func (s *usersStore) SetJiraIdentity(ctx context.Context, userID, accountID, displayName string) error {

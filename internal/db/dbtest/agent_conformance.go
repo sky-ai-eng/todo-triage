@@ -323,4 +323,33 @@ func RunAgentStoreConformance(t *testing.T, factory AgentStoreFactory) {
 			t.Errorf("SetGitHubPATUser invalid agent UUID: want nil, got %v", err)
 		}
 	})
+
+	// --- SKY-296 `...System` admin-pool variants ---
+
+	t.Run("GetForOrgSystem_matches_GetForOrg", func(t *testing.T) {
+		store, orgID, _ := factory(t)
+		ctx := context.Background()
+
+		// Before Create: both variants return (nil, nil) for the
+		// missing-row case.
+		sysGot, err := store.GetForOrgSystem(ctx, orgID)
+		if err != nil {
+			t.Fatalf("GetForOrgSystem (empty): %v", err)
+		}
+		if sysGot != nil {
+			t.Errorf("GetForOrgSystem on empty org returned %+v, want nil", sysGot)
+		}
+
+		id, err := store.Create(ctx, orgID, domain.Agent{DisplayName: "SysAgent"})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		sysGot, err = store.GetForOrgSystem(ctx, orgID)
+		if err != nil {
+			t.Fatalf("GetForOrgSystem after Create: %v", err)
+		}
+		if sysGot == nil || sysGot.ID != id {
+			t.Errorf("GetForOrgSystem returned %+v, want id=%q", sysGot, id)
+		}
+	})
 }

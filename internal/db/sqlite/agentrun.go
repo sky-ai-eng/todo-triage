@@ -19,6 +19,13 @@ import (
 // behavioral change is the orgID assertion at each method entry
 // (SQLite is single-tenant; any non-LocalDefaultOrg value is a
 // confused caller).
+//
+// The constructor takes a single queryer (SQLite has one connection)
+// rather than the (app, admin) pair the Postgres impl uses — the
+// AgentRunStore was the first store to ship multi-pool before
+// SKY-296, and the SQLite side never grew the second arg. The
+// `...System` admin-pool variants are thin wrappers around their
+// non-System counterparts on the SQLite side.
 type agentRunStore struct{ q queryer }
 
 func newAgentRunStore(q queryer) db.AgentRunStore { return &agentRunStore{q: q} }
@@ -450,6 +457,10 @@ func (s *agentRunStore) ActiveIDsForTask(ctx context.Context, orgID, taskID stri
 		ids = append(ids, id)
 	}
 	return ids, rows.Err()
+}
+
+func (s *agentRunStore) ListTakenOverIDsSystem(ctx context.Context, orgID string) ([]string, error) {
+	return s.ListTakenOverIDs(ctx, orgID)
 }
 
 func (s *agentRunStore) ListTakenOverIDs(ctx context.Context, orgID string) ([]string, error) {

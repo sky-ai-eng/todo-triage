@@ -91,12 +91,12 @@ func New(admin, app *sql.DB) db.Stores {
 		// bootstrap reason; SetEnabled/Overrides/Remove/Get run on
 		// app where RLS gates by team membership.
 		TeamAgents: newTeamAgentStore(app, admin),
-		// Users only mutates existing rows (SKY-264 github_username
-		// capture); row creation is an auth-flow concern owned by
-		// SKY-251. All methods on app — RLS gates by
-		// tf.user_can_read_user() / tf.user_can_update_user() once
-		// those policies land.
-		Users: newUsersStore(app),
+		// Users wires both pools (SKY-296): app for request-equivalent
+		// reads/writes (RLS gated by tf.user_can_read_user() /
+		// tf.user_can_update_user()), admin for the poller bootstrap's
+		// GetGitHubUsernameSystem read at startup. Row creation is an
+		// auth-flow concern owned by SKY-251.
+		Users: newUsersStore(app, admin),
 		// Tasks runs on app — every consumer (server tasks handler,
 		// router, delegate) is request-equivalent. The AI scorer uses
 		// the admin-pooled ScoreStore for its system-service reads, so
@@ -119,13 +119,15 @@ func New(admin, app *sql.DB) db.Stores {
 		// pair makes that insert unreachable through tf_app — see
 		// the impl's Create comment.
 		AgentRuns: newAgentRunStore(app, admin),
-		// Entities wires app — every consumer is request-equivalent
-		// (server panels, classifier, delegate context loaders) or
-		// runs in a server-side goroutine that already operates within
-		// the org's identity scope (tracker, started at server boot).
-		// RLS policy entities_all gates reads + writes on
-		// (org_id = tf.current_org_id() AND tf.user_has_org_access).
-		Entities: newEntityStore(app),
+		// Entities wires both pools (SKY-296): app for request-
+		// equivalent consumers (server panels, delegate context
+		// loaders) and admin for the `...System` variants the tracker
+		// + project classifier use. RLS policy entities_all gates
+		// reads + writes on (org_id = tf.current_org_id() AND
+		// tf.user_has_org_access) on the app side; admin bypasses
+		// RLS, and org_id stays in every WHERE clause as defense
+		// in depth.
+		Entities: newEntityStore(app, admin),
 		// Reviews wires app — every consumer is request-equivalent
 		// (reviews handler, swipe-dismiss, agent submit-review via
 		// cmd/exec/gh) or runs in a spawner goroutine launched from
@@ -139,13 +141,15 @@ func New(admin, app *sql.DB) db.Stores {
 		// handler). RLS policy pending_prs_all gates statements via
 		// the runs subquery; org_id defense-in-depth fires alongside.
 		PendingPRs: newPendingPRStore(app),
-		// Repos wires app — every consumer is request-equivalent
-		// (repos/settings/projects handlers, curator) or runs in a
-		// startup/profiler goroutine that operates within the org's
-		// identity scope. RLS policy repo_profiles_all gates on
-		// (org_id = current_org_id() AND user_has_org_access);
-		// org_id defense-in-depth fires in every WHERE clause.
-		Repos: newRepoStore(app),
+		// Repos wires both pools (SKY-296): app for request-
+		// equivalent consumers (repos/settings/projects handlers,
+		// curator) and admin for the `...System` variants the
+		// poller bootstrap + startup clone-status writes use. RLS
+		// policy repo_profiles_all gates on (org_id = current_org_id()
+		// AND user_has_org_access) on the app side; admin bypasses
+		// RLS, and org_id stays in every WHERE clause as defense
+		// in depth.
+		Repos: newRepoStore(app, admin),
 		// PendingFirings wires admin — the router has no per-user
 		// identity (system service) and the drain sweeper runs as a
 		// background goroutine, so impersonating any one user via
@@ -196,17 +200,18 @@ func NewForTx(tx *sql.Tx) db.TxStores {
 		Chains:        newChainStore(tx),
 		Agents:        newTxAgentStore(tx),
 		TeamAgents:    newTxTeamAgentStore(tx),
-		Users:         newUsersStore(tx),
+		Users:         newUsersStore(tx, tx),
 		Tasks:         newTaskStore(tx),
 		Factory:       newFactoryReadStore(tx),
 		// NewForTx is a test door — both pools collapse to the
 		// supplied tx. Tests that exercise the admin-only branch
-		// (event-triggered AgentRunStore.Create) need the
-		// production WithTx wiring instead, which gets the real
-		// admin pool via Store.admin.
+		// (event-triggered AgentRunStore.Create, or any of the
+		// SKY-296 `...System` methods that bypass RLS in
+		// production) need the production WithTx wiring instead,
+		// which gets the real admin pool via Store.admin.
 		AgentRuns:      newAgentRunStore(tx, tx),
-		Entities:       newEntityStore(tx),
-		Repos:          newRepoStore(tx),
+		Entities:       newEntityStore(tx, tx),
+		Repos:          newRepoStore(tx, tx),
 		Reviews:        newReviewStore(tx),
 		PendingPRs:     newPendingPRStore(tx),
 		PendingFirings: newPendingFiringsStore(tx),
