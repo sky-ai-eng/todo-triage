@@ -95,17 +95,26 @@ func SetOnEventRecorded(fn func(domain.Event)) {
 	onEventRecorded = fn
 }
 
-// NotifyEventRecorded is the package-internal hook fan-out. Backend
-// impls in internal/db/{sqlite,postgres}/events.go call this after a
-// successful INSERT so the SetOnEventRecorded hook fires uniformly
-// regardless of dialect. evt.ID must be populated (the generated or
-// caller-supplied UUID) so consumers see the persisted identity.
+// EventHook is the callback backend impls fire after a successful
+// event INSERT. Non-tx writes pass NotifyEventRecorded (immediate
+// fan-out). Tx-bound writes pass PendingEventHooks.Add so the
+// global SetOnEventRecorded subscriber waits for the surrounding
+// commit. Same shape either way — the store doesn't branch on
+// "am I in a tx," the constructor wires the right function.
 //
-// Non-tx writes (request handler outside WithTx, background admin-
-// pool RecordSystem) call this directly because the INSERT is durable
-// the moment ExecContext returns nil. Tx-bound writes route through
-// PendingEventHooks below so the hook waits for the surrounding
-// commit.
+// PendingEventHooks.Add has signature `func(domain.Event)` so its
+// method value satisfies this type directly. NotifyEventRecorded is
+// also `func(domain.Event)` for the same reason.
+type EventHook func(domain.Event)
+
+// NotifyEventRecorded fires the global SetOnEventRecorded hook with
+// evt. evt.ID must be populated (the generated or caller-supplied
+// UUID) so consumers see the persisted identity.
+//
+// Non-tx writes pass this as their EventHook because the INSERT is
+// durable the moment ExecContext returns nil. Tx-bound writes route
+// through PendingEventHooks.Add instead so the hook waits for the
+// surrounding commit.
 func NotifyEventRecorded(evt domain.Event) {
 	if onEventRecorded != nil {
 		onEventRecorded(evt)

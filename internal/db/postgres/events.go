@@ -17,68 +17,70 @@ import (
 // no default), and org_id in every WHERE clause as defense in depth
 // alongside RLS policy events_all.
 //
-// Holds two write paths (app + admin) plus an optional
-// PendingEventHooks per path. When the path's pending pointer is
-// non-nil, the SetOnEventRecorded hook is deferred to commit time
-// (the TxRunner allocates the buffer and calls Fire() after the
-// outer tx commits, dropping it on rollback). When nil, the hook
-// fires immediately on a successful INSERT.
+// Holds two pools:
 //
-// In production WithTx: q is the *sql.Tx → defers; admin is
-// s.admin → fires immediately (autonomous pool). In NewForTx (test
-// door) both halves collapse to the same tx and both defer to the
-// same buffer. Non-tx wiring (Store.New) passes nil for both pendings
-// so the hook fires eagerly as before.
+//   - q: app pool (tf_app, RLS-active). Request-handler equivalents
+//     (stock carry-over, factory drag-to-delegate) route here. RLS
+//     policy events_all gates the statement; the caller must be
+//     inside WithTx so request.jwt.claims is set.
+//
+//   - admin: admin pool (supabase_admin, BYPASSRLS). Background-
+//     goroutine consumers without a JWT-claims context route here
+//     via the `...System` methods. org_id stays bound in the
+//     INSERT/SELECT as defense in depth.
+//
+// Each pool gets its own EventHook so hook firing can be deferred to
+// commit time for tx-bound writes without affecting writes that
+// commit autonomously. In production WithTx: appHook is
+// PendingEventHooks.Add (drained post-commit); adminHook is
+// NotifyEventRecorded (immediate, the admin pool is autonomous from
+// the outer tx).
 type eventStore struct {
-	app   writePath
-	admin writePath
+	q         queryer
+	admin     queryer
+	appHook   db.EventHook
+	adminHook db.EventHook
 }
 
-// writePath is a queryer paired with the deferral buffer that
-// governs hook firing for its writes. nil pending = "the write is
-// durable when ExecContext returns nil" (autonomous pool or
-// committed tx).
-type writePath struct {
-	q       queryer
-	pending *db.PendingEventHooks
-}
-
-// newEventStore constructs the eager-hook variant used by Store.New
-// for non-tx wiring. Both halves fire SetOnEventRecorded the
-// moment the INSERT returns nil.
+// newEventStore is the eager-hook variant used by Store.New for
+// non-tx wiring. Both pools fire SetOnEventRecorded the moment
+// ExecContext returns nil, matching the pre-SKY-305 behavior.
 func newEventStore(q, admin queryer) db.EventStore {
 	return &eventStore{
-		app:   writePath{q: q},
-		admin: writePath{q: admin},
+		q:         q,
+		admin:     admin,
+		appHook:   db.NotifyEventRecorded,
+		adminHook: db.NotifyEventRecorded,
 	}
 }
 
-// newTxEventStore is the tx-bound variant. appPending controls
-// hook deferral for Record (q-side); adminPending controls deferral
-// for RecordSystem (admin-side). Pass nil for adminPending in
-// production WithTx — the admin pool commits autonomously, so its
-// hook fires immediately. For NewForTx (test door) pass the same
-// buffer for both so the test's manual commit/rollback governs all
-// hook firing uniformly.
-func newTxEventStore(q, admin queryer, appPending, adminPending *db.PendingEventHooks) db.EventStore {
+// newTxEventStore is the tx-bound variant. The hook arguments are
+// the dispatch targets for Record and RecordSystem respectively —
+// pass PendingEventHooks.Add to defer, db.NotifyEventRecorded to
+// fire eagerly. Production WithTx (txStoresFromTx) passes a deferred
+// hook for the app pool and an eager hook for admin (autonomous);
+// NewForTx (test door) can pass two eager hooks or share a buffer
+// across both.
+func newTxEventStore(q, admin queryer, appHook, adminHook db.EventHook) db.EventStore {
 	return &eventStore{
-		app:   writePath{q: q, pending: appPending},
-		admin: writePath{q: admin, pending: adminPending},
+		q:         q,
+		admin:     admin,
+		appHook:   appHook,
+		adminHook: adminHook,
 	}
 }
 
 var _ db.EventStore = (*eventStore)(nil)
 
 func (s *eventStore) Record(ctx context.Context, orgID string, evt domain.Event) (string, error) {
-	return s.app.record(ctx, orgID, evt)
+	return recordEvent(ctx, s.q, s.appHook, orgID, evt)
 }
 
 func (s *eventStore) RecordSystem(ctx context.Context, orgID string, evt domain.Event) (string, error) {
-	return s.admin.record(ctx, orgID, evt)
+	return recordEvent(ctx, s.admin, s.adminHook, orgID, evt)
 }
 
-// record runs the INSERT on the path's queryer and either fires
-// the hook immediately or enqueues it on the pending buffer.
+// recordEvent runs the INSERT and dispatches the event through hook.
 //
 // metadata_json casts to jsonb at the placeholder so the caller
 // hands a marshalled string — same pattern ProjectStore uses for
@@ -88,16 +90,15 @@ func (s *eventStore) RecordSystem(ctx context.Context, orgID string, evt domain.
 // metadata) stays intact.
 //
 // created_at is bound from time.Now() rather than relying on the
-// DEFAULT now() column expression. Postgres' now() is the transaction
-// start timestamp — multiple INSERTs in one tx all tie, and the
-// LIMIT-1 ordering in LatestForEntityTypeAndDedupKey then falls
+// DEFAULT now() column expression. Postgres' now() is the
+// transaction-start timestamp — multiple INSERTs in one tx tie, and
+// the LIMIT-1 ordering in LatestForEntityTypeAndDedupKey then falls
 // through to the UUID tiebreaker which is random. Binding from Go
-// gives nanosecond resolution that's monotonic within a process for
-// sequential calls, so same-tx records sort by insertion order.
+// gives ns resolution that's monotonic within a process for
+// sequential calls.
 //
-// occurred_at follows the nullable contract: zero time → NULL column.
-// Chronological queries fall back to created_at via COALESCE.
-func (wp *writePath) record(ctx context.Context, orgID string, evt domain.Event) (string, error) {
+// occurred_at follows the nullable contract: zero time → NULL.
+func recordEvent(ctx context.Context, q queryer, hook db.EventHook, orgID string, evt domain.Event) (string, error) {
 	id := evt.ID
 	if id == "" {
 		id = uuid.New().String()
@@ -115,7 +116,7 @@ func (wp *writePath) record(ctx context.Context, orgID string, evt domain.Event)
 		occurredAt = evt.OccurredAt
 	}
 	createdAt := time.Now()
-	if _, err := wp.q.ExecContext(ctx, `
+	if _, err := q.ExecContext(ctx, `
 		INSERT INTO events (id, org_id, entity_id, event_type, dedup_key, metadata_json, occurred_at, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
 	`, id, orgID, entityID, evt.EventType, evt.DedupKey, metadata, occurredAt, createdAt); err != nil {
@@ -123,23 +124,19 @@ func (wp *writePath) record(ctx context.Context, orgID string, evt domain.Event)
 	}
 	evt.ID = id
 	evt.CreatedAt = createdAt
-	if wp.pending != nil {
-		wp.pending.Add(evt)
-	} else {
-		db.NotifyEventRecorded(evt)
-	}
+	hook(evt)
 	return id, nil
 }
 
 func (s *eventStore) LatestForEntityTypeAndDedupKey(ctx context.Context, orgID, entityID, eventType, dedupKey string) (*domain.Event, error) {
 	// Primary sort on COALESCE(occurred_at, created_at) so the row
 	// picked reflects underlying event order when the source clock
-	// is known (check completion time, review submission time).
-	// Fall back to created_at for events that don't carry a source
-	// timestamp (system events, derived events). The id DESC at the
-	// end is a deterministic tiebreaker for the otherwise-impossible
-	// case where two writes share both timestamps to the nanosecond.
-	row := s.app.q.QueryRowContext(ctx, `
+	// is known (check completion, review submission). Fall back to
+	// created_at for events that don't carry a source timestamp
+	// (system events, derived events). id DESC at the end is the
+	// deterministic tiebreaker for the otherwise-impossible case
+	// where two writes share both timestamps to the nanosecond.
+	row := s.q.QueryRowContext(ctx, `
 		SELECT id, entity_id, event_type, dedup_key,
 		       COALESCE(metadata_json::text, ''), occurred_at, created_at
 		FROM events
@@ -169,7 +166,7 @@ func (s *eventStore) LatestForEntityTypeAndDedupKey(ctx context.Context, orgID, 
 
 func (s *eventStore) GetMetadataSystem(ctx context.Context, orgID, eventID string) (string, error) {
 	var metadata sql.NullString
-	err := s.admin.q.QueryRowContext(ctx, `
+	err := s.admin.QueryRowContext(ctx, `
 		SELECT metadata_json::text FROM events WHERE org_id = $1 AND id = $2
 	`, orgID, eventID).Scan(&metadata)
 	if err == sql.ErrNoRows {

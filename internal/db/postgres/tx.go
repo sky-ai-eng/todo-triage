@@ -153,12 +153,12 @@ func (s *Store) txStoresFromTx(tx *sql.Tx, pending *db.PendingEventHooks) db.TxS
 		// half pinned to s.admin lets the classifier read each org's
 		// project set even when composed inside a claims-set tx.
 		Projects: newProjectStore(tx, s.admin),
-		// Events: app-side write defers hook firing via `pending`
-		// (drained post-commit by runClaimsBoundTx). Admin half stays
-		// pinned to the real admin pool so RecordSystem /
+		// Events: app-side write defers hook firing via pending.Add
+		// (drained post-commit by runClaimsBoundTx). Admin half
+		// stays pinned to the real admin pool so RecordSystem /
 		// GetMetadataSystem inside WithTx routes outside the tx —
 		// those writes commit autonomously and fire their hook
-		// immediately, so the admin-side pending is nil.
-		Events: newTxEventStore(tx, s.admin, pending, nil),
+		// immediately via db.NotifyEventRecorded.
+		Events: newTxEventStore(tx, s.admin, pending.Add, db.NotifyEventRecorded),
 	}
 }
