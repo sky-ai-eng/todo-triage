@@ -13,6 +13,7 @@ import (
 	"os"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -44,9 +45,21 @@ var ErrYieldNotResumable = errors.New("yield: run not in awaiting_input")
 // the registered-cancel path doesn't write to the DB itself, so
 // without that we'd leak a "cancelled but row says running" state.
 //
+// userID identifies the responding user — the actor whose action
+// resumed the yielded run. All writes inside the resume goroutine
+// route under this user's synthetic claims regardless of the run's
+// original trigger type (an event-triggered run that yielded and was
+// answered by a teammate gets the teammate's identity on the resume
+// writes, which is the audit-honest outcome). Local mode passes
+// runmode.LocalDefaultUserID; multi-mode handlers extract it from JWT
+// claims.
+//
 // SKY-139.
-func (s *Spawner) ResumeAfterYield(runID, agentMessage string) error {
-	run, err := s.agentRuns.Get(context.Background(), runmode.LocalDefaultOrg, runID)
+func (s *Spawner) ResumeAfterYield(runID, agentMessage, userID string) error {
+	if userID == "" {
+		return fmt.Errorf("resume: empty user id")
+	}
+	run, err := s.agentRuns.GetSystem(context.Background(), runmode.LocalDefaultOrg, runID)
 	if err != nil {
 		return fmt.Errorf("load run: %w", err)
 	}
@@ -59,7 +72,7 @@ func (s *Spawner) ResumeAfterYield(runID, agentMessage string) error {
 	if run.WorktreePath == "" {
 		return fmt.Errorf("run has no worktree path; cannot resume")
 	}
-	task, err := s.tasks.Get(context.Background(), runmode.LocalDefaultOrg, run.TaskID)
+	task, err := s.tasks.GetSystem(context.Background(), runmode.LocalDefaultOrg, run.TaskID)
 	if err != nil {
 		return fmt.Errorf("load task: %w", err)
 	}
@@ -72,7 +85,7 @@ func (s *Spawner) ResumeAfterYield(runID, agentMessage string) error {
 	// without TRIAGE_FACTORY_REPO, the same way Jira-no-match runs do
 	// today.
 	owner, repo := "", ""
-	entity, err := s.entities.Get(context.Background(), runmode.LocalDefaultOrgID, task.EntityID)
+	entity, err := s.entities.GetSystem(context.Background(), runmode.LocalDefaultOrgID, task.EntityID)
 	if err == nil && entity != nil {
 		owner, repo = parseOwnerRepo(entity.SourceID)
 	}
@@ -80,7 +93,7 @@ func (s *Spawner) ResumeAfterYield(runID, agentMessage string) error {
 	// Resolve extra allowed tools from the prompt used for this run.
 	var extraTools string
 	if run.PromptID != "" {
-		if p, err := s.prompts.Get(context.Background(), runmode.LocalDefaultOrg, run.PromptID); err == nil && p != nil {
+		if p, err := s.prompts.GetSystem(context.Background(), runmode.LocalDefaultOrg, run.PromptID); err == nil && p != nil {
 			extraTools = s.collectExtraTools(p.AllowedTools)
 		}
 	}
@@ -95,15 +108,18 @@ func (s *Spawner) ResumeAfterYield(runID, agentMessage string) error {
 	// defends against legacy / test fixture rows that left the
 	// column unset. Keeping it cheap and explicit rather than
 	// trusting the read.
+	// Resume is always user-initiated — the userID arg is the actor
+	// who clicked respond. All writes inside the resume route under
+	// that user's synthetic claims regardless of the run's original
+	// trigger type: an event-triggered run answered by a teammate
+	// still attributes the resume's writes to the teammate. The
+	// trigger_type captured here is only used for the drainer +
+	// pollDrainer hook on terminal exit (event runs still drive the
+	// per-entity firing queue).
 	triggerType := run.TriggerType
 	if triggerType == "" {
 		triggerType = "manual"
 	}
-	// Resume inherits the run's identity: manual runs route writes
-	// under the original creator's synthetic claims; event-triggered
-	// runs continue to use the admin pool. CreatorUserID is empty for
-	// event runs by schema invariant.
-	router := newWriteRouter(s, triggerType, run.CreatorUserID)
 
 	// Step 1: register the cancel handle synchronously. Once this
 	// runs, a concurrent Cancel(runID) finds the entry and calls
@@ -131,7 +147,15 @@ func (s *Spawner) ResumeAfterYield(runID, agentMessage string) error {
 	// goroutine still running" state the review bot flagged. With
 	// the cancel handle already in place, any Cancel() now hits
 	// cancel(ctx) and the goroutine handles the terminal write.
-	flipped, err := s.agentRuns.MarkResuming(context.Background(), runmode.LocalDefaultOrg, runID)
+	// Routed under the responding user's synthetic claims (resume is
+	// always user-initiated regardless of the run's original trigger).
+	bgCtx := context.Background()
+	var flipped bool
+	err = s.tx.SyntheticClaimsWithTx(bgCtx, runmode.LocalDefaultOrg, userID, func(ts db.TxStores) error {
+		f, fErr := ts.AgentRuns.MarkResuming(bgCtx, runmode.LocalDefaultOrg, runID)
+		flipped = f
+		return fErr
+	})
 	if err != nil {
 		s.mu.Lock()
 		delete(s.cancels, runID)
@@ -166,7 +190,13 @@ func (s *Spawner) ResumeAfterYield(runID, agentMessage string) error {
 		// path doesn't touch the DB; this goroutine owns the
 		// terminal write any time it observes ctx.Err().
 		markCancelled := func() {
-			ok, _ := s.agentRuns.MarkCancelledIfActive(context.Background(), runmode.LocalDefaultOrg, runID, "user_cancelled", "Run cancelled by user")
+			cancelCtx := context.Background()
+			var ok bool
+			_ = s.tx.SyntheticClaimsWithTx(cancelCtx, runmode.LocalDefaultOrg, userID, func(ts db.TxStores) error {
+				f, mErr := ts.AgentRuns.MarkCancelledIfActive(cancelCtx, runmode.LocalDefaultOrg, runID, "user_cancelled", "Run cancelled by user")
+				ok = f
+				return mErr
+			})
 			if ok {
 				s.broadcastRunUpdate(runID, "cancelled")
 			}
@@ -185,11 +215,18 @@ func (s *Spawner) ResumeAfterYield(runID, agentMessage string) error {
 			repoEnv = owner + "/" + repo
 		}
 
-		outcome, err := s.ResumeWithMessage(ctx, router, runID, sessionID, cwd, agentMessage, ResumeOptions{
+		// Resume routes every downstream write under the responding
+		// user's synthetic claims regardless of the run's original
+		// trigger type: pass "manual" + userID so processCompletion /
+		// failRun / ResumeWithMessage / sink each pick the synth-claims
+		// arm. The captured triggerType local (above) stays in scope
+		// for the goroutine's notifyDrainer defer — event-triggered
+		// runs still drive the per-entity firing queue on terminal.
+		outcome, err := s.ResumeWithMessage(ctx, runID, sessionID, cwd, agentMessage, ResumeOptions{
 			Model:             model,
 			RepoEnv:           repoEnv,
 			ExtraAllowedTools: extraTools,
-		})
+		}, "manual", userID)
 		if ctx.Err() != nil {
 			// User cancelled mid-resume. ResumeWithMessage SIGKILLed
 			// the subprocess via its own ctx.Done() watcher; we own
@@ -198,15 +235,15 @@ func (s *Spawner) ResumeAfterYield(runID, agentMessage string) error {
 			return
 		}
 		if err != nil {
-			s.failRun(runID, taskCopy.ID, triggerType, "resume after yield failed: "+err.Error())
+			s.failRun(runID, taskCopy.ID, "manual", userID, "resume after yield failed: "+err.Error())
 			return
 		}
 		if outcome == nil || outcome.Completion == nil {
-			s.failRun(runID, taskCopy.ID, triggerType, "resume after yield produced no completion")
+			s.failRun(runID, taskCopy.ID, "manual", userID, "resume after yield produced no completion")
 			return
 		}
 
-		s.processCompletion(ctx, router, runID, taskCopy, outcome.Completion, cwd, sessionID, model, owner, repo, triggerType, extraTools)
+		s.processCompletion(ctx, runID, taskCopy, outcome.Completion, cwd, sessionID, model, owner, repo, "manual", userID, extraTools)
 	}()
 	return nil
 }
@@ -280,7 +317,7 @@ type ResumeOutcome struct {
 // gives up. Mirroring the initial invocation's status updates here
 // would produce double CompleteAgentRun writes with stale
 // cost/duration fields overwriting the real totals.
-func (s *Spawner) ResumeWithMessage(ctx context.Context, router *writeRouter, runID, sessionID, cwd, message string, opts ResumeOptions) (*ResumeOutcome, error) {
+func (s *Spawner) ResumeWithMessage(ctx context.Context, runID, sessionID, cwd, message string, opts ResumeOptions, triggerType, creatorUserID string) (*ResumeOutcome, error) {
 	if sessionID == "" {
 		return nil, fmt.Errorf("resume: missing session id")
 	}
@@ -334,7 +371,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, router *writeRouter, ru
 		MaxTurns:     100,
 		ExtraEnv:     extraEnv,
 		TraceID:      runID,
-	}, newRunSink(s, router, runID))
+	}, newRunSink(s, runID, triggerType, creatorUserID))
 
 	outcome := &ResumeOutcome{}
 	if apOutcome != nil {

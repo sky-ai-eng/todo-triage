@@ -42,7 +42,7 @@ func (s *stubDelegator) Delegate(task domain.Task, opts delegate.DelegateOpts) (
 	return runID, nil
 }
 
-func (s *stubDelegator) Cancel(runID string) error { return nil }
+func (s *stubDelegator) Cancel(runID, userID string) error { return nil }
 
 // setupDrainScenario seeds entity + prompt + event + task + trigger so a
 // pending firing can be enqueued and drained against a realistic FK graph.

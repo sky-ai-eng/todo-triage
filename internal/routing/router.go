@@ -31,7 +31,7 @@ type Scorer interface {
 // *delegate.Spawner.
 type Delegator interface {
 	Delegate(task domain.Task, opts delegate.DelegateOpts) (string, error)
-	Cancel(runID string) error
+	Cancel(runID, userID string) error
 }
 
 // Router is the central eventbus subscriber that replaces the old auto-
@@ -695,7 +695,7 @@ func (r *Router) DrainEntity(entityID string) {
 				log.Printf("[router] mark firing %d fired (run %s) failed: %v — rolling back: cancelling run + reverting task to queued",
 					firing.ID, runID, err)
 				if r.spawner != nil {
-					if cerr := r.spawner.Cancel(runID); cerr != nil {
+					if cerr := r.spawner.Cancel(runID, ""); cerr != nil {
 						log.Printf("[router] cancel run %s after mark-fired failure: %v — run may already be terminal, drain still triggers from its defer",
 							runID, cerr)
 					}
@@ -1031,7 +1031,7 @@ func (r *Router) cancelActiveRunsForTask(taskID string) {
 		return
 	}
 	for _, id := range ids {
-		if err := r.spawner.Cancel(id); err != nil {
+		if err := r.spawner.Cancel(id, ""); err != nil {
 			log.Printf("[router] cancel run %s on close of task %s: %v", id, taskID, err)
 		}
 	}

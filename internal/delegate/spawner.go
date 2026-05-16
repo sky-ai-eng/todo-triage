@@ -65,8 +65,9 @@ type Spawner struct {
 	// run's creator_user_id is the synthetic claim subject, so RLS
 	// policies on the writes pass under tf_app). Event-triggered runs
 	// don't construct a tx — their writes go through `...System`
-	// admin-pool methods directly. The router lives in writeRouter,
-	// not here.
+	// admin-pool methods directly. Routing is inline at each call
+	// site: `if triggerType == "manual" { s.tx.SyntheticClaimsWithTx
+	// (..., creatorUserID, fn) } else { s.x.MethodSystem(...) }`.
 	tx    db.TxRunner
 	wsHub *websocket.Hub
 

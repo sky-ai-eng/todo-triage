@@ -365,6 +365,172 @@ func TestAgentRunStore_Postgres_Create_UnderAppPoolRLS(t *testing.T) {
 	}
 }
 
+// TestAgentRunStore_Postgres_LifecycleWrites_UnderSyntheticClaims
+// pins the routing the SKY-299 delegate spawner uses for manual-run
+// bookkeeping: lifecycle writes (Complete, MarkCancelledIfActive,
+// MarkResuming, MarkPendingApprovalIfCompleted) wrapped in
+// SyntheticClaimsWithTx must pass RLS under tf_app and land the
+// expected status. Mirrors the spawner's per-call-site branch:
+//
+//	if triggerType == "manual" {
+//	    s.tx.SyntheticClaimsWithTx(...) // this path
+//	} else {
+//	    s.agentRuns.XxxSystem(...)
+//	}
+//
+// The admin-pool System variants are already pgtested via the
+// conformance suite. This test specifically exercises the app-pool
+// arm under realistic RLS — the only way the manual-routing path
+// can succeed in multi-mode without SKY-299's tx wrap is if the
+// row's creator_user_id matches tf.current_user_id() under the
+// claims set by WithTx.
+func TestAgentRunStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID, _ := seedPgAgentRunOrg(t, h)
+	seedPgAgentRunPromptIn(t, h, "p_lc_test", orgID, userID)
+
+	// FK chain on admin (same pattern as
+	// TestAgentRunStore_Postgres_Create_UnderAppPoolRLS).
+	entityID := uuid.New().String()
+	eventID := uuid.New().String()
+	taskID := uuid.New().String()
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
+		VALUES ($1, $2, 'github', $3, 'pr', 'LC Test', '', '{}'::jsonb, now())
+	`, entityID, orgID, "lc-"+orgID[:8]); err != nil {
+		t.Fatalf("entity: %v", err)
+	}
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO events (id, org_id, entity_id, event_type, dedup_key, metadata_json, created_at)
+		VALUES ($1, $2, $3, 'github:pr:ci_check_failed', '', '{}'::jsonb, now())
+	`, eventID, orgID, entityID); err != nil {
+		t.Fatalf("event: %v", err)
+	}
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO tasks (id, org_id, creator_user_id, team_id, visibility, entity_id, event_type, dedup_key, primary_event_id, status, scoring_status, priority_score)
+		VALUES ($1, $2, $3,
+		        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
+		        'team', $4, 'github:pr:ci_check_failed', '', $5, 'queued', 'pending', 0.5)
+	`, taskID, orgID, userID, entityID, eventID); err != nil {
+		t.Fatalf("task: %v", err)
+	}
+
+	stores := pgstore.New(h.AdminDB, h.AppDB)
+	ctx := context.Background()
+
+	// Seed a manual run row owned by userID — the spawner does this
+	// via Create at goroutine spawn time, before the goroutine
+	// reaches any of the lifecycle writes under test.
+	runID := uuid.New().String()
+	if err := stores.Tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		return tx.AgentRuns.Create(ctx, orgID, domain.AgentRun{
+			ID: runID, TaskID: taskID, PromptID: "p_lc_test", Status: "running", Model: "m",
+			TriggerType: "manual", CreatorUserID: userID,
+		})
+	}); err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+
+	// Drive each lifecycle write through SyntheticClaimsWithTx — the
+	// shape the spawner uses for every manual-run bookkeeping point.
+
+	// MarkResuming (yield-resume entry).
+	var resumed bool
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		// Park the run in awaiting_input first so MarkResuming's
+		// guard fires.
+		if err := tx.AgentRuns.SetStatus(ctx, orgID, runID, "awaiting_input"); err != nil {
+			return err
+		}
+		r, mErr := tx.AgentRuns.MarkResuming(ctx, orgID, runID)
+		resumed = r
+		return mErr
+	}); err != nil {
+		t.Fatalf("MarkResuming under synth claims: %v", err)
+	}
+	if !resumed {
+		t.Errorf("MarkResuming: flipped=false, want true (was awaiting_input)")
+	}
+
+	// AddPartialTotals (yield path).
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		return tx.AgentRuns.AddPartialTotals(ctx, orgID, runID, 0.5, 1500, 3)
+	}); err != nil {
+		t.Fatalf("AddPartialTotals under synth claims: %v", err)
+	}
+
+	// Complete (terminal write — the largest of processCompletion's
+	// routed writes).
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		return tx.AgentRuns.Complete(ctx, orgID, runID, "completed", 0.25, 500, 2, "end_turn", "ok")
+	}); err != nil {
+		t.Fatalf("Complete under synth claims: %v", err)
+	}
+
+	// MarkPendingApprovalIfCompleted (the guarded transition for
+	// pending-review/PR runs).
+	var flipped bool
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		f, mErr := tx.AgentRuns.MarkPendingApprovalIfCompleted(ctx, orgID, runID)
+		flipped = f
+		return mErr
+	}); err != nil {
+		t.Fatalf("MarkPendingApprovalIfCompleted under synth claims: %v", err)
+	}
+	if !flipped {
+		t.Errorf("MarkPendingApprovalIfCompleted: flipped=false, want true (row was completed)")
+	}
+
+	// Verify on admin: row landed in pending_approval, totals
+	// reflect the AddPartialTotals + Complete merge, creator stayed
+	// the original user.
+	var (
+		status        string
+		totalCostUSD  float64
+		durationMs    int
+		numTurns      int
+		stopReason    string
+		creatorUserID sql.NullString
+	)
+	if err := h.AdminDB.QueryRow(`
+		SELECT status, total_cost_usd, duration_ms, num_turns, stop_reason, creator_user_id::text
+		FROM runs WHERE id = $1
+	`, runID).Scan(&status, &totalCostUSD, &durationMs, &numTurns, &stopReason, &creatorUserID); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if status != "pending_approval" {
+		t.Errorf("status = %q, want pending_approval", status)
+	}
+	if totalCostUSD != 0.75 {
+		t.Errorf("total_cost_usd = %v, want 0.75 (0.5 partial + 0.25 complete)", totalCostUSD)
+	}
+	if durationMs != 2000 {
+		t.Errorf("duration_ms = %d, want 2000 (1500 partial + 500 complete)", durationMs)
+	}
+	if numTurns != 5 {
+		t.Errorf("num_turns = %d, want 5 (3 partial + 2 complete)", numTurns)
+	}
+	if stopReason != "end_turn" {
+		t.Errorf("stop_reason = %q, want end_turn", stopReason)
+	}
+	if !creatorUserID.Valid || creatorUserID.String != userID {
+		t.Errorf("creator_user_id = %v, want %s", creatorUserID, userID)
+	}
+
+	// MarkFailedIfActive on a terminal row is a no-op (guarded
+	// transition). Verifies the System variant's guard fires even
+	// though we never wrapped in claims for this call (spawner uses
+	// it goroutine-internally with no user identity).
+	failed, err := stores.AgentRuns.MarkFailedIfActiveSystem(ctx, orgID, runID)
+	if err != nil {
+		t.Fatalf("MarkFailedIfActiveSystem: %v", err)
+	}
+	if failed {
+		t.Errorf("MarkFailedIfActiveSystem on terminal row: flipped=true, want false (guard)")
+	}
+}
+
 // seedPgAgentRunPromptIn is a small variant that inserts a prompt
 // with an explicit id. Used by cross-org leakage which needs two
 // prompts in two orgs with distinct ids.

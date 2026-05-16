@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/config"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -116,10 +117,6 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 
 	extraTools := s.collectExtraTools(resolved.AllowedTools)
 
-	if err := s.prompts.IncrementUsage(context.Background(), runmode.LocalDefaultOrg, promptID); err != nil {
-		log.Printf("[delegate] warning: failed to increment usage for prompt %s: %v", promptID, err)
-	}
-
 	triggerType := opts.TriggerType
 	if triggerType == "" {
 		triggerType = "manual"
@@ -142,6 +139,22 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 		}
 	}
 
+	// IncrementUsage routes per trigger type. Manual delegations
+	// write under the user's synthetic claims; event-triggered ones
+	// fire through the admin pool.
+	bgCtx := context.Background()
+	var incErr error
+	if triggerType == "manual" {
+		incErr = s.tx.SyntheticClaimsWithTx(bgCtx, runmode.LocalDefaultOrg, creatorUserID, func(ts db.TxStores) error {
+			return ts.Prompts.IncrementUsage(bgCtx, runmode.LocalDefaultOrg, promptID)
+		})
+	} else {
+		incErr = s.prompts.IncrementUsageSystem(bgCtx, runmode.LocalDefaultOrg, promptID)
+	}
+	if incErr != nil {
+		log.Printf("[delegate] warning: failed to increment usage for prompt %s: %v", promptID, incErr)
+	}
+
 	if resolved.Kind == domain.PromptKindChain {
 		return s.delegateChain(task, resolved, triggerType, triggerID, creatorUserID, ghClient, model)
 	}
@@ -154,7 +167,7 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 	// agent bootstrap, which is transient.
 	actorAgentID := task.ClaimedByAgentID
 	if actorAgentID == "" && s.agents != nil {
-		if a, err := s.agents.GetForOrg(context.Background(), runmode.LocalDefaultOrg); err == nil && a != nil {
+		if a, err := s.agents.GetForOrgSystem(context.Background(), runmode.LocalDefaultOrg); err == nil && a != nil {
 			actorAgentID = a.ID
 		}
 	}
@@ -216,10 +229,10 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 
 		if setupErr != nil {
 			if ctx.Err() != nil {
-				s.handleCancelled(runID, startTime, cfg.wtPath)
+				s.handleCancelled(runID, startTime, cfg.wtPath, triggerType, creatorUserID)
 				return
 			}
-			s.failRun(runID, task.ID, triggerType, setupErr.Error())
+			s.failRun(runID, task.ID, triggerType, creatorUserID, setupErr.Error())
 			return
 		}
 

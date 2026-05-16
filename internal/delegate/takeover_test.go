@@ -135,7 +135,7 @@ func newSpawnerWithActiveCancel(database *sql.DB, runID string) *Spawner {
 // problem, and the handler routes uncategorized errors to 500.
 func TestTakeover_EmptyBaseDir(t *testing.T) {
 	s := NewSpawner(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, "")
-	_, err := s.Takeover("any-run", "")
+	_, err := s.Takeover("any-run", "", "test-user")
 	if err == nil {
 		t.Fatal("expected error on empty baseDir")
 	}
@@ -152,7 +152,7 @@ func TestTakeover_NonexistentRun(t *testing.T) {
 	database := newTakeoverTestDB(t)
 	s := NewSpawner(database, testPromptStore(database), nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, sqlitestore.New(database).Reviews, sqlitestore.New(database).PendingPRs, sqlitestore.New(database).Events, sqlitestore.New(database).TaskMemory, sqlitestore.New(database).RunWorktrees, sqlitestore.New(database).Tx, nil, nil, "")
 
-	_, err := s.Takeover("no-such-run", "/tmp/dest")
+	_, err := s.Takeover("no-such-run", "/tmp/dest", "test-user")
 	if !errors.Is(err, ErrTakeoverInvalidState) {
 		t.Errorf("err = %v, want ErrTakeoverInvalidState", err)
 	}
@@ -166,7 +166,7 @@ func TestTakeover_NoSessionID(t *testing.T) {
 	seedRun(t, database, "run-no-sid", "", "/tmp/wt")
 	s := newSpawnerWithActiveCancel(database, "run-no-sid")
 
-	_, err := s.Takeover("run-no-sid", "/tmp/dest")
+	_, err := s.Takeover("run-no-sid", "/tmp/dest", "test-user")
 	if !errors.Is(err, ErrTakeoverInvalidState) {
 		t.Errorf("err = %v, want ErrTakeoverInvalidState", err)
 	}
@@ -183,7 +183,7 @@ func TestTakeover_NoWorktreePath(t *testing.T) {
 	seedRun(t, database, "run-no-wt", "sess-1", "")
 	s := newSpawnerWithActiveCancel(database, "run-no-wt")
 
-	_, err := s.Takeover("run-no-wt", "/tmp/dest")
+	_, err := s.Takeover("run-no-wt", "/tmp/dest", "test-user")
 	if !errors.Is(err, ErrTakeoverInvalidState) {
 		t.Errorf("err = %v, want ErrTakeoverInvalidState", err)
 	}
@@ -199,7 +199,7 @@ func TestTakeover_RejectsJiraLazyRun(t *testing.T) {
 	seedJiraRun(t, database, "run-jira", "sess-1", "/tmp/runs/run-jira")
 	s := newSpawnerWithActiveCancel(database, "run-jira")
 
-	_, err := s.Takeover("run-jira", "/tmp/dest")
+	_, err := s.Takeover("run-jira", "/tmp/dest", "test-user")
 	if !errors.Is(err, ErrTakeoverInvalidState) {
 		t.Errorf("err = %v, want ErrTakeoverInvalidState", err)
 	}
@@ -218,7 +218,7 @@ func TestTakeover_NoActiveRun(t *testing.T) {
 	// No cancels[runID] set.
 	s := NewSpawner(database, testPromptStore(database), nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, sqlitestore.New(database).Reviews, sqlitestore.New(database).PendingPRs, sqlitestore.New(database).Events, sqlitestore.New(database).TaskMemory, sqlitestore.New(database).RunWorktrees, sqlitestore.New(database).Tx, nil, nil, "")
 
-	_, err := s.Takeover("run-not-active", "/tmp/dest")
+	_, err := s.Takeover("run-not-active", "/tmp/dest", "test-user")
 	if !errors.Is(err, ErrTakeoverInvalidState) {
 		t.Errorf("err = %v, want ErrTakeoverInvalidState", err)
 	}
@@ -235,7 +235,7 @@ func TestTakeover_AlreadyInProgress(t *testing.T) {
 	s := newSpawnerWithActiveCancel(database, "run-double")
 	s.takenOver["run-double"] = true
 
-	_, err := s.Takeover("run-double", "/tmp/dest")
+	_, err := s.Takeover("run-double", "/tmp/dest", "test-user")
 	if !errors.Is(err, ErrTakeoverInProgress) {
 		t.Errorf("err = %v, want ErrTakeoverInProgress", err)
 	}
@@ -273,7 +273,7 @@ func TestAbortTakeover_KeepsFlagSticky(t *testing.T) {
 	s := newSpawnerWithActiveCancel(database, "run-abort")
 	s.takenOver["run-abort"] = true
 
-	s.abortTakeover("run-abort", "", "")
+	s.abortTakeover("run-abort", "", "", runmode.LocalDefaultUserID)
 
 	if !s.wasTakenOver("run-abort") {
 		t.Error("abortTakeover cleared the takenOver flag — late goroutine gates can now race the rollback")
@@ -291,7 +291,7 @@ func TestAbortTakeover_MarksRowTerminal(t *testing.T) {
 	s := newSpawnerWithActiveCancel(database, "run-mark")
 	s.takenOver["run-mark"] = true
 
-	s.abortTakeover("run-mark", "", "")
+	s.abortTakeover("run-mark", "", "", runmode.LocalDefaultUserID)
 
 	got, err := sqlitestore.New(database).AgentRuns.Get(t.Context(), runmode.LocalDefaultOrg, "run-mark")
 	if err != nil {
@@ -357,7 +357,7 @@ func TestAbortTakeover_PrunesStaleWorktreeRegistration(t *testing.T) {
 	s := newSpawnerWithActiveCancel(database, "run-orphaned")
 	s.takenOver["run-orphaned"] = true
 
-	s.abortTakeover("run-orphaned", "", destPath)
+	s.abortTakeover("run-orphaned", "", destPath, runmode.LocalDefaultUserID)
 
 	// destPath dir is gone (was removed by RemoveAt's RemoveAll).
 	if _, err := os.Stat(destPath); !os.IsNotExist(err) {
@@ -410,7 +410,7 @@ func TestAbortTakeover_PreservesTerminalRow(t *testing.T) {
 	s := newSpawnerWithActiveCancel(database, "run-already-done")
 	s.takenOver["run-already-done"] = true
 
-	s.abortTakeover("run-already-done", "", "")
+	s.abortTakeover("run-already-done", "", "", runmode.LocalDefaultUserID)
 
 	got, err := sqlitestore.New(database).AgentRuns.Get(t.Context(), runmode.LocalDefaultOrg, "run-already-done")
 	if err != nil {
