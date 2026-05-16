@@ -397,7 +397,7 @@ func TestMaterializeWorkspace_SuccessfulFirstAdd(t *testing.T) {
 	}
 
 	// Verify the row landed with the deterministic path.
-	row, err := db.GetRunWorktreeByRepo(database.Conn, "r1", "sky/core")
+	row, err := sqlitestore.New(database.Conn).RunWorktrees.GetByRepo(context.Background(), runmode.LocalDefaultOrg, "r1", "sky/core")
 	if err != nil {
 		t.Fatalf("GetRunWorktreeByRepo: %v", err)
 	}
@@ -468,7 +468,7 @@ func TestMaterializeWorkspace_RaceLossAtReservation(t *testing.T) {
 	// the winning row directly, with a distinguishable path so we can
 	// confirm the loser returns IT and not its own pre-computed path.
 	winnerPath := "/tmp/somewhere-else/winner"
-	if _, _, err := db.InsertRunWorktree(database.Conn, domain.RunWorktree{
+	if _, _, err := sqlitestore.New(database.Conn).RunWorktrees.Insert(context.Background(), runmode.LocalDefaultOrg, domain.RunWorktree{
 		RunID: "r1", RepoID: "sky/core",
 		Path: winnerPath, FeatureBranch: "feature/SKY-1",
 	}); err != nil {
@@ -508,7 +508,7 @@ func TestMaterializeWorkspace_TrustsReservationEvenWhenDirMissing(t *testing.T) 
 	seedRepoProfile(t, database, "sky", "core", "https://x", "main")
 
 	winnerPath := expectedPath("r1", "sky", "core")
-	if _, _, err := db.InsertRunWorktree(database.Conn, domain.RunWorktree{
+	if _, _, err := sqlitestore.New(database.Conn).RunWorktrees.Insert(context.Background(), runmode.LocalDefaultOrg, domain.RunWorktree{
 		RunID: "r1", RepoID: "sky/core",
 		Path: winnerPath, FeatureBranch: "feature/SKY-1",
 	}); err != nil {
@@ -531,7 +531,7 @@ func TestMaterializeWorkspace_TrustsReservationEvenWhenDirMissing(t *testing.T) 
 	}
 	// And the row must still be present — the loser must not have
 	// deleted it.
-	row, err := db.GetRunWorktreeByRepo(database.Conn, "r1", "sky/core")
+	row, err := sqlitestore.New(database.Conn).RunWorktrees.GetByRepo(context.Background(), runmode.LocalDefaultOrg, "r1", "sky/core")
 	if err != nil {
 		t.Fatalf("GetRunWorktreeByRepo: %v", err)
 	}
@@ -549,7 +549,7 @@ func TestMaterializeWorkspace_LiveDirShortCircuitsAgeCheck(t *testing.T) {
 	seedRepoProfile(t, database, "sky", "core", "https://x", "main")
 	wantPath := expectedPath("r1", "sky", "core")
 
-	if _, _, err := db.InsertRunWorktree(database.Conn, domain.RunWorktree{
+	if _, _, err := sqlitestore.New(database.Conn).RunWorktrees.Insert(context.Background(), runmode.LocalDefaultOrg, domain.RunWorktree{
 		RunID: "r1", RepoID: "sky/core",
 		Path: wantPath, FeatureBranch: "feature/SKY-1",
 	}); err != nil {
@@ -589,7 +589,7 @@ func TestMaterializeWorkspace_StaleReservationReclaimed(t *testing.T) {
 
 	// Seed the stale row (path won't exist on disk; default stub
 	// statPath returns ErrNotExist for everything not in liveDirs).
-	if _, _, err := db.InsertRunWorktree(database.Conn, domain.RunWorktree{
+	if _, _, err := sqlitestore.New(database.Conn).RunWorktrees.Insert(context.Background(), runmode.LocalDefaultOrg, domain.RunWorktree{
 		RunID: "r1", RepoID: "sky/core",
 		Path: wantPath, FeatureBranch: "feature/SKY-1",
 	}); err != nil {
@@ -611,7 +611,7 @@ func TestMaterializeWorkspace_StaleReservationReclaimed(t *testing.T) {
 		t.Errorf("createCalls = %d, want 1; stale reservation should not block recreate", stub.createCalls)
 	}
 	// And a fresh row exists post-reclaim.
-	row, err := db.GetRunWorktreeByRepo(database.Conn, "r1", "sky/core")
+	row, err := sqlitestore.New(database.Conn).RunWorktrees.GetByRepo(context.Background(), runmode.LocalDefaultOrg, "r1", "sky/core")
 	if err != nil || row == nil {
 		t.Fatalf("expected fresh row after reclaim; got row=%v err=%v", row, err)
 	}
@@ -626,7 +626,7 @@ func TestMaterializeWorkspace_FreshRowMissingDirIsInFlight(t *testing.T) {
 	seedRepoProfile(t, database, "sky", "core", "https://x", "main")
 	wantPath := expectedPath("r1", "sky", "core")
 
-	if _, _, err := db.InsertRunWorktree(database.Conn, domain.RunWorktree{
+	if _, _, err := sqlitestore.New(database.Conn).RunWorktrees.Insert(context.Background(), runmode.LocalDefaultOrg, domain.RunWorktree{
 		RunID: "r1", RepoID: "sky/core",
 		Path: wantPath, FeatureBranch: "feature/SKY-1",
 	}); err != nil {
@@ -636,7 +636,7 @@ func TestMaterializeWorkspace_FreshRowMissingDirIsInFlight(t *testing.T) {
 	// Force `now` to be well within the threshold (real time may have
 	// drifted since the seed; pin to a value tied to the row's
 	// created_at via a re-read).
-	row, err := db.GetRunWorktreeByRepo(database.Conn, "r1", "sky/core")
+	row, err := sqlitestore.New(database.Conn).RunWorktrees.GetByRepo(context.Background(), runmode.LocalDefaultOrg, "r1", "sky/core")
 	if err != nil || row == nil {
 		t.Fatalf("re-read row: %v", err)
 	}
@@ -677,7 +677,7 @@ func TestMaterializeWorkspace_CreateFailureReleasesReservation(t *testing.T) {
 
 	// The reservation must have been released so the next attempt
 	// can re-reserve. Verify the row is gone.
-	row, err := db.GetRunWorktreeByRepo(database.Conn, "r1", "sky/core")
+	row, err := sqlitestore.New(database.Conn).RunWorktrees.GetByRepo(context.Background(), runmode.LocalDefaultOrg, "r1", "sky/core")
 	if err != nil {
 		t.Fatalf("GetRunWorktreeByRepo: %v", err)
 	}

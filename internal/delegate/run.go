@@ -7,7 +7,6 @@ package delegate
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,7 +15,6 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
@@ -77,7 +75,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 			if cfg.isChainStep {
 				return
 			}
-			rows, err := db.GetRunWorktrees(s.database, runID)
+			rows, err := s.runWorktrees.ListSystem(context.Background(), runmode.LocalDefaultOrg, runID)
 			if err != nil {
 				log.Printf("[delegate] run %s: list run_worktrees for cleanup: %v", runID, err)
 			} else {
@@ -91,7 +89,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 						log.Printf("[delegate] run %s: remove worktree %s: %v", runID, w.Path, rmErr)
 						continue
 					}
-					if _, delErr := s.database.ExecContext(cleanupCtx, "DELETE FROM run_worktrees WHERE run_id = ? AND path = ?", runID, w.Path); delErr != nil {
+					if delErr := s.runWorktrees.DeleteByPathSystem(cleanupCtx, runmode.LocalDefaultOrg, runID, w.Path); delErr != nil {
 						log.Printf("[delegate] run %s: delete run_worktrees row for %s: %v", runID, w.Path, delErr)
 					}
 				}
@@ -365,7 +363,7 @@ func (s *Spawner) processCompletion(
 				}
 			}
 			status = "pending_approval"
-			if _, err := s.database.Exec(`UPDATE runs SET status = ? WHERE id = ?`, status, runID); err != nil {
+			if err := s.agentRuns.SetStatusSystem(context.Background(), runmode.LocalDefaultOrg, runID, status); err != nil {
 				log.Printf("[delegate] warning: failed to set pending_approval for run %s: %v", runID, err)
 			}
 		}
@@ -385,21 +383,13 @@ func (s *Spawner) processCompletion(
 		//    the active-run check because the chain orchestrator creates
 		//    them sequentially (step N+1's row doesn't exist yet when
 		//    step N completes).
-		var chainRunID sql.NullString
-		_ = s.database.QueryRow(`SELECT chain_run_id FROM runs WHERE id = ?`, runID).Scan(&chainRunID)
-		if chainRunID.Valid {
+		run, _ := s.agentRuns.GetSystem(context.Background(), runmode.LocalDefaultOrg, runID)
+		if run != nil && run.ChainRunID != "" {
 			// Chain step — skip; terminateChain handles task closure.
 		} else {
-			var hasOtherActiveRun bool
-			_ = s.database.QueryRow(`
-				SELECT EXISTS(
-					SELECT 1 FROM runs
-					WHERE task_id = ? AND id != ?
-					AND status NOT IN ('completed','failed','cancelled','task_unsolvable','taken_over','pending_approval')
-				)
-			`, task.ID, runID).Scan(&hasOtherActiveRun)
+			hasOtherActiveRun, _ := s.agentRuns.HasOtherActiveRunForTaskSystem(context.Background(), runmode.LocalDefaultOrg, task.ID, runID)
 			if !hasOtherActiveRun {
-				if _, err := s.database.Exec(`UPDATE tasks SET status = 'done' WHERE id = ?`, task.ID); err != nil {
+				if err := s.tasks.SetStatusSystem(context.Background(), runmode.LocalDefaultOrg, task.ID, "done"); err != nil {
 					log.Printf("[delegate] warning: failed to update task %s to done: %v", task.ID, err)
 				}
 			}

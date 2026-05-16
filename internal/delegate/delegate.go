@@ -293,7 +293,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, runID string, task domain.Tas
 		return runConfig{}, fmt.Errorf("failed to create worktree: %w", err)
 	}
 
-	if _, err := s.database.Exec(`UPDATE runs SET worktree_path = ? WHERE id = ?`, wtPath, runID); err != nil {
+	if err := s.agentRuns.SetWorktreePathSystem(context.Background(), runmode.LocalDefaultOrg, runID, wtPath); err != nil {
 		log.Printf("[delegate] warning: failed to update worktree path for run %s: %v", runID, err)
 	}
 
@@ -341,7 +341,7 @@ func (s *Spawner) setupJira(ctx context.Context, runID string, task domain.Task,
 	if err != nil {
 		return runConfig{}, fmt.Errorf("create run root: %w", err)
 	}
-	if _, err := s.database.Exec(`UPDATE runs SET worktree_path = ? WHERE id = ?`, runRoot, runID); err != nil {
+	if err := s.agentRuns.SetWorktreePathSystem(context.Background(), runmode.LocalDefaultOrg, runID, runRoot); err != nil {
 		log.Printf("[delegate] warning: failed to set worktree_path for Jira run %s: %v — yield/resume will reject this run", runID, err)
 	}
 

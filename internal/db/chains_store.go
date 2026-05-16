@@ -90,6 +90,14 @@ type ChainStore interface {
 	// single fetch.
 	RunsForChain(ctx context.Context, orgID string, chainRunID string) ([]domain.AgentRun, error)
 
+	// ActiveStepRunIDs returns the IDs of step runs on a chain that
+	// have not reached a terminal state. Used by CancelChain to sweep
+	// active step contexts and cancel them. awaiting_input and
+	// pending_approval are treated as terminal here — those rows are
+	// parked, not actively executing, so cancellation goes through the
+	// chain-run row's MarkRunStatus instead.
+	ActiveStepRunIDs(ctx context.Context, orgID string, chainRunID string) ([]string, error)
+
 	// InsertVerdict writes a chain:verdict artifact for a step run.
 	// metadataJSON is the marshalled domain.ChainVerdict payload.
 	//
@@ -135,8 +143,10 @@ type ChainStore interface {
 	// pool with NULL creator_user_id, manual chains on the app pool
 	// with COALESCE fallback.
 	ListStepsSystem(ctx context.Context, orgID string, chainPromptID string) ([]domain.ChainStep, error)
+	GetRunSystem(ctx context.Context, orgID string, id string) (*domain.ChainRun, error)
 	MarkRunStatusSystem(ctx context.Context, orgID string, id string, status domain.ChainRunStatus, abortReason string, abortedAtStep *int) (changed bool, err error)
 	RunsForChainSystem(ctx context.Context, orgID string, chainRunID string) ([]domain.AgentRun, error)
+	ActiveStepRunIDsSystem(ctx context.Context, orgID string, chainRunID string) ([]string, error)
 	InsertVerdictSystem(ctx context.Context, orgID string, runID string, metadataJSON string) error
 	GetLatestVerdictSystem(ctx context.Context, orgID string, runID string) (*domain.ChainVerdict, error)
 }

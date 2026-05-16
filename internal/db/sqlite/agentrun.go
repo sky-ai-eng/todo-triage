@@ -142,6 +142,40 @@ func (s *agentRunStore) SetSession(ctx context.Context, orgID, runID, sessionID 
 	return err
 }
 
+func (s *agentRunStore) SetStatus(ctx context.Context, orgID, runID, status string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	_, err := s.q.ExecContext(ctx, `UPDATE runs SET status = ? WHERE id = ?`, status, runID)
+	return err
+}
+
+func (s *agentRunStore) SetWorktreePath(ctx context.Context, orgID, runID, path string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	_, err := s.q.ExecContext(ctx, `UPDATE runs SET worktree_path = ? WHERE id = ?`, path, runID)
+	return err
+}
+
+func (s *agentRunStore) HasOtherActiveRunForTask(ctx context.Context, orgID, taskID, excludeRunID string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	var exists bool
+	err := s.q.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM runs
+			WHERE task_id = ? AND id != ?
+			  AND status NOT IN ('completed','failed','cancelled','task_unsolvable','taken_over','pending_approval')
+		)
+	`, taskID, excludeRunID).Scan(&exists)
+	if err != nil {
+		return false, err
+	}
+	return exists, nil
+}
+
 func (s *agentRunStore) MarkTakenOver(ctx context.Context, orgID, runID, takeoverPath, claimUserID string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
@@ -335,6 +369,7 @@ const sqliteRunColumns = `
 	r.id, r.task_id, r.status, r.model, r.started_at, r.completed_at,
 	r.total_cost_usd, r.duration_ms, r.num_turns, r.stop_reason, r.worktree_path,
 	r.result_summary, r.session_id, r.actor_agent_id,
+	COALESCE(r.trigger_type, ''),
 	r.chain_run_id, r.chain_step_index,
 	(NULLIF(TRIM(rm.agent_content, ' ' || char(9) || char(10) || char(13)), '') IS NULL) AS memory_missing
 `
@@ -501,6 +536,18 @@ func (s *agentRunStore) MarkResumingSystem(ctx context.Context, orgID, runID str
 
 func (s *agentRunStore) SetSessionSystem(ctx context.Context, orgID, runID, sessionID string) error {
 	return s.SetSession(ctx, orgID, runID, sessionID)
+}
+
+func (s *agentRunStore) SetStatusSystem(ctx context.Context, orgID, runID, status string) error {
+	return s.SetStatus(ctx, orgID, runID, status)
+}
+
+func (s *agentRunStore) SetWorktreePathSystem(ctx context.Context, orgID, runID, path string) error {
+	return s.SetWorktreePath(ctx, orgID, runID, path)
+}
+
+func (s *agentRunStore) HasOtherActiveRunForTaskSystem(ctx context.Context, orgID, taskID, excludeRunID string) (bool, error) {
+	return s.HasOtherActiveRunForTask(ctx, orgID, taskID, excludeRunID)
 }
 
 func (s *agentRunStore) MarkReleasedSystem(ctx context.Context, orgID, runID string) (bool, error) {
@@ -840,7 +887,7 @@ func scanAgentRun(row *sql.Row, r *domain.AgentRun) error {
 	if err := row.Scan(
 		&r.ID, &r.TaskID, &r.Status, &model, &r.StartedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &stopReason, &worktreePath,
-		&resultSummary, &sessionID, &actorAgentID, &chainRunID, &chainStep,
+		&resultSummary, &sessionID, &actorAgentID, &r.TriggerType, &chainRunID, &chainStep,
 		&r.MemoryMissing,
 	); err != nil {
 		return err
@@ -859,7 +906,7 @@ func scanAgentRunRows(rows *sql.Rows, r *domain.AgentRun) error {
 	if err := rows.Scan(
 		&r.ID, &r.TaskID, &r.Status, &model, &r.StartedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &stopReason, &worktreePath,
-		&resultSummary, &sessionID, &actorAgentID, &chainRunID, &chainStep,
+		&resultSummary, &sessionID, &actorAgentID, &r.TriggerType, &chainRunID, &chainStep,
 		&r.MemoryMissing,
 	); err != nil {
 		return err

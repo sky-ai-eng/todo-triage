@@ -191,7 +191,12 @@ func New(admin, app *sql.DB) db.Stores {
 		// EXISTS subquery against runs; admin bypasses RLS, and
 		// org_id stays in every WHERE clause as defense in depth.
 		TaskMemory: newTaskMemoryStore(app, admin),
-		Tx:         s,
+		// RunWorktrees wires both pools: app for cmd/exec workspace
+		// callers (SKY-302 will wrap those calls in synthetic-claims
+		// via TF_RUN_ID) and admin for the delegate spawner cleanup
+		// defers. org_id stays bound everywhere as defense in depth.
+		RunWorktrees: newRunWorktreeStore(app, admin),
+		Tx:           s,
 	}
 	return s.stores
 }
@@ -247,5 +252,6 @@ func NewForTx(tx *sql.Tx) db.TxStores {
 		Projects:       newProjectStore(tx, tx),
 		Events:         newEventStore(tx, tx),
 		TaskMemory:     newTaskMemoryStore(tx, tx),
+		RunWorktrees:   newRunWorktreeStore(tx, tx),
 	}
 }
