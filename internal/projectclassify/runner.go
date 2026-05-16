@@ -19,16 +19,18 @@ import (
 type Runner struct {
 	database *sql.DB
 	entities db.EntityStore
+	projects db.ProjectStore
 	trigger  chan struct{}
 	stop     chan struct{}
 	mu       sync.Mutex
 	running  bool
 }
 
-func NewRunner(database *sql.DB, entities db.EntityStore) *Runner {
+func NewRunner(database *sql.DB, entities db.EntityStore, projects db.ProjectStore) *Runner {
 	return &Runner{
 		database: database,
 		entities: entities,
+		projects: projects,
 		trigger:  make(chan struct{}, 1),
 		stop:     make(chan struct{}),
 	}
@@ -93,7 +95,7 @@ func (r *Runner) run(ctx context.Context) {
 		return
 	}
 
-	projects, err := db.ListProjects(r.database)
+	projects, err := r.projects.List(ctx, runmode.LocalDefaultOrgID)
 	if err != nil {
 		log.Printf("[classify] list projects: %v", err)
 		return

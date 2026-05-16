@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -152,7 +151,7 @@ func TestLookupEntityProjectID_RoundTrips(t *testing.T) {
 		t.Errorf("expected nil for unassigned entity, got %q", *got)
 	}
 
-	if _, err := db.CreateProject(database, domain.Project{ID: "proj-rt", Name: "Roundtrip"}); err != nil {
+	if _, err := sqlitestore.New(database).Projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID, domain.Project{ID: "proj-rt", Name: "Roundtrip"}); err != nil {
 		t.Fatalf("project: %v", err)
 	}
 	if _, err := database.Exec(`UPDATE entities SET project_id = ? WHERE id = ?`, "proj-rt", entity.ID); err != nil {

@@ -7,6 +7,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -45,7 +46,7 @@ func (s *Server) handleCuratorSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	projectID := r.PathValue("id")
-	project, err := db.GetProject(s.db, projectID)
+	project, err := s.projects.Get(r.Context(), runmode.LocalDefaultOrg, projectID)
 	if err != nil {
 		internalError(w, "curator", err)
 		return
@@ -75,7 +76,7 @@ func (s *Server) handleCuratorSend(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCuratorHistory(w http.ResponseWriter, r *http.Request) {
 	projectID := r.PathValue("id")
-	project, err := db.GetProject(s.db, projectID)
+	project, err := s.projects.Get(r.Context(), runmode.LocalDefaultOrg, projectID)
 	if err != nil {
 		internalError(w, "curator", err)
 		return
@@ -129,7 +130,7 @@ func (s *Server) handleCuratorCancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	projectID := r.PathValue("id")
-	project, err := db.GetProject(s.db, projectID)
+	project, err := s.projects.Get(r.Context(), runmode.LocalDefaultOrg, projectID)
 	if err != nil {
 		internalError(w, "curator", err)
 		return
@@ -176,7 +177,7 @@ func (s *Server) handleCuratorCancel(w http.ResponseWriter, r *http.Request) {
 // failed broadcast (e.g. hub panicked) shouldn't roll back the wipe.
 func (s *Server) handleCuratorReset(w http.ResponseWriter, r *http.Request) {
 	projectID := r.PathValue("id")
-	project, err := db.GetProject(s.db, projectID)
+	project, err := s.projects.Get(r.Context(), runmode.LocalDefaultOrg, projectID)
 	if err != nil {
 		internalError(w, "curator", err)
 		return
