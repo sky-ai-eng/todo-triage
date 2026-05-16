@@ -113,7 +113,7 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 		specPromptID = domain.SystemTicketSpecPromptID
 	}
 
-	id, err := db.CreateProject(s.db, domain.Project{
+	id, err := s.projects.Create(r.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Project{
 		Name:                   name,
 		Description:            req.Description,
 		PinnedRepos:            pinned,
@@ -126,7 +126,7 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "projects", err)
 		return
 	}
-	created, err := db.GetProject(s.db, id)
+	created, err := s.projects.Get(r.Context(), runmode.LocalDefaultOrg, id)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "created but read-back failed: " + err.Error()})
 		return
@@ -134,8 +134,8 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, created)
 }
 
-func (s *Server) handleProjectList(w http.ResponseWriter, _ *http.Request) {
-	projects, err := db.ListProjects(s.db)
+func (s *Server) handleProjectList(w http.ResponseWriter, r *http.Request) {
+	projects, err := s.projects.List(r.Context(), runmode.LocalDefaultOrg)
 	if err != nil {
 		internalError(w, "projects", err)
 		return
@@ -145,7 +145,7 @@ func (s *Server) handleProjectList(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) handleProjectGet(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	project, err := db.GetProject(s.db, id)
+	project, err := s.projects.Get(r.Context(), runmode.LocalDefaultOrg, id)
 	if err != nil {
 		internalError(w, "projects", err)
 		return
@@ -181,7 +181,7 @@ const (
 
 func (s *Server) handleProjectExportPreview(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	preview, err := projectbundle.Preview(r.Context(), s.db, id)
+	preview, err := projectbundle.Preview(r.Context(), s.db, s.projects, id)
 	if err != nil {
 		if errors.Is(err, projectbundle.ErrProjectNotFound) {
 			notFound(w, "project")
@@ -195,7 +195,7 @@ func (s *Server) handleProjectExportPreview(w http.ResponseWriter, r *http.Reque
 
 func (s *Server) handleProjectExport(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	project, err := db.GetProject(s.db, id)
+	project, err := s.projects.Get(r.Context(), runmode.LocalDefaultOrg, id)
 	if err != nil {
 		internalError(w, "projects", err)
 		return
@@ -204,7 +204,7 @@ func (s *Server) handleProjectExport(w http.ResponseWriter, r *http.Request) {
 		notFound(w, "project")
 		return
 	}
-	stream, err := projectbundle.Export(r.Context(), s.db, id)
+	stream, err := projectbundle.Export(r.Context(), s.db, s.projects, id)
 	if err != nil {
 		if errors.Is(err, projectbundle.ErrProjectNotFound) {
 			notFound(w, "project")
@@ -254,6 +254,7 @@ func (s *Server) handleProjectImport(w http.ResponseWriter, r *http.Request) {
 	project, warnings, err := projectbundle.Import(
 		r.Context(),
 		s.db,
+		s.projects,
 		file,
 		size,
 		projectBundleGitHubProbe{client: s.ghClient},
@@ -336,7 +337,7 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	existing, err := db.GetProject(s.db, id)
+	existing, err := s.projects.Get(r.Context(), runmode.LocalDefaultOrg, id)
 	if err != nil {
 		internalError(w, "projects", err)
 		return
@@ -439,7 +440,7 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 		updated.SpecAuthorshipPromptID = trimmed
 	}
 
-	if err := db.UpdateProject(s.db, updated); err != nil {
+	if err := s.projects.Update(r.Context(), runmode.LocalDefaultOrg, updated); err != nil {
 		internalError(w, "projects", err)
 		return
 	}
@@ -463,7 +464,7 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 	if existing.CuratorSessionID != "" {
 		queuePendingContextChanges(s.db, *existing, updated)
 	}
-	fresh, err := db.GetProject(s.db, id)
+	fresh, err := s.projects.Get(r.Context(), runmode.LocalDefaultOrg, id)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "updated but read-back failed: " + err.Error()})
 		return
@@ -493,7 +494,7 @@ func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 	// project's worktree. A read failure here is non-fatal: skip the
 	// prune step, the on-disk cleanup still happens.
 	var pinned []string
-	if existing, err := db.GetProject(s.db, id); err == nil && existing != nil {
+	if existing, err := s.projects.Get(r.Context(), runmode.LocalDefaultOrg, id); err == nil && existing != nil {
 		pinned = existing.PinnedRepos
 	}
 
@@ -509,7 +510,7 @@ func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 		s.curator.CancelProject(id)
 	}
 
-	if err := db.DeleteProject(s.db, id); err != nil {
+	if err := s.projects.Delete(r.Context(), runmode.LocalDefaultOrg, id); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			notFound(w, "project")
 			return
@@ -824,7 +825,7 @@ const knowledgeMaxRequestBytes = 25 * 1024 * 1024
 // it; the client gets a stable string.
 func (s *Server) handleProjectKnowledge(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	project, err := db.GetProject(s.db, id)
+	project, err := s.projects.Get(r.Context(), runmode.LocalDefaultOrg, id)
 	if err != nil {
 		log.Printf("[projects] knowledge list: db get %s: %v", id, err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load project"})
@@ -1102,7 +1103,7 @@ func resolveKnowledgePath(projectID, rawPath string) (string, string, int, strin
 // handle so the file we serve is the one we just verified.
 func (s *Server) handleProjectKnowledgeFile(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	project, err := db.GetProject(s.db, id)
+	project, err := s.projects.Get(r.Context(), runmode.LocalDefaultOrg, id)
 	if err != nil {
 		log.Printf("[projects] knowledge fetch: db get %s: %v", id, err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load project"})
@@ -1203,7 +1204,7 @@ func (s *Server) handleProjectKnowledgeUpload(w http.ResponseWriter, r *http.Req
 	mu.Lock()
 	defer mu.Unlock()
 
-	project, err := db.GetProject(s.db, id)
+	project, err := s.projects.Get(r.Context(), runmode.LocalDefaultOrg, id)
 	if err != nil {
 		log.Printf("[projects] knowledge upload: db get %s: %v", id, err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load project"})
@@ -1408,7 +1409,7 @@ func (s *Server) handleProjectKnowledgeDelete(w http.ResponseWriter, r *http.Req
 	mu.Lock()
 	defer mu.Unlock()
 
-	project, err := db.GetProject(s.db, id)
+	project, err := s.projects.Get(r.Context(), runmode.LocalDefaultOrg, id)
 	if err != nil {
 		log.Printf("[projects] knowledge delete: db get %s: %v", id, err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load project"})

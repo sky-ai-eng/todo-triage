@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -19,11 +18,11 @@ import (
 func TestProjectEntities_FiltersByProjectAndState(t *testing.T) {
 	s := newTestServer(t)
 	seedConfiguredRepo(t, s, "owner", "repo")
-	pid, err := db.CreateProject(s.db, domain.Project{Name: "P", PinnedRepos: []string{"owner/repo"}})
+	pid, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Project{Name: "P", PinnedRepos: []string{"owner/repo"}})
 	if err != nil {
 		t.Fatalf("CreateProject: %v", err)
 	}
-	other, err := db.CreateProject(s.db, domain.Project{Name: "Other", PinnedRepos: []string{"owner/repo"}})
+	other, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Project{Name: "Other", PinnedRepos: []string{"owner/repo"}})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -3,17 +3,47 @@ package db
 import (
 	"database/sql"
 	"testing"
+	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
+// seedProjectForCurator inserts a minimal project row via raw SQL.
+// Package db tests can't depend on internal/db/sqlite (import cycle:
+// sqlite imports db for the interface), so the curator_test fixtures
+// keep their own seed/read helpers. The store-level contract is
+// covered by the dbtest conformance suite running against both
+// backends.
 func seedProjectForCurator(t *testing.T, database *sql.DB) string {
 	t.Helper()
-	id, err := CreateProject(database, domain.Project{Name: "Curator test project"})
-	if err != nil {
+	id := uuid.New().String()
+	now := time.Now().UTC()
+	if _, err := database.Exec(`
+		INSERT INTO projects (id, name, description, pinned_repos, team_id, created_at, updated_at)
+		VALUES (?, 'Curator test project', '', '[]', ?, ?, ?)
+	`, id, runmode.LocalDefaultTeamID, now, now); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
 	return id
+}
+
+func deleteProjectForCurator(t *testing.T, database *sql.DB, id string) {
+	t.Helper()
+	if _, err := database.Exec(`DELETE FROM projects WHERE id = ?`, id); err != nil {
+		t.Fatalf("delete project %q: %v", id, err)
+	}
+}
+
+func readProjectCuratorSessionID(t *testing.T, database *sql.DB, id string) string {
+	t.Helper()
+	var sessionID sql.NullString
+	if err := database.QueryRow(`SELECT curator_session_id FROM projects WHERE id = ?`, id).Scan(&sessionID); err != nil {
+		t.Fatalf("read project %q: %v", id, err)
+	}
+	return sessionID.String
 }
 
 func TestCreateCuratorRequest_RoundtripDefaults(t *testing.T) {
@@ -257,9 +287,7 @@ func TestProjectDelete_CascadesCuratorRows(t *testing.T) {
 		t.Fatalf("insert msg: %v", err)
 	}
 
-	if err := DeleteProject(database, projectID); err != nil {
-		t.Fatalf("delete: %v", err)
-	}
+	deleteProjectForCurator(t, database, projectID)
 
 	if got, _ := GetCuratorRequest(database, requestID); got != nil {
 		t.Errorf("request survived project delete: %+v", got)
@@ -280,9 +308,8 @@ func TestSetProjectCuratorSessionID_PersistsOnProjectRow(t *testing.T) {
 	if err := SetProjectCuratorSessionID(database, projectID, "sess-curator-123"); err != nil {
 		t.Fatalf("set session: %v", err)
 	}
-	got, _ := GetProject(database, projectID)
-	if got.CuratorSessionID != "sess-curator-123" {
-		t.Errorf("curator_session_id = %q", got.CuratorSessionID)
+	if got := readProjectCuratorSessionID(t, database, projectID); got != "sess-curator-123" {
+		t.Errorf("curator_session_id = %q", got)
 	}
 }
 
@@ -434,12 +461,8 @@ func TestResetCuratorForProject_WipesEverythingAndClearsSession(t *testing.T) {
 	}
 
 	// curator_session_id back to NULL → reads as empty string.
-	proj, err := GetProject(database, projectID)
-	if err != nil {
-		t.Fatalf("get project: %v", err)
-	}
-	if proj.CuratorSessionID != "" {
-		t.Errorf("session id = %q, want cleared", proj.CuratorSessionID)
+	if got := readProjectCuratorSessionID(t, database, projectID); got != "" {
+		t.Errorf("session id = %q, want cleared", got)
 	}
 
 	// All curator_requests for this project gone → cascades messages.

@@ -6,7 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -22,7 +21,7 @@ func TestRunner_AllErroredLeavesEntityForRetry(t *testing.T) {
 	isolateHome(t)
 	database := newTestDB(t)
 
-	if _, err := db.CreateProject(database, domain.Project{ID: "p1", Name: "P1"}); err != nil {
+	if _, err := sqlitestore.New(database).Projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{ID: "p1", Name: "P1"}); err != nil {
 		t.Fatal(err)
 	}
 	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#1", "pr", "T", "https://x/1")
@@ -37,7 +36,7 @@ func TestRunner_AllErroredLeavesEntityForRetry(t *testing.T) {
 		return 0, "", errors.New("simulated CLI down")
 	}
 
-	r := NewRunner(database, sqlitestore.New(database).Entities)
+	r := NewRunner(database, sqlitestore.New(database).Entities, sqlitestore.New(database).Projects)
 	r.run(context.Background()) // synchronous one cycle
 
 	post, err := sqlitestore.New(database).Entities.ListUnclassified(context.Background(), runmode.LocalDefaultOrgID)
@@ -64,10 +63,10 @@ func TestRunner_PartialErrorStillStamps(t *testing.T) {
 	isolateHome(t)
 	database := newTestDB(t)
 
-	if _, err := db.CreateProject(database, domain.Project{ID: "p-good", Name: "Good"}); err != nil {
+	if _, err := sqlitestore.New(database).Projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{ID: "p-good", Name: "Good"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.CreateProject(database, domain.Project{ID: "p-flaky", Name: "Flaky"}); err != nil {
+	if _, err := sqlitestore.New(database).Projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{ID: "p-flaky", Name: "Flaky"}); err != nil {
 		t.Fatal(err)
 	}
 	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#2", "pr", "T", "https://x/2")
@@ -84,7 +83,7 @@ func TestRunner_PartialErrorStillStamps(t *testing.T) {
 		return 30, "stub for Good", nil
 	}
 
-	r := NewRunner(database, sqlitestore.New(database).Entities)
+	r := NewRunner(database, sqlitestore.New(database).Entities, sqlitestore.New(database).Projects)
 	r.run(context.Background())
 
 	post, err := sqlitestore.New(database).Entities.ListUnclassified(context.Background(), runmode.LocalDefaultOrgID)

@@ -377,7 +377,7 @@ func main() {
 		openBrowser(browserURL)
 	}
 
-	srv := server.New(database, stores.Prompts, stores.Swipes, stores.Dashboard, stores.EventHandlers, stores.Agents, stores.TeamAgents, stores.Users, stores.Chains, stores.Tasks, stores.Factory, stores.AgentRuns, stores.Entities, stores.Reviews, stores.PendingPRs, stores.Repos)
+	srv := server.New(database, stores.Prompts, stores.Swipes, stores.Dashboard, stores.EventHandlers, stores.Agents, stores.TeamAgents, stores.Users, stores.Chains, stores.Tasks, stores.Factory, stores.AgentRuns, stores.Entities, stores.Reviews, stores.PendingPRs, stores.Repos, stores.Projects)
 
 	distFS, err := frontendDist()
 	if err != nil {
@@ -597,7 +597,7 @@ func main() {
 	// discovered entities against existing projects via per-project
 	// Haiku quorum vote. Sticky — only fires on entities with
 	// classified_at IS NULL, so re-polls don't re-classify.
-	classifier := projectclassify.NewRunner(database, stores.Entities)
+	classifier := projectclassify.NewRunner(database, stores.Entities, stores.Projects)
 	classifier.Start()
 	log.Println("[classify] project classifier started (model: haiku)")
 	bus.Subscribe(eventbus.Subscriber{

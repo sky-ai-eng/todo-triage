@@ -47,6 +47,7 @@ func New(conn *sql.DB) db.Stores {
 		PendingPRs:     newPendingPRStore(conn),
 		Repos:          newRepoStore(conn),
 		PendingFirings: newPendingFiringsStore(conn),
+		Projects:       newProjectStore(conn),
 		Tx:             s,
 	}
 	return s.stores

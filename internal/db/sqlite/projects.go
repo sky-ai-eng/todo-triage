@@ -1,0 +1,210 @@
+package sqlite
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+)
+
+// projectStore is the SQLite impl of db.ProjectStore. SQL bodies are
+// moved verbatim from the pre-D2 internal/db/projects.go; the only
+// behavioral changes are the orgID assertion at each method entry and
+// the ctx-aware database/sql methods.
+//
+// teamID is accepted on Create for signature parity with the Postgres
+// impl but ignored — the local schema covers creator_user_id via
+// column DEFAULT and pins team_id to LocalDefaultTeamID at insert
+// time (matches the projects_team_visibility_requires_team CHECK
+// under the default visibility='team').
+type projectStore struct{ q queryer }
+
+func newProjectStore(q queryer) db.ProjectStore { return &projectStore{q: q} }
+
+var _ db.ProjectStore = (*projectStore)(nil)
+
+func (s *projectStore) Create(ctx context.Context, orgID, teamID string, p domain.Project) (string, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return "", err
+	}
+	_ = teamID // ignored in local mode
+
+	id := p.ID
+	if id == "" {
+		id = uuid.New().String()
+	}
+	pinned := p.PinnedRepos
+	if pinned == nil {
+		pinned = []string{}
+	}
+	pinnedJSON, err := json.Marshal(pinned)
+	if err != nil {
+		return "", fmt.Errorf("marshal pinned_repos: %w", err)
+	}
+	now := time.Now().UTC()
+	_, err = s.q.ExecContext(ctx, `
+		INSERT INTO projects (id, name, description, curator_session_id, pinned_repos, jira_project_key, linear_project_key, spec_authorship_prompt_id, team_id, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		id, p.Name, p.Description,
+		nullIfEmpty(p.CuratorSessionID), string(pinnedJSON),
+		nullIfEmpty(p.JiraProjectKey), nullIfEmpty(p.LinearProjectKey),
+		nullIfEmpty(p.SpecAuthorshipPromptID),
+		runmode.LocalDefaultTeamID,
+		now, now,
+	)
+	if err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+func (s *projectStore) Get(ctx context.Context, orgID, id string) (*domain.Project, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	row := s.q.QueryRowContext(ctx, `
+		SELECT id, name, description, curator_session_id, pinned_repos,
+		       jira_project_key, linear_project_key, spec_authorship_prompt_id,
+		       created_at, updated_at
+		FROM projects WHERE id = ?
+	`, id)
+	return scanSqliteProjectRow(row)
+}
+
+func (s *projectStore) List(ctx context.Context, orgID string) ([]domain.Project, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT id, name, description, curator_session_id, pinned_repos,
+		       jira_project_key, linear_project_key, spec_authorship_prompt_id,
+		       created_at, updated_at
+		FROM projects ORDER BY LOWER(name) ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []domain.Project{}
+	for rows.Next() {
+		p, err := scanSqliteProjectRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		if p != nil {
+			out = append(out, *p)
+		}
+	}
+	return out, rows.Err()
+}
+
+func (s *projectStore) Update(ctx context.Context, orgID string, p domain.Project) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	pinned := p.PinnedRepos
+	if pinned == nil {
+		pinned = []string{}
+	}
+	pinnedJSON, err := json.Marshal(pinned)
+	if err != nil {
+		return fmt.Errorf("marshal pinned_repos: %w", err)
+	}
+	now := time.Now().UTC()
+	res, err := s.q.ExecContext(ctx, `
+		UPDATE projects
+		SET name = ?, description = ?,
+		    curator_session_id = ?, pinned_repos = ?,
+		    jira_project_key = ?, linear_project_key = ?,
+		    spec_authorship_prompt_id = ?,
+		    updated_at = ?
+		WHERE id = ?
+	`,
+		p.Name, p.Description,
+		nullIfEmpty(p.CuratorSessionID), string(pinnedJSON),
+		nullIfEmpty(p.JiraProjectKey), nullIfEmpty(p.LinearProjectKey),
+		nullIfEmpty(p.SpecAuthorshipPromptID),
+		now, p.ID,
+	)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func (s *projectStore) Delete(ctx context.Context, orgID, id string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	res, err := s.q.ExecContext(ctx, `DELETE FROM projects WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// scanSqliteProjectRow reads a SELECT … FROM projects row into a
+// *domain.Project. (nil, nil) on sql.ErrNoRows so callers can map
+// missing rows to a 404 without a sentinel comparison.
+func scanSqliteProjectRow(row interface {
+	Scan(dest ...any) error
+}) (*domain.Project, error) {
+	var (
+		p            domain.Project
+		sessionID    sql.NullString
+		jiraKey      sql.NullString
+		linearKey    sql.NullString
+		specPromptID sql.NullString
+		pinnedJSON   string
+		createdAt    time.Time
+		updatedAt    time.Time
+	)
+	err := row.Scan(
+		&p.ID, &p.Name, &p.Description, &sessionID, &pinnedJSON,
+		&jiraKey, &linearKey, &specPromptID,
+		&createdAt, &updatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	p.CuratorSessionID = sessionID.String
+	p.JiraProjectKey = jiraKey.String
+	p.LinearProjectKey = linearKey.String
+	p.SpecAuthorshipPromptID = specPromptID.String
+	p.CreatedAt = createdAt
+	p.UpdatedAt = updatedAt
+	if pinnedJSON == "" {
+		p.PinnedRepos = []string{}
+	} else if err := json.Unmarshal([]byte(pinnedJSON), &p.PinnedRepos); err != nil {
+		return nil, fmt.Errorf("unmarshal pinned_repos: %w", err)
+	}
+	if p.PinnedRepos == nil {
+		p.PinnedRepos = []string{}
+	}
+	return &p, nil
+}

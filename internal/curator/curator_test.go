@@ -9,6 +9,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 	_ "modernc.org/sqlite"
 )
@@ -30,7 +31,7 @@ func newTestDB(t *testing.T) *sql.DB {
 
 func seedProject(t *testing.T, database *sql.DB, name string) string {
 	t.Helper()
-	id, err := db.CreateProject(database, domain.Project{Name: name})
+	id, err := sqlitestore.New(database).Projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: name})
 	if err != nil {
 		t.Fatalf("create project %q: %v", name, err)
 	}

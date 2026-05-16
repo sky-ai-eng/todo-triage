@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -35,7 +34,7 @@ type projectEntity struct {
 // pages, future audit views) so the panel stays scannable.
 func (s *Server) handleProjectEntities(w http.ResponseWriter, r *http.Request) {
 	projectID := r.PathValue("id")
-	project, err := db.GetProject(s.db, projectID)
+	project, err := s.projects.Get(r.Context(), runmode.LocalDefaultOrg, projectID)
 	if err != nil {
 		log.Printf("[entities] get project %s: %v", projectID, err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load project"})

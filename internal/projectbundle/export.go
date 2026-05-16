@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 )
 
 // Export builds a project bundle and streams it as a ZIP reader.
-func Export(ctx context.Context, database *sql.DB, projectID string) (io.ReadCloser, error) {
-	state, err := collectExportState(ctx, database, projectID)
+func Export(ctx context.Context, database *sql.DB, projects db.ProjectStore, projectID string) (io.ReadCloser, error) {
+	state, err := collectExportState(ctx, database, projects, projectID)
 	if err != nil {
 		return nil, err
 	}

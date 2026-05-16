@@ -43,7 +43,7 @@ func TestWaitFor_ReturnsImmediatelyWhenAlreadyClassified(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	runner := NewRunner(database, sqlitestore.New(database).Entities)
+	runner := NewRunner(database, sqlitestore.New(database).Entities, sqlitestore.New(database).Projects)
 	start := time.Now()
 	WaitFor(context.Background(), database, runner, entity.ID, 5*time.Second)
 	elapsed := time.Since(start)
@@ -64,7 +64,7 @@ func TestWaitFor_TriggersRunnerOnEntry(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	runner := NewRunner(database, sqlitestore.New(database).Entities)
+	runner := NewRunner(database, sqlitestore.New(database).Entities, sqlitestore.New(database).Projects)
 	// Don't Start the runner — we just want to observe that Trigger()
 	// got invoked. Inspect the trigger channel directly: a buffered
 	// chan with capacity 1 should have one signal queued after WaitFor.
@@ -94,7 +94,7 @@ func TestWaitFor_HonorsTimeout(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	runner := NewRunner(database, sqlitestore.New(database).Entities)
+	runner := NewRunner(database, sqlitestore.New(database).Entities, sqlitestore.New(database).Projects)
 	// Drain any trigger so the test focuses on the timeout path.
 	go func() {
 		<-runner.trigger
@@ -121,7 +121,7 @@ func TestWaitFor_WakesOnceClassificationLands(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	runner := NewRunner(database, sqlitestore.New(database).Entities)
+	runner := NewRunner(database, sqlitestore.New(database).Entities, sqlitestore.New(database).Projects)
 	go func() {
 		<-runner.trigger
 	}()
@@ -152,7 +152,7 @@ func TestWaitFor_WakesOnceClassificationLands(t *testing.T) {
 // drainer would block forever waiting for a signal that never comes.
 func TestWaitFor_ReturnsEarlyOnMissingEntity(t *testing.T) {
 	database := newTestDB(t)
-	runner := NewRunner(database, sqlitestore.New(database).Entities)
+	runner := NewRunner(database, sqlitestore.New(database).Entities, sqlitestore.New(database).Projects)
 
 	start := time.Now()
 	WaitFor(context.Background(), database, runner, "nonexistent-entity-id", 5*time.Second)
@@ -173,7 +173,7 @@ func TestWaitFor_ReturnsOnContextCancel(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	runner := NewRunner(database, sqlitestore.New(database).Entities)
+	runner := NewRunner(database, sqlitestore.New(database).Entities, sqlitestore.New(database).Projects)
 	go func() {
 		<-runner.trigger
 	}()

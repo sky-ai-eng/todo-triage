@@ -3,12 +3,14 @@ package projectbundle
 import (
 	"context"
 	"database/sql"
+
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 )
 
 // Preview returns the exact file list and aggregate size that Export would
 // include for the given project.
-func Preview(ctx context.Context, database *sql.DB, projectID string) (*ExportPreview, error) {
-	state, err := collectExportState(ctx, database, projectID)
+func Preview(ctx context.Context, database *sql.DB, projects db.ProjectStore, projectID string) (*ExportPreview, error) {
+	state, err := collectExportState(ctx, database, projects, projectID)
 	if err != nil {
 		return nil, err
 	}

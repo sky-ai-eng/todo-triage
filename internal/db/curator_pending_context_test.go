@@ -5,7 +5,9 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	_ "modernc.org/sqlite"
 )
 
@@ -26,7 +28,10 @@ func newPendingContextDB(t *testing.T) *sql.DB {
 
 func seedProjectWithSession(t *testing.T, database *sql.DB) (projectID, sessionID string) {
 	t.Helper()
-	id, err := db.CreateProject(database, domain.Project{Name: "p"})
+	id, err := sqlitestore.New(database).Projects.Create(
+		t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
+		domain.Project{Name: "p"},
+	)
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
@@ -170,7 +175,10 @@ func TestConsumePendingContext_ScopesToCurrentSession(t *testing.T) {
 // to be safe to call.
 func TestConsumePendingContext_NoSessionYet(t *testing.T) {
 	database := newPendingContextDB(t)
-	id, err := db.CreateProject(database, domain.Project{Name: "p"})
+	id, err := sqlitestore.New(database).Projects.Create(
+		t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
+		domain.Project{Name: "p"},
+	)
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
@@ -236,13 +244,14 @@ func TestConsumePendingContext_ReturnsCurrentProjectState(t *testing.T) {
 
 	// Apply the PATCH the row was queued for: the project's
 	// pinned_repos transitions from [] to [a/b].
-	before, err := db.GetProject(database, projectID)
+	projects := sqlitestore.New(database).Projects
+	before, err := projects.Get(t.Context(), runmode.LocalDefaultOrg, projectID)
 	if err != nil || before == nil {
 		t.Fatalf("read project: %v", err)
 	}
 	updated := *before
 	updated.PinnedRepos = []string{"a/b"}
-	if err := db.UpdateProject(database, updated); err != nil {
+	if err := projects.Update(t.Context(), runmode.LocalDefaultOrg, updated); err != nil {
 		t.Fatalf("update project: %v", err)
 	}
 

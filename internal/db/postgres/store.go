@@ -153,7 +153,12 @@ func New(admin, app *sql.DB) db.Stores {
 		// via an EXISTS subquery against tasks; org_id defense-in-
 		// depth fires in every WHERE/INSERT clause regardless.
 		PendingFirings: newPendingFiringsStore(admin),
-		Tx:             s,
+		// Projects wires app — every consumer is request-equivalent
+		// or runs in a startup goroutine that operates within the
+		// org's identity scope. projects_* RLS policies gate
+		// statements by visibility + team membership.
+		Projects: newProjectStore(app),
+		Tx:       s,
 	}
 	return s.stores
 }
@@ -205,5 +210,6 @@ func NewForTx(tx *sql.Tx) db.TxStores {
 		Reviews:        newReviewStore(tx),
 		PendingPRs:     newPendingPRStore(tx),
 		PendingFirings: newPendingFiringsStore(tx),
+		Projects:       newProjectStore(tx),
 	}
 }

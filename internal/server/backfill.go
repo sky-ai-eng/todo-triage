@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
@@ -48,7 +47,7 @@ type backfillCandidate struct {
 // nothing to backfill for them.
 func (s *Server) handleBackfillCandidates(w http.ResponseWriter, r *http.Request) {
 	projectID := r.PathValue("id")
-	project, err := db.GetProject(s.db, projectID)
+	project, err := s.projects.Get(r.Context(), runmode.LocalDefaultOrg, projectID)
 	if err != nil {
 		log.Printf("[backfill] candidates: get project %s: %v", projectID, err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load project"})
@@ -109,7 +108,7 @@ func (s *Server) handleBackfillCandidates(w http.ResponseWriter, r *http.Request
 			c.CurrentProjectID = *e.ProjectID
 			name, ok := nameCache[*e.ProjectID]
 			if !ok {
-				if p, err := db.GetProject(s.db, *e.ProjectID); err == nil && p != nil {
+				if p, err := s.projects.Get(r.Context(), runmode.LocalDefaultOrg, *e.ProjectID); err == nil && p != nil {
 					name = p.Name
 				}
 				nameCache[*e.ProjectID] = name
@@ -147,7 +146,7 @@ type backfillFailure struct {
 // applied count rather than failing the whole batch on a single row.
 func (s *Server) handleBackfill(w http.ResponseWriter, r *http.Request) {
 	projectID := r.PathValue("id")
-	project, err := db.GetProject(s.db, projectID)
+	project, err := s.projects.Get(r.Context(), runmode.LocalDefaultOrg, projectID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load project"})
 		return

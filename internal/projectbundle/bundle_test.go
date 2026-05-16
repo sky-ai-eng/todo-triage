@@ -84,7 +84,7 @@ func seedFixture(t *testing.T, database *sql.DB, projectName string) fixture {
 	}
 
 	sessionID := "11111111-2222-3333-4444-555555555555"
-	projectID, err := db.CreateProject(database, domain.Project{
+	projectID, err := sqlitestore.New(database).Projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{
 		Name:             projectName,
 		Description:      "Fixture project",
 		CuratorSessionID: sessionID,
@@ -180,7 +180,7 @@ func seedFixture(t *testing.T, database *sql.DB, projectName string) fixture {
 
 func exportFixtureBundle(t *testing.T, database *sql.DB, projectID string) []byte {
 	t.Helper()
-	reader, err := Export(context.Background(), database, projectID)
+	reader, err := Export(context.Background(), database, sqlitestore.New(database).Projects, projectID)
 	if err != nil {
 		t.Fatalf("export: %v", err)
 	}
@@ -232,6 +232,7 @@ func TestImport_RoundTripSessionTreeAndCompactions(t *testing.T) {
 	imported, warnings, err := Import(
 		context.Background(),
 		targetDB,
+		sqlitestore.New(targetDB).Projects,
 		bytes.NewReader(bundleBytes),
 		int64(len(bundleBytes)),
 		fakeProbe{cloneURLs: map[string]string{"sky-ai-eng/triage-factory": "https://github.com/sky-ai-eng/triage-factory.git"}},
@@ -338,6 +339,7 @@ func TestImport_MissingReposAbortsWithoutWrites(t *testing.T) {
 	_, _, err := Import(
 		context.Background(),
 		targetDB,
+		sqlitestore.New(targetDB).Projects,
 		bytes.NewReader(bundleBytes),
 		int64(len(bundleBytes)),
 		fakeProbe{errs: map[string]error{"sky-ai-eng/triage-factory": errors.New("returned 404")}},
@@ -349,7 +351,7 @@ func TestImport_MissingReposAbortsWithoutWrites(t *testing.T) {
 	if len(missing.Missing) != 1 || missing.Missing[0].Repo != "sky-ai-eng/triage-factory" {
 		t.Fatalf("unexpected missing repos payload: %+v", missing.Missing)
 	}
-	projects, err := db.ListProjects(targetDB)
+	projects, err := sqlitestore.New(targetDB).Projects.List(t.Context(), runmode.LocalDefaultOrgID)
 	if err != nil {
 		t.Fatalf("list projects: %v", err)
 	}
@@ -367,12 +369,13 @@ func TestImport_DuplicateNameAborts(t *testing.T) {
 	bundleBytes := exportFixtureBundle(t, sourceDB, f.projectID)
 
 	targetDB := newBundleTestDB(t)
-	if _, err := db.CreateProject(targetDB, domain.Project{Name: "Duplicate Name"}); err != nil {
+	if _, err := sqlitestore.New(targetDB).Projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "Duplicate Name"}); err != nil {
 		t.Fatalf("seed duplicate name: %v", err)
 	}
 	_, _, err := Import(
 		context.Background(),
 		targetDB,
+		sqlitestore.New(targetDB).Projects,
 		bytes.NewReader(bundleBytes),
 		int64(len(bundleBytes)),
 		fakeProbe{cloneURLs: map[string]string{"sky-ai-eng/triage-factory": "https://github.com/sky-ai-eng/triage-factory.git"}},
@@ -381,7 +384,7 @@ func TestImport_DuplicateNameAborts(t *testing.T) {
 	if !errors.As(err, &dup) {
 		t.Fatalf("expected DuplicateNameError, got %v", err)
 	}
-	projects, err := db.ListProjects(targetDB)
+	projects, err := sqlitestore.New(targetDB).Projects.List(t.Context(), runmode.LocalDefaultOrgID)
 	if err != nil {
 		t.Fatalf("list projects: %v", err)
 	}

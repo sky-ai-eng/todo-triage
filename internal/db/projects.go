@@ -1,210 +1,65 @@
 package db
 
 import (
-	"database/sql"
-	"encoding/json"
-	"fmt"
-	"time"
-
-	"github.com/google/uuid"
+	"context"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// CreateProject inserts a new project and returns its id. PinnedRepos
-// is JSON-marshalled into the pinned_repos column.
+//go:generate go run github.com/vektra/mockery/v2 --name=ProjectStore --output=./mocks --case=underscore --with-expecter
+
+// ProjectStore owns the projects table — user-curated work groupings
+// (a Linear/Jira "project" mirrored locally, with pinned repos and
+// the curator session that maintains the project's knowledge dir).
 //
-// ID handling: if p.ID is non-empty it's used as-is; otherwise a uuid
-// is generated. The HTTP create handler always passes an empty ID, so
-// the API surface is server-generation-only. Internal callers (tests,
-// seed scripts) can pre-set an ID when deterministic IDs are useful;
-// no security concern because there is no client path that supplies
-// an arbitrary ID. The returned id is the one actually persisted.
+// All methods take orgID; local mode passes runmode.LocalDefaultOrgID.
+// Create additionally takes teamID — projects are user-driven writes
+// and the human picks which team owns the project at the Create UI;
+// the store does not synthesize a team. creator_user_id is resolved
+// from tf.current_user_id() set by WithTx (falling back to org owner
+// only on the admin-pool test path where claims aren't set). SKY-294
+// owns the broader team-selection UX work (per-page filter + write-
+// time picker + sticky default).
 //
-// Empty PinnedRepos serializes as `[]` (not null) — matches the DB
-// default and keeps the JSON round-trip predictable.
-//
-// Local-mode only: team_id is pinned to LocalDefaultTeamID. SKY-253
-// D9 (org-scoping pass) will replace this raw-SQL function with a
-// ProjectStore.Create(ctx, orgID, teamID, ...) that derives team_id
-// from the request-scoped session context, with SQLite + Postgres
-// impls. Until then, calling this in multi mode would silently attach
-// the row to the wrong team — guarded only by main.go's
-// log.Fatalf on TF_MODE=multi at startup.
-func CreateProject(database *sql.DB, p domain.Project) (string, error) {
-	id := p.ID
-	if id == "" {
-		id = uuid.New().String()
-	}
-	pinned := p.PinnedRepos
-	if pinned == nil {
-		pinned = []string{}
-	}
-	pinnedJSON, err := json.Marshal(pinned)
-	if err != nil {
-		return "", fmt.Errorf("marshal pinned_repos: %w", err)
-	}
-	now := time.Now().UTC()
-	// team_id pinned to LocalDefaultTeamID so the
-	// projects_team_visibility_requires_team CHECK passes for the
-	// default visibility='team'.
-	_, err = database.Exec(`
-		INSERT INTO projects (id, name, description, curator_session_id, pinned_repos, jira_project_key, linear_project_key, spec_authorship_prompt_id, team_id, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`,
-		id, p.Name, p.Description,
-		nullIfEmpty(p.CuratorSessionID), string(pinnedJSON),
-		nullIfEmpty(p.JiraProjectKey), nullIfEmpty(p.LinearProjectKey),
-		nullIfEmpty(p.SpecAuthorshipPromptID),
-		runmode.LocalDefaultTeamID,
-		now, now,
-	)
-	if err != nil {
-		return "", err
-	}
-	return id, nil
-}
+// Postgres wires against the app pool — every consumer is request-
+// equivalent (projects handler, curator, backfill, project_entities)
+// or runs in a startup goroutine that already operates within the
+// org's identity scope (projectclassify runner). RLS policies
+// projects_select / projects_insert / projects_update / projects_delete
+// gate every statement; org_id defense-in-depth fires alongside.
+type ProjectStore interface {
+	// Create inserts a new project and returns its id. If p.ID is
+	// non-empty it's used verbatim; otherwise a uuid is generated.
+	// PinnedRepos serializes to JSON (nil → []). teamID populates
+	// team_id (required by the projects_team_visibility_requires_team
+	// CHECK when the row defaults to visibility='team'); the SQLite
+	// impl uses the local sentinel teamID, the Postgres impl binds
+	// the caller-supplied value directly and refuses the SQLite
+	// sentinel.
+	Create(ctx context.Context, orgID, teamID string, p domain.Project) (string, error)
 
-// GetProject returns a project by id, or (nil, nil) if not found.
-func GetProject(database *sql.DB, id string) (*domain.Project, error) {
-	row := database.QueryRow(`
-		SELECT id, name, description, curator_session_id, pinned_repos, jira_project_key, linear_project_key, spec_authorship_prompt_id, created_at, updated_at
-		FROM projects WHERE id = ?
-	`, id)
-	return scanProject(row)
-}
+	// Get returns a project by id, or (nil, nil) if not found.
+	Get(ctx context.Context, orgID, id string) (*domain.Project, error)
 
-// ListProjects returns all projects ordered by name (case-insensitive).
-// No pagination — projects are user-curated and counts stay small (≤100
-// in any plausible install).
-func ListProjects(database *sql.DB) ([]domain.Project, error) {
-	rows, err := database.Query(`
-		SELECT id, name, description, curator_session_id, pinned_repos, jira_project_key, linear_project_key, spec_authorship_prompt_id, created_at, updated_at
-		FROM projects ORDER BY LOWER(name) ASC
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+	// List returns all projects ordered by name (case-insensitive).
+	// No pagination — counts stay small (≤100 in any plausible install).
+	// Empty result returns []domain.Project{}, not nil.
+	List(ctx context.Context, orgID string) ([]domain.Project, error)
 
-	out := []domain.Project{}
-	for rows.Next() {
-		p, err := scanProject(rows)
-		if err != nil {
-			return nil, err
-		}
-		if p != nil {
-			out = append(out, *p)
-		}
-	}
-	return out, rows.Err()
-}
+	// Update writes the full mutable row from p (caller is responsible
+	// for merging partial PATCH input over an existing row first).
+	// updated_at is stamped server-side. created_at + creator_user_id
+	// + team_id + visibility are preserved. Returns sql.ErrNoRows when
+	// the project doesn't exist so handlers can map to 404.
+	Update(ctx context.Context, orgID string, p domain.Project) error
 
-// UpdateProject writes the full row from p (caller is responsible
-// for merging partial PATCH input over an existing row first).
-// updated_at is stamped server-side. created_at is preserved.
-func UpdateProject(database *sql.DB, p domain.Project) error {
-	pinned := p.PinnedRepos
-	if pinned == nil {
-		pinned = []string{}
-	}
-	pinnedJSON, err := json.Marshal(pinned)
-	if err != nil {
-		return fmt.Errorf("marshal pinned_repos: %w", err)
-	}
-	now := time.Now().UTC()
-	res, err := database.Exec(`
-		UPDATE projects
-		SET name = ?, description = ?,
-		    curator_session_id = ?, pinned_repos = ?,
-		    jira_project_key = ?, linear_project_key = ?,
-		    spec_authorship_prompt_id = ?,
-		    updated_at = ?
-		WHERE id = ?
-	`,
-		p.Name, p.Description,
-		nullIfEmpty(p.CuratorSessionID), string(pinnedJSON),
-		nullIfEmpty(p.JiraProjectKey), nullIfEmpty(p.LinearProjectKey),
-		nullIfEmpty(p.SpecAuthorshipPromptID),
-		now, p.ID,
-	)
-	if err != nil {
-		return err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		return sql.ErrNoRows
-	}
-	return nil
-}
-
-// DeleteProject removes the row. The entities.project_id FK is
-// declared ON DELETE SET NULL, so any tagged entities become
-// untagged automatically — caller does not need to clear them
-// first. Returns sql.ErrNoRows if the project doesn't exist so
-// the handler can map that to 404.
-//
-// On-disk knowledge artifacts (`~/.triagefactory/projects/<id>/`)
-// are NOT removed here — the handler owns that to keep this layer
-// pure DB. Same split as the rest of the codebase (e.g. takeover
-// directory cleanup lives in spawner, not in db).
-func DeleteProject(database *sql.DB, id string) error {
-	res, err := database.Exec(`DELETE FROM projects WHERE id = ?`, id)
-	if err != nil {
-		return err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		return sql.ErrNoRows
-	}
-	return nil
-}
-
-// scanProject is the shared row reader for QueryRow / Query rows.
-// Returns (nil, nil) on sql.ErrNoRows so callers can distinguish
-// "missing" from "error" without a sentinel comparison.
-type rowScanner interface {
-	Scan(dest ...any) error
-}
-
-func scanProject(row rowScanner) (*domain.Project, error) {
-	var (
-		p            domain.Project
-		sessionID    sql.NullString
-		jiraKey      sql.NullString
-		linearKey    sql.NullString
-		specPromptID sql.NullString
-		pinnedJSON   string
-		createdAt    time.Time
-		updatedAt    time.Time
-	)
-	err := row.Scan(&p.ID, &p.Name, &p.Description, &sessionID, &pinnedJSON, &jiraKey, &linearKey, &specPromptID, &createdAt, &updatedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	p.CuratorSessionID = sessionID.String
-	p.JiraProjectKey = jiraKey.String
-	p.LinearProjectKey = linearKey.String
-	p.SpecAuthorshipPromptID = specPromptID.String
-	p.CreatedAt = createdAt
-	p.UpdatedAt = updatedAt
-	if pinnedJSON == "" {
-		p.PinnedRepos = []string{}
-	} else if err := json.Unmarshal([]byte(pinnedJSON), &p.PinnedRepos); err != nil {
-		return nil, fmt.Errorf("unmarshal pinned_repos: %w", err)
-	}
-	if p.PinnedRepos == nil {
-		p.PinnedRepos = []string{}
-	}
-	return &p, nil
+	// Delete removes the project. The entities.project_id FK is
+	// declared ON DELETE SET NULL so tagged entities become untagged
+	// automatically — callers don't need to clear them first. Returns
+	// sql.ErrNoRows when the project doesn't exist.
+	//
+	// On-disk knowledge artifacts (`~/.triagefactory/projects/<id>/`)
+	// are NOT removed here — the handler owns that to keep this layer
+	// pure DB. Same split as the rest of the codebase.
+	Delete(ctx context.Context, orgID, id string) error
 }

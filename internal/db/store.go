@@ -126,6 +126,14 @@ type Stores struct {
 	// (the router has no per-user identity; system service).
 	PendingFirings PendingFiringsStore
 
+	// Projects owns the projects table — user-curated work groupings
+	// (Linear/Jira project mirrors with pinned repos and the curator
+	// session that maintains the project's knowledge dir). App pool
+	// in Postgres; consumers are the projects handler, curator,
+	// backfill, project_entities, projectclassify runner, and the
+	// projectbundle import/export paths.
+	Projects ProjectStore
+
 	// Tx is the transaction runner — handlers that need atomic
 	// multi-store writes call Tx.WithTx and receive a TxStores with
 	// every field tx-bound. Postgres impl also sets the JWT claims
@@ -157,6 +165,7 @@ type TxStores struct {
 	PendingPRs     PendingPRStore
 	Repos          RepoStore
 	PendingFirings PendingFiringsStore
+	Projects       ProjectStore
 }
 
 // TxRunner runs fn inside a single database transaction. Postgres

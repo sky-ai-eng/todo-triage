@@ -84,6 +84,7 @@ func (r *countingReader) Read(p []byte) (int, error) {
 func Import(
 	ctx context.Context,
 	database *sql.DB,
+	projects db.ProjectStore,
 	readerAt io.ReaderAt,
 	size int64,
 	probe GitHubProbe,
@@ -104,7 +105,7 @@ func Import(
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := ensureUniqueProjectName(database, manifest.Project.Name); err != nil {
+	if err := ensureUniqueProjectName(ctx, projects, manifest.Project.Name); err != nil {
 		return nil, nil, err
 	}
 	cloneURLs, err := preflightPinnedRepos(ctx, manifest.Project.PinnedRepos, probe)
@@ -193,7 +194,7 @@ func Import(
 	committed = true
 
 	warnings := clonePinnedRepos(ctx, manifest.Project.PinnedRepos, cloneURLs)
-	project, err := db.GetProject(database, newProjectID)
+	project, err := projects.Get(ctx, runmode.LocalDefaultOrg, newProjectID)
 	if err != nil {
 		return nil, warnings, fmt.Errorf("load imported project: %w", err)
 	}
@@ -259,13 +260,13 @@ func readZipFileLimited(zf *zip.File, maxBytes int64) ([]byte, error) {
 	return body, nil
 }
 
-func ensureUniqueProjectName(database *sql.DB, incoming string) error {
+func ensureUniqueProjectName(ctx context.Context, projects db.ProjectStore, incoming string) error {
 	incoming = strings.TrimSpace(incoming)
-	projects, err := db.ListProjects(database)
+	rows, err := projects.List(ctx, runmode.LocalDefaultOrg)
 	if err != nil {
 		return fmt.Errorf("list projects: %w", err)
 	}
-	for _, p := range projects {
+	for _, p := range rows {
 		if strings.EqualFold(strings.TrimSpace(p.Name), incoming) {
 			return &DuplicateNameError{Name: incoming}
 		}
