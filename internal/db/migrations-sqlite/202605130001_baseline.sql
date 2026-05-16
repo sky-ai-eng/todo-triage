@@ -425,8 +425,11 @@ CREATE TABLE tasks (
         visibility <> 'team' OR team_id IS NOT NULL
     )
 );
+-- SKY-295: dedup is per-team. Same (entity, event_type, dedup_key) in
+-- two different teams must create two distinct tasks so each team's
+-- queue surfaces the work independently.
 CREATE UNIQUE INDEX idx_tasks_active_entity_event_dedup
-    ON tasks(entity_id, event_type, dedup_key)
+    ON tasks(entity_id, event_type, dedup_key, team_id)
     WHERE status NOT IN ('done', 'dismissed');
 CREATE INDEX        idx_tasks_status          ON tasks(status);
 CREATE INDEX        idx_tasks_entity          ON tasks(entity_id);

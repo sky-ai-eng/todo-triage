@@ -22,7 +22,7 @@ import (
 // and returns a seeder that creates fresh entity+event+task chains
 // for each assertion.
 func TestTaskStore_SQLite(t *testing.T) {
-	dbtest.RunTaskStoreConformance(t, func(t *testing.T) (db.TaskStore, string, string, string, dbtest.TaskSeeder) {
+	dbtest.RunTaskStoreConformance(t, func(t *testing.T) (db.TaskStore, string, string, string, string, dbtest.TaskSeeder, dbtest.TeamSeeder) {
 		t.Helper()
 		conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
 		if err != nil {
@@ -51,7 +51,23 @@ func TestTaskStore_SQLite(t *testing.T) {
 			t.Helper()
 			return seedSQLiteTaskChain(t, conn, suffix)
 		}
-		return stores.Tasks, runmode.LocalDefaultOrg, runmode.LocalDefaultAgentID, runmode.LocalDefaultUserID, seeder
+		// SKY-295: per-team multi-team conformance test creates a
+		// secondary team alongside LocalDefaultTeamID. Local mode is
+		// single-team in production, but the SQLite schema doesn't
+		// reject additional teams — useful for exercising the
+		// per-team dedup index from one in-memory DB.
+		teamSeeder := func(t *testing.T, suffix string) string {
+			t.Helper()
+			id := uuid.New().String()
+			if _, err := conn.Exec(
+				`INSERT INTO teams (id, org_id, slug, name) VALUES (?, ?, ?, ?)`,
+				id, runmode.LocalDefaultOrgID, "team-"+suffix+"-"+id[:8], "Conformance Team "+suffix,
+			); err != nil {
+				t.Fatalf("seed extra team: %v", err)
+			}
+			return id
+		}
+		return stores.Tasks, runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, runmode.LocalDefaultAgentID, runmode.LocalDefaultUserID, seeder, teamSeeder
 	})
 }
 

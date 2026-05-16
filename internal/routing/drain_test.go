@@ -69,7 +69,7 @@ func setupDrainScenario(t *testing.T, database *sql.DB) (entityID, taskID, trigg
 		t.Fatalf("record event: %v", err)
 	}
 
-	task, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, entityID, domain.EventGitHubPRCICheckFailed, "build", eventID, 0.5)
+	task, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, entityID, domain.EventGitHubPRCICheckFailed, "build", eventID, 0.5)
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
@@ -276,7 +276,7 @@ func TestDrainEntity_MultipleStaleFirings(t *testing.T) {
 	triggerIDs := []string{}
 	for i := 0; i < 3; i++ {
 		dedup := []string{"checkA", "checkB", "checkC"}[i]
-		task, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, entityID, domain.EventGitHubPRCICheckFailed, dedup, eventID, 0.5)
+		task, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, entityID, domain.EventGitHubPRCICheckFailed, dedup, eventID, 0.5)
 		if err != nil {
 			t.Fatalf("create task %d: %v", i, err)
 		}

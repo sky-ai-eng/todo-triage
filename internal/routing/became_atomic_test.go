@@ -53,7 +53,7 @@ func TestHandleEvent_BecameAtomic_ExistingTask_NoDuplicate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record assigned event: %v", err)
 	}
-	existingTask, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, entity.ID,
+	existingTask, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, entity.ID,
 		domain.EventJiraIssueAssigned, "", assignedEventID, 0.5)
 	if err != nil {
 		t.Fatalf("create existing task: %v", err)

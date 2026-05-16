@@ -228,34 +228,74 @@ func (r *Router) HandleEvent(evt domain.Event) {
 		return
 	}
 
-	// Step 7: Find or create task via dedup index.
-	// Use the highest-priority matching rule's default_priority, or 0.5 if
-	// only triggers matched (forgiving path).
-	defaultPriority := 0.5
-	for _, rule := range matchedRules {
-		if rule.DefaultPriority != nil && *rule.DefaultPriority > defaultPriority {
-			defaultPriority = *rule.DefaultPriority
-		}
+	// Step 7: Find or create one task per matching team (SKY-295).
+	// Group matched rules + triggers by team_id so the same event
+	// matching N teams' rules fans out to N tasks, one per team.
+	// Org-visibility handlers (system-shipped rules with team_id NULL)
+	// route to LocalDefaultTeamID — the single team in local mode.
+	// In multi-mode they'd need a per-team broadcast that hasn't
+	// landed yet (SKY-294's UX territory); for now they collapse onto
+	// LocalDefaultTeamID and the Postgres impl's sentinel filter
+	// surfaces this as a clear error.
+	teamRules := map[string][]domain.EventHandler{}
+	teamTriggers := map[string][]domain.EventHandler{}
+	for _, h := range matchedRules {
+		teamRules[handlerTeamID(h)] = append(teamRules[handlerTeamID(h)], h)
+	}
+	for _, h := range matchedTriggers {
+		teamTriggers[handlerTeamID(h)] = append(teamTriggers[handlerTeamID(h)], h)
 	}
 
-	task, created, err := r.tasks.FindOrCreate(context.Background(), runmode.LocalDefaultOrg, entityID, evt.EventType, evt.DedupKey, evt.ID, defaultPriority)
-	if err != nil {
-		log.Printf("[router] failed to find/create task for %s on entity %s: %v", evt.EventType, entityID, err)
+	// Union of teams that had any matching handler — drives the
+	// per-team task-creation loop. A team with only triggers (no
+	// rules) still gets a task with the trigger-fallback priority.
+	teamSet := map[string]struct{}{}
+	for t := range teamRules {
+		teamSet[t] = struct{}{}
+	}
+	for t := range teamTriggers {
+		teamSet[t] = struct{}{}
+	}
+
+	// Track which tasks got created/bumped per team so the
+	// auto-delegate step (step 9) can fire each team's matched
+	// triggers against that team's task.
+	tasksByTeam := make(map[string]*domain.Task, len(teamSet))
+
+	for teamID := range teamSet {
+		// Use the highest-priority matching rule's default_priority
+		// within this team, or 0.5 if only triggers matched.
+		defaultPriority := 0.5
+		for _, rule := range teamRules[teamID] {
+			if rule.DefaultPriority != nil && *rule.DefaultPriority > defaultPriority {
+				defaultPriority = *rule.DefaultPriority
+			}
+		}
+
+		task, created, err := r.tasks.FindOrCreate(context.Background(), runmode.LocalDefaultOrg, teamID, entityID, evt.EventType, evt.DedupKey, evt.ID, defaultPriority)
+		if err != nil {
+			log.Printf("[router] failed to find/create task for %s on entity %s (team %s): %v", evt.EventType, entityID, teamID, err)
+			continue
+		}
+
+		if created {
+			if err := r.tasks.RecordEvent(context.Background(), runmode.LocalDefaultOrg, task.ID, evt.ID, "spawned"); err != nil {
+				log.Printf("[router] failed to record spawned task_event: %v", err)
+			}
+			log.Printf("[router] created task %s (%s) on entity %s (team %s)", task.ID, evt.EventType, entityID, teamID)
+		} else {
+			if err := r.tasks.Bump(context.Background(), runmode.LocalDefaultOrg, task.ID, evt.ID); err != nil {
+				log.Printf("[router] failed to bump task %s: %v", task.ID, err)
+			}
+			if err := r.tasks.RecordEvent(context.Background(), runmode.LocalDefaultOrg, task.ID, evt.ID, "bumped"); err != nil {
+				log.Printf("[router] failed to record bumped task_event: %v", err)
+			}
+		}
+		tasksByTeam[teamID] = task
+	}
+
+	if len(tasksByTeam) == 0 {
 		return
-	}
-
-	if created {
-		if err := r.tasks.RecordEvent(context.Background(), runmode.LocalDefaultOrg, task.ID, evt.ID, "spawned"); err != nil {
-			log.Printf("[router] failed to record spawned task_event: %v", err)
-		}
-		log.Printf("[router] created task %s (%s) on entity %s", task.ID, evt.EventType, entityID)
-	} else {
-		if err := r.tasks.Bump(context.Background(), runmode.LocalDefaultOrg, task.ID, evt.ID); err != nil {
-			log.Printf("[router] failed to bump task %s: %v", task.ID, err)
-		}
-		if err := r.tasks.RecordEvent(context.Background(), runmode.LocalDefaultOrg, task.ID, evt.ID, "bumped"); err != nil {
-			log.Printf("[router] failed to record bumped task_event: %v", err)
-		}
 	}
 
 	// Step 8: Enqueue AI scoring (always — produces UI metadata regardless).
@@ -272,14 +312,35 @@ func (r *Router) HandleEvent(evt domain.Event) {
 	// the cooldown was protecting against). Triggers with
 	// min_autonomy_suitability > 0 still defer to post-scoring re-derive.
 	if cfg, err := config.Load(); err == nil && cfg.AI.AutoDelegateEnabled {
-		for _, trigger := range matchedTriggers {
-			if trigger.MinAutonomySuitability != nil && *trigger.MinAutonomySuitability > 0 {
-				continue // deferred to post-scoring handler
+		for teamID, triggers := range teamTriggers {
+			task, ok := tasksByTeam[teamID]
+			if !ok {
+				continue // FindOrCreate failed for this team
 			}
-			r.tryAutoDelegate(task, trigger, entityID, evt.ID)
+			for _, trigger := range triggers {
+				if trigger.MinAutonomySuitability != nil && *trigger.MinAutonomySuitability > 0 {
+					continue // deferred to post-scoring handler
+				}
+				r.tryAutoDelegate(task, trigger, entityID, evt.ID)
+			}
 		}
 	}
 
+}
+
+// handlerTeamID resolves the team a matched event_handler routes its
+// tasks to. User-source handlers carry visibility='team' + team_id set;
+// system-shipped org-wide handlers (visibility='org', team_id NULL)
+// collapse to runmode.LocalDefaultTeamID — the only available team in
+// local mode. Multi-mode org-rule fanout across all member teams is
+// SKY-294 territory; for now the Postgres impl's sentinel filter
+// surfaces this as a clear error rather than silently picking the
+// wrong team.
+func handlerTeamID(h domain.EventHandler) string {
+	if h.TeamID != "" {
+		return h.TeamID
+	}
+	return runmode.LocalDefaultTeamID
 }
 
 // tryAutoDelegate decides whether a matched (task, trigger) fires now or

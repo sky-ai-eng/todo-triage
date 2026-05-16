@@ -42,6 +42,7 @@ var _ db.EventHandlerStore = (*eventHandlerStore)(nil)
 // helpers stay aligned. Per-kind nullable columns scan into sql.Null*
 // and map to the domain pointer fields.
 const sqliteEventHandlerColumns = `id, kind, event_type, scope_predicate_json, enabled, source,
+       team_id,
        name, default_priority, sort_order,
        prompt_id, breaker_threshold, min_autonomy_suitability,
        created_at, updated_at`
@@ -391,6 +392,7 @@ func scanEventHandlerFromAnySQLite(scanFn func(dst ...any) error) (domain.EventH
 	var h domain.EventHandler
 	var (
 		pred          sql.NullString
+		teamID        sql.NullString
 		nameNS        sql.NullString
 		defPriority   sql.NullFloat64
 		sortOrder     sql.NullInt64
@@ -400,11 +402,15 @@ func scanEventHandlerFromAnySQLite(scanFn func(dst ...any) error) (domain.EventH
 	)
 	if err := scanFn(
 		&h.ID, &h.Kind, &h.EventType, &pred, &h.Enabled, &h.Source,
+		&teamID,
 		&nameNS, &defPriority, &sortOrder,
 		&promptID, &breakerNS, &minAutonomyNS,
 		&h.CreatedAt, &h.UpdatedAt,
 	); err != nil {
 		return h, err
+	}
+	if teamID.Valid {
+		h.TeamID = teamID.String
 	}
 	if pred.Valid {
 		s := pred.String

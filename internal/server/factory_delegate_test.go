@@ -340,7 +340,7 @@ func TestHandleFactoryDelegate_PendingTasksRoundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record event: %v", err)
 	}
-	task, _, err := s.tasks.FindOrCreate(t.Context(), runmode.LocalDefaultOrg, entity.ID, domain.EventGitHubPRCICheckPassed, "", evtID, 0.5)
+	task, _, err := s.tasks.FindOrCreate(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, entity.ID, domain.EventGitHubPRCICheckPassed, "", evtID, 0.5)
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}

@@ -33,15 +33,31 @@ func TestTaskStore_Postgres(t *testing.T) {
 	// directly. Same pattern as TestSwipeStore_Postgres.
 	stores := pgstore.New(h.AdminDB, h.AdminDB)
 
-	dbtest.RunTaskStoreConformance(t, func(t *testing.T) (db.TaskStore, string, string, string, dbtest.TaskSeeder) {
+	dbtest.RunTaskStoreConformance(t, func(t *testing.T) (db.TaskStore, string, string, string, string, dbtest.TaskSeeder, dbtest.TeamSeeder) {
 		t.Helper()
 		h.Reset(t)
 		orgID, userID, agentID := seedPgOrgUserAgent(t, h)
+		// The org's default team — seeded by seedPgDefaultTeam inside
+		// seedPgOrgUserAgent — is the teamID the conformance subtests
+		// thread into FindOrCreate. firstTeamForOrg picks it up via
+		// the same created_at ordering production used to do
+		// implicitly.
+		teamID := firstTeamForOrg(t, h, orgID)
 		seeder := func(t *testing.T, suffix string) (entityID, eventID, taskID string) {
 			t.Helper()
 			return seedPgTaskChain(t, h.AdminDB, orgID, userID, suffix)
 		}
-		return stores.Tasks, orgID, agentID, userID, seeder
+		// SKY-295: per-team conformance subtest needs a second team
+		// inside the same org so the partial unique index fans out
+		// instead of collapsing. Seed the team + a membership for
+		// the harness's user so memberships-aware code paths stay
+		// happy (RLS-bypassing AdminDB doesn't strictly need the
+		// membership, but the canonical shape mirrors production).
+		teamSeeder := func(t *testing.T, suffix string) string {
+			t.Helper()
+			return seedPgDefaultTeam(t, h, orgID, userID)
+		}
+		return stores.Tasks, orgID, teamID, agentID, userID, seeder, teamSeeder
 	})
 }
 

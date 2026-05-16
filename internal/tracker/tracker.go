@@ -337,17 +337,30 @@ func (t *Tracker) discoverGitHub(client *ghclient.Client, username string, repos
 	return all, nil
 }
 
-// backfillReviewRequested synthesizes a pr:review_requested event + queued
-// task for a PR being discovered for the first time with the session user
-// already in its requested-reviewer list. Uses db.RecordEvent (not
-// bus.Publish) so downstream routing doesn't double-create a task — we own
-// task creation here via FindOrCreateTask, identical to the Jira carry-over
-// queue path. The task's primary_event_id FK is satisfied by the synthesized
-// event's ID.
+// backfillReviewRequested publishes a synthesized pr:review_requested
+// event for a PR being discovered for the first time with the session
+// user already in its requested-reviewer list. The router subscribes
+// to the bus, evaluates rules, and fans out to per-team tasks (SKY-295).
+// The task's primary_event_id FK is satisfied when the router records
+// the event in its HandleEvent step 1.
 //
-// The "is this PR's review requested from me" decision happens upstream at
-// the caller's matchesAny check, not here; this function just records the
-// author login on the metadata so the predicate matcher can do its work.
+// Pre-SKY-295 the tracker bypassed the bus and called
+// tasks.FindOrCreateAt directly, which sidestepped rule evaluation —
+// every backfilled task ended up assigned to "the oldest team in the
+// org" regardless of which team's rule actually matched. Routing
+// through the bus gives backfill the same team-aware fanout every
+// other tracker-detected event already gets.
+//
+// The OccurredAt stamp uses the PR's CreatedAt as a lower bound:
+// GitHub doesn't expose per-review-request timestamps, so PR creation
+// time is the closest we have — better than "just now" on the card
+// for a PR that's been pending your review for weeks. Falls back to
+// time.Now() if the GraphQL timestamp is missing or unparseable.
+//
+// The "is this PR's review requested from me" decision happens
+// upstream at the caller's matchesAny check, not here; this function
+// just records the author login on the metadata so the predicate
+// matcher can do its work.
 func (t *Tracker) backfillReviewRequested(entityID string, snap domain.PRSnapshot) error {
 	meta := events.GitHubPRReviewRequestedMetadata{
 		Author:   snap.Author,
@@ -362,30 +375,19 @@ func (t *Tracker) backfillReviewRequested(entityID string, snap domain.PRSnapsho
 	if err != nil {
 		return err
 	}
+	occurredAt := time.Time{}
+	if snap.CreatedAt != "" {
+		if parsed, perr := time.Parse(time.RFC3339, snap.CreatedAt); perr == nil {
+			occurredAt = parsed
+		}
+	}
 	eid := entityID
-	eventID, err := db.RecordEvent(t.database, domain.Event{
+	t.bus.Publish(domain.Event{
 		EntityID:     &eid,
 		EventType:    domain.EventGitHubPRReviewRequested,
 		MetadataJSON: string(metaJSON),
+		OccurredAt:   occurredAt,
 	})
-	if err != nil {
-		return fmt.Errorf("record event: %w", err)
-	}
-	// Stamp the backfilled task with the PR's createdAt rather than now.
-	// GitHub doesn't expose per-review-request timestamps, so PR.CreatedAt
-	// is the closest bound we have — a review request can't predate the PR.
-	// Better than "just now" on the card for a PR that's been pending your
-	// review for weeks. Falls back to time.Now() if the GraphQL timestamp
-	// is missing or unparseable (shouldn't happen in practice).
-	createdAt := time.Now()
-	if snap.CreatedAt != "" {
-		if parsed, perr := time.Parse(time.RFC3339, snap.CreatedAt); perr == nil {
-			createdAt = parsed
-		}
-	}
-	if _, _, err := t.tasks.FindOrCreateAt(context.Background(), runmode.LocalDefaultOrg, entityID, domain.EventGitHubPRReviewRequested, "", eventID, 0.5, createdAt); err != nil {
-		return fmt.Errorf("create task: %w", err)
-	}
 	return nil
 }
 

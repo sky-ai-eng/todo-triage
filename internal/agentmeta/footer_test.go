@@ -53,7 +53,7 @@ func seedFooterRun(t *testing.T, database *sql.DB, fix runFooterFixture) {
 	if err != nil {
 		t.Fatalf("event: %v", err)
 	}
-	task, _, err := sqlitestore.New(database).Tasks.FindOrCreate(t.Context(), runmode.LocalDefaultOrg, entity.ID, domain.EventGitHubPRCICheckFailed, fix.ID, evt, 0.5)
+	task, _, err := sqlitestore.New(database).Tasks.FindOrCreate(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, entity.ID, domain.EventGitHubPRCICheckFailed, fix.ID, evt, 0.5)
 	if err != nil {
 		t.Fatalf("task: %v", err)
 	}

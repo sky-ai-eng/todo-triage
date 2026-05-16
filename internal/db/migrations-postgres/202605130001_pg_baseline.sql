@@ -2086,7 +2086,10 @@ CREATE INDEX idx_task_events_task ON public.task_events USING btree (task_id);
 -- Name: idx_tasks_active_entity_event_dedup; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE UNIQUE INDEX idx_tasks_active_entity_event_dedup ON public.tasks USING btree (entity_id, event_type, dedup_key) WHERE (status <> ALL (ARRAY['done'::text, 'dismissed'::text]));
+-- SKY-295: dedup is per-team. Same (entity, event_type, dedup_key) in
+-- two different teams must create two distinct tasks so each team's
+-- queue surfaces the work independently.
+CREATE UNIQUE INDEX idx_tasks_active_entity_event_dedup ON public.tasks USING btree (entity_id, event_type, dedup_key, team_id) WHERE (status <> ALL (ARRAY['done'::text, 'dismissed'::text]));
 
 
 --

@@ -77,7 +77,7 @@ func setupReDeriveScenario(t *testing.T, database *sql.DB, minAutonomy float64) 
 	}
 
 	// Create task
-	task, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, entityID, domain.EventGitHubPRCICheckFailed, "build", eventID, 0.5)
+	task, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, entityID, domain.EventGitHubPRCICheckFailed, "build", eventID, 0.5)
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
@@ -337,7 +337,7 @@ func TestReDeriveAfterScoring_ZeroThresholdTrigger_SkippedByReDerive(t *testing.
 		EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entityID,
 		DedupKey: "lint", MetadataJSON: string(metaJSON),
 	})
-	task, _, _ := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, entityID, domain.EventGitHubPRCICheckFailed, "lint", eventID, 0.5)
+	task, _, _ := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, entityID, domain.EventGitHubPRCICheckFailed, "lint", eventID, 0.5)
 
 	// Prompt
 	createTestPrompt(t, database, domain.Prompt{ID: "p2", Name: "Test2", Body: "Do", Source: "user"})
@@ -382,7 +382,7 @@ func TestReDeriveAfterScoring_PredicateMismatch_Skips(t *testing.T) {
 		EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entityID,
 		DedupKey: "build", MetadataJSON: string(metaJSON),
 	})
-	task, _, _ := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, entityID, domain.EventGitHubPRCICheckFailed, "build", eventID, 0.5)
+	task, _, _ := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, entityID, domain.EventGitHubPRCICheckFailed, "build", eventID, 0.5)
 
 	// Prompt
 	createTestPrompt(t, database, domain.Prompt{ID: "p3", Name: "Test3", Body: "Do", Source: "user"})

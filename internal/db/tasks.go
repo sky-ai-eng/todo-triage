@@ -26,8 +26,9 @@ import (
 //     pre-D2 raw functions did.
 //   - FindOrCreate returns (task, created, err). The dedup path
 //     keys off the partial unique index on tasks
-//     (entity_id, event_type, dedup_key) WHERE status NOT IN
-//     ('done', 'dismissed').
+//     (entity_id, event_type, dedup_key, team_id) WHERE status NOT IN
+//     ('done', 'dismissed') — SKY-295: per-team dedup so the same
+//     event matching N teams' rules fans out to N tasks.
 //   - Claim mutations return ok=true when the row actually changed.
 //     False means a guard tripped (caller doesn't broadcast,
 //     usually surfaces 409). HandoffAgentClaim returns the
@@ -81,18 +82,26 @@ type TaskStore interface {
 	// --- Lifecycle ---
 
 	// FindOrCreate implements the dedup logic via the partial unique
-	// index (entity_id, event_type, dedup_key) WHERE status NOT IN
-	// ('done', 'dismissed'). If an active task exists, returns it
-	// with created=false; otherwise creates a fresh queued row with
-	// created=true. Concurrent callers race on the index — the
-	// loser re-reads the winner's row.
-	FindOrCreate(ctx context.Context, orgID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64) (*domain.Task, bool, error)
+	// index (entity_id, event_type, dedup_key, team_id) WHERE status
+	// NOT IN ('done', 'dismissed'). teamID is caller-supplied — the
+	// store does not synthesize one (SKY-295). Local mode passes
+	// runmode.LocalDefaultTeamID; the SQLite impl accepts that
+	// directly. Multi mode passes the user-selected team from the
+	// router's matched event_handler; the Postgres impl refuses the
+	// LocalDefaultTeamID sentinel with a clear error.
+	//
+	// If an active task exists for the (entity, event_type,
+	// dedup_key, team) tuple, returns it with created=false;
+	// otherwise creates a fresh queued row with created=true.
+	// Concurrent callers race on the index — the loser re-reads the
+	// winner's row.
+	FindOrCreate(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64) (*domain.Task, bool, error)
 
 	// FindOrCreateAt is FindOrCreate with a caller-supplied
 	// createdAt on the new row. Used by initial-discovery backfills
 	// where the activity is older than "now" (e.g. a pending review
 	// request observed on a 2-week-old PR).
-	FindOrCreateAt(ctx context.Context, orgID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error)
+	FindOrCreateAt(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error)
 
 	// Bump records a new matching event on an existing task — if
 	// the task is snoozed, un-snoozes it (wake-on-bump). Does NOT

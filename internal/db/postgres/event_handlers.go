@@ -58,6 +58,7 @@ var _ db.EventHandlerStore = (*eventHandlerStore)(nil)
 // + breaker_threshold + min_autonomy_suitability for triggers) are
 // scanned via sql.Null* and mapped to the domain type's pointer fields.
 const pgEventHandlerColumns = `id, kind, event_type, scope_predicate_json::text, enabled, source,
+       team_id,
        name, default_priority, sort_order,
        prompt_id, breaker_threshold, min_autonomy_suitability,
        created_at, updated_at`
@@ -472,6 +473,7 @@ func scanEventHandlerFromAny(scanFn func(dst ...any) error) (domain.EventHandler
 	var h domain.EventHandler
 	var (
 		pred          sql.NullString
+		teamID        sql.NullString
 		nameNS        sql.NullString
 		defPriority   sql.NullFloat64
 		sortOrder     sql.NullInt64
@@ -481,11 +483,15 @@ func scanEventHandlerFromAny(scanFn func(dst ...any) error) (domain.EventHandler
 	)
 	if err := scanFn(
 		&h.ID, &h.Kind, &h.EventType, &pred, &h.Enabled, &h.Source,
+		&teamID,
 		&nameNS, &defPriority, &sortOrder,
 		&promptID, &breakerNS, &minAutonomyNS,
 		&h.CreatedAt, &h.UpdatedAt,
 	); err != nil {
 		return h, err
+	}
+	if teamID.Valid {
+		h.TeamID = teamID.String
 	}
 	if pred.Valid {
 		s := pred.String

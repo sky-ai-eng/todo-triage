@@ -17,14 +17,19 @@ import "time"
 // The CHECK constraints on event_handlers enforce the shape pair at the
 // SQL level; both backends rely on it.
 type EventHandler struct {
-	ID                 string    `json:"id"`
-	Kind               string    `json:"kind"` // "rule" | "trigger"
-	EventType          string    `json:"event_type"`
-	ScopePredicateJSON *string   `json:"scope_predicate_json"`
-	Enabled            bool      `json:"enabled"`
-	Source             string    `json:"source"` // "system" | "user"
-	CreatedAt          time.Time `json:"created_at"`
-	UpdatedAt          time.Time `json:"updated_at"`
+	ID                 string  `json:"id"`
+	Kind               string  `json:"kind"` // "rule" | "trigger"
+	EventType          string  `json:"event_type"`
+	ScopePredicateJSON *string `json:"scope_predicate_json"`
+	Enabled            bool    `json:"enabled"`
+	Source             string  `json:"source"` // "system" | "user"
+	// TeamID identifies the owning team for visibility='team' rows.
+	// Empty for visibility='org' rows (system-shipped rules). SKY-295
+	// reads this to route tasks created off matched rules to the
+	// correct team's queue.
+	TeamID    string    `json:"team_id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 
 	// Rule-only (nil for triggers).
 	Name            string   `json:"name"`             // required for rules

@@ -148,7 +148,7 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	task, created, err := s.tasks.FindOrCreate(r.Context(), runmode.LocalDefaultOrg, req.EntityID, req.EventType, req.DedupKey, primaryEvent.ID, defaultPriority)
+	task, created, err := s.tasks.FindOrCreate(r.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, req.EntityID, req.EventType, req.DedupKey, primaryEvent.ID, defaultPriority)
 	if err != nil {
 		internalError(w, "factory", err)
 		return
