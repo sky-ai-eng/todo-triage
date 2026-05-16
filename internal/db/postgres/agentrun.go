@@ -325,6 +325,18 @@ func markPendingApprovalIfCompleted(ctx context.Context, q queryer, orgID, runID
 	return n > 0, err
 }
 
+func (s *agentRunStore) MarkCompletedIfPendingApproval(ctx context.Context, orgID, runID string) (bool, error) {
+	res, err := s.q.ExecContext(ctx, `
+		UPDATE runs SET status = 'completed'
+		WHERE org_id = $1 AND id = $2 AND status = 'pending_approval'
+	`, orgID, runID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
 func hasOtherActiveRunForTask(ctx context.Context, q queryer, orgID, taskID, excludeRunID string) (bool, error) {
 	var exists bool
 	err := q.QueryRowContext(ctx, `

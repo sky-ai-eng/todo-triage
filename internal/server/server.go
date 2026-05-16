@@ -26,25 +26,31 @@ import (
 
 // Server is the main HTTP server for Triage Factory.
 type Server struct {
-	db              *sql.DB
-	prompts         db.PromptStore
-	swipes          db.SwipeStore
-	dashboard       db.DashboardStore
-	eventHandlers   db.EventHandlerStore
-	agents          db.AgentStore     // SKY-261 D-Claims: resolves the org's agent for claim stamps
-	teamAgents      db.TeamAgentStore // SKY-261 D-Claims: re-checks team_agents.enabled on swipe-delegate / factory-delegate
-	users           db.UsersStore     // SKY-264: github_username + display_name on the synthetic local user row
-	chains          db.ChainStore
-	tasks           db.TaskStore        // SKY-283: task lifecycle, claim, queue + factory snapshot reads
-	factory         db.FactoryReadStore // SKY-292: factory snapshot reads
-	agentRuns       db.AgentRunStore    // SKY-285: agent run lifecycle + transcript + yields
-	entities        db.EntityStore      // SKY-284: entity reads/writes for dashboard, factory_handler, stock, backfill, project_entities
-	reviews         db.ReviewStore      // SKY-286: pending_reviews CRUD for reviews handler, swipe-discard, agent status payload
-	pendingPRs      db.PendingPRStore   // SKY-287: pending_prs CRUD for pending_prs handler, agent status payload, drag-back-to-queue cleanup
-	repos           db.RepoStore        // SKY-288: repo_profiles CRUD for repos/settings/projects handlers and curator pinned-repo materialization
-	projects        db.ProjectStore     // SKY-290: projects CRUD for projects/curator/backfill/project_entities handlers
-	events          db.EventStore       // SKY-305: events audit log Record/Latest for stock carry-over + factory drag-to-delegate
-	taskMemory      db.TaskMemoryStore  // run_memory writes (human verdict capture on review/PR submit, swipe-discard cleanup)
+	db            *sql.DB
+	prompts       db.PromptStore
+	swipes        db.SwipeStore
+	dashboard     db.DashboardStore
+	eventHandlers db.EventHandlerStore
+	agents        db.AgentStore     // SKY-261 D-Claims: resolves the org's agent for claim stamps
+	teamAgents    db.TeamAgentStore // SKY-261 D-Claims: re-checks team_agents.enabled on swipe-delegate / factory-delegate
+	users         db.UsersStore     // SKY-264: github_username + display_name on the synthetic local user row
+	chains        db.ChainStore
+	tasks         db.TaskStore        // SKY-283: task lifecycle, claim, queue + factory snapshot reads
+	factory       db.FactoryReadStore // SKY-292: factory snapshot reads
+	agentRuns     db.AgentRunStore    // SKY-285: agent run lifecycle + transcript + yields
+	entities      db.EntityStore      // SKY-284: entity reads/writes for dashboard, factory_handler, stock, backfill, project_entities
+	reviews       db.ReviewStore      // SKY-286: pending_reviews CRUD for reviews handler, swipe-discard, agent status payload
+	pendingPRs    db.PendingPRStore   // SKY-287: pending_prs CRUD for pending_prs handler, agent status payload, drag-back-to-queue cleanup
+	repos         db.RepoStore        // SKY-288: repo_profiles CRUD for repos/settings/projects handlers and curator pinned-repo materialization
+	projects      db.ProjectStore     // SKY-290: projects CRUD for projects/curator/backfill/project_entities handlers
+	events        db.EventStore       // SKY-305: events audit log Record/Latest for stock carry-over + factory drag-to-delegate
+	taskMemory    db.TaskMemoryStore  // run_memory writes (human verdict capture on review/PR submit, swipe-discard cleanup)
+	// tx runs handler-cleanup write batches under the request user's
+	// claims even when the cleanup needs to outlive the request
+	// context. Each cleanup wraps in `s.tx.WithTx(cleanupCtx, orgID,
+	// userID, fn)` so multi-mode RLS sees the user's identity. Local
+	// mode SQLite ignores userID.
+	tx              db.TxRunner
 	mux             *http.ServeMux
 	static          fs.FS
 	ws              *websocket.Hub
@@ -165,7 +171,7 @@ func (s *Server) agentEnabledForLocalTeam(ctx context.Context) (*domain.Agent, b
 // argument list grows one store at a time as their callers migrate;
 // raw *sql.DB stays available for handlers that haven't been ported
 // to a store yet.
-func New(database *sql.DB, prompts db.PromptStore, swipes db.SwipeStore, dashboard db.DashboardStore, eventHandlers db.EventHandlerStore, agents db.AgentStore, teamAgents db.TeamAgentStore, users db.UsersStore, chains db.ChainStore, tasks db.TaskStore, factory db.FactoryReadStore, agentRuns db.AgentRunStore, entities db.EntityStore, reviews db.ReviewStore, pendingPRs db.PendingPRStore, repos db.RepoStore, projects db.ProjectStore, events db.EventStore, taskMemory db.TaskMemoryStore) *Server {
+func New(database *sql.DB, prompts db.PromptStore, swipes db.SwipeStore, dashboard db.DashboardStore, eventHandlers db.EventHandlerStore, agents db.AgentStore, teamAgents db.TeamAgentStore, users db.UsersStore, chains db.ChainStore, tasks db.TaskStore, factory db.FactoryReadStore, agentRuns db.AgentRunStore, entities db.EntityStore, reviews db.ReviewStore, pendingPRs db.PendingPRStore, repos db.RepoStore, projects db.ProjectStore, events db.EventStore, taskMemory db.TaskMemoryStore, tx db.TxRunner) *Server {
 	s := &Server{
 		db:            database,
 		prompts:       prompts,
@@ -186,6 +192,7 @@ func New(database *sql.DB, prompts db.PromptStore, swipes db.SwipeStore, dashboa
 		projects:      projects,
 		events:        events,
 		taskMemory:    taskMemory,
+		tx:            tx,
 		mux:           http.NewServeMux(),
 		ws:            websocket.NewHub(),
 	}

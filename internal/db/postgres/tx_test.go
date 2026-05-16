@@ -184,6 +184,59 @@ func TestSyntheticClaimsWithTx_Postgres_RollsBackOnError(t *testing.T) {
 	}
 }
 
+// TestWithTx_Postgres_SurvivesCancelledOriginCtx pins the SKY-300
+// handler-cleanup pattern: a goroutine-like cleanup that needs to
+// outlive its originating request gets a cancellation-detached ctx
+// via context.WithoutCancel(r.Context()), and WithTx runs to
+// completion against that ctx even though the parent ctx is already
+// done. The combination of WithoutCancel (value inheritance + cancel
+// detachment) + WithTx (claims set from caller-supplied identity)
+// is what makes post-handler cleanup safe in multi-mode: writes
+// still attribute to the request user, but a client disconnect
+// can't strand the cleanup mid-batch.
+func TestWithTx_Postgres_SurvivesCancelledOriginCtx(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID := seedSyntheticClaimsOrg(t, h, "withtx-detached")
+
+	stores := pgstore.New(h.AdminDB, h.AppDB)
+
+	// Build a parent ctx and cancel it immediately — the standin
+	// for "request returned, r.Context() is done."
+	parentCtx, parentCancel := context.WithCancel(context.Background())
+	parentCancel()
+	if parentCtx.Err() == nil {
+		t.Fatal("parentCtx should be done after cancel")
+	}
+
+	// Detach via WithoutCancel — the cleanup ctx inherits parent's
+	// values (none here in the test, but in production it carries
+	// claims set by auth middleware) without inheriting the cancel.
+	cleanupCtx := context.WithoutCancel(parentCtx)
+	if cleanupCtx.Err() != nil {
+		t.Fatal("cleanupCtx should NOT be done — WithoutCancel breaks the cancel chain")
+	}
+
+	// Inside WithTx, write a row + read it back. Both must succeed
+	// despite the parent ctx being done.
+	if err := stores.Tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
+		if err := tx.Repos.SetConfigured(cleanupCtx, orgID, []string{"survives/cancel"}); err != nil {
+			return fmt.Errorf("SetConfigured under detached ctx: %w", err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("WithTx on detached ctx: %v", err)
+	}
+
+	names, err := stores.Repos.ListConfiguredNamesSystem(context.Background(), orgID)
+	if err != nil {
+		t.Fatalf("ListConfiguredNamesSystem: %v", err)
+	}
+	if len(names) != 1 || names[0] != "survives/cancel" {
+		t.Errorf("after WithTx on detached ctx: got %v, want [survives/cancel]", names)
+	}
+}
+
 // seedSyntheticClaimsOrg creates a fresh org + owner user + default
 // team for SyntheticClaimsWithTx tests. Mirrors seedPgEntityOrg's
 // shape but with a different label so the test files don't collide

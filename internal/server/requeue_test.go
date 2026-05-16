@@ -1213,7 +1213,7 @@ func TestCleanupPendingApprovalRun_Idempotent(t *testing.T) {
 	s := newTestServer(t)
 	taskID, runID, _ := pendingApprovalFixture(t, s.db)
 
-	s.cleanupPendingApprovalRun(taskID, discardOutcomeRequeued)
+	s.cleanupPendingApprovalRun(context.Background(), runmode.LocalDefaultOrg, runmode.LocalDefaultUserID, taskID, discardOutcomeRequeued)
 
 	var humanContentBefore sql.NullString
 	var completedAtBefore sql.NullTime
@@ -1229,7 +1229,7 @@ func TestCleanupPendingApprovalRun_Idempotent(t *testing.T) {
 	}
 
 	// Second call: different outcome, must not take effect.
-	s.cleanupPendingApprovalRun(taskID, discardOutcomeDismissed)
+	s.cleanupPendingApprovalRun(context.Background(), runmode.LocalDefaultOrg, runmode.LocalDefaultUserID, taskID, discardOutcomeDismissed)
 
 	var humanContentAfter sql.NullString
 	var completedAtAfter sql.NullTime
@@ -1281,7 +1281,7 @@ func TestCleanupPendingApprovalRun_DeleteFailureHoldsRunForRetry(t *testing.T) {
 		t.Fatalf("rename comments table: %v", err)
 	}
 
-	s.cleanupPendingApprovalRun(taskID, discardOutcomeRequeued)
+	s.cleanupPendingApprovalRun(context.Background(), runmode.LocalDefaultOrg, runmode.LocalDefaultUserID, taskID, discardOutcomeRequeued)
 
 	// Run must still be pending_approval — the delete failed and
 	// MarkAgentRunDiscarded must have been skipped.
@@ -1300,7 +1300,7 @@ func TestCleanupPendingApprovalRun_DeleteFailureHoldsRunForRetry(t *testing.T) {
 		t.Fatalf("restore comments table: %v", err)
 	}
 
-	s.cleanupPendingApprovalRun(taskID, discardOutcomeRequeued)
+	s.cleanupPendingApprovalRun(context.Background(), runmode.LocalDefaultOrg, runmode.LocalDefaultUserID, taskID, discardOutcomeRequeued)
 
 	if err := s.db.QueryRow(`SELECT status FROM runs WHERE id = ?`, runID).Scan(&runStatus); err != nil {
 		t.Fatalf("scan run after retry: %v", err)
@@ -1336,7 +1336,7 @@ func TestCleanupPendingApprovalRun_AgentContentNullSurvives(t *testing.T) {
 		t.Fatalf("force null agent_content: %v", err)
 	}
 
-	s.cleanupPendingApprovalRun(taskID, discardOutcomeRequeued)
+	s.cleanupPendingApprovalRun(context.Background(), runmode.LocalDefaultOrg, runmode.LocalDefaultUserID, taskID, discardOutcomeRequeued)
 
 	var agentContent, humanContent sql.NullString
 	if err := s.db.QueryRow(

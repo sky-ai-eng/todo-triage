@@ -1289,7 +1289,7 @@ func (s *Server) handleProjectKnowledgeUpload(w http.ResponseWriter, r *http.Req
 		}
 	}
 	if wroteAny {
-		if _, err := s.db.Exec(`UPDATE projects SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`, id); err != nil {
+		if err := s.projects.BumpUpdatedAt(r.Context(), runmode.LocalDefaultOrg, id); err != nil {
 			// Log but don't fail the upload — the files are on disk
 			// and the user expects the response to reflect that.
 			// The activity timestamp is a hint for follow-on display,
@@ -1433,7 +1433,7 @@ func (s *Server) handleProjectKnowledgeDelete(w http.ResponseWriter, r *http.Req
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to remove file"})
 		return
 	}
-	if _, err := s.db.Exec(`UPDATE projects SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`, id); err != nil {
+	if err := s.projects.BumpUpdatedAt(r.Context(), runmode.LocalDefaultOrg, id); err != nil {
 		log.Printf("[projects] knowledge delete: bump updated_at for %s: %v", id, err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to update project state"})
 		return

@@ -63,6 +63,17 @@ type ProjectStore interface {
 	// pure DB. Same split as the rest of the codebase.
 	Delete(ctx context.Context, orgID, id string) error
 
+	// BumpUpdatedAt stamps updated_at = now() without changing any
+	// other column. The knowledge-base upload/delete handlers call
+	// this after writing or removing files on disk so the UI's
+	// "recently active" sort reflects the activity — Update would
+	// require loading + writing the full row just to refresh the
+	// timestamp. A no-op when the project doesn't exist (the handler
+	// has already responded against the in-memory project id; a
+	// vanished row is rare and doesn't affect the on-disk action's
+	// success).
+	BumpUpdatedAt(ctx context.Context, orgID, id string) error
+
 	// --- Admin-pool variants (`...System`) ---
 	//
 	// ListSystem mirrors List but routes through the admin pool in
