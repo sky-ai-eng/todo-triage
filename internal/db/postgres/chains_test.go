@@ -273,6 +273,30 @@ func TestChainStore_Postgres_CreateRun_UnderAppPoolRLS(t *testing.T) {
 		t.Errorf("manual creator_user_id = %q, want %q (JWT-claimed user)",
 			manualCreator.String, userID)
 	}
+
+	// The chain_runs_select RLS policy was widened so event-triggered
+	// rows (creator_user_id NULL) resolve via plain org membership
+	// rather than the creator-equals-caller predicate. Without that,
+	// the request-facing GetRun / GetRunForRun / CancelChain paths
+	// would silently 404 on every auto-fired chain because the
+	// app-pool SELECT can't match a NULL creator. Verify a WithTx
+	// read of the event-triggered row succeeds.
+	var sawEventRun bool
+	if err := stores.Tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		cr, err := tx.Chains.GetRun(ctx, orgID, eventRunID)
+		if err != nil {
+			return err
+		}
+		if cr != nil {
+			sawEventRun = true
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("WithTx GetRun on event chain: %v", err)
+	}
+	if !sawEventRun {
+		t.Error("WithTx GetRun on event-triggered chain returned nil; RLS policy still excludes NULL-creator rows")
+	}
 }
 
 // TestChainStore_Postgres_CrossOrgLeakage pins the defense-in-depth
@@ -343,6 +367,27 @@ func TestChainStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	}
 	if len(stepsA) != 0 {
 		t.Errorf("ListStepsSystem(orgA, chainIDB) leaked %d rows, want 0", len(stepsA))
+	}
+
+	// GetLatestVerdictSystem on org A reading org B's step run must
+	// return (nil, nil) — the run_id is unique across orgs but the
+	// admin pool bypasses RLS, so the org_id WHERE clause on
+	// run_artifacts is the only thing standing between the system
+	// variant and a cross-tenant verdict leak.
+	verdictCrossOrg, err := chains.GetLatestVerdictSystem(ctx, orgA, stepRunB)
+	if err != nil {
+		t.Fatalf("GetLatestVerdictSystem cross-org: %v", err)
+	}
+	if verdictCrossOrg != nil {
+		t.Errorf("GetLatestVerdictSystem(orgA, stepRunB) returned %+v, want nil (cross-org leak)", verdictCrossOrg)
+	}
+	// Same-org read still returns the verdict.
+	verdictSameOrg, err := chains.GetLatestVerdictSystem(ctx, orgB, stepRunB)
+	if err != nil {
+		t.Fatalf("GetLatestVerdictSystem same-org: %v", err)
+	}
+	if verdictSameOrg == nil || verdictSameOrg.Reason != "B" {
+		t.Errorf("GetLatestVerdictSystem(orgB, stepRunB) = %+v, want reason=B", verdictSameOrg)
 	}
 
 	// RunsForChainSystem on org A must not return cross-org step runs.

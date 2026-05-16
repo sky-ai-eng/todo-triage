@@ -451,9 +451,9 @@ func getLatestChainVerdict(ctx context.Context, q queryer, orgID, runID string) 
 	var raw sql.NullString
 	err := q.QueryRowContext(ctx, `
 		SELECT metadata_json::text FROM run_artifacts
-		WHERE run_id = $1 AND kind = 'chain:verdict'
+		WHERE org_id = $1 AND run_id = $2 AND kind = 'chain:verdict'
 		ORDER BY created_at DESC, id DESC LIMIT 1
-	`, runID).Scan(&raw)
+	`, orgID, runID).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
