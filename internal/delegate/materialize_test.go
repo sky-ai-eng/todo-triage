@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -26,13 +25,14 @@ func TestMaterializePriorMemories_CreatesDirEvenWithNoPriors(t *testing.T) {
 	database := newTakeoverTestDB(t)
 	cwd := t.TempDir()
 
-	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "jira", "SKY-100", "issue", "T", "https://x/100")
+	stores := sqlitestore.New(database)
+	entity, _, err := stores.Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "jira", "SKY-100", "issue", "T", "https://x/100")
 	if err != nil {
 		t.Fatalf("entity: %v", err)
 	}
 
 	// Sanity: no memories for this entity yet.
-	mems, err := db.GetMemoriesForEntity(database, entity.ID)
+	mems, err := stores.TaskMemory.GetMemoriesForEntity(context.Background(), runmode.LocalDefaultOrg, entity.ID)
 	if err != nil {
 		t.Fatalf("GetMemoriesForEntity: %v", err)
 	}
@@ -40,7 +40,7 @@ func TestMaterializePriorMemories_CreatesDirEvenWithNoPriors(t *testing.T) {
 		t.Fatalf("expected 0 priors for new entity, got %d", len(mems))
 	}
 
-	materializePriorMemories(database, cwd, entity.ID)
+	materializePriorMemories(stores.TaskMemory, cwd, entity.ID)
 
 	memDir := filepath.Join(cwd, "_scratch", "entity-memory")
 	info, err := os.Stat(memDir)
@@ -67,12 +67,13 @@ func TestMaterializePriorMemories_WritesPriors(t *testing.T) {
 	database := newTakeoverTestDB(t)
 	cwd := t.TempDir()
 
-	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "jira", "SKY-200", "issue", "T", "https://x/200")
+	stores := sqlitestore.New(database)
+	entity, _, err := stores.Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "jira", "SKY-200", "issue", "T", "https://x/200")
 	if err != nil {
 		t.Fatalf("entity: %v", err)
 	}
 	// Seed task + run + memory chain so GetMemoriesForEntity returns one row.
-	evt, err := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrg, domain.Event{
+	evt, err := stores.Events.Record(context.Background(), runmode.LocalDefaultOrg, domain.Event{
 		EventType: domain.EventJiraIssueAssigned, EntityID: &entity.ID, MetadataJSON: `{}`,
 	})
 	if err != nil {
@@ -83,16 +84,16 @@ func TestMaterializePriorMemories_WritesPriors(t *testing.T) {
 		t.Fatalf("task: %v", err)
 	}
 	ensureTestPrompt(t, database, domain.Prompt{ID: "p1", Name: "T", Body: "x", Source: "user"})
-	if err := sqlitestore.New(database).AgentRuns.Create(t.Context(), runmode.LocalDefaultOrg, domain.AgentRun{
+	if err := stores.AgentRuns.Create(t.Context(), runmode.LocalDefaultOrg, domain.AgentRun{
 		ID: "prior-run", TaskID: task.ID, PromptID: "p1", Status: "completed", Model: "m",
 	}); err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if err := db.UpsertAgentMemory(database, "prior-run", entity.ID, "what i did last time"); err != nil {
+	if err := stores.TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrg, "prior-run", entity.ID, "what i did last time"); err != nil {
 		t.Fatalf("upsert memory: %v", err)
 	}
 
-	materializePriorMemories(database, cwd, entity.ID)
+	materializePriorMemories(stores.TaskMemory, cwd, entity.ID)
 
 	priorPath := filepath.Join(cwd, "_scratch", "entity-memory", "prior-run.md")
 	body, err := os.ReadFile(priorPath)

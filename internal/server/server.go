@@ -44,6 +44,7 @@ type Server struct {
 	repos           db.RepoStore        // SKY-288: repo_profiles CRUD for repos/settings/projects handlers and curator pinned-repo materialization
 	projects        db.ProjectStore     // SKY-290: projects CRUD for projects/curator/backfill/project_entities handlers
 	events          db.EventStore       // SKY-305: events audit log Record/Latest for stock carry-over + factory drag-to-delegate
+	taskMemory      db.TaskMemoryStore  // run_memory writes (human verdict capture on review/PR submit, swipe-discard cleanup)
 	mux             *http.ServeMux
 	static          fs.FS
 	ws              *websocket.Hub
@@ -164,7 +165,7 @@ func (s *Server) agentEnabledForLocalTeam(ctx context.Context) (*domain.Agent, b
 // argument list grows one store at a time as their callers migrate;
 // raw *sql.DB stays available for handlers that haven't been ported
 // to a store yet.
-func New(database *sql.DB, prompts db.PromptStore, swipes db.SwipeStore, dashboard db.DashboardStore, eventHandlers db.EventHandlerStore, agents db.AgentStore, teamAgents db.TeamAgentStore, users db.UsersStore, chains db.ChainStore, tasks db.TaskStore, factory db.FactoryReadStore, agentRuns db.AgentRunStore, entities db.EntityStore, reviews db.ReviewStore, pendingPRs db.PendingPRStore, repos db.RepoStore, projects db.ProjectStore, events db.EventStore) *Server {
+func New(database *sql.DB, prompts db.PromptStore, swipes db.SwipeStore, dashboard db.DashboardStore, eventHandlers db.EventHandlerStore, agents db.AgentStore, teamAgents db.TeamAgentStore, users db.UsersStore, chains db.ChainStore, tasks db.TaskStore, factory db.FactoryReadStore, agentRuns db.AgentRunStore, entities db.EntityStore, reviews db.ReviewStore, pendingPRs db.PendingPRStore, repos db.RepoStore, projects db.ProjectStore, events db.EventStore, taskMemory db.TaskMemoryStore) *Server {
 	s := &Server{
 		db:            database,
 		prompts:       prompts,
@@ -184,6 +185,7 @@ func New(database *sql.DB, prompts db.PromptStore, swipes db.SwipeStore, dashboa
 		repos:         repos,
 		projects:      projects,
 		events:        events,
+		taskMemory:    taskMemory,
 		mux:           http.NewServeMux(),
 		ws:            websocket.NewHub(),
 	}

@@ -760,7 +760,7 @@ func (s *Server) cleanupPendingApprovalRun(taskID string, outcome discardOutcome
 	// report) — so it can recalibrate. Format mirrors the SKY-205
 	// submit-time block so the parsing contract is uniform.
 	humanContent := buildDiscardHumanContent(outcome, kind)
-	if err := db.UpdateRunMemoryHumanContent(s.db, runID, humanContent); err != nil {
+	if err := s.taskMemory.UpdateRunMemoryHumanContent(context.Background(), runmode.LocalDefaultOrg, runID, humanContent); err != nil {
 		log.Printf("[approval-discard] human_content write for run %s failed: %v", runID, err)
 	}
 
