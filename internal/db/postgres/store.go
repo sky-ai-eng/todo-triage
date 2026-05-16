@@ -139,7 +139,14 @@ func New(admin, app *sql.DB) db.Stores {
 		// handler). RLS policy pending_prs_all gates statements via
 		// the runs subquery; org_id defense-in-depth fires alongside.
 		PendingPRs: newPendingPRStore(app),
-		Tx:         s,
+		// Repos wires app — every consumer is request-equivalent
+		// (repos/settings/projects handlers, curator) or runs in a
+		// startup/profiler goroutine that operates within the org's
+		// identity scope. RLS policy repo_profiles_all gates on
+		// (org_id = current_org_id() AND user_has_org_access);
+		// org_id defense-in-depth fires in every WHERE clause.
+		Repos: newRepoStore(app),
+		Tx:    s,
 	}
 	return s.stores
 }
@@ -187,6 +194,7 @@ func NewForTx(tx *sql.Tx) db.TxStores {
 		// admin pool via Store.admin.
 		AgentRuns:  newAgentRunStore(tx, tx),
 		Entities:   newEntityStore(tx),
+		Repos:      newRepoStore(tx),
 		Reviews:    newReviewStore(tx),
 		PendingPRs: newPendingPRStore(tx),
 	}

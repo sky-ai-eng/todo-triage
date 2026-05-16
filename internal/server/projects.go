@@ -69,7 +69,7 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required"})
 		return
 	}
-	pinned, errMsg := validatePinnedRepos(s.db, req.PinnedRepos)
+	pinned, errMsg := validatePinnedRepos(r.Context(), s.repos, req.PinnedRepos)
 	if errMsg != "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": errMsg})
 		return
@@ -359,7 +359,7 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 		updated.Description = *req.Description
 	}
 	if req.PinnedRepos != nil {
-		pinned, errMsg := validatePinnedRepos(s.db, *req.PinnedRepos)
+		pinned, errMsg := validatePinnedRepos(r.Context(), s.repos, *req.PinnedRepos)
 		if errMsg != "" {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": errMsg})
 			return
@@ -617,8 +617,8 @@ func validatePinnedRepoShape(repos []string) ([]string, string) {
 // the user can't authenticate against.
 //
 // Returns (normalized, "") on success and (nil, errMsg) on failure.
-func validatePinnedRepos(database *sql.DB, repos []string) ([]string, string) {
-	out, errMsg := validatePinnedRepoShape(repos)
+func validatePinnedRepos(ctx context.Context, repos db.RepoStore, slugs []string) ([]string, string) {
+	out, errMsg := validatePinnedRepoShape(slugs)
 	if errMsg != "" {
 		return nil, errMsg
 	}
@@ -626,7 +626,7 @@ func validatePinnedRepos(database *sql.DB, repos []string) ([]string, string) {
 		return out, ""
 	}
 
-	configured, err := db.GetConfiguredRepoNames(database)
+	configured, err := repos.ListConfiguredNames(ctx, runmode.LocalDefaultOrgID)
 	if err != nil {
 		return nil, "failed to load configured repos: " + err.Error()
 	}

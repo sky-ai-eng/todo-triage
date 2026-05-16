@@ -216,7 +216,7 @@ func materializeWorkspace(database *db.DB, runID, ownerRepoArg string, deps addD
 		}
 	}
 
-	profile, err := db.GetRepoProfile(database.Conn, repoID)
+	profile, err := stores.Repos.Get(context.Background(), runmode.LocalDefaultOrgID, repoID)
 	if err != nil {
 		return "", fmt.Errorf("workspace add: load repo profile: %w", err)
 	}

@@ -103,7 +103,7 @@ func listWorkspaces(database *db.DB, runID string) (listOutput, error) {
 	// surface each repo's description in the JSON output. The
 	// description is the agent's cheapest disambiguation signal when
 	// the ticket text doesn't make the target repo obvious.
-	configured, err := db.GetAllRepoProfiles(database.Conn)
+	configured, err := stores.Repos.List(context.Background(), runmode.LocalDefaultOrgID)
 	if err != nil {
 		return listOutput{}, fmt.Errorf("workspace list: load configured repos: %w", err)
 	}

@@ -1,11 +1,14 @@
 package workspace
 
 import (
+	"context"
 	"errors"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 func TestListWorkspaces_MissingRunID(t *testing.T) {
@@ -128,7 +131,7 @@ func TestListWorkspaces_AvailableSurfacesDescription(t *testing.T) {
 	database := newTestDB(t)
 	seedJiraRun(t, database, "r1", "SKY-1")
 
-	if err := db.UpsertRepoProfile(database.Conn, domain.RepoProfile{
+	if err := sqlitestore.New(database.Conn).Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.RepoProfile{
 		ID: "owner/alpha", Owner: "owner", Repo: "alpha",
 		Description:   "Core API service",
 		ProfileText:   "Long LLM-generated profile text that should NOT appear in workspace list output...",
@@ -141,7 +144,7 @@ func TestListWorkspaces_AvailableSurfacesDescription(t *testing.T) {
 	// clone_url). MUST be filtered out — `workspace add` rejects
 	// no-clone-url profiles, so surfacing them here would lead the
 	// agent to options that fail at materialize time.
-	if err := db.UpsertRepoProfile(database.Conn, domain.RepoProfile{
+	if err := sqlitestore.New(database.Conn).Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.RepoProfile{
 		ID: "owner/skeleton", Owner: "owner", Repo: "skeleton",
 		// CloneURL deliberately empty
 		DefaultBranch: "main",

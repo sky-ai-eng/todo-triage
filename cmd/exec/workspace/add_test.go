@@ -129,7 +129,7 @@ func seedGitHubRun(t *testing.T, database *db.DB, runID string) {
 
 func seedRepoProfile(t *testing.T, database *db.DB, owner, repo, cloneURL, defaultBranch string) {
 	t.Helper()
-	if err := db.UpsertRepoProfile(database.Conn, domain.RepoProfile{
+	if err := sqlitestore.New(database.Conn).Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.RepoProfile{
 		ID: owner + "/" + repo, Owner: owner, Repo: repo,
 		CloneURL: cloneURL, DefaultBranch: defaultBranch,
 		ProfileText: "test profile",

@@ -1,0 +1,68 @@
+package sqlite_test
+
+import (
+	"database/sql"
+	"testing"
+
+	"github.com/google/uuid"
+	_ "modernc.org/sqlite"
+
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+)
+
+// anyRepoProfile is a minimal fixture for orgID-guard tests where the
+// row's fields don't matter — assertLocalOrg fires before the INSERT.
+func anyRepoProfile() domain.RepoProfile {
+	id := uuid.New().String()
+	return domain.RepoProfile{
+		ID: id + "/" + id, Owner: id, Repo: id,
+	}
+}
+
+// TestRepoStore_SQLite runs the shared conformance suite against the
+// SQLite RepoStore impl. Each subtest gets a fresh in-memory DB.
+func TestRepoStore_SQLite(t *testing.T) {
+	dbtest.RunRepoStoreConformance(t, func(t *testing.T) (db.RepoStore, string) {
+		t.Helper()
+		conn := newSQLiteForRepoTest(t)
+		stores := sqlitestore.New(conn)
+		return stores.Repos, runmode.LocalDefaultOrgID
+	})
+}
+
+// TestRepoStore_SQLite_RejectsNonLocalOrg pins the assertLocalOrg
+// guard — every method must refuse a non-local orgID.
+func TestRepoStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
+	conn := newSQLiteForRepoTest(t)
+	stores := sqlitestore.New(conn)
+
+	const bogusOrg = "11111111-1111-1111-1111-111111111111"
+	if err := stores.Repos.Upsert(t.Context(), bogusOrg, anyRepoProfile()); err == nil {
+		t.Errorf("Upsert with non-local orgID should error")
+	}
+	if _, err := stores.Repos.Get(t.Context(), bogusOrg, "any/repo"); err == nil {
+		t.Errorf("Get with non-local orgID should error")
+	}
+	if _, err := stores.Repos.List(t.Context(), bogusOrg); err == nil {
+		t.Errorf("List with non-local orgID should error")
+	}
+}
+
+func newSQLiteForRepoTest(t *testing.T) *sql.DB {
+	t.Helper()
+	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	if err != nil {
+		t.Fatalf("open in-memory db: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	conn.SetMaxOpenConns(1)
+	conn.SetMaxIdleConns(1)
+	if err := db.BootstrapSchemaForTest(conn); err != nil {
+		t.Fatalf("bootstrap schema: %v", err)
+	}
+	return conn
+}

@@ -111,6 +111,15 @@ type Stores struct {
 	// back-to-queue cleanup. Leaf table — no child rows hang off it.
 	PendingPRs PendingPRStore
 
+	// Repos owns repo_profiles — the user-configured GitHub repos
+	// plus their cached AI profile and clone-attempt state. App pool
+	// in Postgres; consumers are the repos handler, settings, the
+	// curator, the projects handler, the poller manager, the
+	// profiler, and the workspace CLI tests. Every method accepts
+	// repoID as "owner/repo" — Postgres splits to (owner, repo) and
+	// queries by the natural key UNIQUE(org_id, owner, repo).
+	Repos RepoStore
+
 	// Tx is the transaction runner — handlers that need atomic
 	// multi-store writes call Tx.WithTx and receive a TxStores with
 	// every field tx-bound. Postgres impl also sets the JWT claims
@@ -140,6 +149,7 @@ type TxStores struct {
 	Entities      EntityStore
 	Reviews       ReviewStore
 	PendingPRs    PendingPRStore
+	Repos         RepoStore
 }
 
 // TxRunner runs fn inside a single database transaction. Postgres

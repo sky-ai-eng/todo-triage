@@ -9,7 +9,6 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/config"
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
@@ -153,7 +152,7 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	repoCount, _ := db.CountConfiguredRepos(s.db)
+	repoCount, _ := s.repos.CountConfigured(r.Context(), runmode.LocalDefaultOrgID)
 
 	// GitHub is mandatory — configured requires GitHub creds + at least one repo
 	result := map[string]any{
