@@ -120,6 +120,12 @@ type Stores struct {
 	// queries by the natural key UNIQUE(org_id, owner, repo).
 	Repos RepoStore
 
+	// PendingFirings owns the pending_firings table — the FIFO queue
+	// of intent-to-auto-delegate rows the router enqueues when an
+	// entity already has an active auto run. Admin pool in Postgres
+	// (the router has no per-user identity; system service).
+	PendingFirings PendingFiringsStore
+
 	// Tx is the transaction runner — handlers that need atomic
 	// multi-store writes call Tx.WithTx and receive a TxStores with
 	// every field tx-bound. Postgres impl also sets the JWT claims
@@ -133,23 +139,24 @@ type Stores struct {
 // in the same transaction. Fields are added as their parent stores
 // land in successive waves.
 type TxStores struct {
-	Scores        ScoreStore
-	Prompts       PromptStore
-	Swipes        SwipeStore
-	Dashboard     DashboardStore
-	Secrets       SecretStore
-	EventHandlers EventHandlerStore
-	Chains        ChainStore
-	Agents        AgentStore
-	TeamAgents    TeamAgentStore
-	Users         UsersStore
-	Tasks         TaskStore
-	Factory       FactoryReadStore
-	AgentRuns     AgentRunStore
-	Entities      EntityStore
-	Reviews       ReviewStore
-	PendingPRs    PendingPRStore
-	Repos         RepoStore
+	Scores         ScoreStore
+	Prompts        PromptStore
+	Swipes         SwipeStore
+	Dashboard      DashboardStore
+	Secrets        SecretStore
+	EventHandlers  EventHandlerStore
+	Chains         ChainStore
+	Agents         AgentStore
+	TeamAgents     TeamAgentStore
+	Users          UsersStore
+	Tasks          TaskStore
+	Factory        FactoryReadStore
+	AgentRuns      AgentRunStore
+	Entities       EntityStore
+	Reviews        ReviewStore
+	PendingPRs     PendingPRStore
+	Repos          RepoStore
+	PendingFirings PendingFiringsStore
 }
 
 // TxRunner runs fn inside a single database transaction. Postgres

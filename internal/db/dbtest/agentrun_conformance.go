@@ -470,6 +470,52 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		}
 	})
 
+	t.Run("HasActiveAutoRunForEntity", func(t *testing.T) {
+		// Per-entity sibling of HasActiveForTask: any non-terminal
+		// trigger_type='event' run on any task that belongs to the
+		// entity. Manual delegations are excluded (SKY-189 design —
+		// manual decoupled from the auto-queue gate); terminal runs
+		// don't count either.
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		ent := seed.Entity(t, "ha-ent")
+		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+
+		// No runs → false.
+		if has, _ := store.HasActiveAutoRunForEntity(ctx, orgID, ent); has {
+			t.Error("HasActiveAutoRunForEntity with no runs: true, want false")
+		}
+
+		// Manual run — must NOT trip the gate.
+		_ = seedAgentRunForTaskTest(t, store, orgID, taskID, "running")
+		if has, _ := store.HasActiveAutoRunForEntity(ctx, orgID, ent); has {
+			t.Error("manual run tripped the auto-run gate; gate must be event-only")
+		}
+
+		// Add an active event-trigger run on the same task — gate flips true.
+		eventRunID := uuid.New().String()
+		if err := store.Create(ctx, orgID, domain.AgentRun{
+			ID: eventRunID, TaskID: taskID, PromptID: agentRunTestPrompt(t),
+			Status: "running", Model: "m", TriggerType: "event",
+		}); err != nil {
+			t.Fatalf("Create event-triggered: %v", err)
+		}
+		if has, _ := store.HasActiveAutoRunForEntity(ctx, orgID, ent); !has {
+			t.Error("active event-trigger run should trip the gate")
+		}
+
+		// Terminate the event run; only terminal event-trigger rows
+		// remain plus the still-running manual — gate flips back to
+		// false.
+		if err := store.Complete(ctx, orgID, eventRunID, "completed", 0, 0, 0, "", ""); err != nil {
+			t.Fatalf("Complete: %v", err)
+		}
+		if has, _ := store.HasActiveAutoRunForEntity(ctx, orgID, ent); has {
+			t.Error("terminal event run + active manual should NOT trip the gate")
+		}
+	})
+
 	t.Run("PendingApprovalIDForTask", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()

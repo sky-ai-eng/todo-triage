@@ -119,6 +119,14 @@ type AgentRunStore interface {
 	// in-flight gate for auto-delegation.
 	HasActiveForTask(ctx context.Context, orgID, taskID string) (bool, error)
 
+	// HasActiveAutoRunForEntity returns true if any task on the
+	// entity has a non-terminal run with trigger_type='event'.
+	// Manual delegations are intentionally excluded per SKY-189
+	// (manual decoupled from the queue). Used by the router's
+	// per-entity firing gate; sweeper uses the same predicate to
+	// skip entities that wouldn't drain anyway.
+	HasActiveAutoRunForEntity(ctx context.Context, orgID, entityID string) (bool, error)
+
 	// ActiveIDsForTask returns the IDs of runs on the task that
 	// haven't reached a terminal state. Used by the task-close
 	// → run-cancel cascade.
