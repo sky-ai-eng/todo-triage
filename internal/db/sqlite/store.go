@@ -27,7 +27,11 @@ type Store struct {
 // 21 fields on the bundle.
 func New(conn *sql.DB) db.Stores {
 	s := &Store{conn: conn}
-	users := newUsersStore(conn)
+	// SKY-296 introduced two-pool constructors on EntityStore /
+	// RepoStore / UsersStore / AgentStore so the Postgres impl can
+	// route `...System` admin-pool variants distinctly. SQLite has
+	// one connection — both args collapse to conn here.
+	users := newUsersStore(conn, conn)
 	s.stores = db.Stores{
 		Scores:         newScoreStore(conn),
 		Prompts:        newPromptStore(conn, conn),
@@ -36,16 +40,16 @@ func New(conn *sql.DB) db.Stores {
 		Secrets:        newSecretStore(),
 		EventHandlers:  newEventHandlerStore(conn, users),
 		Chains:         newChainStore(conn),
-		Agents:         newAgentStore(conn),
+		Agents:         newAgentStore(conn, conn),
 		TeamAgents:     newTeamAgentStore(conn),
 		Users:          users,
 		Tasks:          newTaskStore(conn),
 		Factory:        newFactoryReadStore(conn),
 		AgentRuns:      newAgentRunStore(conn),
-		Entities:       newEntityStore(conn),
+		Entities:       newEntityStore(conn, conn),
 		Reviews:        newReviewStore(conn),
 		PendingPRs:     newPendingPRStore(conn),
-		Repos:          newRepoStore(conn),
+		Repos:          newRepoStore(conn, conn),
 		PendingFirings: newPendingFiringsStore(conn),
 		Projects:       newProjectStore(conn),
 		Tx:             s,

@@ -52,4 +52,16 @@ type UsersStore interface {
 	// creation; this store only mutates existing rows. Idempotent on
 	// identical input.
 	SetJiraIdentity(ctx context.Context, userID, accountID, displayName string) error
+
+	// --- Admin-pool variants (`...System`) ---
+	//
+	// GetGitHubUsernameSystem mirrors GetGitHubUsername but routes
+	// through the admin pool in Postgres. The single consumer is the
+	// poller bootstrap, which reads each repo owner's stored login at
+	// server boot to seed the GitHub poller's identity allowlist —
+	// there is no JWT-claims context at that point, and the read
+	// spans every user the poller intends to act for. Behavior
+	// matches GetGitHubUsername; SQLite collapses the two variants
+	// to one connection.
+	GetGitHubUsernameSystem(ctx context.Context, userID string) (string, error)
 }

@@ -17,9 +17,14 @@ import (
 //
 // SQLite uses the natural "owner/repo" string as the id column
 // directly — no synthetic uuid to translate.
+//
+// The constructor takes two queryers for signature parity with the
+// Postgres impl (SKY-296), but SQLite has one connection — both
+// arguments collapse onto the same queryer. The `...System` admin-
+// pool variants are thin wrappers around the non-System methods.
 type repoStore struct{ q queryer }
 
-func newRepoStore(q queryer) db.RepoStore { return &repoStore{q: q} }
+func newRepoStore(q, _ queryer) db.RepoStore { return &repoStore{q: q} }
 
 var _ db.RepoStore = (*repoStore)(nil)
 
@@ -222,6 +227,23 @@ func (s *repoStore) UpdateCloneStatus(ctx context.Context, orgID, owner, repo, s
 		WHERE owner = ? AND repo = ?
 	`, status, nullIfEmpty(errMsg), nullIfEmpty(errKind), owner, repo)
 	return err
+}
+
+// --- Admin-pool (`...System`) variants ---
+//
+// SKY-296 surface — SQLite has one connection so each System variant
+// delegates to its non-System counterpart.
+
+func (s *repoStore) ListSystem(ctx context.Context, orgID string) ([]domain.RepoProfile, error) {
+	return s.List(ctx, orgID)
+}
+
+func (s *repoStore) ListConfiguredNamesSystem(ctx context.Context, orgID string) ([]string, error) {
+	return s.ListConfiguredNames(ctx, orgID)
+}
+
+func (s *repoStore) UpdateCloneStatusSystem(ctx context.Context, orgID, owner, repo, status, errMsg, errKind string) error {
+	return s.UpdateCloneStatus(ctx, orgID, owner, repo, status, errMsg, errKind)
 }
 
 // rowScanner is the common Scan surface of *sql.Row and *sql.Rows.

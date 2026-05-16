@@ -12,22 +12,39 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// entityStore is the Postgres impl of db.EntityStore. Wired against
-// the app pool in postgres.New: every consumer is request-equivalent
-// (server panels, classifier, delegate context loaders) or runs in a
-// server-side goroutine that already operates within the org's
-// identity scope (the tracker, started at server boot). RLS policy
-// entities_all gates every read/write on
-// (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id));
-// org_id is also included in every WHERE clause as defense in depth.
+// entityStore is the Postgres impl of db.EntityStore. Holds two pools
+// (SKY-296):
+//
+//   - q: app pool (tf_app, RLS-active). Every request-equivalent
+//     consumer (server panels, delegate context loaders, the classifier
+//     once it runs inside a user-scoped goroutine) hits this side. RLS
+//     policy entities_all gates every read/write on
+//     (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id)).
+//
+//   - admin: admin pool (supabase_admin, BYPASSRLS). System services
+//     that legitimately operate across users hit the `...System`
+//     methods — the tracker (writes entities for every polled repo
+//     regardless of which user configured the repo) and the project
+//     classifier (reads every org's unclassified entities to triage
+//     them). Mirrors the AgentRunStore precedent: explicit `...System`
+//     method names keep call-site intent grep-able; the impl routes
+//     per-method internally.
+//
+// org_id is in every WHERE clause as defense in depth on both pools,
+// so even the admin-pool variants only see the requested org's rows.
 //
 // SQL is written fresh against D3's schema: $N placeholders, JSONB
 // cast on snapshot_json reads/writes, explicit timestamptz binds so
 // poll cycles share a time source with the SQLite path rather than
 // drifting onto Postgres's now().
-type entityStore struct{ q queryer }
+type entityStore struct {
+	q     queryer
+	admin queryer
+}
 
-func newEntityStore(q queryer) db.EntityStore { return &entityStore{q: q} }
+func newEntityStore(q, admin queryer) db.EntityStore {
+	return &entityStore{q: q, admin: admin}
+}
 
 var _ db.EntityStore = (*entityStore)(nil)
 
@@ -42,16 +59,36 @@ const pgEntitySelectCols = `id, source, source_id, kind, COALESCE(title, ''), CO
 // --- Lookup ---
 
 func (s *entityStore) Get(ctx context.Context, orgID, id string) (*domain.Entity, error) {
-	row := s.q.QueryRowContext(ctx, `SELECT `+pgEntitySelectCols+` FROM entities WHERE org_id = $1 AND id = $2`, orgID, id)
+	return getEntity(ctx, s.q, orgID, id)
+}
+
+func (s *entityStore) GetSystem(ctx context.Context, orgID, id string) (*domain.Entity, error) {
+	return getEntity(ctx, s.admin, orgID, id)
+}
+
+func getEntity(ctx context.Context, q queryer, orgID, id string) (*domain.Entity, error) {
+	row := q.QueryRowContext(ctx, `SELECT `+pgEntitySelectCols+` FROM entities WHERE org_id = $1 AND id = $2`, orgID, id)
 	return scanEntityRow(row)
 }
 
 func (s *entityStore) GetBySource(ctx context.Context, orgID, source, sourceID string) (*domain.Entity, error) {
-	row := s.q.QueryRowContext(ctx, `SELECT `+pgEntitySelectCols+` FROM entities WHERE org_id = $1 AND source = $2 AND source_id = $3`, orgID, source, sourceID)
+	return getEntityBySource(ctx, s.q, orgID, source, sourceID)
+}
+
+func getEntityBySource(ctx context.Context, q queryer, orgID, source, sourceID string) (*domain.Entity, error) {
+	row := q.QueryRowContext(ctx, `SELECT `+pgEntitySelectCols+` FROM entities WHERE org_id = $1 AND source = $2 AND source_id = $3`, orgID, source, sourceID)
 	return scanEntityRow(row)
 }
 
 func (s *entityStore) Descriptions(ctx context.Context, orgID string, ids []string) (map[string]string, error) {
+	return entityDescriptions(ctx, s.q, orgID, ids)
+}
+
+func (s *entityStore) DescriptionsSystem(ctx context.Context, orgID string, ids []string) (map[string]string, error) {
+	return entityDescriptions(ctx, s.admin, orgID, ids)
+}
+
+func entityDescriptions(ctx context.Context, q queryer, orgID string, ids []string) (map[string]string, error) {
 	out := make(map[string]string, len(ids))
 	if len(ids) == 0 {
 		return out, nil
@@ -77,7 +114,7 @@ func (s *entityStore) Descriptions(ctx context.Context, orgID string, ids []stri
 	// chunking needed (the parameter count cap that drives SQLite's
 	// chunked path doesn't apply when the list is a single array
 	// bind).
-	rows, err := s.q.QueryContext(ctx, `
+	rows, err := q.QueryContext(ctx, `
 		SELECT id, COALESCE(description, '')
 		FROM entities
 		WHERE org_id = $1 AND id = ANY($2)
@@ -99,7 +136,15 @@ func (s *entityStore) Descriptions(ctx context.Context, orgID string, ids []stri
 }
 
 func (s *entityStore) ListUnclassified(ctx context.Context, orgID string) ([]domain.Entity, error) {
-	rows, err := s.q.QueryContext(ctx, `
+	return listUnclassifiedEntities(ctx, s.q, orgID)
+}
+
+func (s *entityStore) ListUnclassifiedSystem(ctx context.Context, orgID string) ([]domain.Entity, error) {
+	return listUnclassifiedEntities(ctx, s.admin, orgID)
+}
+
+func listUnclassifiedEntities(ctx context.Context, q queryer, orgID string) ([]domain.Entity, error) {
+	rows, err := q.QueryContext(ctx, `
 		SELECT `+pgEntitySelectCols+`
 		FROM entities
 		WHERE org_id = $1 AND project_id IS NULL AND classified_at IS NULL AND state = 'active'
@@ -113,7 +158,15 @@ func (s *entityStore) ListUnclassified(ctx context.Context, orgID string) ([]dom
 }
 
 func (s *entityStore) ListActive(ctx context.Context, orgID, source string) ([]domain.Entity, error) {
-	rows, err := s.q.QueryContext(ctx, `
+	return listActiveEntities(ctx, s.q, orgID, source)
+}
+
+func (s *entityStore) ListActiveSystem(ctx context.Context, orgID, source string) ([]domain.Entity, error) {
+	return listActiveEntities(ctx, s.admin, orgID, source)
+}
+
+func listActiveEntities(ctx context.Context, q queryer, orgID, source string) ([]domain.Entity, error) {
+	rows, err := q.QueryContext(ctx, `
 		SELECT `+pgEntitySelectCols+`
 		FROM entities
 		WHERE org_id = $1 AND source = $2 AND state = 'active'
@@ -154,7 +207,15 @@ func (s *entityStore) ListProjectPanel(ctx context.Context, orgID, projectID str
 // --- Mutation ---
 
 func (s *entityStore) FindOrCreate(ctx context.Context, orgID, source, sourceID, kind, title, url string) (*domain.Entity, bool, error) {
-	existing, err := s.GetBySource(ctx, orgID, source, sourceID)
+	return findOrCreateEntity(ctx, s.q, orgID, source, sourceID, kind, title, url)
+}
+
+func (s *entityStore) FindOrCreateSystem(ctx context.Context, orgID, source, sourceID, kind, title, url string) (*domain.Entity, bool, error) {
+	return findOrCreateEntity(ctx, s.admin, orgID, source, sourceID, kind, title, url)
+}
+
+func findOrCreateEntity(ctx context.Context, q queryer, orgID, source, sourceID, kind, title, url string) (*domain.Entity, bool, error) {
+	existing, err := getEntityBySource(ctx, q, orgID, source, sourceID)
 	if err != nil {
 		return nil, false, err
 	}
@@ -164,7 +225,7 @@ func (s *entityStore) FindOrCreate(ctx context.Context, orgID, source, sourceID,
 
 	id := uuid.New().String()
 	now := time.Now()
-	_, err = s.q.ExecContext(ctx, `
+	_, err = q.ExecContext(ctx, `
 		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, state, created_at, last_polled_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', $8, $9)
 	`, id, orgID, source, sourceID, kind, title, url, now, now)
@@ -173,7 +234,7 @@ func (s *entityStore) FindOrCreate(ctx context.Context, orgID, source, sourceID,
 		// (org_id, source, source_id) just fired. Re-read so both
 		// callers see a populated entity. If the re-read also
 		// fails, surface the original error.
-		existing, err2 := s.GetBySource(ctx, orgID, source, sourceID)
+		existing, err2 := getEntityBySource(ctx, q, orgID, source, sourceID)
 		if err2 == nil && existing != nil {
 			return existing, false, nil
 		}
@@ -194,7 +255,15 @@ func (s *entityStore) FindOrCreate(ctx context.Context, orgID, source, sourceID,
 }
 
 func (s *entityStore) UpdateSnapshot(ctx context.Context, orgID, id, snapshotJSON string) error {
-	_, err := s.q.ExecContext(ctx, `
+	return updateEntitySnapshot(ctx, s.q, orgID, id, snapshotJSON)
+}
+
+func (s *entityStore) UpdateSnapshotSystem(ctx context.Context, orgID, id, snapshotJSON string) error {
+	return updateEntitySnapshot(ctx, s.admin, orgID, id, snapshotJSON)
+}
+
+func updateEntitySnapshot(ctx context.Context, q queryer, orgID, id, snapshotJSON string) error {
+	_, err := q.ExecContext(ctx, `
 		UPDATE entities
 		SET snapshot_json = $1::jsonb, last_polled_at = $2
 		WHERE org_id = $3 AND id = $4
@@ -208,16 +277,40 @@ func (s *entityStore) PatchSnapshot(ctx context.Context, orgID, id, snapshotJSON
 }
 
 func (s *entityStore) UpdateTitle(ctx context.Context, orgID, id, title string) error {
-	_, err := s.q.ExecContext(ctx, `UPDATE entities SET title = $1 WHERE org_id = $2 AND id = $3`, title, orgID, id)
+	return updateEntityTitle(ctx, s.q, orgID, id, title)
+}
+
+func (s *entityStore) UpdateTitleSystem(ctx context.Context, orgID, id, title string) error {
+	return updateEntityTitle(ctx, s.admin, orgID, id, title)
+}
+
+func updateEntityTitle(ctx context.Context, q queryer, orgID, id, title string) error {
+	_, err := q.ExecContext(ctx, `UPDATE entities SET title = $1 WHERE org_id = $2 AND id = $3`, title, orgID, id)
 	return err
 }
 
 func (s *entityStore) UpdateDescription(ctx context.Context, orgID, id, description string) error {
-	_, err := s.q.ExecContext(ctx, `UPDATE entities SET description = $1 WHERE org_id = $2 AND id = $3`, description, orgID, id)
+	return updateEntityDescription(ctx, s.q, orgID, id, description)
+}
+
+func (s *entityStore) UpdateDescriptionSystem(ctx context.Context, orgID, id, description string) error {
+	return updateEntityDescription(ctx, s.admin, orgID, id, description)
+}
+
+func updateEntityDescription(ctx context.Context, q queryer, orgID, id, description string) error {
+	_, err := q.ExecContext(ctx, `UPDATE entities SET description = $1 WHERE org_id = $2 AND id = $3`, description, orgID, id)
 	return err
 }
 
 func (s *entityStore) AssignProject(ctx context.Context, orgID, id string, projectID *string, rationale string) error {
+	return assignEntityProject(ctx, s.q, orgID, id, projectID, rationale)
+}
+
+func (s *entityStore) AssignProjectSystem(ctx context.Context, orgID, id string, projectID *string, rationale string) error {
+	return assignEntityProject(ctx, s.admin, orgID, id, projectID, rationale)
+}
+
+func assignEntityProject(ctx context.Context, q queryer, orgID, id string, projectID *string, rationale string) error {
 	var projectArg any
 	if projectID != nil && *projectID != "" {
 		projectArg = *projectID
@@ -226,7 +319,7 @@ func (s *entityStore) AssignProject(ctx context.Context, orgID, id string, proje
 	if rationale != "" {
 		rationaleArg = rationale
 	}
-	res, err := s.q.ExecContext(ctx, `
+	res, err := q.ExecContext(ctx, `
 		UPDATE entities
 		SET project_id = $1,
 		    classification_rationale = $2,
@@ -242,7 +335,7 @@ func (s *entityStore) AssignProject(ctx context.Context, orgID, id string, proje
 	}
 	if n == 0 {
 		var exists int
-		err := s.q.QueryRowContext(ctx, `SELECT 1 FROM entities WHERE org_id = $1 AND id = $2`, orgID, id).Scan(&exists)
+		err := q.QueryRowContext(ctx, `SELECT 1 FROM entities WHERE org_id = $1 AND id = $2`, orgID, id).Scan(&exists)
 		if err == sql.ErrNoRows {
 			return sql.ErrNoRows
 		}
@@ -254,7 +347,15 @@ func (s *entityStore) AssignProject(ctx context.Context, orgID, id string, proje
 }
 
 func (s *entityStore) MarkClosed(ctx context.Context, orgID, id string) error {
-	_, err := s.q.ExecContext(ctx, `
+	return markEntityClosed(ctx, s.q, orgID, id)
+}
+
+func (s *entityStore) MarkClosedSystem(ctx context.Context, orgID, id string) error {
+	return markEntityClosed(ctx, s.admin, orgID, id)
+}
+
+func markEntityClosed(ctx context.Context, q queryer, orgID, id string) error {
+	_, err := q.ExecContext(ctx, `
 		UPDATE entities SET state = 'closed', closed_at = $1 WHERE org_id = $2 AND id = $3
 	`, time.Now(), orgID, id)
 	return err
@@ -268,7 +369,15 @@ func (s *entityStore) Close(ctx context.Context, orgID, id string) error {
 }
 
 func (s *entityStore) Reactivate(ctx context.Context, orgID, id string) (bool, error) {
-	res, err := s.q.ExecContext(ctx, `
+	return reactivateEntity(ctx, s.q, orgID, id)
+}
+
+func (s *entityStore) ReactivateSystem(ctx context.Context, orgID, id string) (bool, error) {
+	return reactivateEntity(ctx, s.admin, orgID, id)
+}
+
+func reactivateEntity(ctx context.Context, q queryer, orgID, id string) (bool, error) {
+	res, err := q.ExecContext(ctx, `
 		UPDATE entities SET state = 'active', closed_at = NULL WHERE org_id = $1 AND id = $2 AND state = 'closed'
 	`, orgID, id)
 	if err != nil {

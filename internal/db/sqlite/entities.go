@@ -16,9 +16,15 @@ import (
 // ported from the pre-D2 internal/db/entities.go; the only behavioral
 // change is the orgID assertion at each method entry. SQLite tables
 // have no org_id column — local mode is single-tenant by construction.
+//
+// The constructor takes two queryers for signature parity with the
+// Postgres impl (SKY-296), but SQLite has only one connection — both
+// arguments collapse onto the same queryer. The `...System` admin-
+// pool variants therefore run identically to the non-System variants
+// here; the pool distinction is purely a multi-mode concept.
 type entityStore struct{ q queryer }
 
-func newEntityStore(q queryer) db.EntityStore { return &entityStore{q: q} }
+func newEntityStore(q, _ queryer) db.EntityStore { return &entityStore{q: q} }
 
 var _ db.EntityStore = (*entityStore)(nil)
 
@@ -342,6 +348,58 @@ func (s *entityStore) Reactivate(ctx context.Context, orgID, id string) (bool, e
 	}
 	n, _ := res.RowsAffected()
 	return n > 0, nil
+}
+
+// --- Admin-pool (`...System`) variants ---
+//
+// SKY-296 introduces `...System` methods on these stores so multi-mode
+// consumers without JWT-claims context can route through the admin
+// pool. SQLite has one connection and no auth concept, so each System
+// variant just delegates to its non-System counterpart — preserving
+// the same assertLocalOrg gate and behavior.
+
+func (s *entityStore) GetSystem(ctx context.Context, orgID, id string) (*domain.Entity, error) {
+	return s.Get(ctx, orgID, id)
+}
+
+func (s *entityStore) ListActiveSystem(ctx context.Context, orgID, source string) ([]domain.Entity, error) {
+	return s.ListActive(ctx, orgID, source)
+}
+
+func (s *entityStore) ListUnclassifiedSystem(ctx context.Context, orgID string) ([]domain.Entity, error) {
+	return s.ListUnclassified(ctx, orgID)
+}
+
+func (s *entityStore) FindOrCreateSystem(ctx context.Context, orgID, source, sourceID, kind, title, url string) (*domain.Entity, bool, error) {
+	return s.FindOrCreate(ctx, orgID, source, sourceID, kind, title, url)
+}
+
+func (s *entityStore) UpdateSnapshotSystem(ctx context.Context, orgID, id, snapshotJSON string) error {
+	return s.UpdateSnapshot(ctx, orgID, id, snapshotJSON)
+}
+
+func (s *entityStore) UpdateTitleSystem(ctx context.Context, orgID, id, title string) error {
+	return s.UpdateTitle(ctx, orgID, id, title)
+}
+
+func (s *entityStore) UpdateDescriptionSystem(ctx context.Context, orgID, id, description string) error {
+	return s.UpdateDescription(ctx, orgID, id, description)
+}
+
+func (s *entityStore) AssignProjectSystem(ctx context.Context, orgID, id string, projectID *string, rationale string) error {
+	return s.AssignProject(ctx, orgID, id, projectID, rationale)
+}
+
+func (s *entityStore) MarkClosedSystem(ctx context.Context, orgID, id string) error {
+	return s.MarkClosed(ctx, orgID, id)
+}
+
+func (s *entityStore) ReactivateSystem(ctx context.Context, orgID, id string) (bool, error) {
+	return s.Reactivate(ctx, orgID, id)
+}
+
+func (s *entityStore) DescriptionsSystem(ctx context.Context, orgID string, ids []string) (map[string]string, error) {
+	return s.Descriptions(ctx, orgID, ids)
 }
 
 // scanEntityRow / scanEntityFromRows return a fresh domain.Entity per

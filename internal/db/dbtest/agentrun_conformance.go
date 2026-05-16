@@ -568,6 +568,28 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		if got[released] {
 			t.Errorf("released takeover %s leaked — worktree_path filter failed", released)
 		}
+
+		// SKY-296: ListTakenOverIDsSystem (admin pool) returns the
+		// same set as ListTakenOverIDs for the same orgID — the only
+		// difference is which pool runs the SELECT. The startup
+		// worktree-cleanup gate uses the System variant because it
+		// has no JWT-claims context.
+		sysIDs, err := store.ListTakenOverIDsSystem(ctx, orgID)
+		if err != nil {
+			t.Fatalf("ListTakenOverIDsSystem: %v", err)
+		}
+		sysGot := map[string]bool{}
+		for _, id := range sysIDs {
+			sysGot[id] = true
+		}
+		if len(sysGot) != len(got) {
+			t.Errorf("ListTakenOverIDsSystem returned %d ids, ListTakenOverIDs returned %d", len(sysGot), len(got))
+		}
+		for id := range got {
+			if !sysGot[id] {
+				t.Errorf("ListTakenOverIDsSystem missing id %s present in ListTakenOverIDs", id)
+			}
+		}
 	})
 
 	t.Run("EntitiesWithAwaitingInput_EmptyInputFastPath", func(t *testing.T) {

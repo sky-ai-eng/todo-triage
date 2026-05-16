@@ -455,7 +455,15 @@ func (s *agentRunStore) ActiveIDsForTask(ctx context.Context, orgID, taskID stri
 }
 
 func (s *agentRunStore) ListTakenOverIDs(ctx context.Context, orgID string) ([]string, error) {
-	rows, err := s.q.QueryContext(ctx, `
+	return listTakenOverRunIDs(ctx, s.q, orgID)
+}
+
+func (s *agentRunStore) ListTakenOverIDsSystem(ctx context.Context, orgID string) ([]string, error) {
+	return listTakenOverRunIDs(ctx, s.admin, orgID)
+}
+
+func listTakenOverRunIDs(ctx context.Context, q queryer, orgID string) ([]string, error) {
+	rows, err := q.QueryContext(ctx, `
 		SELECT id FROM runs
 		WHERE org_id = $1 AND status = 'taken_over' AND COALESCE(worktree_path, '') != ''
 	`, orgID)

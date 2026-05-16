@@ -2,9 +2,12 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // WithTx runs fn inside a single Postgres transaction against the app
@@ -26,6 +29,45 @@ import (
 // admin-wired stores (db.Stores.Scores in wave 0; more in later
 // waves). WithTx is purely for the request-handler atomicity boundary.
 func (s *Store) WithTx(ctx context.Context, orgID, userID string, fn func(db.TxStores) error) error {
+	return s.runClaimsBoundTx(ctx, orgID, userID, fn)
+}
+
+// SyntheticClaimsWithTx mirrors WithTx for callers that have an
+// authoritative (orgID, userID) identity but no request context —
+// delegate spawner goroutines, curator-message processing, post-
+// terminal handler cleanup, agent CLI subcommands.
+//
+// The Postgres body is identical to WithTx — same role elevation,
+// same JWT-claims setup, same TxStores wiring. The only difference
+// is the *intent* of the call site: WithTx callers extract the pair
+// from request context, SyntheticClaimsWithTx callers construct it
+// from a known row identity (the run's creator_user_id, the curator
+// session's user, etc.). Both run under tf_app, both honor RLS.
+//
+// userID must be a real users row id. Passing
+// runmode.LocalDefaultUserID is rejected — that sentinel has no FK
+// target in the multi-mode users table, and runs.creator_user_id
+// has an FK to users(id). Callers that lack a real user identity
+// (event-triggered runs by schema CHECK, system services) should
+// route through the admin pool via per-store `...System` methods
+// instead. See SKY-296.
+func (s *Store) SyntheticClaimsWithTx(ctx context.Context, orgID, userID string, fn func(db.TxStores) error) error {
+	if userID == runmode.LocalDefaultUserID {
+		return errors.New("postgres: SyntheticClaimsWithTx rejected runmode.LocalDefaultUserID — sentinel has no FK target in multi-mode users; route to admin pool via per-store ...System methods")
+	}
+	if userID == "" {
+		return errors.New("postgres: SyntheticClaimsWithTx requires a non-empty userID; route through admin pool for callers that have no user identity")
+	}
+	return s.runClaimsBoundTx(ctx, orgID, userID, fn)
+}
+
+// runClaimsBoundTx is the shared body between WithTx and
+// SyntheticClaimsWithTx. The only structural difference between the
+// two public entry points is the source of the (orgID, userID) pair
+// (request context vs caller-supplied) plus the SyntheticClaimsWithTx
+// guardrails enforced at the public layer — once we're past those,
+// the SQL is identical.
+func (s *Store) runClaimsBoundTx(ctx context.Context, orgID, userID string, fn func(db.TxStores) error) error {
 	tx, err := s.app.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -56,7 +98,20 @@ func (s *Store) WithTx(ctx context.Context, orgID, userID string, fn func(db.TxS
 		return err
 	}
 
-	txStores := db.TxStores{
+	if err := fn(s.txStoresFromTx(tx)); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// txStoresFromTx returns the TxStores bundle wired against a single
+// *sql.Tx. Shared between the WithTx and SyntheticClaimsWithTx code
+// paths so wiring drift is impossible: both entrypoints get the
+// exact same set of tx-bound stores, with the same admin-pool
+// retention for AgentRuns (event-triggered Create routes around RLS
+// even from inside a claims-set tx — see the Create comment).
+func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
+	return db.TxStores{
 		Scores:        newScoreStore(tx),
 		Prompts:       newTxPromptStore(tx),
 		Swipes:        newSwipeStore(tx),
@@ -66,7 +121,7 @@ func (s *Store) WithTx(ctx context.Context, orgID, userID string, fn func(db.TxS
 		Chains:        newChainStore(tx),
 		Agents:        newTxAgentStore(tx),
 		TeamAgents:    newTxTeamAgentStore(tx),
-		Users:         newUsersStore(tx),
+		Users:         newUsersStore(tx, tx),
 		Tasks:         newTaskStore(tx),
 		Factory:       newFactoryReadStore(tx),
 		// AgentRuns: composed half is tx; admin half stays the
@@ -75,15 +130,11 @@ func (s *Store) WithTx(ctx context.Context, orgID, userID string, fn func(db.TxS
 		// the outer tx — see Create's pool-routing comment for
 		// why that's the intended semantics.
 		AgentRuns:      newAgentRunStore(tx, s.admin),
-		Entities:       newEntityStore(tx),
+		Entities:       newEntityStore(tx, tx),
 		Reviews:        newReviewStore(tx),
 		PendingPRs:     newPendingPRStore(tx),
-		Repos:          newRepoStore(tx),
+		Repos:          newRepoStore(tx, tx),
 		PendingFirings: newPendingFiringsStore(tx),
 		Projects:       newProjectStore(tx),
 	}
-	if err := fn(txStores); err != nil {
-		return err
-	}
-	return tx.Commit()
 }

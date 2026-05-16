@@ -54,10 +54,18 @@ const pgAgentColumns = `id, display_name, default_model, default_autonomy_suitab
        created_at, updated_at`
 
 func (s *agentStore) GetForOrg(ctx context.Context, orgID string) (*domain.Agent, error) {
+	return getAgentForOrg(ctx, s.app, orgID)
+}
+
+func (s *agentStore) GetForOrgSystem(ctx context.Context, orgID string) (*domain.Agent, error) {
+	return getAgentForOrg(ctx, s.admin, orgID)
+}
+
+func getAgentForOrg(ctx context.Context, q queryer, orgID string) (*domain.Agent, error) {
 	if !isValidUUID(orgID) {
 		return nil, nil
 	}
-	row := s.app.QueryRowContext(ctx, `
+	row := q.QueryRowContext(ctx, `
 		SELECT `+pgAgentColumns+`
 		FROM agents
 		WHERE org_id = $1

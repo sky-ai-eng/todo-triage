@@ -84,4 +84,18 @@ type RepoStore interface {
 	// (configured-repos-only invariant — clone hooks fire after
 	// repo selection).
 	UpdateCloneStatus(ctx context.Context, orgID, owner, repo, status, errMsg, errKind string) error
+
+	// --- Admin-pool variants (`...System`) ---
+	//
+	// Same SKY-296 pattern as EntityStore: routed through the admin
+	// pool in Postgres for system-service callers that have no JWT
+	// claims in scope. Consumers are the poller bootstrap (reads
+	// every configured repo for every org at server boot) and the
+	// startup clone-status writes (records EnsureBareClone outcomes
+	// before any request can have arrived). Behavior is identical
+	// to the non-System variants — same SQL, same return shape.
+
+	ListSystem(ctx context.Context, orgID string) ([]domain.RepoProfile, error)
+	ListConfiguredNamesSystem(ctx context.Context, orgID string) ([]string, error)
+	UpdateCloneStatusSystem(ctx context.Context, orgID, owner, repo, status, errMsg, errKind string) error
 }

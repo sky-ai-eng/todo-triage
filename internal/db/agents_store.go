@@ -85,6 +85,13 @@ type AgentStore interface {
 	// userID is always "" because there's no users table) and by
 	// multi-mode small-org fallback. Admin-only in Postgres.
 	SetGitHubPATUser(ctx context.Context, orgID, agentID, userID string) error
+
+	// GetForOrgSystem mirrors GetForOrg but routes through the admin
+	// pool in Postgres. The single consumer is the startup
+	// BootstrapLocalAgent path, which materializes the org's agent
+	// row before any JWT-claims context could exist. Same SKY-296
+	// admin/app split convention as the other stores in this wave.
+	GetForOrgSystem(ctx context.Context, orgID string) (*domain.Agent, error)
 }
 
 // bootstrapAgentNamespace is the fixed UUID v4 used as the seed

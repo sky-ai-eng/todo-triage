@@ -24,15 +24,23 @@ import (
 // in-depth check (the sentinel rows must exist + match the runmode
 // constants); per-method entries don't need it because the org_id
 // column physically constrains writes/reads to the one synthetic org.
+// agentStore — SQLite impl. The constructor accepts two queryers for
+// signature parity with the Postgres impl (SKY-296); SQLite has one
+// connection so both collapse to the same queryer. The
+// `...System` variants delegate to their non-System counterparts.
 type agentStore struct{ q queryer }
 
-func newAgentStore(q queryer) db.AgentStore { return &agentStore{q: q} }
+func newAgentStore(q, _ queryer) db.AgentStore { return &agentStore{q: q} }
 
 var _ db.AgentStore = (*agentStore)(nil)
 
 const sqliteAgentColumns = `id, display_name, default_model, default_autonomy_suitability,
        github_app_installation_id, github_pat_user_id, jira_service_account_id,
        created_at, updated_at`
+
+func (s *agentStore) GetForOrgSystem(ctx context.Context, orgID string) (*domain.Agent, error) {
+	return s.GetForOrg(ctx, orgID)
+}
 
 func (s *agentStore) GetForOrg(ctx context.Context, orgID string) (*domain.Agent, error) {
 	row := s.q.QueryRowContext(ctx, `

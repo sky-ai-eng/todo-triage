@@ -181,8 +181,27 @@ type TxStores struct {
 // Callers always pass orgID + userID explicitly — D7 will replace
 // the explicit pass with extraction from a request-scoped context,
 // but the WithTx shape stays the same.
+//
+// SyntheticClaimsWithTx mirrors WithTx for callers that have an
+// authoritative (orgID, userID) identity but no request context —
+// delegate-spawner goroutines, curator-message processing, post-
+// terminal handler cleanup, agent CLI subcommands. The only
+// structural difference from WithTx is the source of the claims
+// values: request context vs caller-supplied. The Postgres impl
+// shares its body with WithTx via a private helper; the SQLite
+// impl asserts orgID == runmode.LocalDefaultOrg and ignores
+// userID (no auth concept in local mode).
+//
+// userID is required and must reference a real users row in
+// Postgres — runs.creator_user_id has an FK to users(id). Callers
+// that don't have a real user (event-triggered run completion,
+// system services) should route to admin pool via the per-store
+// `...System` methods instead. Passing runmode.LocalDefaultUserID
+// in production multi-mode is rejected with a clear error because
+// that sentinel has no FK target in the multi-mode users table.
 type TxRunner interface {
 	WithTx(ctx context.Context, orgID, userID string, fn func(TxStores) error) error
+	SyntheticClaimsWithTx(ctx context.Context, orgID, userID string, fn func(TxStores) error) error
 }
 
 // ErrNotApplicableInLocal is returned by SQLite impls of multi-only
