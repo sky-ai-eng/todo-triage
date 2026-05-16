@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -21,7 +20,7 @@ func seedYieldedRun(t *testing.T, s *Server, req *domain.YieldRequest) string {
 		t.Fatalf("entity: %v", err)
 	}
 	eid := entity.ID
-	eventID, err := db.RecordEvent(s.db, domain.Event{EntityID: &eid, EventType: domain.EventGitHubPRCICheckFailed})
+	eventID, err := s.events.Record(context.Background(), runmode.LocalDefaultOrg, domain.Event{EntityID: &eid, EventType: domain.EventGitHubPRCICheckFailed})
 	if err != nil {
 		t.Fatalf("event: %v", err)
 	}

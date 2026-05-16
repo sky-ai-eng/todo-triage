@@ -165,7 +165,14 @@ func New(admin, app *sql.DB) db.Stores {
 		// by visibility + team membership; admin bypasses RLS, and
 		// org_id stays in every WHERE clause as defense in depth.
 		Projects: newProjectStore(app, admin),
-		Tx:       s,
+		// Events wires both pools (SKY-305): app for request-handler
+		// equivalents (stock carry-over, factory drag-to-delegate) and
+		// admin for background goroutines without JWT-claims context
+		// (router RecordSystem + re-derive, delegate post-run metadata
+		// enrichment). events_all RLS gates the app side; admin
+		// bypasses, org_id is bound everywhere as defense in depth.
+		Events: newEventStore(app, admin),
+		Tx:     s,
 	}
 	return s.stores
 }
@@ -219,5 +226,6 @@ func NewForTx(tx *sql.Tx) db.TxStores {
 		PendingPRs:     newPendingPRStore(tx),
 		PendingFirings: newPendingFiringsStore(tx),
 		Projects:       newProjectStore(tx, tx),
+		Events:         newEventStore(tx, tx),
 	}
 }

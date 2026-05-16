@@ -50,6 +50,15 @@ func (s *Store) runTx(ctx context.Context, orgID, userID string, fn func(db.TxSt
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// pending accumulates SetOnEventRecorded fires for events
+	// recorded inside this tx, drained after Commit returns nil.
+	// SQLite has one connection so both Record and RecordSystem
+	// route through the same tx — both halves of the tx-bound
+	// store share this buffer, and a rollback drops all queued
+	// hook fires so LifetimeDistinctCounter never observes events
+	// the DB never persisted.
+	pending := db.NewPendingEventHooks()
+
 	users := newUsersStore(tx, tx)
 	txStores := db.TxStores{
 		Scores:         newScoreStore(tx),
@@ -71,9 +80,14 @@ func (s *Store) runTx(ctx context.Context, orgID, userID string, fn func(db.TxSt
 		Repos:          newRepoStore(tx, tx),
 		PendingFirings: newPendingFiringsStore(tx),
 		Projects:       newProjectStore(tx, tx),
+		Events:         newTxEventStore(tx, tx, pending.Add, pending.Add),
 	}
 	if err := fn(txStores); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	pending.Fire()
+	return nil
 }

@@ -45,7 +45,7 @@ func seedFooterRun(t *testing.T, database *sql.DB, fix runFooterFixture) {
 	if err != nil {
 		t.Fatalf("entity: %v", err)
 	}
-	evt, err := db.RecordEvent(database, domain.Event{
+	evt, err := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrg, domain.Event{
 		EventType:    domain.EventGitHubPRCICheckFailed,
 		EntityID:     &entity.ID,
 		MetadataJSON: `{}`,

@@ -10,7 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -35,7 +34,7 @@ func TestHandleFactoryDelegate_ServiceUnavailableWithoutSpawner(t *testing.T) {
 		t.Fatalf("seed entity: %v", err)
 	}
 	eid := entity.ID
-	if _, err := db.RecordEvent(s.db, domain.Event{
+	if _, err := s.events.Record(context.Background(), runmode.LocalDefaultOrg, domain.Event{
 		EntityID:  &eid,
 		EventType: domain.EventGitHubPRCICheckPassed,
 	}); err != nil {
@@ -104,7 +103,7 @@ func TestHandleFactoryDelegate_409OnClosedEntity(t *testing.T) {
 		t.Fatalf("close entity: %v", err)
 	}
 	eid := entity.ID
-	if _, err := db.RecordEvent(s.db, domain.Event{
+	if _, err := s.events.Record(context.Background(), runmode.LocalDefaultOrg, domain.Event{
 		EntityID:  &eid,
 		EventType: domain.EventGitHubPRMerged,
 	}); err != nil {
@@ -162,14 +161,14 @@ func TestHandleFactoryDelegate_400OnMalformedJSON(t *testing.T) {
 // success (claim committed, run didn't fire).
 func TestHandleFactoryDelegate_DelegateErrorPreservesClaim(t *testing.T) {
 	s := newTestServer(t)
-	s.SetSpawner(delegate.NewSpawner(s.db, s.prompts, nil, s.chains, s.tasks, s.agentRuns, s.entities, s.reviews, s.pendingPRs, nil, websocket.NewHub(), "haiku"))
+	s.SetSpawner(delegate.NewSpawner(s.db, s.prompts, nil, s.chains, s.tasks, s.agentRuns, s.entities, s.reviews, s.pendingPRs, s.events, nil, websocket.NewHub(), "haiku"))
 
 	entity, _, err := sqlitestore.New(s.db).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#400p", "pr", "", "")
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
 	eid := entity.ID
-	if _, err := db.RecordEvent(s.db, domain.Event{
+	if _, err := s.events.Record(context.Background(), runmode.LocalDefaultOrg, domain.Event{
 		EntityID:  &eid,
 		EventType: domain.EventGitHubPRCICheckPassed,
 	}); err != nil {
@@ -249,7 +248,7 @@ func TestHandleFactoryDelegate_DelegateErrorPreservesClaim(t *testing.T) {
 // the factory drop UI.
 func TestHandleFactoryDelegate_RefusedWhenBotDisabled(t *testing.T) {
 	s := newTestServer(t)
-	s.SetSpawner(delegate.NewSpawner(s.db, s.prompts, nil, nil, s.tasks, s.agentRuns, s.entities, s.reviews, s.pendingPRs, nil, websocket.NewHub(), "haiku"))
+	s.SetSpawner(delegate.NewSpawner(s.db, s.prompts, nil, nil, s.tasks, s.agentRuns, s.entities, s.reviews, s.pendingPRs, s.events, nil, websocket.NewHub(), "haiku"))
 
 	// Flip the bot OFF on the local team. Production path is
 	// team_agents.SetEnabled via a team-admin gesture; direct
@@ -269,7 +268,7 @@ func TestHandleFactoryDelegate_RefusedWhenBotDisabled(t *testing.T) {
 		t.Fatalf("seed entity: %v", err)
 	}
 	eid := entity.ID
-	if _, err := db.RecordEvent(s.db, domain.Event{
+	if _, err := s.events.Record(context.Background(), runmode.LocalDefaultOrg, domain.Event{
 		EntityID:  &eid,
 		EventType: domain.EventGitHubPRCICheckPassed,
 	}); err != nil {
@@ -333,7 +332,7 @@ func TestHandleFactoryDelegate_PendingTasksRoundtrip(t *testing.T) {
 		t.Fatalf("seed entity: %v", err)
 	}
 	eid := entity.ID
-	evtID, err := db.RecordEvent(s.db, domain.Event{
+	evtID, err := s.events.Record(context.Background(), runmode.LocalDefaultOrg, domain.Event{
 		EntityID:  &eid,
 		EventType: domain.EventGitHubPRCICheckPassed,
 	})

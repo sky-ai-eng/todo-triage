@@ -143,7 +143,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	// just leaves event-derived placeholders empty. FKs guarantee the
 	// event exists, so a real miss would be a DB-level problem we want
 	// to log and continue through rather than aborting the run.
-	metadataJSON, err := db.GetEventMetadata(s.database, task.PrimaryEventID)
+	metadataJSON, err := s.events.GetMetadataSystem(context.Background(), runmode.LocalDefaultOrgID, task.PrimaryEventID)
 	if err != nil {
 		log.Printf("[delegate] warning: failed to load event metadata for task %s (event %s): %v — event placeholders will render empty", task.ID, task.PrimaryEventID, err)
 		metadataJSON = ""

@@ -98,10 +98,23 @@ func (s *Store) runClaimsBoundTx(ctx context.Context, orgID, userID string, fn f
 		return err
 	}
 
-	if err := fn(s.txStoresFromTx(tx)); err != nil {
+	// pending accumulates SetOnEventRecorded fires for events
+	// recorded inside this tx's app-pool path. Fired post-commit
+	// (below) so a rolled-back outer fn never inflates the
+	// LifetimeDistinctCounter with a row the DB never persisted.
+	// RecordSystem inside WithTx routes to s.admin (autonomous
+	// pool, commits independent of this tx) — its hook fires
+	// immediately on a successful INSERT, so we pass nil for the
+	// admin-side pending below.
+	pending := db.NewPendingEventHooks()
+	if err := fn(s.txStoresFromTx(tx, pending)); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	pending.Fire()
+	return nil
 }
 
 // txStoresFromTx returns the TxStores bundle wired against a single
@@ -110,7 +123,7 @@ func (s *Store) runClaimsBoundTx(ctx context.Context, orgID, userID string, fn f
 // exact same set of tx-bound stores, with the same admin-pool
 // retention for AgentRuns (event-triggered Create routes around RLS
 // even from inside a claims-set tx — see the Create comment).
-func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
+func (s *Store) txStoresFromTx(tx *sql.Tx, pending *db.PendingEventHooks) db.TxStores {
 	return db.TxStores{
 		Scores:        newScoreStore(tx),
 		Prompts:       newTxPromptStore(tx),
@@ -140,5 +153,12 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// half pinned to s.admin lets the classifier read each org's
 		// project set even when composed inside a claims-set tx.
 		Projects: newProjectStore(tx, s.admin),
+		// Events: app-side write defers hook firing via pending.Add
+		// (drained post-commit by runClaimsBoundTx). Admin half
+		// stays pinned to the real admin pool so RecordSystem /
+		// GetMetadataSystem inside WithTx routes outside the tx —
+		// those writes commit autonomously and fire their hook
+		// immediately via db.NotifyEventRecorded.
+		Events: newTxEventStore(tx, s.admin, pending.Add, db.NotifyEventRecorded),
 	}
 }

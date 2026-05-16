@@ -134,6 +134,14 @@ type Stores struct {
 	// projectbundle import/export paths.
 	Projects ProjectStore
 
+	// Events owns the events audit log — append-only event rows the
+	// router records and the factory/delegate paths read. Holds both
+	// pools (SKY-305): app for request-handler equivalents (stock
+	// carry-over, factory drag-to-delegate) and admin for background
+	// goroutines without JWT-claims context (router RecordSystem +
+	// re-derive, delegate post-run metadata enrichment).
+	Events EventStore
+
 	// Tx is the transaction runner — handlers that need atomic
 	// multi-store writes call Tx.WithTx and receive a TxStores with
 	// every field tx-bound. Postgres impl also sets the JWT claims
@@ -166,6 +174,7 @@ type TxStores struct {
 	Repos          RepoStore
 	PendingFirings PendingFiringsStore
 	Projects       ProjectStore
+	Events         EventStore
 }
 
 // TxRunner runs fn inside a single database transaction. Postgres

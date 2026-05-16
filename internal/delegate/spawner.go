@@ -49,6 +49,7 @@ type Spawner struct {
 	entities   db.EntityStore    // SKY-284: entity reads for project lookup + resume context
 	reviews    db.ReviewStore    // SKY-286: pending review cleanup on discard / cancel paths
 	pendingPRs db.PendingPRStore // SKY-287: pending PR lookup on processCompletion / cleanup paths
+	events     db.EventStore     // SKY-305: admin-pool GetMetadataSystem for post-run prompt building
 	wsHub      *websocket.Hub
 
 	mu                    sync.Mutex
@@ -64,7 +65,7 @@ type Spawner struct {
 	agentToolsCache string
 }
 
-func NewSpawner(database *sql.DB, prompts db.PromptStore, agents db.AgentStore, chains db.ChainStore, tasks db.TaskStore, agentRuns db.AgentRunStore, entities db.EntityStore, reviews db.ReviewStore, pendingPRs db.PendingPRStore, ghClient *ghclient.Client, wsHub *websocket.Hub, model string) *Spawner {
+func NewSpawner(database *sql.DB, prompts db.PromptStore, agents db.AgentStore, chains db.ChainStore, tasks db.TaskStore, agentRuns db.AgentRunStore, entities db.EntityStore, reviews db.ReviewStore, pendingPRs db.PendingPRStore, events db.EventStore, ghClient *ghclient.Client, wsHub *websocket.Hub, model string) *Spawner {
 	return &Spawner{
 		database:    database,
 		prompts:     prompts,
@@ -75,6 +76,7 @@ func NewSpawner(database *sql.DB, prompts db.PromptStore, agents db.AgentStore, 
 		entities:    entities,
 		reviews:     reviews,
 		pendingPRs:  pendingPRs,
+		events:      events,
 		ghClient:    ghClient,
 		wsHub:       wsHub,
 		model:       model,

@@ -13,14 +13,7 @@ import (
 func seedJiraRun(t *testing.T, database *sql.DB, runID string) {
 	t.Helper()
 	entity := createEntityForTest(t, database, "jira", "SKY-"+runID, "issue", "T-"+runID, "https://x/"+runID)
-	evt, err := RecordEvent(database, domain.Event{
-		EventType:    domain.EventJiraIssueAssigned,
-		EntityID:     &entity.ID,
-		MetadataJSON: `{}`,
-	})
-	if err != nil {
-		t.Fatalf("event: %v", err)
-	}
+	evt := recordEvent(t, database, entity.ID, domain.EventJiraIssueAssigned)
 	task := seedTaskForTest(t, database, entity.ID, domain.EventJiraIssueAssigned, runID, evt)
 	createPromptForTest(t, database, domain.Prompt{ID: "p-" + runID, Name: "T", Body: "x", Source: "user"})
 	if err := createRunForTest(t, database, domain.AgentRun{
