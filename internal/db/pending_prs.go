@@ -132,4 +132,13 @@ type PendingPRStore interface {
 	// that already calls ReviewStore.DeleteByRunID. No-op on a run
 	// with no pending PR; safe to call unconditionally.
 	DeleteByRunID(ctx context.Context, orgID, runID string) error
+
+	// ByRunIDSystem mirrors ByRunID but routes through the admin
+	// pool in Postgres. The delegate spawner's processCompletion
+	// reads the pending PR attached to a run from a goroutine that
+	// has detached from any request context, so it has no
+	// JWT-claims in scope. Behavior matches the non-System variant;
+	// the only difference is which Postgres pool the statement runs
+	// on; SQLite has one connection and the two variants collapse.
+	ByRunIDSystem(ctx context.Context, orgID, runID string) (*domain.PendingPR, error)
 }

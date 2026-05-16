@@ -123,4 +123,13 @@ type ReviewStore interface {
 	// transcript renderer to detect inline-comment IDs that the
 	// agent emits. Returns false on errors (best-effort).
 	IsCommentID(ctx context.Context, orgID, commentID string) bool
+
+	// ByRunIDSystem mirrors ByRunID but routes through the admin
+	// pool in Postgres. The delegate spawner's processCompletion
+	// reads the pending review attached to a run from a goroutine
+	// that has detached from any request context, so it has no
+	// JWT-claims in scope. Behavior matches the non-System variant;
+	// the only difference is which Postgres pool the statement runs
+	// on; SQLite has one connection and the two variants collapse.
+	ByRunIDSystem(ctx context.Context, orgID, runID string) (*domain.PendingReview, error)
 }

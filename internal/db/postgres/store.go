@@ -78,10 +78,14 @@ func New(admin, app *sql.DB) db.Stores {
 		// app — same pool-split pattern PromptStore + the predecessor
 		// stores used.
 		EventHandlers: newEventHandlerStore(app, admin),
-		// Chains has no admin/app split — chain rows are user-created,
-		// no boot-time seed needs to bypass RLS. All methods run on the
-		// app pool; RLS enforces the creator predicate on chain_runs.
-		Chains: newChainStore(app),
+		// Chains wires both pools. CreateRun routes internally on
+		// trigger_type (event → admin with NULL creator, manual → app
+		// with COALESCE fallback), mirroring AgentRunStore.Create. The
+		// `...System` variants on the read/write methods (ListSteps,
+		// MarkRunStatus, RunsForChain, InsertVerdict, GetLatestVerdict)
+		// give the chain orchestrator goroutine an admin-pool route
+		// for its detached-context work.
+		Chains: newChainStore(app, admin),
 		// Agents.Create routes through admin (bootstrap has no JWT
 		// claims and the agents_insert policy gates on
 		// tf.user_is_org_admin); every other method on app. Same
@@ -130,19 +134,24 @@ func New(admin, app *sql.DB) db.Stores {
 		// RLS, and org_id stays in every WHERE clause as defense
 		// in depth.
 		Entities: newEntityStore(app, admin),
-		// Reviews wires app — every consumer is request-equivalent
-		// (reviews handler, swipe-dismiss, agent submit-review via
-		// cmd/exec/gh) or runs in a spawner goroutine launched from
-		// a request handler. RLS policies pending_reviews_all +
-		// pending_review_comments_all gate every statement.
-		Reviews: newReviewStore(app),
-		// PendingPRs wires app — same shape as Reviews: every
-		// consumer is request-equivalent (pending_prs handler,
-		// swipe-dismiss cleanup, agent gh-create-pr tool via
-		// cmd/exec, spawner goroutine launched from a request
-		// handler). RLS policy pending_prs_all gates statements via
-		// the runs subquery; org_id defense-in-depth fires alongside.
-		PendingPRs: newPendingPRStore(app),
+		// Reviews wires both pools: app for request-equivalent
+		// consumers (reviews handler, swipe-dismiss, agent submit-
+		// review via cmd/exec/gh), admin for ByRunIDSystem — the
+		// delegate spawner's processCompletion reads pending reviews
+		// from a goroutine that has detached from the request
+		// context. RLS policies pending_reviews_all +
+		// pending_review_comments_all gate the app side; admin
+		// bypasses RLS, and org_id stays in every WHERE clause as
+		// defense in depth.
+		Reviews: newReviewStore(app, admin),
+		// PendingPRs wires both pools: app for request-equivalent
+		// consumers (pending_prs handler, swipe-dismiss cleanup,
+		// agent gh-create-pr tool via cmd/exec), admin for
+		// ByRunIDSystem — same goroutine-detached read path as
+		// ReviewStore.ByRunIDSystem. RLS policy pending_prs_all gates
+		// the app side via the runs subquery; admin bypasses RLS,
+		// and org_id stays in every WHERE clause as defense in depth.
+		PendingPRs: newPendingPRStore(app, admin),
 		// Repos wires both pools (SKY-296): app for request-
 		// equivalent consumers (repos/settings/projects handlers,
 		// curator) and admin for the `...System` variants the
@@ -217,7 +226,7 @@ func NewForTx(tx *sql.Tx) db.TxStores {
 		Dashboard:     newDashboardStore(tx),
 		Secrets:       newSecretStore(tx),
 		EventHandlers: newTxEventHandlerStore(tx),
-		Chains:        newChainStore(tx),
+		Chains:        newChainStore(tx, tx),
 		Agents:        newTxAgentStore(tx),
 		TeamAgents:    newTxTeamAgentStore(tx),
 		Users:         newUsersStore(tx, tx),
@@ -232,8 +241,8 @@ func NewForTx(tx *sql.Tx) db.TxStores {
 		AgentRuns:      newAgentRunStore(tx, tx),
 		Entities:       newEntityStore(tx, tx),
 		Repos:          newRepoStore(tx, tx),
-		Reviews:        newReviewStore(tx),
-		PendingPRs:     newPendingPRStore(tx),
+		Reviews:        newReviewStore(tx, tx),
+		PendingPRs:     newPendingPRStore(tx, tx),
 		PendingFirings: newPendingFiringsStore(tx),
 		Projects:       newProjectStore(tx, tx),
 		Events:         newEventStore(tx, tx),

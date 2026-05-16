@@ -203,6 +203,37 @@ type AgentRunStore interface {
 	// endpoint to validate that a submitted response matches the
 	// open request's type.
 	LatestYieldRequest(ctx context.Context, orgID, runID string) (*domain.YieldRequest, error)
+
+	// --- Admin-pool variants (`...System`) ---
+	//
+	// These mirror the per-method shape of the corresponding
+	// app-pool methods but route through the admin pool (BYPASSRLS)
+	// in Postgres. They exist for the delegate spawner goroutines —
+	// the run-lifecycle, transcript-streaming, and post-terminal
+	// bookkeeping paths that start from a request handler but
+	// continue on detached contexts with no JWT-claims in scope.
+	//
+	// Behavior contract is identical to the non-System variants:
+	// org_id stays in every WHERE clause as defense in depth, return
+	// shapes are identical. The only difference is which Postgres
+	// pool the statement runs on; SQLite has one connection and the
+	// two variants collapse.
+	//
+	// Create has no System counterpart — it routes internally on
+	// trigger_type so event-triggered runs land on the admin pool
+	// and manual runs on the app pool. MarkTakenOver also has no
+	// System variant: takeover is always user-initiated, so its
+	// path goes through synthetic-claims rather than the admin pool.
+	GetSystem(ctx context.Context, orgID, runID string) (*domain.AgentRun, error)
+	CompleteSystem(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary string) error
+	AddPartialTotalsSystem(ctx context.Context, orgID, runID string, costUSD float64, durationMs, numTurns int) error
+	MarkAwaitingInputSystem(ctx context.Context, orgID, runID string) (bool, error)
+	MarkResumingSystem(ctx context.Context, orgID, runID string) (bool, error)
+	SetSessionSystem(ctx context.Context, orgID, runID, sessionID string) error
+	MarkReleasedSystem(ctx context.Context, orgID, runID string) (bool, error)
+	MarkCancelledIfActiveSystem(ctx context.Context, orgID, runID, stopReason, summary string) (bool, error)
+	InsertMessageSystem(ctx context.Context, orgID string, msg *domain.AgentMessage) (int64, error)
+	InsertYieldRequestSystem(ctx context.Context, orgID, runID string, req *domain.YieldRequest) (*domain.AgentMessage, error)
 }
 
 // run_messages subtypes used by the SKY-139 yield-resume flow.

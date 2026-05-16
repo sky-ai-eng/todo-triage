@@ -16,9 +16,14 @@ import (
 )
 
 // chainStore is the SQLite impl of db.ChainStore.
+//
+// The constructor takes two queryers for signature parity with the
+// Postgres impl's (app, admin) split. SQLite has one connection so
+// the second arg is discarded; `...System` admin-pool variants are
+// thin wrappers around their non-System counterparts.
 type chainStore struct{ q queryer }
 
-func newChainStore(q queryer) db.ChainStore { return &chainStore{q: q} }
+func newChainStore(q, _ queryer) db.ChainStore { return &chainStore{q: q} }
 
 var _ db.ChainStore = (*chainStore)(nil)
 
@@ -395,4 +400,32 @@ func (s *chainStore) LatestVerdictsForRuns(ctx context.Context, orgID string, ru
 		out[runID] = &v
 	}
 	return out, rows.Err()
+}
+
+// --- Admin-pool variants ---
+//
+// All `...System` methods below delegate straight through to their
+// non-System counterparts. SQLite has one connection so the pool
+// distinction doesn't exist; the wrappers are kept for signature
+// parity with Postgres. The chain orchestrator goroutine consumes
+// these from its detached-context lifecycle.
+
+func (s *chainStore) ListStepsSystem(ctx context.Context, orgID, chainPromptID string) ([]domain.ChainStep, error) {
+	return s.ListSteps(ctx, orgID, chainPromptID)
+}
+
+func (s *chainStore) MarkRunStatusSystem(ctx context.Context, orgID, id string, status domain.ChainRunStatus, abortReason string, abortedAtStep *int) (bool, error) {
+	return s.MarkRunStatus(ctx, orgID, id, status, abortReason, abortedAtStep)
+}
+
+func (s *chainStore) RunsForChainSystem(ctx context.Context, orgID, chainRunID string) ([]domain.AgentRun, error) {
+	return s.RunsForChain(ctx, orgID, chainRunID)
+}
+
+func (s *chainStore) InsertVerdictSystem(ctx context.Context, orgID, runID, metadataJSON string) error {
+	return s.InsertVerdict(ctx, orgID, runID, metadataJSON)
+}
+
+func (s *chainStore) GetLatestVerdictSystem(ctx context.Context, orgID, runID string) (*domain.ChainVerdict, error) {
+	return s.GetLatestVerdict(ctx, orgID, runID)
 }

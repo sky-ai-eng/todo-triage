@@ -15,7 +15,25 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// chainStore is the Postgres impl of db.ChainStore.
+// chainStore is the Postgres impl of db.ChainStore. Holds two pools:
+//
+//   - app: app pool (tf_app, RLS-active). Every request-equivalent
+//     consumer (chains handler, pending_prs / reviews handlers,
+//     user-initiated chain lifecycle entry points like CancelChain
+//     and the ResumeChainAfter* paths) runs here.
+//
+//   - admin: admin pool (supabase_admin, BYPASSRLS). The chain
+//     orchestrator goroutine — delegateChain / runChain /
+//     terminateChain — detaches from the kicking-off handler's
+//     context the moment it spawns, so it has no JWT-claims in
+//     scope and routes through admin via the `...System` variants.
+//     org_id stays in the WHERE clause as defense in depth.
+//
+// CreateRun routes internally on ChainRun.TriggerType, mirroring
+// the AgentRunStore.Create pattern: event-triggered chains land on
+// the admin pool with NULL creator_user_id, manual chains on the
+// app pool with COALESCE fallback. There is no separate
+// CreateRunSystem.
 //
 // org_id is threaded through every WHERE for defense in depth; RLS
 // enforces the creator predicate on chain_runs and prompt_chain_steps
@@ -25,18 +43,27 @@ import (
 // inputs with isValidUUID and treat non-UUID strings as not-found —
 // otherwise Postgres surfaces 22P02 at the column-type layer, which
 // doesn't match the SQLite TEXT-keyed semantics callers expect.
-//
-// No admin/app pool split: every method runs on the app pool. There's
-// no boot-time seed (chain rows are user-created), so the claims-less
-// write path other stores need doesn't apply.
-type chainStore struct{ app queryer }
+type chainStore struct {
+	app   queryer
+	admin queryer
+}
 
-func newChainStore(app queryer) db.ChainStore { return &chainStore{app: app} }
+func newChainStore(app, admin queryer) db.ChainStore {
+	return &chainStore{app: app, admin: admin}
+}
 
 var _ db.ChainStore = (*chainStore)(nil)
 
 func (s *chainStore) ListSteps(ctx context.Context, orgID, chainPromptID string) ([]domain.ChainStep, error) {
-	rows, err := s.app.QueryContext(ctx, `
+	return listChainSteps(ctx, s.app, orgID, chainPromptID)
+}
+
+func (s *chainStore) ListStepsSystem(ctx context.Context, orgID, chainPromptID string) ([]domain.ChainStep, error) {
+	return listChainSteps(ctx, s.admin, orgID, chainPromptID)
+}
+
+func listChainSteps(ctx context.Context, q queryer, orgID, chainPromptID string) ([]domain.ChainStep, error) {
+	rows, err := q.QueryContext(ctx, `
 		SELECT chain_prompt_id, step_index, step_prompt_id, brief, created_at
 		FROM prompt_chain_steps
 		WHERE org_id = $1 AND chain_prompt_id = $2
@@ -95,6 +122,31 @@ func (s *chainStore) ReplaceSteps(ctx context.Context, orgID, chainPromptID stri
 	})
 }
 
+// CreateRun routes internally on cr.TriggerType, mirroring the
+// AgentRunStore.Create pattern:
+//
+//   - trigger_type='event' lands on the admin pool with
+//     creator_user_id NULL. The chain_runs_creator_matches_trigger_type
+//     CHECK pairs that nullability with trigger_type. The RLS policy
+//     chain_runs_modify gates app-pool inserts on
+//     creator_user_id = tf.current_user_id(), which is mutually
+//     exclusive with creator NULL — admin pool (BYPASSRLS) is the
+//     only path that can satisfy the CHECK.
+//
+//   - trigger_type='manual' lands on the app pool with
+//     COALESCE(tf.current_user_id(), orgs.owner_user_id) so the
+//     audit row carries the JWT-bound caller in production and
+//     falls back to the org owner in admin-pooled tests where no
+//     JWT is set.
+//
+// Both paths commit autonomously from any outer WithTx the caller
+// is composed inside — admin is a separate connection. No caller
+// composes this method under WithTx today; document the edge here.
+//
+// The SQL is split because Postgres needs USAGE on schema `tf` to
+// plan a reference to `tf.current_user_id()`, and the admin role
+// (supabase_admin) running the event-triggered insert shouldn't
+// need to touch `tf` at all.
 func (s *chainStore) CreateRun(ctx context.Context, orgID string, cr domain.ChainRun) (string, error) {
 	if cr.ID == "" {
 		cr.ID = uuid.New().String()
@@ -105,6 +157,13 @@ func (s *chainStore) CreateRun(ctx context.Context, orgID string, cr domain.Chai
 	if cr.TriggerType == "" {
 		return "", errors.New("chain run trigger type required")
 	}
+	if cr.TriggerType == domain.ChainTriggerEvent {
+		return s.createRunEventTriggered(ctx, orgID, cr)
+	}
+	return s.createRunManual(ctx, orgID, cr)
+}
+
+func (s *chainStore) createRunEventTriggered(ctx context.Context, orgID string, cr domain.ChainRun) (string, error) {
 	var triggerID any
 	if cr.TriggerID != "" {
 		triggerID = cr.TriggerID
@@ -117,9 +176,39 @@ func (s *chainStore) CreateRun(ctx context.Context, orgID string, cr domain.Chai
 	if cr.CompletedAt != nil {
 		completedAt = cr.CompletedAt.UTC()
 	}
-	// creator_user_id resolution mirrors PromptStore / TaskRuleStore /
-	// TriggerStore: prefer the JWT-bound caller, fall back to org owner
-	// so system-context writes still satisfy the NOT NULL FK.
+	if _, err := s.admin.ExecContext(ctx, `
+		INSERT INTO chain_runs
+			(id, org_id, creator_user_id, chain_prompt_id, task_id, trigger_type, trigger_id,
+			 status, worktree_path, abort_reason, completed_at, started_at)
+		VALUES (
+			$1, $2, NULL,
+			$3, $4, $5, $6,
+			$7, $8, $9, $10, now()
+		)
+	`, cr.ID, orgID, cr.ChainPromptID, cr.TaskID, cr.TriggerType, triggerID, cr.Status, cr.WorktreePath, abortReason, completedAt); err != nil {
+		return "", fmt.Errorf("insert chain_run (event): %w", err)
+	}
+	return cr.ID, nil
+}
+
+func (s *chainStore) createRunManual(ctx context.Context, orgID string, cr domain.ChainRun) (string, error) {
+	var triggerID any
+	if cr.TriggerID != "" {
+		triggerID = cr.TriggerID
+	}
+	var abortReason any
+	if cr.AbortReason != "" {
+		abortReason = cr.AbortReason
+	}
+	var completedAt any
+	if cr.CompletedAt != nil {
+		completedAt = cr.CompletedAt.UTC()
+	}
+	// creator_user_id resolution mirrors PromptStore / TaskRuleStore
+	// / TriggerStore: prefer the JWT-bound caller, fall back to org
+	// owner so admin-pooled tests still satisfy the chain_runs
+	// _creator_matches_trigger_type CHECK (NOT NULL on the manual
+	// branch).
 	if _, err := s.app.ExecContext(ctx, `
 		INSERT INTO chain_runs
 			(id, org_id, creator_user_id, chain_prompt_id, task_id, trigger_type, trigger_id,
@@ -131,7 +220,7 @@ func (s *chainStore) CreateRun(ctx context.Context, orgID string, cr domain.Chai
 			$7, $8, $9, $10, now()
 		)
 	`, cr.ID, orgID, cr.ChainPromptID, cr.TaskID, cr.TriggerType, triggerID, cr.Status, cr.WorktreePath, abortReason, completedAt); err != nil {
-		return "", fmt.Errorf("insert chain_run: %w", err)
+		return "", fmt.Errorf("insert chain_run (manual): %w", err)
 	}
 	return cr.ID, nil
 }
@@ -212,6 +301,14 @@ func (s *chainStore) GetRunForRun(ctx context.Context, orgID, runID string) (*do
 }
 
 func (s *chainStore) MarkRunStatus(ctx context.Context, orgID, id string, status domain.ChainRunStatus, abortReason string, abortedAtStep *int) (bool, error) {
+	return markChainRunStatus(ctx, s.app, orgID, id, status, abortReason, abortedAtStep)
+}
+
+func (s *chainStore) MarkRunStatusSystem(ctx context.Context, orgID, id string, status domain.ChainRunStatus, abortReason string, abortedAtStep *int) (bool, error) {
+	return markChainRunStatus(ctx, s.admin, orgID, id, status, abortReason, abortedAtStep)
+}
+
+func markChainRunStatus(ctx context.Context, q queryer, orgID, id string, status domain.ChainRunStatus, abortReason string, abortedAtStep *int) (bool, error) {
 	if !isValidUUID(id) {
 		return false, nil
 	}
@@ -225,7 +322,7 @@ func (s *chainStore) MarkRunStatus(ctx context.Context, orgID, id string, status
 	if abortedAtStep != nil {
 		stepArg = *abortedAtStep
 	}
-	res, err := s.app.ExecContext(ctx, `
+	res, err := q.ExecContext(ctx, `
 		UPDATE chain_runs
 		SET status = $1, abort_reason = $2, aborted_at_step = $3, completed_at = now()
 		WHERE org_id = $4 AND id = $5
@@ -242,10 +339,18 @@ func (s *chainStore) MarkRunStatus(ctx context.Context, orgID, id string, status
 }
 
 func (s *chainStore) RunsForChain(ctx context.Context, orgID, chainRunID string) ([]domain.AgentRun, error) {
+	return runsForChain(ctx, s.app, orgID, chainRunID)
+}
+
+func (s *chainStore) RunsForChainSystem(ctx context.Context, orgID, chainRunID string) ([]domain.AgentRun, error) {
+	return runsForChain(ctx, s.admin, orgID, chainRunID)
+}
+
+func runsForChain(ctx context.Context, q queryer, orgID, chainRunID string) ([]domain.AgentRun, error) {
 	if !isValidUUID(chainRunID) {
 		return nil, nil
 	}
-	rows, err := s.app.QueryContext(ctx, `
+	rows, err := q.QueryContext(ctx, `
 		SELECT id, task_id, prompt_id, status, model, started_at, completed_at,
 		       total_cost_usd, duration_ms, num_turns, stop_reason, worktree_path,
 		       result_summary, session_id, chain_run_id, chain_step_index
@@ -313,10 +418,18 @@ func (s *chainStore) RunsForChain(ctx context.Context, orgID, chainRunID string)
 }
 
 func (s *chainStore) InsertVerdict(ctx context.Context, orgID, runID, metadataJSON string) error {
+	return insertChainVerdict(ctx, s.app, orgID, runID, metadataJSON)
+}
+
+func (s *chainStore) InsertVerdictSystem(ctx context.Context, orgID, runID, metadataJSON string) error {
+	return insertChainVerdict(ctx, s.admin, orgID, runID, metadataJSON)
+}
+
+func insertChainVerdict(ctx context.Context, q queryer, orgID, runID, metadataJSON string) error {
 	if !isValidUUID(runID) {
 		return fmt.Errorf("postgres chains: invalid run_id %q", runID)
 	}
-	_, err := s.app.ExecContext(ctx, `
+	_, err := q.ExecContext(ctx, `
 		INSERT INTO run_artifacts (id, org_id, run_id, kind, metadata_json, is_primary, created_at)
 		VALUES (gen_random_uuid(), $1, $2, 'chain:verdict', $3::jsonb, FALSE, now())
 	`, orgID, runID, metadataJSON)
@@ -324,15 +437,23 @@ func (s *chainStore) InsertVerdict(ctx context.Context, orgID, runID, metadataJS
 }
 
 func (s *chainStore) GetLatestVerdict(ctx context.Context, orgID, runID string) (*domain.ChainVerdict, error) {
+	return getLatestChainVerdict(ctx, s.app, orgID, runID)
+}
+
+func (s *chainStore) GetLatestVerdictSystem(ctx context.Context, orgID, runID string) (*domain.ChainVerdict, error) {
+	return getLatestChainVerdict(ctx, s.admin, orgID, runID)
+}
+
+func getLatestChainVerdict(ctx context.Context, q queryer, orgID, runID string) (*domain.ChainVerdict, error) {
 	if !isValidUUID(runID) {
 		return nil, nil
 	}
 	var raw sql.NullString
-	err := s.app.QueryRowContext(ctx, `
+	err := q.QueryRowContext(ctx, `
 		SELECT metadata_json::text FROM run_artifacts
-		WHERE run_id = $1 AND kind = 'chain:verdict'
+		WHERE org_id = $1 AND run_id = $2 AND kind = 'chain:verdict'
 		ORDER BY created_at DESC, id DESC LIMIT 1
-	`, runID).Scan(&raw)
+	`, orgID, runID).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

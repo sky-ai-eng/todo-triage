@@ -4723,7 +4723,13 @@ CREATE TABLE public.prompt_chain_steps (
 CREATE TABLE public.chain_runs (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
-    creator_user_id uuid NOT NULL,
+    -- creator_user_id is nullable for trigger_type='event' chains
+    -- (system-emitted by the router via the admin pool); manual
+    -- chains carry the human delegator. The matching
+    -- chain_runs_creator_matches_trigger_type CHECK below pairs the
+    -- two so the seeder can't drift. Mirrors the runs table's
+    -- runs_creator_matches_trigger_type pattern.
+    creator_user_id uuid,
     chain_prompt_id text NOT NULL,
     task_id uuid NOT NULL,
     trigger_type text NOT NULL,
@@ -4734,7 +4740,8 @@ CREATE TABLE public.chain_runs (
     worktree_path text NOT NULL,
     started_at timestamp with time zone DEFAULT now() NOT NULL,
     completed_at timestamp with time zone,
-    CONSTRAINT chain_runs_status_check CHECK ((status = ANY (ARRAY['running'::text, 'completed'::text, 'aborted'::text, 'failed'::text, 'cancelled'::text])))
+    CONSTRAINT chain_runs_status_check CHECK ((status = ANY (ARRAY['running'::text, 'completed'::text, 'aborted'::text, 'failed'::text, 'cancelled'::text]))),
+    CONSTRAINT chain_runs_creator_matches_trigger_type CHECK ((((trigger_type = 'manual'::text) AND (creator_user_id IS NOT NULL)) OR ((trigger_type = 'event'::text) AND (creator_user_id IS NULL))))
 );
 
 ALTER TABLE ONLY public.prompt_chain_steps
@@ -4790,19 +4797,50 @@ CREATE POLICY prompt_chain_steps_all ON public.prompt_chain_steps FOR ALL
                            WHERE p.id = prompt_chain_steps.chain_prompt_id
                              AND p.org_id = prompt_chain_steps.org_id)));
 
--- chain_runs are creator-scoped, same as runs/tasks.
+-- chain_runs are creator-scoped for manual chains and org-visible
+-- for event-triggered chains. The chain_runs_creator_matches_trigger_type
+-- CHECK pairs trigger_type with creator nullability: trigger_type='event'
+-- rows have creator_user_id NULL (system-emitted via the admin pool by
+-- the router / spawner). Those event rows would otherwise be unreadable
+-- through the app pool, because the manual-only `creator_user_id =
+-- tf.current_user_id()` predicate is unsatisfiable when the column is
+-- NULL — leaving the chain detail handlers, GetRun, GetRunForRun, and
+-- CancelChain unable to see system-emitted chains for any request user.
+--
+-- Policies are split per command so INSERT keeps the strict
+-- creator-equals-caller WITH CHECK (the app pool must never be able to
+-- write trigger_type='event' rows directly — that would let any org
+-- member impersonate the router by inserting NULL-creator rows and
+-- erase the audit boundary between system-emitted and human-delegated
+-- chains). SELECT, UPDATE, DELETE widen to "creator IS NULL OR creator
+-- = caller" so request handlers can read + cancel auto-fired chains.
+-- Mirrors the runs table's per-command policy split.
 CREATE POLICY chain_runs_select ON public.chain_runs FOR SELECT
   USING ((org_id = tf.current_org_id())
          AND tf.user_has_org_access(org_id)
-         AND (creator_user_id = tf.current_user_id()));
+         AND ((creator_user_id IS NULL)
+              OR (creator_user_id = tf.current_user_id())));
 
-CREATE POLICY chain_runs_modify ON public.chain_runs FOR ALL
+CREATE POLICY chain_runs_insert ON public.chain_runs FOR INSERT
+  WITH CHECK ((org_id = tf.current_org_id())
+              AND tf.user_has_org_access(org_id)
+              AND (creator_user_id = tf.current_user_id()));
+
+CREATE POLICY chain_runs_update ON public.chain_runs FOR UPDATE
   USING ((org_id = tf.current_org_id())
          AND tf.user_has_org_access(org_id)
-         AND (creator_user_id = tf.current_user_id()))
+         AND ((creator_user_id IS NULL)
+              OR (creator_user_id = tf.current_user_id())))
   WITH CHECK ((org_id = tf.current_org_id())
-              AND (creator_user_id = tf.current_user_id())
-              AND tf.user_has_org_access(org_id));
+              AND tf.user_has_org_access(org_id)
+              AND ((creator_user_id IS NULL)
+                   OR (creator_user_id = tf.current_user_id())));
+
+CREATE POLICY chain_runs_delete ON public.chain_runs FOR DELETE
+  USING ((org_id = tf.current_org_id())
+         AND tf.user_has_org_access(org_id)
+         AND ((creator_user_id IS NULL)
+              OR (creator_user_id = tf.current_user_id())));
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.prompt_chain_steps TO tf_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.chain_runs         TO tf_app;

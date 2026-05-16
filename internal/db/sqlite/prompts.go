@@ -307,6 +307,10 @@ func (s *promptStore) IncrementUsage(ctx context.Context, orgID string, id strin
 	return err
 }
 
+func (s *promptStore) IncrementUsageSystem(ctx context.Context, orgID string, id string) error {
+	return s.IncrementUsage(ctx, orgID, id)
+}
+
 // --- Stats ---------------------------------------------------------
 
 // Stats reads three separate views from the runs table. Kept as

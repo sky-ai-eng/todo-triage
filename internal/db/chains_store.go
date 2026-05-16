@@ -112,4 +112,31 @@ type ChainStore interface {
 	// chains_handler.go to avoid an N+1 when rendering the chain-detail
 	// page.
 	LatestVerdictsForRuns(ctx context.Context, orgID string, runIDs []string) (map[string]*domain.ChainVerdict, error)
+
+	// --- Admin-pool variants (`...System`) ---
+	//
+	// These mirror the per-method shape of the corresponding app-pool
+	// methods but route through the admin pool (BYPASSRLS) in
+	// Postgres. They exist for the chain orchestrator goroutine —
+	// the long-running loop in delegateChain / runChain /
+	// terminateChain that drives a chain through its step list. The
+	// orchestrator detaches from the kicking-off handler's context
+	// the moment it spawns, so it has no JWT-claims in scope and
+	// would otherwise fail under RLS in multi-mode.
+	//
+	// Behavior contract is identical to the non-System variants;
+	// org_id stays in every WHERE clause as defense in depth. The
+	// only difference is which Postgres pool the statement runs on;
+	// SQLite has one connection and the two variants collapse.
+	//
+	// CreateRun has no System counterpart — it routes internally on
+	// the supplied ChainRun.TriggerType, mirroring the AgentRunStore
+	// .Create pattern: event-triggered chain runs land on the admin
+	// pool with NULL creator_user_id, manual chains on the app pool
+	// with COALESCE fallback.
+	ListStepsSystem(ctx context.Context, orgID string, chainPromptID string) ([]domain.ChainStep, error)
+	MarkRunStatusSystem(ctx context.Context, orgID string, id string, status domain.ChainRunStatus, abortReason string, abortedAtStep *int) (changed bool, err error)
+	RunsForChainSystem(ctx context.Context, orgID string, chainRunID string) ([]domain.AgentRun, error)
+	InsertVerdictSystem(ctx context.Context, orgID string, runID string, metadataJSON string) error
+	GetLatestVerdictSystem(ctx context.Context, orgID string, runID string) (*domain.ChainVerdict, error)
 }

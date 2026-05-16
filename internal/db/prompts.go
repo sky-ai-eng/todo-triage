@@ -111,4 +111,11 @@ type PromptStore interface {
 	// prompt name from its eventbus subscriber goroutine, which has
 	// no JWT-claims context.
 	GetSystem(ctx context.Context, orgID string, id string) (*domain.Prompt, error)
+
+	// IncrementUsageSystem mirrors IncrementUsage but routes through
+	// the admin pool in Postgres. The delegate spawner bumps
+	// usage_count from inside a goroutine that continues past the
+	// request lifecycle (initial Delegate dispatch + per-step chain
+	// orchestration), so the call may run without JWT-claims context.
+	IncrementUsageSystem(ctx context.Context, orgID string, id string) error
 }

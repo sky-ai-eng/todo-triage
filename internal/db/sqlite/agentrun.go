@@ -459,6 +459,14 @@ func (s *agentRunStore) ActiveIDsForTask(ctx context.Context, orgID, taskID stri
 	return ids, rows.Err()
 }
 
+// --- Admin-pool variants ---
+//
+// All `...System` methods below delegate straight through to their
+// non-System counterparts. SQLite has one connection so the pool
+// distinction doesn't exist; the wrappers are kept for signature
+// parity with Postgres. The delegate spawner consumes these from
+// its goroutine paths that detach from the request context.
+
 func (s *agentRunStore) ListTakenOverIDsSystem(ctx context.Context, orgID string) ([]string, error) {
 	return s.ListTakenOverIDs(ctx, orgID)
 }
@@ -469,6 +477,46 @@ func (s *agentRunStore) HasActiveAutoRunForEntitySystem(ctx context.Context, org
 
 func (s *agentRunStore) ActiveIDsForTaskSystem(ctx context.Context, orgID, taskID string) ([]string, error) {
 	return s.ActiveIDsForTask(ctx, orgID, taskID)
+}
+
+func (s *agentRunStore) GetSystem(ctx context.Context, orgID, runID string) (*domain.AgentRun, error) {
+	return s.Get(ctx, orgID, runID)
+}
+
+func (s *agentRunStore) CompleteSystem(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary string) error {
+	return s.Complete(ctx, orgID, runID, status, costUSD, durationMs, numTurns, stopReason, resultSummary)
+}
+
+func (s *agentRunStore) AddPartialTotalsSystem(ctx context.Context, orgID, runID string, costUSD float64, durationMs, numTurns int) error {
+	return s.AddPartialTotals(ctx, orgID, runID, costUSD, durationMs, numTurns)
+}
+
+func (s *agentRunStore) MarkAwaitingInputSystem(ctx context.Context, orgID, runID string) (bool, error) {
+	return s.MarkAwaitingInput(ctx, orgID, runID)
+}
+
+func (s *agentRunStore) MarkResumingSystem(ctx context.Context, orgID, runID string) (bool, error) {
+	return s.MarkResuming(ctx, orgID, runID)
+}
+
+func (s *agentRunStore) SetSessionSystem(ctx context.Context, orgID, runID, sessionID string) error {
+	return s.SetSession(ctx, orgID, runID, sessionID)
+}
+
+func (s *agentRunStore) MarkReleasedSystem(ctx context.Context, orgID, runID string) (bool, error) {
+	return s.MarkReleased(ctx, orgID, runID)
+}
+
+func (s *agentRunStore) MarkCancelledIfActiveSystem(ctx context.Context, orgID, runID, stopReason, summary string) (bool, error) {
+	return s.MarkCancelledIfActive(ctx, orgID, runID, stopReason, summary)
+}
+
+func (s *agentRunStore) InsertMessageSystem(ctx context.Context, orgID string, msg *domain.AgentMessage) (int64, error) {
+	return s.InsertMessage(ctx, orgID, msg)
+}
+
+func (s *agentRunStore) InsertYieldRequestSystem(ctx context.Context, orgID, runID string, req *domain.YieldRequest) (*domain.AgentMessage, error) {
+	return s.InsertYieldRequest(ctx, orgID, runID, req)
 }
 
 func (s *agentRunStore) ListTakenOverIDs(ctx context.Context, orgID string) ([]string, error) {
