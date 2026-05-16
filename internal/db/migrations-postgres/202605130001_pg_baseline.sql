@@ -4806,19 +4806,27 @@ CREATE POLICY prompt_chain_steps_all ON public.prompt_chain_steps FOR ALL
 -- tf.current_user_id()` predicate is unsatisfiable when the column is
 -- NULL — leaving the chain detail handlers, GetRun, GetRunForRun, and
 -- CancelChain unable to see system-emitted chains for any request user.
--- Widening the predicate so NULL-creator rows resolve via plain org
--- membership keeps the manual-private semantics for human-delegated
--- chains while letting org members observe + cancel auto-fired ones.
--- Same pattern as runs, where event rows are visible org-wide via the
--- visibility='org' branch; chain_runs has no visibility column, so
--- "creator IS NULL" carries that role here.
+--
+-- Policies are split per command so INSERT keeps the strict
+-- creator-equals-caller WITH CHECK (the app pool must never be able to
+-- write trigger_type='event' rows directly — that would let any org
+-- member impersonate the router by inserting NULL-creator rows and
+-- erase the audit boundary between system-emitted and human-delegated
+-- chains). SELECT, UPDATE, DELETE widen to "creator IS NULL OR creator
+-- = caller" so request handlers can read + cancel auto-fired chains.
+-- Mirrors the runs table's per-command policy split.
 CREATE POLICY chain_runs_select ON public.chain_runs FOR SELECT
   USING ((org_id = tf.current_org_id())
          AND tf.user_has_org_access(org_id)
          AND ((creator_user_id IS NULL)
               OR (creator_user_id = tf.current_user_id())));
 
-CREATE POLICY chain_runs_modify ON public.chain_runs FOR ALL
+CREATE POLICY chain_runs_insert ON public.chain_runs FOR INSERT
+  WITH CHECK ((org_id = tf.current_org_id())
+              AND tf.user_has_org_access(org_id)
+              AND (creator_user_id = tf.current_user_id()));
+
+CREATE POLICY chain_runs_update ON public.chain_runs FOR UPDATE
   USING ((org_id = tf.current_org_id())
          AND tf.user_has_org_access(org_id)
          AND ((creator_user_id IS NULL)
@@ -4827,6 +4835,12 @@ CREATE POLICY chain_runs_modify ON public.chain_runs FOR ALL
               AND tf.user_has_org_access(org_id)
               AND ((creator_user_id IS NULL)
                    OR (creator_user_id = tf.current_user_id())));
+
+CREATE POLICY chain_runs_delete ON public.chain_runs FOR DELETE
+  USING ((org_id = tf.current_org_id())
+         AND tf.user_has_org_access(org_id)
+         AND ((creator_user_id IS NULL)
+              OR (creator_user_id = tf.current_user_id())));
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.prompt_chain_steps TO tf_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.chain_runs         TO tf_app;
