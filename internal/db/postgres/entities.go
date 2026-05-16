@@ -362,7 +362,15 @@ func markEntityClosed(ctx context.Context, q queryer, orgID, id string) error {
 }
 
 func (s *entityStore) Close(ctx context.Context, orgID, id string) error {
-	_, err := s.q.ExecContext(ctx, `
+	return closeActiveEntity(ctx, s.q, orgID, id)
+}
+
+func (s *entityStore) CloseSystem(ctx context.Context, orgID, id string) error {
+	return closeActiveEntity(ctx, s.admin, orgID, id)
+}
+
+func closeActiveEntity(ctx context.Context, q queryer, orgID, id string) error {
+	_, err := q.ExecContext(ctx, `
 		UPDATE entities SET state = 'closed', closed_at = $1 WHERE org_id = $2 AND id = $3 AND state = 'active'
 	`, time.Now(), orgID, id)
 	return err

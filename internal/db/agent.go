@@ -146,6 +146,17 @@ type AgentRunStore interface {
 	// split as the rest of this wave.
 	ListTakenOverIDsSystem(ctx context.Context, orgID string) ([]string, error)
 
+	// HasActiveAutoRunForEntitySystem mirrors HasActiveAutoRunForEntity
+	// but routes through the admin pool in Postgres. The router's
+	// per-entity firing gate consumes this from its eventbus subscriber
+	// goroutine, which has no JWT-claims context.
+	HasActiveAutoRunForEntitySystem(ctx context.Context, orgID, entityID string) (bool, error)
+
+	// ActiveIDsForTaskSystem mirrors ActiveIDsForTask but routes through
+	// the admin pool in Postgres. The router's task-close cascade uses
+	// this to enumerate runs to cancel from its background goroutine.
+	ActiveIDsForTaskSystem(ctx context.Context, orgID, taskID string) ([]string, error)
+
 	// ListTakenOverForResume returns every taken-over run in the
 	// local DB, joined with its task + entity for display,
 	// ordered newest-first. Used by the CLI's resume command.

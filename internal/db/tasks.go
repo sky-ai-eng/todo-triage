@@ -184,6 +184,33 @@ type TaskStore interface {
 	// once, not once-per-step. Used by the router to check the
 	// circuit-breaker threshold.
 	CountConsecutiveFailedRuns(ctx context.Context, orgID, entityID, promptID string) (int, error)
+
+	// --- Admin-pool variants (`...System`) ---
+	//
+	// These mirror the per-method shape of the corresponding app-pool
+	// methods but route through the admin pool (BYPASSRLS) in
+	// Postgres. They exist for the router — a background eventbus
+	// subscriber goroutine with no JWT-claims context that drives the
+	// full event-to-task path (record event, dedup-create task, bump
+	// on re-arrival, inline-close stale siblings, fire auto-delegate
+	// triggers, drain pending firings). Same pattern as EntityStore +
+	// AgentRunStore.
+	//
+	// Behavior contract is identical to the non-System variants: org_id
+	// stays in every WHERE clause as defense in depth, return shapes
+	// are identical. The only difference is which Postgres pool the
+	// statement runs on; SQLite has one connection and the two
+	// variants collapse.
+	GetSystem(ctx context.Context, orgID, taskID string) (*domain.Task, error)
+	FindActiveByEntitySystem(ctx context.Context, orgID, entityID string) ([]domain.Task, error)
+	FindOrCreateAtSystem(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error)
+	BumpSystem(ctx context.Context, orgID, taskID, eventID string) error
+	CloseSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType string) error
+	CloseAllForEntitySystem(ctx context.Context, orgID, entityID, closeReason string) (int, error)
+	SetStatusSystem(ctx context.Context, orgID, taskID, status string) error
+	RecordEventSystem(ctx context.Context, orgID, taskID, eventID, kind string) error
+	CountConsecutiveFailedRunsSystem(ctx context.Context, orgID, entityID, promptID string) (int, error)
+	StampAgentClaimIfUnclaimedSystem(ctx context.Context, orgID, taskID, agentID string) (bool, error)
 }
 
 // HandoffResult discriminates the three outcomes HandoffAgentClaim

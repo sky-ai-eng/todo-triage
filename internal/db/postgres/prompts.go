@@ -208,8 +208,16 @@ func (s *promptStore) List(ctx context.Context, orgID string) ([]domain.Prompt, 
 }
 
 func (s *promptStore) Get(ctx context.Context, orgID string, id string) (*domain.Prompt, error) {
+	return getPrompt(ctx, s.app, orgID, id)
+}
+
+func (s *promptStore) GetSystem(ctx context.Context, orgID string, id string) (*domain.Prompt, error) {
+	return getPrompt(ctx, s.admin, orgID, id)
+}
+
+func getPrompt(ctx context.Context, q queryer, orgID, id string) (*domain.Prompt, error) {
 	var p domain.Prompt
-	err := s.app.QueryRowContext(ctx, `
+	err := q.QueryRowContext(ctx, `
 		SELECT id, name, body, source, allowed_tools, model, usage_count, created_at, updated_at
 		FROM prompts WHERE org_id = $1 AND id = $2
 	`, orgID, id).Scan(&p.ID, &p.Name, &p.Body, &p.Source, &p.AllowedTools, &p.Model, &p.UsageCount, &p.CreatedAt, &p.UpdatedAt)

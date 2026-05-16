@@ -193,6 +193,10 @@ func (s *promptStore) Get(ctx context.Context, orgID string, id string) (*domain
 	return &p, nil
 }
 
+func (s *promptStore) GetSystem(ctx context.Context, orgID string, id string) (*domain.Prompt, error) {
+	return s.Get(ctx, orgID, id)
+}
+
 // Create inserts a prompt row scoped to the local sentinel team. The
 // visibility + creator_user_id pair is derived from p.Source rather
 // than taken from the caller, which is a deliberate divergence from

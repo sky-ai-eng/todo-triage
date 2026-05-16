@@ -89,8 +89,16 @@ func (s *usersStore) GetDisplayName(ctx context.Context, userID string) (string,
 }
 
 func (s *usersStore) GetJiraIdentity(ctx context.Context, userID string) (string, string, error) {
+	return getJiraIdentity(ctx, s.q, userID)
+}
+
+func (s *usersStore) GetJiraIdentitySystem(ctx context.Context, userID string) (string, string, error) {
+	return getJiraIdentity(ctx, s.admin, userID)
+}
+
+func getJiraIdentity(ctx context.Context, q queryer, userID string) (string, string, error) {
 	var accountID, displayName sql.NullString
-	err := s.q.QueryRowContext(ctx,
+	err := q.QueryRowContext(ctx,
 		`SELECT jira_account_id, jira_display_name FROM users WHERE id = $1`,
 		userID,
 	).Scan(&accountID, &displayName)

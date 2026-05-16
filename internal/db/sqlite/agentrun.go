@@ -463,6 +463,14 @@ func (s *agentRunStore) ListTakenOverIDsSystem(ctx context.Context, orgID string
 	return s.ListTakenOverIDs(ctx, orgID)
 }
 
+func (s *agentRunStore) HasActiveAutoRunForEntitySystem(ctx context.Context, orgID, entityID string) (bool, error) {
+	return s.HasActiveAutoRunForEntity(ctx, orgID, entityID)
+}
+
+func (s *agentRunStore) ActiveIDsForTaskSystem(ctx context.Context, orgID, taskID string) ([]string, error) {
+	return s.ActiveIDsForTask(ctx, orgID, taskID)
+}
+
 func (s *agentRunStore) ListTakenOverIDs(ctx context.Context, orgID string) ([]string, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err

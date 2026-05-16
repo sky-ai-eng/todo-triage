@@ -108,6 +108,16 @@ type EventHandlerStore interface {
 	// the row isn't found, isn't a rule, or the new trigger fields
 	// don't satisfy the CHECK constraints.
 	Promote(ctx context.Context, orgID string, id string, t domain.EventHandler) error
+
+	// --- Admin-pool variants (`...System`) ---
+	//
+	// The router consumes these from its eventbus subscriber
+	// goroutine, which has no JWT-claims context. Admin-pool routing
+	// in Postgres; SQLite collapses to the non-System variants.
+	// org_id stays in the WHERE clause as defense in depth.
+
+	GetSystem(ctx context.Context, orgID string, id string) (*domain.EventHandler, error)
+	GetEnabledForEventSystem(ctx context.Context, orgID string, eventType string) ([]domain.EventHandler, error)
 }
 
 // ShippedEventHandler is the tabular shape of one shipped system handler.

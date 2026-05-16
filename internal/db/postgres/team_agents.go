@@ -52,10 +52,18 @@ const pgTeamAgentColumns = `team_id, agent_id, enabled, per_team_model,
        per_team_autonomy_suitability, added_at`
 
 func (s *teamAgentStore) GetForTeam(ctx context.Context, orgID, teamID, agentID string) (*domain.TeamAgent, error) {
+	return getTeamAgent(ctx, s.app, teamID, agentID)
+}
+
+func (s *teamAgentStore) GetForTeamSystem(ctx context.Context, orgID, teamID, agentID string) (*domain.TeamAgent, error) {
+	return getTeamAgent(ctx, s.admin, teamID, agentID)
+}
+
+func getTeamAgent(ctx context.Context, q queryer, teamID, agentID string) (*domain.TeamAgent, error) {
 	if !isValidUUID(teamID) || !isValidUUID(agentID) {
 		return nil, nil
 	}
-	row := s.app.QueryRowContext(ctx, `
+	row := q.QueryRowContext(ctx, `
 		SELECT `+pgTeamAgentColumns+`
 		FROM team_agents
 		WHERE team_id = $1 AND agent_id = $2
