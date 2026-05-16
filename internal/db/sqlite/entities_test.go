@@ -63,7 +63,7 @@ func newSQLiteEntitySeeder(conn *sql.DB) dbtest.EntitySeeder {
 		Project: func(t *testing.T, name string) string {
 			t.Helper()
 			pid, err := sqlitestore.New(conn).Projects.Create(
-				t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID,
+				t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
 				domain.Project{Name: name},
 			)
 			if err != nil {

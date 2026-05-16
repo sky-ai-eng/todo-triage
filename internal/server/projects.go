@@ -113,7 +113,7 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 		specPromptID = domain.SystemTicketSpecPromptID
 	}
 
-	id, err := s.projects.Create(r.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID, domain.Project{
+	id, err := s.projects.Create(r.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Project{
 		Name:                   name,
 		Description:            req.Description,
 		PinnedRepos:            pinned,

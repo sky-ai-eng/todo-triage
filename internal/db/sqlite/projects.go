@@ -19,23 +19,22 @@ import (
 // behavioral changes are the orgID assertion at each method entry and
 // the ctx-aware database/sql methods.
 //
-// userID and teamID are accepted on Create for signature parity with
-// the Postgres impl but ignored — the local schema covers
-// creator_user_id via column DEFAULT and pins team_id to
-// LocalDefaultTeamID at insert time (matches the
-// projects_team_visibility_requires_team CHECK under the default
-// visibility='team').
+// teamID is accepted on Create for signature parity with the Postgres
+// impl but ignored — the local schema covers creator_user_id via
+// column DEFAULT and pins team_id to LocalDefaultTeamID at insert
+// time (matches the projects_team_visibility_requires_team CHECK
+// under the default visibility='team').
 type projectStore struct{ q queryer }
 
 func newProjectStore(q queryer) db.ProjectStore { return &projectStore{q: q} }
 
 var _ db.ProjectStore = (*projectStore)(nil)
 
-func (s *projectStore) Create(ctx context.Context, orgID, userID, teamID string, p domain.Project) (string, error) {
+func (s *projectStore) Create(ctx context.Context, orgID, teamID string, p domain.Project) (string, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return "", err
 	}
-	_, _ = userID, teamID // ignored in local mode
+	_ = teamID // ignored in local mode
 
 	id := p.ID
 	if id == "" {

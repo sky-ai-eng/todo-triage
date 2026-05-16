@@ -19,7 +19,7 @@ import (
 
 func seedProjectWithSessionForPatch(t *testing.T, s *Server) (id, sessionID string) {
 	t.Helper()
-	id, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
+	id, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestProjectPatch_QueuesPinnedRepoChange(t *testing.T) {
 func TestProjectPatch_NoQueueWithoutSession(t *testing.T) {
 	s := newTestServer(t)
 	seedConfiguredRepo(t, s, "sky-ai-eng", "triage-factory")
-	id, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
+	id, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}

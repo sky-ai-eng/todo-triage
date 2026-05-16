@@ -13,12 +13,13 @@ import (
 // the curator session that maintains the project's knowledge dir).
 //
 // All methods take orgID; local mode passes runmode.LocalDefaultOrgID.
-// Create additionally takes userID + teamID for the Postgres schema's
-// creator_user_id NOT NULL + (team_id NOT NULL via visibility='team'
-// CHECK) — the router/handlers pass runmode.LocalDefault*ID today;
-// D9 / SKY-253 retrofits to the request principals once handler-level
-// claims are wired. SQLite ignores userID/teamID (column DEFAULTs
-// cover the local sentinels).
+// Create additionally takes teamID — projects are user-driven writes
+// and the human picks which team owns the project at the Create UI;
+// the store does not synthesize a team. creator_user_id is resolved
+// from tf.current_user_id() set by WithTx (falling back to org owner
+// only on the admin-pool test path where claims aren't set). SKY-294
+// owns the broader team-selection UX work (per-page filter + write-
+// time picker + sticky default).
 //
 // Postgres wires against the app pool — every consumer is request-
 // equivalent (projects handler, curator, backfill, project_entities)
@@ -29,11 +30,13 @@ import (
 type ProjectStore interface {
 	// Create inserts a new project and returns its id. If p.ID is
 	// non-empty it's used verbatim; otherwise a uuid is generated.
-	// PinnedRepos serializes to JSON (nil → []). userID populates
-	// creator_user_id (Postgres NOT NULL); teamID populates team_id
-	// (required by the projects_team_visibility_requires_team CHECK
-	// when the row defaults to visibility='team').
-	Create(ctx context.Context, orgID, userID, teamID string, p domain.Project) (string, error)
+	// PinnedRepos serializes to JSON (nil → []). teamID populates
+	// team_id (required by the projects_team_visibility_requires_team
+	// CHECK when the row defaults to visibility='team'); the SQLite
+	// impl uses the local sentinel teamID, the Postgres impl binds
+	// the caller-supplied value directly and refuses the SQLite
+	// sentinel.
+	Create(ctx context.Context, orgID, teamID string, p domain.Project) (string, error)
 
 	// Get returns a project by id, or (nil, nil) if not found.
 	Get(ctx context.Context, orgID, id string) (*domain.Project, error)

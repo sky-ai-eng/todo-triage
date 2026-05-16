@@ -16,11 +16,11 @@ import (
 // TestProjectStore_SQLite runs the shared conformance suite against
 // the SQLite ProjectStore impl. Each subtest gets a fresh in-memory DB.
 func TestProjectStore_SQLite(t *testing.T) {
-	dbtest.RunProjectStoreConformance(t, func(t *testing.T) (db.ProjectStore, string, string, string) {
+	dbtest.RunProjectStoreConformance(t, func(t *testing.T) (db.ProjectStore, string, string) {
 		t.Helper()
 		conn := newSQLiteForProjectTest(t)
 		stores := sqlitestore.New(conn)
-		return stores.Projects, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID
+		return stores.Projects, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID
 	})
 }
 
@@ -32,7 +32,7 @@ func TestProjectStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	const bogusOrg = "11111111-1111-1111-1111-111111111111"
 	ctx := t.Context()
 
-	if _, err := store.Create(ctx, bogusOrg, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID, domain.Project{Name: "x"}); err == nil {
+	if _, err := store.Create(ctx, bogusOrg, runmode.LocalDefaultTeamID, domain.Project{Name: "x"}); err == nil {
 		t.Errorf("Create with non-local orgID should error")
 	}
 	if _, err := store.Get(ctx, bogusOrg, "any"); err == nil {

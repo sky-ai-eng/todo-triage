@@ -84,7 +84,7 @@ func seedFixture(t *testing.T, database *sql.DB, projectName string) fixture {
 	}
 
 	sessionID := "11111111-2222-3333-4444-555555555555"
-	projectID, err := sqlitestore.New(database).Projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID, domain.Project{
+	projectID, err := sqlitestore.New(database).Projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{
 		Name:             projectName,
 		Description:      "Fixture project",
 		CuratorSessionID: sessionID,
@@ -369,7 +369,7 @@ func TestImport_DuplicateNameAborts(t *testing.T) {
 	bundleBytes := exportFixtureBundle(t, sourceDB, f.projectID)
 
 	targetDB := newBundleTestDB(t)
-	if _, err := sqlitestore.New(targetDB).Projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID, domain.Project{Name: "Duplicate Name"}); err != nil {
+	if _, err := sqlitestore.New(targetDB).Projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "Duplicate Name"}); err != nil {
 		t.Fatalf("seed duplicate name: %v", err)
 	}
 	_, _, err := Import(

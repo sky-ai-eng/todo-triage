@@ -21,7 +21,7 @@ func TestRunner_AllErroredLeavesEntityForRetry(t *testing.T) {
 	isolateHome(t)
 	database := newTestDB(t)
 
-	if _, err := sqlitestore.New(database).Projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID, domain.Project{ID: "p1", Name: "P1"}); err != nil {
+	if _, err := sqlitestore.New(database).Projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{ID: "p1", Name: "P1"}); err != nil {
 		t.Fatal(err)
 	}
 	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#1", "pr", "T", "https://x/1")
@@ -63,10 +63,10 @@ func TestRunner_PartialErrorStillStamps(t *testing.T) {
 	isolateHome(t)
 	database := newTestDB(t)
 
-	if _, err := sqlitestore.New(database).Projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID, domain.Project{ID: "p-good", Name: "Good"}); err != nil {
+	if _, err := sqlitestore.New(database).Projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{ID: "p-good", Name: "Good"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := sqlitestore.New(database).Projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID, domain.Project{ID: "p-flaky", Name: "Flaky"}); err != nil {
+	if _, err := sqlitestore.New(database).Projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{ID: "p-flaky", Name: "Flaky"}); err != nil {
 		t.Fatal(err)
 	}
 	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#2", "pr", "T", "https://x/2")

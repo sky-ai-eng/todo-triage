@@ -29,7 +29,7 @@ func newProjectStore(q queryer) db.ProjectStore { return &projectStore{q: q} }
 
 var _ db.ProjectStore = (*projectStore)(nil)
 
-func (s *projectStore) Create(ctx context.Context, orgID, userID, teamID string, p domain.Project) (string, error) {
+func (s *projectStore) Create(ctx context.Context, orgID, teamID string, p domain.Project) (string, error) {
 	id := p.ID
 	if id == "" {
 		id = uuid.New().String()
@@ -43,30 +43,29 @@ func (s *projectStore) Create(ctx context.Context, orgID, userID, teamID string,
 		return "", fmt.Errorf("marshal pinned_repos: %w", err)
 	}
 
-	// Sentinel-leak handling: the handler/router still passes
-	// runmode.LocalDefault{User,Team}ID until D9 retrofits handler-
-	// level claims. Those sentinels have no FK target in a multi-mode
-	// users/teams table, so binding them directly would trip
-	// creator_user_id_fkey / team_id_fkey on every Create. Normalize
-	// to empty before binding so NULLIF collapses to NULL and the
-	// COALESCE walks to a real fallback. Same shape as the SKY-289
-	// pending_firings filter.
-	creatorBind := userID
-	if creatorBind == runmode.LocalDefaultUserID {
-		creatorBind = ""
-	}
+	// teamID: required, no synthesis. Projects are user-driven writes
+	// and the human picks which team owns the project at the Create
+	// UI (SKY-294). A "first of caller's teams" or "any team in org"
+	// fallback would either silently attach to the wrong team or
+	// collide with projects_insert RLS (tf.user_in_team(team_id)).
+	// The handler ships runmode.LocalDefaultTeamID today; the
+	// sentinel filter converts that to empty, which then trips the
+	// explicit guard below. Post-D9, the handler threads a real team
+	// from request context.
 	teamBind := teamID
 	if teamBind == runmode.LocalDefaultTeamID {
 		teamBind = ""
 	}
+	if teamBind == "" {
+		return "", fmt.Errorf("project store: team_id required for Postgres Create (handler must thread the user-selected team from request context; the SQLite-only LocalDefaultTeamID sentinel does not satisfy the projects_insert RLS policy)")
+	}
 
-	// creator_user_id resolution: caller-supplied → tf.current_user_id()
-	// → org owner. team_id resolution: caller-supplied → caller's first
-	// team in the org (deterministic by created_at) — the CHECK refuses
-	// NULL when visibility='team', and the schema default for visibility
-	// is 'team', so a fallback that lands NULL would fail. The two-arg
-	// COALESCE is enough today; D9 will replace these COALESCE chains
-	// with bare $N once handler-level claims pin the values.
+	// creator_user_id: pulled from tf.current_user_id() set by WithTx
+	// claims — same pattern every other app-pool store uses
+	// (event_handlers, swipes, chains, tasks, prompts). Org-owner
+	// fallback covers the pgtest admin-pool path (BYPASSRLS, no
+	// claims set); in production multi-mode under tf_app, claims are
+	// always set and the COALESCE stops at the first branch.
 	_, err = s.q.ExecContext(ctx, `
 		INSERT INTO projects
 		  (id, org_id, creator_user_id, team_id, name, description,
@@ -74,14 +73,12 @@ func (s *projectStore) Create(ctx context.Context, orgID, userID, teamID string,
 		   jira_project_key, linear_project_key, spec_authorship_prompt_id)
 		VALUES
 		  ($1, $2,
-		   COALESCE(NULLIF($3, '')::uuid, tf.current_user_id(),
-		            (SELECT owner_user_id FROM orgs WHERE id = $2)),
-		   COALESCE(NULLIF($4, '')::uuid,
-		            (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1)),
-		   $5, $6, NULLIF($7, ''), $8::jsonb,
-		   NULLIF($9, ''), NULLIF($10, ''), NULLIF($11, ''))
+		   COALESCE(tf.current_user_id(), (SELECT owner_user_id FROM orgs WHERE id = $2)),
+		   $3::uuid,
+		   $4, $5, NULLIF($6, ''), $7::jsonb,
+		   NULLIF($8, ''), NULLIF($9, ''), NULLIF($10, ''))
 	`,
-		id, orgID, creatorBind, teamBind,
+		id, orgID, teamBind,
 		p.Name, p.Description,
 		p.CuratorSessionID, string(pinnedJSON),
 		p.JiraProjectKey, p.LinearProjectKey, p.SpecAuthorshipPromptID,

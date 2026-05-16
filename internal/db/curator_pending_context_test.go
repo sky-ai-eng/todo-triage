@@ -29,7 +29,7 @@ func newPendingContextDB(t *testing.T) *sql.DB {
 func seedProjectWithSession(t *testing.T, database *sql.DB) (projectID, sessionID string) {
 	t.Helper()
 	id, err := sqlitestore.New(database).Projects.Create(
-		t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID,
+		t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
 		domain.Project{Name: "p"},
 	)
 	if err != nil {
@@ -176,7 +176,7 @@ func TestConsumePendingContext_ScopesToCurrentSession(t *testing.T) {
 func TestConsumePendingContext_NoSessionYet(t *testing.T) {
 	database := newPendingContextDB(t)
 	id, err := sqlitestore.New(database).Projects.Create(
-		t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID,
+		t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
 		domain.Project{Name: "p"},
 	)
 	if err != nil {

@@ -17,19 +17,19 @@ import (
 
 // TestProjectStore_Postgres runs the shared conformance suite against
 // the Postgres ProjectStore impl. Both pools wire against AdminDB
-// (BYPASSRLS) so behavior tests stay independent of the auth path;
-// the cross-org leakage test below exercises the org_id filter
-// directly, and the sentinel-routing test pins the
-// runmode.LocalDefault*ID fallback behavior the router relies on.
+// (BYPASSRLS) so behavior tests stay independent of the auth path.
+// creator_user_id under admin pool resolves via the org-owner
+// fallback half of the COALESCE (no JWT claims set → tf.current_user_id()
+// is NULL); production multi-mode under WithTx hits the first branch.
 func TestProjectStore_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB)
-	dbtest.RunProjectStoreConformance(t, func(t *testing.T) (db.ProjectStore, string, string, string) {
+	dbtest.RunProjectStoreConformance(t, func(t *testing.T) (db.ProjectStore, string, string) {
 		t.Helper()
 		h.Reset(t)
-		orgID, userID, _ := seedPgProjectOrg(t, h)
+		orgID, _, _ := seedPgProjectOrg(t, h)
 		teamID := firstTeamForOrg(t, h, orgID)
-		return stores.Projects, orgID, userID, teamID
+		return stores.Projects, orgID, teamID
 	})
 }
 
@@ -41,11 +41,11 @@ func TestProjectStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	stores := pgstore.New(h.AdminDB, h.AdminDB)
 	ctx := context.Background()
 
-	orgA, userA, _ := seedPgProjectOrg(t, h)
+	orgA, _, _ := seedPgProjectOrg(t, h)
 	teamA := firstTeamForOrg(t, h, orgA)
 	orgB, _, _ := seedPgProjectOrg(t, h)
 
-	id, err := stores.Projects.Create(ctx, orgA, userA, teamA, domain.Project{
+	id, err := stores.Projects.Create(ctx, orgA, teamA, domain.Project{
 		Name: "orgA project", Description: "secret",
 	})
 	if err != nil {
@@ -75,40 +75,26 @@ func TestProjectStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	}
 }
 
-// TestProjectStore_Postgres_CreateWithLocalSentinels is the regression
-// test for the SQLite-only sentinel constants leaking into Postgres.
-// Until D9 / SKY-253 retrofits handler-level claims, the projects
-// handler still passes runmode.LocalDefault{User,Team}ID. Binding them
-// directly would trip creator_user_id_fkey / team membership policies;
-// the store normalizes the sentinels so the COALESCE chain walks to
-// a real user/team. Same shape as the SKY-289 pending_firings filter.
-func TestProjectStore_Postgres_CreateWithLocalSentinels(t *testing.T) {
+// TestProjectStore_Postgres_CreateRefusesTeamSentinel pins the team
+// guard: passing runmode.LocalDefaultTeamID (the SQLite-only sentinel)
+// returns a clear error instead of silently attaching the project to
+// any team. Projects are user-driven writes; the human picks the
+// team at the Create UI (SKY-294), and the store refuses to make one
+// up. Once D9 retrofits handler claims, the caller threads a real
+// team from request context.
+func TestProjectStore_Postgres_CreateRefusesTeamSentinel(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB)
 	ctx := context.Background()
 
-	orgID, ownerUserID, _ := seedPgProjectOrg(t, h)
-	teamID := firstTeamForOrg(t, h, orgID)
+	orgID, _, _ := seedPgProjectOrg(t, h)
 
-	id, err := stores.Projects.Create(ctx, orgID,
-		runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID,
-		domain.Project{Name: "sentinel"})
-	if err != nil {
-		t.Fatalf("Create with sentinels: %v (FK would trip if sentinels weren't filtered)", err)
-	}
-
-	var creator, team string
-	if err := h.AdminDB.QueryRow(
-		`SELECT creator_user_id, team_id FROM projects WHERE id = $1`, id,
-	).Scan(&creator, &team); err != nil {
-		t.Fatalf("read row: %v", err)
-	}
-	if creator != ownerUserID {
-		t.Errorf("creator_user_id = %q, want org owner %q", creator, ownerUserID)
-	}
-	if team != teamID {
-		t.Errorf("team_id = %q, want first team in org %q", team, teamID)
+	_, err := stores.Projects.Create(ctx, orgID,
+		runmode.LocalDefaultTeamID,
+		domain.Project{Name: "no-team"})
+	if err == nil {
+		t.Fatal("Create with team sentinel should error; want explicit team_id requirement")
 	}
 }
 

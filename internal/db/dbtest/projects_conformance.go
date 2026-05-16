@@ -13,12 +13,12 @@ import (
 )
 
 // ProjectStoreFactory is what a per-backend test file hands to
-// RunProjectStoreConformance. Returns the wired ProjectStore impl,
-// the orgID/userID/teamID to thread through Create (Postgres needs
-// real FK-valid values; SQLite ignores them but accepts whatever).
+// RunProjectStoreConformance. Returns the wired ProjectStore impl and
+// the orgID + teamID to thread through Create (Postgres needs a real
+// FK-valid team; SQLite ignores it).
 type ProjectStoreFactory func(t *testing.T) (
 	store db.ProjectStore,
-	orgID, userID, teamID string,
+	orgID, teamID string,
 )
 
 // RunProjectStoreConformance covers the project-store contract every
@@ -41,8 +41,8 @@ func RunProjectStoreConformance(t *testing.T, mk ProjectStoreFactory) {
 	ctx := context.Background()
 
 	t.Run("Create_generates_id_when_empty", func(t *testing.T) {
-		s, orgID, userID, teamID := mk(t)
-		id, err := s.Create(ctx, orgID, userID, teamID, domain.Project{
+		s, orgID, teamID := mk(t)
+		id, err := s.Create(ctx, orgID, teamID, domain.Project{
 			Name: "Generated", Description: "x",
 		})
 		if err != nil {
@@ -61,12 +61,12 @@ func RunProjectStoreConformance(t *testing.T, mk ProjectStoreFactory) {
 	})
 
 	t.Run("Create_honors_supplied_id", func(t *testing.T) {
-		s, orgID, userID, teamID := mk(t)
+		s, orgID, teamID := mk(t)
 		// Postgres' projects.id is a uuid column — a bare string id
 		// would fail the cast. We don't pre-set an ID in conformance;
 		// the caller-supplied path is exercised at the call site
 		// (projectbundle.Import) which already passes uuid-shaped ids.
-		id, err := s.Create(ctx, orgID, userID, teamID, domain.Project{Name: "supplied"})
+		id, err := s.Create(ctx, orgID, teamID, domain.Project{Name: "supplied"})
 		if err != nil {
 			t.Fatalf("Create: %v", err)
 		}
@@ -77,7 +77,7 @@ func RunProjectStoreConformance(t *testing.T, mk ProjectStoreFactory) {
 	})
 
 	t.Run("Create_then_Get_round_trips_full_surface", func(t *testing.T) {
-		s, orgID, userID, teamID := mk(t)
+		s, orgID, teamID := mk(t)
 		// SpecAuthorshipPromptID is intentionally left empty here — it
 		// FKs to prompts(id), which would need a backend-specific
 		// fixture to seed. The empty path exercises the NULLIF
@@ -92,7 +92,7 @@ func RunProjectStoreConformance(t *testing.T, mk ProjectStoreFactory) {
 			JiraProjectKey:   "SKY",
 			LinearProjectKey: "LIN",
 		}
-		id, err := s.Create(ctx, orgID, userID, teamID, input)
+		id, err := s.Create(ctx, orgID, teamID, input)
 		if err != nil {
 			t.Fatalf("Create: %v", err)
 		}
@@ -121,8 +121,8 @@ func RunProjectStoreConformance(t *testing.T, mk ProjectStoreFactory) {
 	})
 
 	t.Run("Create_with_nil_pinned_repos_yields_empty_slice", func(t *testing.T) {
-		s, orgID, userID, teamID := mk(t)
-		id, err := s.Create(ctx, orgID, userID, teamID, domain.Project{
+		s, orgID, teamID := mk(t)
+		id, err := s.Create(ctx, orgID, teamID, domain.Project{
 			Name:        "Nil Pinned",
 			PinnedRepos: nil,
 		})
@@ -139,7 +139,7 @@ func RunProjectStoreConformance(t *testing.T, mk ProjectStoreFactory) {
 	})
 
 	t.Run("Get_returns_nil_on_miss", func(t *testing.T) {
-		s, orgID, _, _ := mk(t)
+		s, orgID, _ := mk(t)
 		got, err := s.Get(ctx, orgID, "00000000-0000-0000-0000-0000000000ff")
 		if err != nil {
 			t.Fatalf("Get: %v", err)
@@ -150,7 +150,7 @@ func RunProjectStoreConformance(t *testing.T, mk ProjectStoreFactory) {
 	})
 
 	t.Run("List_empty_returns_empty_slice", func(t *testing.T) {
-		s, orgID, _, _ := mk(t)
+		s, orgID, _ := mk(t)
 		got, err := s.List(ctx, orgID)
 		if err != nil {
 			t.Fatalf("List: %v", err)
@@ -164,10 +164,10 @@ func RunProjectStoreConformance(t *testing.T, mk ProjectStoreFactory) {
 	})
 
 	t.Run("List_orders_case_insensitive_by_name", func(t *testing.T) {
-		s, orgID, userID, teamID := mk(t)
+		s, orgID, teamID := mk(t)
 		names := []string{"banana", "Apple", "cherry"}
 		for _, n := range names {
-			if _, err := s.Create(ctx, orgID, userID, teamID, domain.Project{Name: n}); err != nil {
+			if _, err := s.Create(ctx, orgID, teamID, domain.Project{Name: n}); err != nil {
 				t.Fatalf("Create %q: %v", n, err)
 			}
 		}
@@ -189,8 +189,8 @@ func RunProjectStoreConformance(t *testing.T, mk ProjectStoreFactory) {
 	})
 
 	t.Run("Update_writes_mutable_surface_and_stamps_updated_at", func(t *testing.T) {
-		s, orgID, userID, teamID := mk(t)
-		id, _ := s.Create(ctx, orgID, userID, teamID, domain.Project{
+		s, orgID, teamID := mk(t)
+		id, _ := s.Create(ctx, orgID, teamID, domain.Project{
 			Name: "Before", Description: "before", PinnedRepos: []string{"a/b"},
 		})
 		before, _ := s.Get(ctx, orgID, id)
@@ -223,7 +223,7 @@ func RunProjectStoreConformance(t *testing.T, mk ProjectStoreFactory) {
 	})
 
 	t.Run("Update_on_missing_id_returns_ErrNoRows", func(t *testing.T) {
-		s, orgID, _, _ := mk(t)
+		s, orgID, _ := mk(t)
 		err := s.Update(ctx, orgID, domain.Project{
 			ID:   "00000000-0000-0000-0000-0000000000ee",
 			Name: "ghost",
@@ -234,8 +234,8 @@ func RunProjectStoreConformance(t *testing.T, mk ProjectStoreFactory) {
 	})
 
 	t.Run("Delete_removes_row", func(t *testing.T) {
-		s, orgID, userID, teamID := mk(t)
-		id, _ := s.Create(ctx, orgID, userID, teamID, domain.Project{Name: "to-delete"})
+		s, orgID, teamID := mk(t)
+		id, _ := s.Create(ctx, orgID, teamID, domain.Project{Name: "to-delete"})
 		if err := s.Delete(ctx, orgID, id); err != nil {
 			t.Fatalf("Delete: %v", err)
 		}
@@ -246,7 +246,7 @@ func RunProjectStoreConformance(t *testing.T, mk ProjectStoreFactory) {
 	})
 
 	t.Run("Delete_on_missing_id_returns_ErrNoRows", func(t *testing.T) {
-		s, orgID, _, _ := mk(t)
+		s, orgID, _ := mk(t)
 		err := s.Delete(ctx, orgID, "00000000-0000-0000-0000-0000000000dd")
 		if !errors.Is(err, sql.ErrNoRows) {
 			t.Errorf("Delete on missing id: err=%v, want sql.ErrNoRows", err)
