@@ -8,6 +8,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
@@ -23,7 +24,7 @@ func curatorTestSetup(t *testing.T) (*Server, *curator.Curator, string) {
 	t.Helper()
 	srv := newTestServer(t)
 	hub := websocket.NewHub()
-	c := curator.New(srv.db, srv.prompts, srv.repos, hub, "")
+	c := curator.New(srv.db, sqlitestore.New(srv.db), hub, "")
 	srv.SetCurator(c)
 	t.Cleanup(c.Shutdown)
 

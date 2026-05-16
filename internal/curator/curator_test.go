@@ -47,10 +47,10 @@ func seedProject(t *testing.T, database *sql.DB, name string) string {
 func TestCurator_SendMessage_RejectsAfterShutdown(t *testing.T) {
 	database := newTestDB(t)
 	projectID := seedProject(t, database, "p")
-	c := New(database, testPromptStore(database), sqlitestore.New(database).Repos, nil, "")
+	c := New(database, sqlitestore.New(database), nil, "")
 	c.Shutdown()
 
-	_, err := c.SendMessage(projectID, "hi")
+	_, err := c.SendMessage(t.Context(), projectID, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "hi")
 	if err == nil {
 		t.Fatal("expected error after shutdown, got nil")
 	}
@@ -81,7 +81,7 @@ func TestCurator_CancelProject_FlipsQueuedRows(t *testing.T) {
 	id1, _ := db.CreateCuratorRequest(database, projectID, "first")
 	id2, _ := db.CreateCuratorRequest(database, projectID, "second")
 
-	c := New(database, testPromptStore(database), sqlitestore.New(database).Repos, nil, "")
+	c := New(database, sqlitestore.New(database), nil, "")
 	t.Cleanup(c.Shutdown)
 	c.CancelProject(projectID)
 
@@ -104,14 +104,14 @@ func TestCurator_CancelProject_KillsActiveSession(t *testing.T) {
 	projectID := seedProject(t, database, "active")
 
 	hub := websocket.NewHub()
-	c := New(database, testPromptStore(database), sqlitestore.New(database).Repos, hub, "")
+	c := New(database, sqlitestore.New(database), hub, "")
 	t.Cleanup(c.Shutdown)
 
 	// SendMessage spawns the per-project goroutine if absent. The
 	// goroutine will try to invoke claude — that'll fail fast on
 	// CI / dev boxes without claude on PATH, but the failure is
 	// masked by the immediate CancelProject anyway.
-	if _, err := c.SendMessage(projectID, "hello"); err != nil {
+	if _, err := c.SendMessage(t.Context(), projectID, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "hello"); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 	c.CancelProject(projectID)
@@ -142,13 +142,19 @@ func TestCurator_CrossProjectParallel(t *testing.T) {
 	projectA := seedProject(t, database, "A")
 	projectB := seedProject(t, database, "B")
 
-	c := New(database, testPromptStore(database), sqlitestore.New(database).Repos, nil, "")
+	c := New(database, sqlitestore.New(database), nil, "")
 	t.Cleanup(c.Shutdown)
 
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); _, _ = c.SendMessage(projectA, "hi from A") }()
-	go func() { defer wg.Done(); _, _ = c.SendMessage(projectB, "hi from B") }()
+	go func() {
+		defer wg.Done()
+		_, _ = c.SendMessage(t.Context(), projectA, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "hi from A")
+	}()
+	go func() {
+		defer wg.Done()
+		_, _ = c.SendMessage(t.Context(), projectB, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "hi from B")
+	}()
 	wg.Wait()
 
 	c.mu.Lock()

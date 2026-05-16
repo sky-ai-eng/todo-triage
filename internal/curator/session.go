@@ -21,7 +21,7 @@ import (
 type projectSession struct {
 	curator   *Curator
 	projectID string
-	queue     chan string
+	queue     chan queueItem
 
 	// ctx + stopAll bound the lifetime of the whole goroutine. Closed
 	// during Curator.Shutdown or CancelProject; the goroutine drops
@@ -60,35 +60,39 @@ func (s *projectSession) run() {
 		select {
 		case <-s.ctx.Done():
 			return
-		case requestID, ok := <-s.queue:
+		case item, ok := <-s.queue:
 			if !ok {
 				return
 			}
-			s.dispatch(requestID)
+			s.dispatch(item)
 		}
 	}
 }
 
-// dispatch processes one queued request. Owns the row's lifecycle
-// from queued → running → terminal; broadcasts each transition so
-// the Projects page can update without re-fetching.
+// dispatch processes one queued request under the requesting user's
+// identity (item.orgID, item.creatorUserID). Each per-turn write is
+// wrapped in stores.Tx.SyntheticClaimsWithTx so multi-mode RLS gates
+// the row on the same (org_id, creator_user_id) pair the schema
+// columns carry. Owns the row's lifecycle from queued → running →
+// terminal; broadcasts each transition so the Projects page can
+// update without re-fetching.
 //
 // Cancel ordering: msgCtx and inFlightCancel are registered BEFORE
-// MarkCuratorRequestRunning so that by the time any external observer
-// can see the row in `running` state, the cancel handle is already
-// armed. Without this, a cancel that landed in the window between
-// "row is running" and "inFlightCancel registered" would see a nil
-// cancel handle and be a no-op — the goroutine would then run
-// agentproc to completion, and even though the cancel handler also
-// flips the row at the DB level, the goroutine's terminal write
-// could clobber it. The SQL filter on CompleteCuratorRequest
-// belt-and-suspenders that, but registering early closes the race
-// window in the first place.
-func (s *projectSession) dispatch(requestID string) {
+// MarkRequestRunning so that by the time any external observer can
+// see the row in `running` state, the cancel handle is already armed.
+// Without this, a cancel that landed in the window between "row is
+// running" and "inFlightCancel registered" would see a nil cancel
+// handle and be a no-op — the goroutine would then run agentproc to
+// completion, and even though the cancel handler also flips the row
+// at the DB level, the goroutine's terminal write could clobber it.
+// The SQL filter on CompleteRequest belt-and-suspenders that, but
+// registering early closes the race window in the first place.
+func (s *projectSession) dispatch(item queueItem) {
+	requestID := item.requestID
 	if err := s.ctx.Err(); err != nil {
 		// Shutdown raced ahead of the dequeue — flip the row to
 		// cancelled so it doesn't sit forever in queued.
-		s.markCancelled(requestID, "process shutting down")
+		s.markCancelled(item, "process shutting down")
 		return
 	}
 
@@ -109,17 +113,36 @@ func (s *projectSession) dispatch(requestID string) {
 		msgCancel()
 	}()
 
-	if err := db.MarkCuratorRequestRunning(s.curator.database, requestID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+	// MarkRequestRunning + the immediate GetRequest read happen in
+	// one short tx — same identity, single round-trip on Postgres.
+	// Cancellation that lands during this tx is observed via msgCtx
+	// after the wrap returns; the SQL filter on the UPDATE makes a
+	// double-flip safe.
+	markCtx := context.WithoutCancel(msgCtx)
+	var req *domain.CuratorRequest
+	wrapErr := s.curator.stores.Tx.SyntheticClaimsWithTx(markCtx, item.orgID, item.creatorUserID, func(ts db.TxStores) error {
+		if err := ts.Curator.MarkRequestRunning(markCtx, item.orgID, requestID); err != nil {
+			return err
+		}
+		got, err := ts.Curator.GetRequest(markCtx, item.orgID, requestID)
+		if err != nil {
+			return err
+		}
+		req = got
+		return nil
+	})
+	if wrapErr != nil {
+		if errors.Is(wrapErr, sql.ErrNoRows) {
 			// Already terminal — usually because Cancel raced before
 			// pickup. Skip; the canceller already wrote the row.
 			return
 		}
-		// The request has already been dequeued from the in-memory
-		// project queue. If we return here without a terminal state,
-		// the row remains stuck in queued with no retry path.
-		log.Printf("[curator] warning: mark request %s running: %v", requestID, err)
-		s.failRequest(requestID, fmt.Sprintf("mark running: %v", err))
+		log.Printf("[curator] warning: mark request %s running: %v", requestID, wrapErr)
+		s.failRequest(item, fmt.Sprintf("mark running: %v", wrapErr))
+		return
+	}
+	if req == nil {
+		s.failRequest(item, "request not found")
 		return
 	}
 	s.curator.broadcastRequestUpdate(s.projectID, requestID, "running")
@@ -128,23 +151,13 @@ func (s *projectSession) dispatch(requestID string) {
 	// before doing any further work so we don't pointlessly load
 	// the project / spawn claude on a cancelled request.
 	if msgCtx.Err() != nil {
-		s.markCancelled(requestID, "user cancelled")
-		return
-	}
-
-	req, err := db.GetCuratorRequest(s.curator.database, requestID)
-	if err != nil {
-		s.failRequest(requestID, fmt.Sprintf("load request: %v", err))
-		return
-	}
-	if req == nil {
-		s.failRequest(requestID, "request not found")
+		s.markCancelled(item, "user cancelled")
 		return
 	}
 
 	cwd, err := ensureKnowledgeDir(s.projectID)
 	if err != nil {
-		s.failRequest(requestID, fmt.Sprintf("knowledge dir: %v", err))
+		s.failRequest(item, fmt.Sprintf("knowledge dir: %v", err))
 		return
 	}
 
@@ -166,13 +179,25 @@ func (s *projectSession) dispatch(requestID string) {
 	// silently lose the user's deltas. The merge logic in
 	// RevertPendingContext handles the case where a NEW PATCH lands
 	// during dispatch.
-	project, pending, err := db.ConsumePendingContext(s.curator.database, s.projectID, requestID)
-	if err != nil {
-		s.failRequest(requestID, fmt.Sprintf("consume pending context: %v", err))
+	var (
+		project *domain.Project
+		pending []domain.CuratorPendingContext
+	)
+	consumeCtx := context.WithoutCancel(msgCtx)
+	if err := s.curator.stores.Tx.SyntheticClaimsWithTx(consumeCtx, item.orgID, item.creatorUserID, func(ts db.TxStores) error {
+		p, ps, err := ts.Curator.ConsumePendingContext(consumeCtx, item.orgID, s.projectID, requestID)
+		if err != nil {
+			return err
+		}
+		project = p
+		pending = ps
+		return nil
+	}); err != nil {
+		s.failRequest(item, fmt.Sprintf("consume pending context: %v", err))
 		return
 	}
 	if project == nil {
-		s.failRequest(requestID, "project missing")
+		s.failRequest(item, "project missing")
 		return
 	}
 
@@ -184,13 +209,13 @@ func (s *projectSession) dispatch(requestID string) {
 	// pinning the same repo queue rather than race. Per-repo
 	// failures are non-fatal: the agent still gets the project's
 	// knowledge files plus whatever subset of repos materialized.
-	materializePinnedRepos(msgCtx, s.curator.repos, s.projectID, cwd, project.PinnedRepos)
+	materializePinnedRepos(msgCtx, s.curator.stores.Repos, s.projectID, cwd, project.PinnedRepos)
 	if msgCtx.Err() != nil {
 		// Cancel fired during repo refresh (one big bare clone can
 		// take seconds on a fresh fetch). Don't waste cycles spawning
 		// claude only to immediately cancel it.
-		s.markCancelled(requestID, "user cancelled")
-		s.revertPendingFor(requestID)
+		s.markCancelled(item, "user cancelled")
+		s.revertPendingFor(item)
 		return
 	}
 
@@ -205,8 +230,8 @@ func (s *projectSession) dispatch(requestID string) {
 	// "missing --model" error from claude itself. Fail the row up
 	// front so the user sees a clear message.
 	if model == "" {
-		s.failRequest(requestID, "curator AI model is not configured")
-		s.revertPendingFor(requestID)
+		s.failRequest(item, "curator AI model is not configured")
+		s.revertPendingFor(item)
 		return
 	}
 
@@ -218,8 +243,8 @@ func (s *projectSession) dispatch(requestID string) {
 	// happens we'd silently disable curator tooling.
 	selfBin, err := os.Executable()
 	if err != nil {
-		s.failRequest(requestID, fmt.Sprintf("resolve own binary path: %v", err))
-		s.revertPendingFor(requestID)
+		s.failRequest(item, fmt.Sprintf("resolve own binary path: %v", err))
+		s.revertPendingFor(item)
 		return
 	}
 
@@ -250,7 +275,11 @@ func (s *projectSession) dispatch(requestID string) {
 			Subtype:   "context_change",
 			Content:   contextNote,
 		}
-		if _, auditErr := db.InsertCuratorMessage(s.curator.database, auditMsg); auditErr != nil {
+		auditCtx := context.WithoutCancel(msgCtx)
+		if auditErr := s.curator.stores.Tx.SyntheticClaimsWithTx(auditCtx, item.orgID, item.creatorUserID, func(ts db.TxStores) error {
+			_, err := ts.Curator.InsertMessage(auditCtx, item.orgID, auditMsg)
+			return err
+		}); auditErr != nil {
 			log.Printf("[curator] warning: insert context_change audit row for %s: %v", requestID, auditErr)
 		}
 	}
@@ -271,7 +300,8 @@ func (s *projectSession) dispatch(requestID string) {
 	// take effect on the next turn without a session reset (SKY-221).
 	// Failure is non-fatal: the user's chat turn should still answer
 	// even if skill writing hits a permission glitch.
-	if err := materializeSpecSkill(s.curator.database, s.curator.prompts, project, cwd); err != nil {
+	skillCtx := context.WithoutCancel(msgCtx)
+	if err := materializeSpecSkill(skillCtx, s.curator.stores, item.orgID, item.creatorUserID, project, cwd); err != nil {
 		log.Printf("[curator] warning: materialize spec skill for project %s: %v", s.projectID, err)
 	}
 	if err := materializeJiraFormattingSkill(cwd); err != nil {
@@ -291,7 +321,7 @@ func (s *projectSession) dispatch(requestID string) {
 			"TRIAGE_FACTORY_CURATOR_REQUEST_ID=" + requestID,
 		},
 		TraceID: requestID,
-	}, newRequestSink(s.curator, s.projectID, requestID))
+	}, newRequestSink(s.curator, s.projectID, requestID, item.orgID, item.creatorUserID))
 
 	// Cancellation observed → terminal cancelled status. Distinguish
 	// between request-level cancellation and broader session/project
@@ -302,8 +332,8 @@ func (s *projectSession) dispatch(requestID string) {
 		if s.ctx.Err() != nil {
 			cancelReason = "session cancelled"
 		}
-		s.markCancelled(requestID, cancelReason)
-		s.revertPendingFor(requestID)
+		s.markCancelled(item, cancelReason)
+		s.revertPendingFor(item)
 		return
 	}
 
@@ -312,14 +342,14 @@ func (s *projectSession) dispatch(requestID string) {
 		if outcome != nil {
 			stderr = outcome.Stderr
 		}
-		s.failRequest(requestID, fmt.Sprintf("%v\nstderr: %s", runErr, stderr))
-		s.revertPendingFor(requestID)
+		s.failRequest(item, fmt.Sprintf("%v\nstderr: %s", runErr, stderr))
+		s.revertPendingFor(item)
 		return
 	}
 
 	if outcome == nil || outcome.Result == nil {
-		s.failRequest(requestID, "claude exited without producing a result event")
-		s.revertPendingFor(requestID)
+		s.failRequest(item, "claude exited without producing a result event")
+		s.revertPendingFor(item)
 		return
 	}
 
@@ -329,19 +359,28 @@ func (s *projectSession) dispatch(requestID string) {
 		status = "failed"
 		errMsg = outcome.Result.Result
 	}
-	flipped, err := db.CompleteCuratorRequest(
-		s.curator.database, requestID, status, errMsg,
-		outcome.Result.CostUSD, outcome.Result.DurationMs, outcome.Result.NumTurns,
-	)
-	if err != nil {
-		log.Printf("[curator] warning: complete request %s: %v", requestID, err)
+	completeCtx := context.WithoutCancel(msgCtx)
+	var flipped bool
+	completeErr := s.curator.stores.Tx.SyntheticClaimsWithTx(completeCtx, item.orgID, item.creatorUserID, func(ts db.TxStores) error {
+		f, err := ts.Curator.CompleteRequest(
+			completeCtx, item.orgID, requestID, status, errMsg,
+			outcome.Result.CostUSD, outcome.Result.DurationMs, outcome.Result.NumTurns,
+		)
+		if err != nil {
+			return err
+		}
+		flipped = f
+		return nil
+	})
+	if completeErr != nil {
+		log.Printf("[curator] warning: complete request %s: %v", requestID, completeErr)
 		// We don't know whether the row landed terminal. Revert the
 		// pending rows on the conservative assumption that the agent
 		// did not see them — if the row turns out to be `done` after
 		// all, the worst case is the user gets a duplicate diff on
 		// their next message, which is far better than silently
 		// losing the deltas.
-		s.revertPendingFor(requestID)
+		s.revertPendingFor(item)
 		return
 	}
 	if !flipped {
@@ -356,17 +395,17 @@ func (s *projectSession) dispatch(requestID string) {
 		// belt-and-suspenders for the "row was already cancelled
 		// before our completion write" race.
 		log.Printf("[curator] request %s already terminal, skipping completion broadcast (intended status: %s)", requestID, status)
-		s.revertPendingFor(requestID)
+		s.revertPendingFor(item)
 		return
 	}
 	if status == "done" {
-		s.finalizePendingFor(requestID)
+		s.finalizePendingFor(item)
 	} else {
 		// Terminal `failed` from agentproc's IsError result: the agent
 		// emitted a result event marking the turn as a failure. Treat
 		// the same as a process-level failure for pending-row
 		// purposes — user retry should re-see the deltas.
-		s.revertPendingFor(requestID)
+		s.revertPendingFor(item)
 	}
 	s.curator.broadcastRequestUpdate(s.projectID, requestID, status)
 }
@@ -375,9 +414,12 @@ func (s *projectSession) dispatch(requestID string) {
 // request. Best-effort logging — finalization failure leaves stale
 // rows that the next user message will skip (they are already marked
 // consumed) but does not poison the chat or block other dispatches.
-func (s *projectSession) finalizePendingFor(requestID string) {
-	if err := db.FinalizePendingContext(s.curator.database, requestID); err != nil {
-		log.Printf("[curator] warning: finalize pending context for %s: %v", requestID, err)
+func (s *projectSession) finalizePendingFor(item queueItem) {
+	ctx := context.WithoutCancel(s.ctx)
+	if err := s.curator.stores.Tx.SyntheticClaimsWithTx(ctx, item.orgID, item.creatorUserID, func(ts db.TxStores) error {
+		return ts.Curator.FinalizePendingContext(ctx, item.orgID, item.requestID)
+	}); err != nil {
+		log.Printf("[curator] warning: finalize pending context for %s: %v", item.requestID, err)
 	}
 }
 
@@ -386,12 +428,18 @@ func (s *projectSession) finalizePendingFor(requestID string) {
 // removes the curator_messages audit row keyed to this request so the
 // chat history doesn't show a phantom "context noted" entry for a
 // turn that never delivered the deltas.
-func (s *projectSession) revertPendingFor(requestID string) {
-	if err := db.RevertPendingContext(s.curator.database, requestID); err != nil {
-		log.Printf("[curator] warning: revert pending context for %s: %v", requestID, err)
-	}
-	if err := db.DeleteCuratorMessagesBySubtype(s.curator.database, requestID, "context_change"); err != nil {
-		log.Printf("[curator] warning: delete context_change audit for %s: %v", requestID, err)
+func (s *projectSession) revertPendingFor(item queueItem) {
+	ctx := context.WithoutCancel(s.ctx)
+	if err := s.curator.stores.Tx.SyntheticClaimsWithTx(ctx, item.orgID, item.creatorUserID, func(ts db.TxStores) error {
+		if err := ts.Curator.RevertPendingContext(ctx, item.orgID, item.requestID); err != nil {
+			return fmt.Errorf("revert pending: %w", err)
+		}
+		if err := ts.Curator.DeleteMessagesBySubtype(ctx, item.orgID, item.requestID, "context_change"); err != nil {
+			return fmt.Errorf("delete audit: %w", err)
+		}
+		return nil
+	}); err != nil {
+		log.Printf("[curator] warning: revert/delete pending context for %s: %v", item.requestID, err)
 	}
 }
 
@@ -444,21 +492,39 @@ func (s *projectSession) shutdown(reason string) {
 	<-s.done
 }
 
-func (s *projectSession) markCancelled(requestID, reason string) {
-	flipped, err := db.MarkCuratorRequestCancelledIfActive(s.curator.database, requestID, reason)
+func (s *projectSession) markCancelled(item queueItem, reason string) {
+	ctx := context.WithoutCancel(s.ctx)
+	var flipped bool
+	err := s.curator.stores.Tx.SyntheticClaimsWithTx(ctx, item.orgID, item.creatorUserID, func(ts db.TxStores) error {
+		f, err := ts.Curator.MarkRequestCancelledIfActive(ctx, item.orgID, item.requestID, reason)
+		if err != nil {
+			return err
+		}
+		flipped = f
+		return nil
+	})
 	if err != nil {
-		log.Printf("[curator] warning: cancel request %s: %v", requestID, err)
+		log.Printf("[curator] warning: cancel request %s: %v", item.requestID, err)
 		return
 	}
 	if flipped {
-		s.curator.broadcastRequestUpdate(s.projectID, requestID, "cancelled")
+		s.curator.broadcastRequestUpdate(s.projectID, item.requestID, "cancelled")
 	}
 }
 
-func (s *projectSession) failRequest(requestID, errMsg string) {
-	flipped, err := db.CompleteCuratorRequest(s.curator.database, requestID, "failed", errMsg, 0, 0, 0)
+func (s *projectSession) failRequest(item queueItem, errMsg string) {
+	ctx := context.WithoutCancel(s.ctx)
+	var flipped bool
+	err := s.curator.stores.Tx.SyntheticClaimsWithTx(ctx, item.orgID, item.creatorUserID, func(ts db.TxStores) error {
+		f, err := ts.Curator.CompleteRequest(ctx, item.orgID, item.requestID, "failed", errMsg, 0, 0, 0)
+		if err != nil {
+			return err
+		}
+		flipped = f
+		return nil
+	})
 	if err != nil {
-		log.Printf("[curator] warning: fail request %s: %v", requestID, err)
+		log.Printf("[curator] warning: fail request %s: %v", item.requestID, err)
 		return
 	}
 	if !flipped {
@@ -466,5 +532,5 @@ func (s *projectSession) failRequest(requestID, errMsg string) {
 		// the handler already broadcast that.
 		return
 	}
-	s.curator.broadcastRequestUpdate(s.projectID, requestID, "failed")
+	s.curator.broadcastRequestUpdate(s.projectID, item.requestID, "failed")
 }

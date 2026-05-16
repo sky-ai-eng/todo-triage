@@ -197,7 +197,16 @@ func New(admin, app *sql.DB) db.Stores {
 		// cleanup defers. org_id stays bound everywhere as defense
 		// in depth.
 		RunWorktrees: newRunWorktreeStore(app, admin),
-		Tx:           s,
+		// Curator wires the app pool. The per-project goroutine
+		// wraps each turn's writes in Tx.SyntheticClaimsWithTx
+		// under the requesting user's identity; the tx-bound
+		// variant composed inside tx.go's txStoresFromTx body is
+		// what actually services those calls. The handler-side
+		// CreateRequest / GetRequest reads (where the request has
+		// a user identity but not yet via the D9 context plumb)
+		// also route through this app-pool wiring.
+		Curator: newCuratorStore(app),
+		Tx:      s,
 	}
 	return s.stores
 }
@@ -254,5 +263,6 @@ func NewForTx(tx *sql.Tx) db.TxStores {
 		Events:         newEventStore(tx, tx),
 		TaskMemory:     newTaskMemoryStore(tx, tx),
 		RunWorktrees:   newRunWorktreeStore(tx, tx),
+		Curator:        newCuratorStore(tx),
 	}
 }

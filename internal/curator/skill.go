@@ -2,7 +2,6 @@ package curator
 
 import (
 	"context"
-	"database/sql"
 	_ "embed" // required by //go:embed
 	"fmt"
 	"log"
@@ -12,7 +11,6 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // specSkillDirName is the per-session subdirectory Claude Code scans for
@@ -42,11 +40,15 @@ var jiraFormattingSkillTemplate string
 // points at) and the user expects the Curator's next turn to pick up
 // the change without a session reset. Writing fresh on every dispatch
 // is the cheapest way to honor that.
-func materializeSpecSkill(database *sql.DB, prompts db.PromptStore, project *domain.Project, cwd string) error {
+//
+// orgID + creatorUserID identify the requesting user — the prompt
+// lookup runs inside SyntheticClaimsWithTx so multi-mode RLS reads
+// stay attributed to the user that triggered the turn. SKY-298.
+func materializeSpecSkill(ctx context.Context, stores db.Stores, orgID, creatorUserID string, project *domain.Project, cwd string) error {
 	if project == nil {
 		return nil
 	}
-	prompt, err := resolveSpecPrompt(prompts, project)
+	prompt, err := resolveSpecPrompt(ctx, stores, orgID, creatorUserID, project)
 	if err != nil {
 		return err
 	}
@@ -96,24 +98,37 @@ func materializeJiraFormattingSkill(cwd string) error {
 // deleted prompt, both fall through to the default — the schema's
 // ON DELETE SET NULL drops dangling FKs but a stale in-memory project
 // row could still carry the deleted id, so we re-check.
-func resolveSpecPrompt(prompts db.PromptStore, project *domain.Project) (*domain.Prompt, error) {
-	ctx := context.Background()
-	if project.SpecAuthorshipPromptID != "" {
-		p, err := prompts.Get(ctx, runmode.LocalDefaultOrg, project.SpecAuthorshipPromptID)
+//
+// Reads happen inside SyntheticClaimsWithTx so multi-mode RLS on
+// prompts_select gates on (org_id = tf.current_org_id() AND
+// tf.user_has_org_access). The lookup is read-only; the tx exists
+// purely to set claims for that one call.
+func resolveSpecPrompt(ctx context.Context, stores db.Stores, orgID, creatorUserID string, project *domain.Project) (*domain.Prompt, error) {
+	var result *domain.Prompt
+	err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, creatorUserID, func(ts db.TxStores) error {
+		if project.SpecAuthorshipPromptID != "" {
+			p, err := ts.Prompts.Get(ctx, orgID, project.SpecAuthorshipPromptID)
+			if err != nil {
+				return fmt.Errorf("load configured spec prompt: %w", err)
+			}
+			if p != nil {
+				result = p
+				return nil
+			}
+			log.Printf("[curator] project %s references missing spec prompt %s; falling back to system default",
+				project.ID, project.SpecAuthorshipPromptID)
+		}
+		p, err := ts.Prompts.Get(ctx, orgID, domain.SystemTicketSpecPromptID)
 		if err != nil {
-			return nil, fmt.Errorf("load configured spec prompt: %w", err)
+			return fmt.Errorf("load default spec prompt: %w", err)
 		}
-		if p != nil {
-			return p, nil
-		}
-		log.Printf("[curator] project %s references missing spec prompt %s; falling back to system default",
-			project.ID, project.SpecAuthorshipPromptID)
-	}
-	p, err := prompts.Get(ctx, runmode.LocalDefaultOrg, domain.SystemTicketSpecPromptID)
+		result = p
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("load default spec prompt: %w", err)
+		return nil, err
 	}
-	return p, nil
+	return result, nil
 }
 
 // renderSkillFile wraps the prompt body in the YAML frontmatter shape

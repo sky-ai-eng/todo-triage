@@ -201,6 +201,15 @@ func (s *projectStore) Delete(ctx context.Context, orgID, id string) error {
 	return nil
 }
 
+func (s *projectStore) SetCuratorSessionID(ctx context.Context, orgID, projectID, sessionID string) error {
+	_, err := s.q.ExecContext(ctx, `
+		UPDATE projects
+		SET curator_session_id = NULLIF($1, ''), updated_at = now()
+		WHERE org_id = $2 AND id = $3
+	`, sessionID, orgID, projectID)
+	return err
+}
+
 func (s *projectStore) BumpUpdatedAt(ctx context.Context, orgID, id string) error {
 	_, err := s.q.ExecContext(ctx,
 		`UPDATE projects SET updated_at = now() WHERE org_id = $1 AND id = $2`,

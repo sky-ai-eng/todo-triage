@@ -63,7 +63,14 @@ func New(conn *sql.DB) db.Stores {
 		// connection so the dual-pool constructor collapses; the
 		// `...System` variants forward to the non-System bodies.
 		RunWorktrees: newRunWorktreeStore(conn, conn),
-		Tx:           s,
+		// Curator: the goroutine wraps each turn in
+		// Stores.Tx.SyntheticClaimsWithTx so the tx-bound variant
+		// (composed inside the tx.go runTx body) is what handles
+		// production writes. The non-tx variant wired here exists
+		// for completeness — handler-side helpers stay on the
+		// package-level *sql.DB calls until D9.
+		Curator: newCuratorStore(conn),
+		Tx:      s,
 	}
 	return s.stores
 }

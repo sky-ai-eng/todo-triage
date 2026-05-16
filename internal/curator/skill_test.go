@@ -6,7 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 func TestMaterializeSpecSkill_WritesProjectChoice(t *testing.T) {
@@ -18,7 +20,7 @@ func TestMaterializeSpecSkill_WritesProjectChoice(t *testing.T) {
 
 	cwd := t.TempDir()
 	project := &domain.Project{ID: "p1", SpecAuthorshipPromptID: "custom-spec"}
-	if err := materializeSpecSkill(database, testPromptStore(database), project, cwd); err != nil {
+	if err := materializeSpecSkill(t.Context(), sqlitestore.New(database), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, project, cwd); err != nil {
 		t.Fatalf("materialize: %v", err)
 	}
 
@@ -54,7 +56,7 @@ func TestMaterializeSpecSkill_FallsBackToSystemDefault(t *testing.T) {
 	cwd := t.TempDir()
 	// Empty SpecAuthorshipPromptID → fall through to system default.
 	project := &domain.Project{ID: "p1"}
-	if err := materializeSpecSkill(database, testPromptStore(database), project, cwd); err != nil {
+	if err := materializeSpecSkill(t.Context(), sqlitestore.New(database), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, project, cwd); err != nil {
 		t.Fatalf("materialize: %v", err)
 	}
 
@@ -79,7 +81,7 @@ func TestMaterializeSpecSkill_StaleReferenceFallsBack(t *testing.T) {
 
 	cwd := t.TempDir()
 	project := &domain.Project{ID: "p1", SpecAuthorshipPromptID: "ghost-id-that-does-not-exist"}
-	if err := materializeSpecSkill(database, testPromptStore(database), project, cwd); err != nil {
+	if err := materializeSpecSkill(t.Context(), sqlitestore.New(database), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, project, cwd); err != nil {
 		t.Fatalf("materialize: %v", err)
 	}
 	data, err := os.ReadFile(filepath.Join(cwd, ".claude", "skills", "ticket-spec", "SKILL.md"))
@@ -106,7 +108,7 @@ func TestMaterializeSpecSkill_OverwritesOnEachCall(t *testing.T) {
 	cwd := t.TempDir()
 	skillPath := filepath.Join(cwd, ".claude", "skills", "ticket-spec", "SKILL.md")
 	project := &domain.Project{ID: "p1", SpecAuthorshipPromptID: "v1"}
-	if err := materializeSpecSkill(database, testPromptStore(database), project, cwd); err != nil {
+	if err := materializeSpecSkill(t.Context(), sqlitestore.New(database), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, project, cwd); err != nil {
 		t.Fatalf("first: %v", err)
 	}
 	first, err := os.ReadFile(skillPath)
@@ -119,7 +121,7 @@ func TestMaterializeSpecSkill_OverwritesOnEachCall(t *testing.T) {
 
 	// Swap project's prompt; next dispatch should overwrite.
 	project.SpecAuthorshipPromptID = "v2"
-	if err := materializeSpecSkill(database, testPromptStore(database), project, cwd); err != nil {
+	if err := materializeSpecSkill(t.Context(), sqlitestore.New(database), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, project, cwd); err != nil {
 		t.Fatalf("second: %v", err)
 	}
 	second, err := os.ReadFile(skillPath)
@@ -140,7 +142,7 @@ func TestMaterializeSpecSkill_NoPromptDoesNotError(t *testing.T) {
 	database := newTestDB(t)
 	cwd := t.TempDir()
 	project := &domain.Project{ID: "p1"}
-	if err := materializeSpecSkill(database, testPromptStore(database), project, cwd); err != nil {
+	if err := materializeSpecSkill(t.Context(), sqlitestore.New(database), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, project, cwd); err != nil {
 		t.Fatalf("expected nil error when no prompt available, got %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(cwd, ".claude", "skills", "ticket-spec", "SKILL.md")); !os.IsNotExist(err) {
@@ -161,7 +163,7 @@ func TestMaterializeSpecSkill_NoPromptClearsStaleFile(t *testing.T) {
 
 	cwd := t.TempDir()
 	project := &domain.Project{ID: "p1", SpecAuthorshipPromptID: "v1"}
-	if err := materializeSpecSkill(database, testPromptStore(database), project, cwd); err != nil {
+	if err := materializeSpecSkill(t.Context(), sqlitestore.New(database), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, project, cwd); err != nil {
 		t.Fatalf("first dispatch: %v", err)
 	}
 	skillPath := filepath.Join(cwd, ".claude", "skills", "ticket-spec", "SKILL.md")
@@ -173,7 +175,7 @@ func TestMaterializeSpecSkill_NoPromptClearsStaleFile(t *testing.T) {
 	// no system default seeded. Resolution should fail through to the
 	// no-prompt branch.
 	project.SpecAuthorshipPromptID = "ghost"
-	if err := materializeSpecSkill(database, testPromptStore(database), project, cwd); err != nil {
+	if err := materializeSpecSkill(t.Context(), sqlitestore.New(database), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, project, cwd); err != nil {
 		t.Fatalf("second dispatch: %v", err)
 	}
 	if _, err := os.Stat(skillPath); !os.IsNotExist(err) {

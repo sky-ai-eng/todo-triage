@@ -63,6 +63,17 @@ type ProjectStore interface {
 	// pure DB. Same split as the rest of the codebase.
 	Delete(ctx context.Context, orgID, id string) error
 
+	// SetCuratorSessionID persists the Claude Code session id on the
+	// project row. The curator's first dispatch on a project captures
+	// the session id from the agent's init event; subsequent turns
+	// resume against the same id. App pool in Postgres — the goroutine
+	// wraps this in SyntheticClaimsWithTx under the requesting user's
+	// identity, since the bookkeeping write is part of that user's
+	// turn. updated_at is stamped server-side. Idempotent — repeating
+	// the same value is a harmless no-op (the per-request sink also
+	// short-circuits via persistOnce).
+	SetCuratorSessionID(ctx context.Context, orgID, projectID, sessionID string) error
+
 	// BumpUpdatedAt stamps updated_at = now() without changing any
 	// other column. The knowledge-base upload/delete handlers call
 	// this after writing or removing files on disk so the UI's

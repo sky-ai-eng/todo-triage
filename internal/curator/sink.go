@@ -1,6 +1,7 @@
 package curator
 
 import (
+	"context"
 	"fmt"
 	"sync"
 
@@ -24,9 +25,11 @@ import (
 // writing the same value twice per request even though SetProjectCuratorSessionID
 // is idempotent at the DB layer.
 type requestSink struct {
-	curator   *Curator
-	projectID string
-	requestID string
+	curator       *Curator
+	projectID     string
+	requestID     string
+	orgID         string
+	creatorUserID string
 
 	// onceMu guards persistOnce + sessionID updates so a future
 	// concurrent ParseLine wouldn't double-persist if the underlying
@@ -39,8 +42,14 @@ type requestSink struct {
 	}
 }
 
-func newRequestSink(c *Curator, projectID, requestID string) *requestSink {
-	return &requestSink{curator: c, projectID: projectID, requestID: requestID}
+func newRequestSink(c *Curator, projectID, requestID, orgID, creatorUserID string) *requestSink {
+	return &requestSink{
+		curator:       c,
+		projectID:     projectID,
+		requestID:     requestID,
+		orgID:         orgID,
+		creatorUserID: creatorUserID,
+	}
 }
 
 // OnSession persists the captured session_id on the project row the
@@ -55,7 +64,16 @@ func (s *requestSink) OnSession(sessionID string) error {
 	}
 	s.onceMu.Unlock()
 
-	if err := db.SetProjectCuratorSessionID(s.curator.database, s.projectID, sessionID); err != nil {
+	// The session-id update is part of this user's turn — wrap in
+	// synthetic claims so multi-mode RLS attributes the bookkeeping
+	// write to the same identity as the message writes. Background
+	// ctx is fine here: this fires from the agentproc sink, not from
+	// a cancellable msgCtx, and the write should land even if the
+	// dispatch is being torn down.
+	ctx := context.Background()
+	if err := s.curator.stores.Tx.SyntheticClaimsWithTx(ctx, s.orgID, s.creatorUserID, func(ts db.TxStores) error {
+		return ts.Projects.SetCuratorSessionID(ctx, s.orgID, s.projectID, sessionID)
+	}); err != nil {
 		return fmt.Errorf("persist curator session_id: %w", err)
 	}
 
@@ -88,8 +106,19 @@ func (s *requestSink) OnMessage(msg *domain.AgentMessage) error {
 		CacheCreationTokens: msg.CacheCreationTokens,
 		CreatedAt:           msg.CreatedAt,
 	}
-	id, err := db.InsertCuratorMessage(s.curator.database, curatorMsg)
-	if err != nil {
+	// Per-message synthetic-claims wrap — each row attributes to the
+	// requesting user. Short-lived tx (one INSERT) so the long-running
+	// claude subprocess never holds a tx open. See SKY-298.
+	ctx := context.Background()
+	var id int64
+	if err := s.curator.stores.Tx.SyntheticClaimsWithTx(ctx, s.orgID, s.creatorUserID, func(ts db.TxStores) error {
+		got, err := ts.Curator.InsertMessage(ctx, s.orgID, curatorMsg)
+		if err != nil {
+			return err
+		}
+		id = got
+		return nil
+	}); err != nil {
 		return fmt.Errorf("insert curator message: %w", err)
 	}
 	curatorMsg.ID = int(id)
