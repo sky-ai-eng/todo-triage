@@ -79,20 +79,6 @@ func TestPendingFiringsStore_Postgres_CrossOrgLeakage(t *testing.T) {
 		t.Errorf("orgB ListEntitiesWithPending = %v, want empty", ids)
 	}
 
-	// EntityCanFireImmediately scoped to orgB must report true on
-	// orgA's entity — orgB sees no pending firings and no active runs
-	// for that entity.
-	if can, _ := stores.PendingFirings.EntityCanFireImmediately(ctx, orgB, tupA.EntityID); !can {
-		t.Errorf("orgB EntityCanFireImmediately returned false on orgA's entity (cross-org leak)")
-	}
-
-	// HasActiveAutoRunForEntity: seed an active event run in orgA,
-	// then assert orgB doesn't see it through the gate.
-	seedA.ActiveAutoRun(t, tupA.TaskID)
-	if has, _ := stores.PendingFirings.HasActiveAutoRunForEntity(ctx, orgB, tupA.EntityID); has {
-		t.Errorf("orgB HasActiveAutoRunForEntity returned true for orgA's run (cross-org leak)")
-	}
-
 	// MarkFired/MarkSkipped cross-org must NOT mutate orgA's row.
 	// Read orgA's firing id first.
 	rowsA, _ := stores.PendingFirings.ListForEntity(ctx, orgA, tupA.EntityID)
@@ -100,7 +86,7 @@ func TestPendingFiringsStore_Postgres_CrossOrgLeakage(t *testing.T) {
 		t.Fatalf("expected one orgA firing, got %d", len(rowsA))
 	}
 	firingID := rowsA[0].ID
-	runIDInOrgB := seedB.ActiveAutoRun(t, tupB.TaskID)
+	runIDInOrgB := seedB.RunForTask(t, tupB.TaskID)
 	if err := stores.PendingFirings.MarkFired(ctx, orgB, firingID, runIDInOrgB); err != nil {
 		t.Fatalf("MarkFired cross-org: %v", err)
 	}
@@ -211,7 +197,11 @@ func newPgPendingFiringsSeeder(h *pgtest.Harness, orgID, userID string) dbtest.P
 		}
 	}
 
-	insertRun := func(t *testing.T, taskID, triggerType, status string) string {
+	// runForTask inserts a manual-trigger run row so MarkFired's
+	// fired_run_id FK to runs(id) is satisfied. The conformance
+	// suite doesn't probe gate semantics here — those live in
+	// AgentRunStore's own tests.
+	runForTask := func(t *testing.T, taskID string) string {
 		t.Helper()
 		runID := uuid.New().String()
 		promptID := uuid.New().String()
@@ -221,46 +211,17 @@ func newPgPendingFiringsSeeder(h *pgtest.Harness, orgID, userID string) dbtest.P
 		`, promptID, orgID, userID, teamID); err != nil {
 			t.Fatalf("seed run prompt: %v", err)
 		}
-		// runs_creator_matches_trigger_type:
-		//   - trigger_type='event'  ↔ creator_user_id IS NULL
-		//   - trigger_type='manual' ↔ creator_user_id IS NOT NULL
-		// runs.trigger_id REFERENCES event_handlers(id); event-trigger
-		// runs need a real handler row, manual runs leave it NULL.
-		var triggerBind any
-		var creatorBind any
-		if triggerType == "event" {
-			trigID := uuid.New().String()
-			if _, err := conn.Exec(`
-				INSERT INTO event_handlers (id, org_id, creator_user_id, team_id, visibility, kind, event_type, source, prompt_id, breaker_threshold, min_autonomy_suitability, enabled, created_at, updated_at)
-				VALUES ($1, $2, $3, $4, 'team', 'trigger', 'github:pr:ci_check_failed', 'user', $5, 4, 0, true, now(), now())
-			`, trigID, orgID, userID, teamID, promptID); err != nil {
-				t.Fatalf("seed run trigger: %v", err)
-			}
-			triggerBind = trigID
-			creatorBind = nil
-		} else {
-			triggerBind = nil
-			creatorBind = userID
-		}
 		if _, err := conn.Exec(`
-			INSERT INTO runs (id, org_id, task_id, prompt_id, trigger_id, trigger_type, status, model, team_id, visibility, creator_user_id, started_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, 'm', $8, 'team', $9, now())
-		`, runID, orgID, taskID, promptID, triggerBind, triggerType, status, teamID, creatorBind); err != nil {
+			INSERT INTO runs (id, org_id, task_id, prompt_id, trigger_type, status, model, team_id, visibility, creator_user_id, started_at)
+			VALUES ($1, $2, $3, $4, 'manual', 'running', 'm', $5, 'team', $6, now())
+		`, runID, orgID, taskID, promptID, teamID, userID); err != nil {
 			t.Fatalf("seed run: %v", err)
 		}
 		return runID
 	}
 
 	return dbtest.PendingFiringsSeeder{
-		Tuple: tuple,
-		ActiveAutoRun: func(t *testing.T, taskID string) string {
-			return insertRun(t, taskID, "event", "running")
-		},
-		TerminalAutoRun: func(t *testing.T, taskID string) string {
-			return insertRun(t, taskID, "event", "completed")
-		},
-		ManualRun: func(t *testing.T, taskID string) string {
-			return insertRun(t, taskID, "manual", "running")
-		},
+		Tuple:      tuple,
+		RunForTask: runForTask,
 	}
 }

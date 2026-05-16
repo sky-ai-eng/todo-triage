@@ -414,6 +414,24 @@ func (s *agentRunStore) HasActiveForTask(ctx context.Context, orgID, taskID stri
 	return count > 0, err
 }
 
+// HasActiveAutoRunForEntity is the per-entity sibling of
+// HasActiveForTask: any non-terminal trigger_type='event' run on any
+// task that belongs to the entity. Manual delegations are excluded.
+// Used by the router's per-entity firing gate (SKY-189).
+func (s *agentRunStore) HasActiveAutoRunForEntity(ctx context.Context, orgID, entityID string) (bool, error) {
+	var count int
+	err := s.q.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM runs r
+		JOIN tasks t ON t.id = r.task_id AND t.org_id = r.org_id
+		WHERE r.org_id = $1
+		  AND t.entity_id = $2
+		  AND r.trigger_type = 'event'
+		  AND r.status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',
+		                       'pending_approval', 'taken_over')
+	`, orgID, entityID).Scan(&count)
+	return count > 0, err
+}
+
 func (s *agentRunStore) ActiveIDsForTask(ctx context.Context, orgID, taskID string) ([]string, error) {
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT id FROM runs

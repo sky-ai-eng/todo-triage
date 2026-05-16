@@ -18,12 +18,10 @@ import (
 // kept honest by the explicit filter here in case the policy is ever
 // loosened).
 //
-// HasActiveAutoRunForEntity hits runs+tasks rather than
-// pending_firings. It belongs to AgentRunStore by strict ownership;
-// it lives here because the only caller is the per-entity firing
-// gate (EntityCanFireImmediately) and threading two stores through
-// the router for one composite predicate adds more wiring than it
-// removes. Flagged in the PR description for SKY-259 to revisit.
+// The per-entity firing gate's runs-shaped half lives on
+// AgentRunStore (HasActiveAutoRunForEntity) — strict ownership. The
+// router composes the gate from this store's HasPendingForEntity +
+// AgentRunStore's HasActiveAutoRunForEntity.
 type pendingFiringsStore struct{ q queryer }
 
 func newPendingFiringsStore(q queryer) db.PendingFiringsStore {
@@ -91,19 +89,6 @@ func (s *pendingFiringsStore) MarkSkipped(ctx context.Context, orgID string, fir
 	return err
 }
 
-func (s *pendingFiringsStore) HasActiveAutoRunForEntity(ctx context.Context, orgID, entityID string) (bool, error) {
-	var count int
-	err := s.q.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM runs r
-		JOIN tasks t ON t.id = r.task_id AND t.org_id = r.org_id
-		WHERE r.org_id = $1
-		  AND t.entity_id = $2
-		  AND r.trigger_type = 'event'
-		  AND r.status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable', 'pending_approval', 'taken_over')
-	`, orgID, entityID).Scan(&count)
-	return count > 0, err
-}
-
 func (s *pendingFiringsStore) HasPendingForEntity(ctx context.Context, orgID, entityID string) (bool, error) {
 	var count int
 	err := s.q.QueryRowContext(ctx, `
@@ -111,21 +96,6 @@ func (s *pendingFiringsStore) HasPendingForEntity(ctx context.Context, orgID, en
 		WHERE org_id = $1 AND entity_id = $2 AND status = 'pending'
 	`, orgID, entityID).Scan(&count)
 	return count > 0, err
-}
-
-func (s *pendingFiringsStore) EntityCanFireImmediately(ctx context.Context, orgID, entityID string) (bool, error) {
-	active, err := s.HasActiveAutoRunForEntity(ctx, orgID, entityID)
-	if err != nil {
-		return false, err
-	}
-	if active {
-		return false, nil
-	}
-	pending, err := s.HasPendingForEntity(ctx, orgID, entityID)
-	if err != nil {
-		return false, err
-	}
-	return !pending, nil
 }
 
 func (s *pendingFiringsStore) ListEntitiesWithPending(ctx context.Context, orgID string) ([]string, error) {

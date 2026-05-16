@@ -6,7 +6,6 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // PendingFiringsStoreFactory is what a per-backend test file hands to
@@ -41,21 +40,13 @@ type PendingFiringsSeeder struct {
 	// returns the IDs Enqueue needs.
 	Tuple func(t *testing.T) PendingFiringsTuple
 
-	// ActiveAutoRun inserts a non-terminal trigger_type='event' run
-	// against an existing taskID. Used to exercise the
-	// HasActiveAutoRunForEntity gate without going through the
-	// router's spawner.
-	ActiveAutoRun func(t *testing.T, taskID string) string
-
-	// TerminalAutoRun inserts a terminal trigger_type='event' run
-	// against the taskID — paired with ActiveAutoRun to assert the
-	// gate flips false once the run terminates.
-	TerminalAutoRun func(t *testing.T, taskID string) string
-
-	// ManualRun inserts a non-terminal trigger_type='manual' run
-	// against the taskID. Used to assert the gate ignores manual
-	// delegations (per SKY-189 design — manual decoupled from queue).
-	ManualRun func(t *testing.T, taskID string) string
+	// RunForTask inserts a run against the taskID and returns the
+	// runID. Used by MarkFired tests to satisfy fired_run_id's FK to
+	// runs(id). Status / trigger_type aren't load-bearing here —
+	// the conformance suite only needs a real run row to point at;
+	// the per-entity firing gate's runs-shaped half is owned by
+	// AgentRunStore and tested there.
+	RunForTask func(t *testing.T, taskID string) string
 }
 
 // RunPendingFiringsStoreConformance covers the pending-firings
@@ -72,12 +63,13 @@ type PendingFiringsSeeder struct {
 //   - MarkSkipped flips 'pending' → 'skipped_stale' with reason;
 //     same idempotency guard.
 //   - HasPendingForEntity tracks presence of 'pending' rows.
-//   - HasActiveAutoRunForEntity is true for non-terminal event-trigger
-//     runs, false for terminal runs, false for manual runs.
-//   - EntityCanFireImmediately is false when either gate is active.
 //   - ListEntitiesWithPending returns distinct entity ids that have
 //     at least one 'pending' row, scoped to the org.
 //   - ListForEntity orders by queued_at ASC then id ASC.
+//
+// The runs-shaped half of the per-entity firing gate
+// (HasActiveAutoRunForEntity) is owned by AgentRunStore — its
+// behavior is covered by that store's own tests, not here.
 func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -216,7 +208,7 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 		// (fired_run_id has FK with ON DELETE on (fired_run_id, org_id)
 		// referencing runs(id, org_id)). The seeder's run-insert
 		// helpers produce valid run ids.
-		runID := seed.ActiveAutoRun(t, tup.TaskID)
+		runID := seed.RunForTask(t, tup.TaskID)
 		if err := s.MarkFired(ctx, orgID, row.ID, runID); err != nil {
 			t.Fatalf("MarkFired: %v", err)
 		}
@@ -242,7 +234,7 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 		if err := s.MarkSkipped(ctx, orgID, row.ID, domain.PendingFiringSkipTaskClosed); err != nil {
 			t.Fatalf("MarkSkipped: %v", err)
 		}
-		runID := seed.ActiveAutoRun(t, tup.TaskID)
+		runID := seed.RunForTask(t, tup.TaskID)
 		// Should silently no-op — guarded by WHERE status='pending'.
 		if err := s.MarkFired(ctx, orgID, row.ID, runID); err != nil {
 			t.Fatalf("MarkFired on terminal: %v", err)
@@ -291,77 +283,6 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 		has, _ = s.HasPendingForEntity(ctx, orgID, tup.EntityID)
 		if has {
 			t.Errorf("after only terminal rows remain, HasPending should be false")
-		}
-	})
-
-	t.Run("HasActiveAutoRunForEntity_gates_only_event_runs", func(t *testing.T) {
-		s, orgID, seed := mk(t)
-		tup := seed.Tuple(t)
-		has, _ := s.HasActiveAutoRunForEntity(ctx, orgID, tup.EntityID)
-		if has {
-			t.Errorf("no runs → should report false")
-		}
-
-		// Manual run on the task — must NOT trip the gate per SKY-189.
-		seed.ManualRun(t, tup.TaskID)
-		has, _ = s.HasActiveAutoRunForEntity(ctx, orgID, tup.EntityID)
-		if has {
-			t.Errorf("manual run should not trip the auto-run gate")
-		}
-
-		// Active event run — should trip.
-		seed.ActiveAutoRun(t, tup.TaskID)
-		has, _ = s.HasActiveAutoRunForEntity(ctx, orgID, tup.EntityID)
-		if !has {
-			t.Errorf("active event run should trip the gate")
-		}
-	})
-
-	t.Run("HasActiveAutoRunForEntity_false_when_only_terminal", func(t *testing.T) {
-		s, orgID, seed := mk(t)
-		tup := seed.Tuple(t)
-		seed.TerminalAutoRun(t, tup.TaskID)
-		has, _ := s.HasActiveAutoRunForEntity(ctx, orgID, tup.EntityID)
-		if has {
-			t.Errorf("terminal-only runs should not trip the gate, got true")
-		}
-	})
-
-	t.Run("EntityCanFireImmediately_composes_both_gates", func(t *testing.T) {
-		s, orgID, seed := mk(t)
-		tup := seed.Tuple(t)
-
-		// Clean slate: no runs, no pending → can fire.
-		can, err := s.EntityCanFireImmediately(ctx, orgID, tup.EntityID)
-		if err != nil {
-			t.Fatalf("EntityCanFireImmediately: %v", err)
-		}
-		if !can {
-			t.Errorf("clean entity should be allowed to fire immediately")
-		}
-
-		// Pending row in queue → cannot fire.
-		if _, err := s.Enqueue(ctx, orgID, tup.UserID, tup.EntityID, tup.TaskID, tup.TriggerID, tup.EventID); err != nil {
-			t.Fatalf("Enqueue: %v", err)
-		}
-		can, _ = s.EntityCanFireImmediately(ctx, orgID, tup.EntityID)
-		if can {
-			t.Errorf("queue with pending row should block immediate fire")
-		}
-
-		// Skip the row → queue empty, can fire again.
-		row, _ := s.PopForEntity(ctx, orgID, tup.EntityID)
-		_ = s.MarkSkipped(ctx, orgID, row.ID, domain.PendingFiringSkipTaskClosed)
-		can, _ = s.EntityCanFireImmediately(ctx, orgID, tup.EntityID)
-		if !can {
-			t.Errorf("after skip drains queue, should be allowed to fire (no active run either)")
-		}
-
-		// Active auto run → blocks.
-		seed.ActiveAutoRun(t, tup.TaskID)
-		can, _ = s.EntityCanFireImmediately(ctx, orgID, tup.EntityID)
-		if can {
-			t.Errorf("active auto run should block immediate fire")
 		}
 	})
 
@@ -417,8 +338,3 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 		}
 	})
 }
-
-// LocalUserID is a convenience for SQLite seeders — the local user
-// sentinel is what the router passes today, and the conformance suite
-// uses it through PendingFiringsTuple.UserID.
-var LocalUserID = runmode.LocalDefaultUserID

@@ -359,12 +359,24 @@ func (r *Router) tryAutoDelegate(task *domain.Task, trigger domain.EventHandler,
 
 	// Per-entity gate. Closed if any auto run is active on the entity OR
 	// any pending_firings rows are already queued (FIFO fairness).
-	canFire, err := r.firings.EntityCanFireImmediately(context.Background(), runmode.LocalDefaultOrg, entityID)
+	// Compose the per-entity firing gate from its two halves:
+	// AgentRunStore owns the runs-shaped predicate, PendingFiringsStore
+	// owns the queue-shaped one. canFire = neither side blocks.
+	gateCtx := context.Background()
+	hasActive, err := r.agentRuns.HasActiveAutoRunForEntity(gateCtx, runmode.LocalDefaultOrg, entityID)
 	if err != nil {
-		log.Printf("[router] entity gate query error for %s: %v", entityID, err)
+		log.Printf("[router] entity gate active-run query error for %s: %v", entityID, err)
 		return
 	}
-	if !canFire {
+	hasPending := false
+	if !hasActive {
+		hasPending, err = r.firings.HasPendingForEntity(gateCtx, runmode.LocalDefaultOrg, entityID)
+		if err != nil {
+			log.Printf("[router] entity gate pending query error for %s: %v", entityID, err)
+			return
+		}
+	}
+	if hasActive || hasPending {
 		inserted, err := r.firings.Enqueue(context.Background(), runmode.LocalDefaultOrg, runmode.LocalDefaultUserID, entityID, task.ID, trigger.ID, triggeringEventID)
 		if err != nil {
 			log.Printf("[router] enqueue firing failed (entity %s task %s trigger %s): %v",
@@ -621,7 +633,7 @@ func (r *Router) RunDrainSweeper(ctx context.Context, interval time.Duration) {
 				continue
 			}
 			for _, eid := range ids {
-				active, err := r.firings.HasActiveAutoRunForEntity(ctx, runmode.LocalDefaultOrg, eid)
+				active, err := r.agentRuns.HasActiveAutoRunForEntity(ctx, runmode.LocalDefaultOrg, eid)
 				if err != nil {
 					log.Printf("[router] drain sweeper: active-check error for %s: %v", eid, err)
 					continue

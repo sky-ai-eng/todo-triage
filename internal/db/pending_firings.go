@@ -23,13 +23,10 @@ import (
 // equals the local sentinel and otherwise ignores it (single-tenant
 // by design).
 //
-// HasActiveAutoRunForEntity is logically a runs-table query and would
-// fit AgentRunStore by the strict ownership rule; it lives here
-// because the only caller is the per-entity firing gate
-// (EntityCanFireImmediately), and threading two stores through the
-// router for one composite predicate was the lesser of two evils.
-// Flagged in the PR; left in place for the SKY-259-shaped event-
-// handler unification ticket to decide.
+// The per-entity firing gate is composed at the call site (router)
+// from HasPendingForEntity here + AgentRunStore.HasActiveAutoRunForEntity
+// — strict ownership rather than threading a runs-shaped predicate
+// through this store.
 type PendingFiringsStore interface {
 	// Enqueue inserts a pending firing for (entity, task, trigger).
 	// The partial unique index on (task_id, trigger_id) WHERE
@@ -72,24 +69,12 @@ type PendingFiringsStore interface {
 	// entity is still considered.
 	MarkSkipped(ctx context.Context, orgID string, firingID int64, reason string) error
 
-	// HasActiveAutoRunForEntity returns true if any task on the
-	// entity has a non-terminal run with trigger_type='event'.
-	// Manual delegations are excluded (per SKY-189: manual is fully
-	// decoupled from the queue and doesn't participate in the per-
-	// entity gate). Logically a runs query; lives here for caller
-	// ergonomics, see the store-level doc comment.
-	HasActiveAutoRunForEntity(ctx context.Context, orgID, entityID string) (bool, error)
-
 	// HasPendingForEntity returns true iff the entity has any
-	// pending_firings row in 'pending' status. Combined with
-	// HasActiveAutoRunForEntity in EntityCanFireImmediately to
-	// enforce FIFO drainage.
+	// pending_firings row in 'pending' status. The router composes
+	// this with AgentRunStore.HasActiveAutoRunForEntity to enforce
+	// FIFO drainage — a new firing must queue behind older pending
+	// rows OR an active auto run on the same entity.
 	HasPendingForEntity(ctx context.Context, orgID, entityID string) (bool, error)
-
-	// EntityCanFireImmediately returns true iff a new firing for the
-	// entity can fire right now without enqueueing — no active auto
-	// run AND no pending firings ahead of it.
-	EntityCanFireImmediately(ctx context.Context, orgID, entityID string) (bool, error)
 
 	// ListEntitiesWithPending returns the distinct entity IDs that
 	// have at least one pending_firings row in 'pending' status. Used

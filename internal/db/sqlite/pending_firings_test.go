@@ -54,14 +54,8 @@ func TestPendingFiringsStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	if err := stores.PendingFirings.MarkSkipped(ctx, bogusOrg, 1, "reason"); err == nil {
 		t.Errorf("MarkSkipped with non-local orgID should error")
 	}
-	if _, err := stores.PendingFirings.HasActiveAutoRunForEntity(ctx, bogusOrg, "e"); err == nil {
-		t.Errorf("HasActiveAutoRunForEntity with non-local orgID should error")
-	}
 	if _, err := stores.PendingFirings.HasPendingForEntity(ctx, bogusOrg, "e"); err == nil {
 		t.Errorf("HasPendingForEntity with non-local orgID should error")
-	}
-	if _, err := stores.PendingFirings.EntityCanFireImmediately(ctx, bogusOrg, "e"); err == nil {
-		t.Errorf("EntityCanFireImmediately with non-local orgID should error")
 	}
 	if _, err := stores.PendingFirings.ListEntitiesWithPending(ctx, bogusOrg); err == nil {
 		t.Errorf("ListEntitiesWithPending with non-local orgID should error")
@@ -158,64 +152,29 @@ func newSQLitePendingFiringsSeeder(conn *sql.DB) dbtest.PendingFiringsSeeder {
 		}
 	}
 
-	insertRun := func(t *testing.T, taskID, triggerType, status string) string {
+	// runForTask inserts a manual-trigger run row so MarkFired's
+	// fired_run_id FK to runs(id) is satisfied. The conformance
+	// suite doesn't probe gate semantics here — those live in
+	// AgentRunStore's own tests.
+	runForTask := func(t *testing.T, taskID string) string {
 		t.Helper()
 		runID := "r-" + uuid.New().String()[:8]
-		// runs.trigger_id is nullable; manual runs leave it empty.
-		// prompts(id) FK: reuse the test's prompt via a subquery on
-		// the task's primary_event_id is overkill — just pick any
-		// prompt row that exists in this DB. The task seeder above
-		// created one with a deterministic suffix, but we don't know
-		// the suffix here. Insert a one-off prompt scoped to this run.
 		promptID := "p-run-" + runID
 		if _, err := conn.Exec(`INSERT INTO prompts (id, name, body, source, creator_user_id, team_id) VALUES (?, 'r', 'x', 'user', ?, ?)`,
 			promptID, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID); err != nil {
 			t.Fatalf("seed run prompt: %v", err)
 		}
-		var triggerBind any
-		if triggerType == "event" {
-			// runs.trigger_id REFERENCES event_handlers(id). For event
-			// runs we need a real trigger row; reuse a synthetic one.
-			trigID := "trig-run-" + runID
-			if _, err := conn.Exec(`
-				INSERT INTO event_handlers (id, kind, event_type, prompt_id, breaker_threshold, min_autonomy_suitability, enabled, source, creator_user_id)
-				VALUES (?, 'trigger', ?, ?, 4, 0, 1, 'user', ?)
-			`, trigID, domain.EventGitHubPRCICheckFailed, promptID, runmode.LocalDefaultUserID); err != nil {
-				t.Fatalf("seed run trigger: %v", err)
-			}
-			triggerBind = trigID
-		} else {
-			triggerBind = nil
-		}
-		// runs_creator_matches_trigger_type: trigger_type='event' rows
-		// must have creator_user_id NULL; trigger_type='manual' rows
-		// must have it set. The DEFAULT clause lays down the sentinel
-		// regardless, so override explicitly for event runs.
-		var creatorBind any
-		if triggerType == "event" {
-			creatorBind = nil
-		} else {
-			creatorBind = runmode.LocalDefaultUserID
-		}
 		if _, err := conn.Exec(`
-			INSERT INTO runs (id, task_id, prompt_id, trigger_id, trigger_type, status, started_at, creator_user_id)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-		`, runID, taskID, promptID, triggerBind, triggerType, status, time.Now(), creatorBind); err != nil {
+			INSERT INTO runs (id, task_id, prompt_id, trigger_type, status, started_at, creator_user_id)
+			VALUES (?, ?, ?, 'manual', 'running', ?, ?)
+		`, runID, taskID, promptID, time.Now(), runmode.LocalDefaultUserID); err != nil {
 			t.Fatalf("seed run: %v", err)
 		}
 		return runID
 	}
 
 	return dbtest.PendingFiringsSeeder{
-		Tuple: tuple,
-		ActiveAutoRun: func(t *testing.T, taskID string) string {
-			return insertRun(t, taskID, "event", "running")
-		},
-		TerminalAutoRun: func(t *testing.T, taskID string) string {
-			return insertRun(t, taskID, "event", "completed")
-		},
-		ManualRun: func(t *testing.T, taskID string) string {
-			return insertRun(t, taskID, "manual", "running")
-		},
+		Tuple:      tuple,
+		RunForTask: runForTask,
 	}
 }

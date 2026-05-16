@@ -82,21 +82,6 @@ func (s *pendingFiringsStore) MarkSkipped(ctx context.Context, orgID string, fir
 	return err
 }
 
-func (s *pendingFiringsStore) HasActiveAutoRunForEntity(ctx context.Context, orgID, entityID string) (bool, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return false, err
-	}
-	var count int
-	err := s.q.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM runs r
-		JOIN tasks t ON t.id = r.task_id
-		WHERE t.entity_id = ?
-		  AND r.trigger_type = 'event'
-		  AND r.status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable', 'pending_approval', 'taken_over')
-	`, entityID).Scan(&count)
-	return count > 0, err
-}
-
 func (s *pendingFiringsStore) HasPendingForEntity(ctx context.Context, orgID, entityID string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
@@ -107,21 +92,6 @@ func (s *pendingFiringsStore) HasPendingForEntity(ctx context.Context, orgID, en
 		WHERE entity_id = ? AND status = 'pending'
 	`, entityID).Scan(&count)
 	return count > 0, err
-}
-
-func (s *pendingFiringsStore) EntityCanFireImmediately(ctx context.Context, orgID, entityID string) (bool, error) {
-	active, err := s.HasActiveAutoRunForEntity(ctx, orgID, entityID)
-	if err != nil {
-		return false, err
-	}
-	if active {
-		return false, nil
-	}
-	pending, err := s.HasPendingForEntity(ctx, orgID, entityID)
-	if err != nil {
-		return false, err
-	}
-	return !pending, nil
 }
 
 func (s *pendingFiringsStore) ListEntitiesWithPending(ctx context.Context, orgID string) ([]string, error) {
