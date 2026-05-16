@@ -257,7 +257,7 @@ func (s *Server) handlePendingPRSubmit(w http.ResponseWriter, r *http.Request) {
 	// next retry of this ticket should see what the human changed.
 	if pr.RunID != "" {
 		humanContent := FormatHumanFeedbackPR(pr, pr.Title, pr.Body)
-		if err := db.UpdateRunMemoryHumanContent(s.db, pr.RunID, humanContent); err != nil {
+		if err := s.taskMemory.UpdateRunMemoryHumanContent(r.Context(), runmode.LocalDefaultOrg, pr.RunID, humanContent); err != nil {
 			log.Printf("[pending-prs] warning: failed to record human verdict for run %s: %v", pr.RunID, err)
 		}
 	}

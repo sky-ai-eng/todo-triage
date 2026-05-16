@@ -123,7 +123,7 @@ func (s *Spawner) runAgent(ctx context.Context, runID string, task domain.Task, 
 	// already tried. The directory is git-excluded by writeLocalExcludes
 	// (managedExcludePatterns in internal/worktree/worktree.go) so
 	// nothing leaks into the PR.
-	materializePriorMemories(s.database, claudeCwd, task.EntityID)
+	materializePriorMemories(s.taskMemory, claudeCwd, task.EntityID)
 
 	// SKY-219: copy the entity's project knowledge-base into
 	// ./_scratch/project-knowledge/ if the entity is assigned to a
@@ -276,7 +276,7 @@ func (s *Spawner) processCompletion(
 	// the gate after retries" (UpsertAgentMemory normalizes
 	// empty/whitespace input to NULL on the way in).
 	agentContent, fileState := readAgentMemoryFile(claudeCwd, runID)
-	if err := db.UpsertAgentMemory(s.database, runID, task.EntityID, agentContent); err != nil {
+	if err := s.taskMemory.UpsertAgentMemorySystem(context.Background(), runmode.LocalDefaultOrg, runID, task.EntityID, agentContent); err != nil {
 		log.Printf("[delegate] warning: failed to upsert memory for run %s: %v", runID, err)
 	}
 	switch fileState {

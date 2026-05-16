@@ -55,7 +55,11 @@ func New(conn *sql.DB) db.Stores {
 		// Events wires both args to conn — SQLite has one connection
 		// so the dual-pool constructor collapses, same as TaskStore.
 		Events: newEventStore(conn, conn),
-		Tx:     s,
+		// TaskMemory wires both args to conn — SQLite has one
+		// connection so the dual-pool constructor collapses; the
+		// `...System` variants forward to the non-System bodies.
+		TaskMemory: newTaskMemoryStore(conn, conn),
+		Tx:         s,
 	}
 	return s.stores
 }
