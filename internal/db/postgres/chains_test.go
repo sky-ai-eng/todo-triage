@@ -2,12 +2,14 @@ package postgres_test
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"testing"
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -175,6 +177,198 @@ func TestChainStore_Postgres_RunLifecycle(t *testing.T) {
 	}
 	if idx == nil || *idx != 0 {
 		t.Errorf("GetRunForRun stepIdx = %v, want 0", idx)
+	}
+}
+
+// TestChainStore_Postgres_CreateRun_UnderAppPoolRLS pins the
+// internal trigger_type routing in CreateRun against actual RLS,
+// not the AdminDB-bypassed conformance setup:
+//
+//  1. trigger_type='event' routes to the admin pool and lands with
+//     creator_user_id NULL. The chain_runs_creator_matches_trigger_type
+//     CHECK requires NULL for event rows; the chain_runs_modify RLS
+//     policy on the app pool requires creator_user_id =
+//     tf.current_user_id(), which is mutually exclusive. Admin
+//     (BYPASSRLS) is the only path that can satisfy the CHECK.
+//
+//  2. trigger_type='manual' routes to the app pool and the COALESCE
+//     pulls tf.current_user_id() (set via WithTx) into the row, so
+//     the manual chain run reads back with the JWT-claimed user as
+//     creator_user_id.
+//
+// Mirrors TestAgentRunStore_Postgres_Create_UnderAppPoolRLS — same
+// fix-against-actual-RLS shape.
+func TestChainStore_Postgres_CreateRun_UnderAppPoolRLS(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+
+	orgID, userID := seedPgOrgForChains(t, h)
+	seedPgDefaultTeam(t, h, orgID, userID)
+	chainPromptID := "chain-rls-" + orgID[:8]
+	seedPgPrompt(t, h, orgID, userID, chainPromptID, "chain")
+	taskID := seedPgTask(t, h, orgID, userID)
+
+	// Wire ChainStore against the real admin pool (BYPASSRLS) for the
+	// event-triggered insert and the real app pool (RLS-active under
+	// tf_app via WithTx) for the manual insert.
+	stores := pgstore.New(h.AdminDB, h.AppDB)
+	ctx := context.Background()
+
+	// ---- Event-triggered CreateRun ----
+	// No JWT claims tx — the admin pool handles the insert directly.
+	eventRunID, err := stores.Chains.CreateRun(ctx, orgID, domain.ChainRun{
+		ChainPromptID: chainPromptID,
+		TaskID:        taskID,
+		TriggerType:   domain.ChainTriggerEvent,
+		WorktreePath:  "/tmp/wt-chain-event",
+	})
+	if err != nil {
+		t.Fatalf("event-triggered CreateRun under app-pool wiring: %v", err)
+	}
+	var landedTrigger string
+	var landedCreator sql.NullString
+	if err := h.AdminDB.QueryRow(
+		`SELECT trigger_type, creator_user_id::text FROM chain_runs WHERE id = $1`,
+		eventRunID,
+	).Scan(&landedTrigger, &landedCreator); err != nil {
+		t.Fatalf("read back event chain_run: %v", err)
+	}
+	if landedTrigger != string(domain.ChainTriggerEvent) {
+		t.Errorf("trigger_type = %q, want event", landedTrigger)
+	}
+	if landedCreator.Valid {
+		t.Errorf("creator_user_id = %q, want NULL (event-trigger CHECK)", landedCreator.String)
+	}
+
+	// ---- Manual CreateRun ----
+	// Inside WithTx so JWT claims are set; the COALESCE in
+	// createRunManual resolves tf.current_user_id() to userID.
+	var manualRunID string
+	if err := stores.Tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		id, err := tx.Chains.CreateRun(ctx, orgID, domain.ChainRun{
+			ChainPromptID: chainPromptID,
+			TaskID:        taskID,
+			TriggerType:   domain.ChainTriggerManual,
+			WorktreePath:  "/tmp/wt-chain-manual",
+		})
+		if err != nil {
+			return err
+		}
+		manualRunID = id
+		return nil
+	}); err != nil {
+		t.Fatalf("manual CreateRun under app-pool: %v", err)
+	}
+	var manualCreator sql.NullString
+	if err := h.AdminDB.QueryRow(
+		`SELECT creator_user_id::text FROM chain_runs WHERE id = $1`,
+		manualRunID,
+	).Scan(&manualCreator); err != nil {
+		t.Fatalf("read back manual chain_run: %v", err)
+	}
+	if !manualCreator.Valid {
+		t.Fatalf("manual creator_user_id is NULL; want %s (resolved from JWT claims)", userID)
+	}
+	if manualCreator.String != userID {
+		t.Errorf("manual creator_user_id = %q, want %q (JWT-claimed user)",
+			manualCreator.String, userID)
+	}
+}
+
+// TestChainStore_Postgres_CrossOrgLeakage pins the defense-in-depth
+// org_id filter on every admin-pool variant: even with RLS bypassed,
+// a System read for org A must never return rows that live in org B.
+// Mirrors the AgentRunStore cross-org leakage suite.
+func TestChainStore_Postgres_CrossOrgLeakage(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+
+	orgA, userA := seedPgOrgForChains(t, h)
+	orgB, userB := seedPgOrgForChains(t, h)
+	seedPgDefaultTeam(t, h, orgA, userA)
+	seedPgDefaultTeam(t, h, orgB, userB)
+
+	chainIDA := "chain-leak-a-" + orgA[:8]
+	chainIDB := "chain-leak-b-" + orgB[:8]
+	stepIDA := "step-leak-a-" + orgA[:8]
+	stepIDB := "step-leak-b-" + orgB[:8]
+	seedPgPrompt(t, h, orgA, userA, chainIDA, "chain")
+	seedPgPrompt(t, h, orgA, userA, stepIDA, "leaf")
+	seedPgPrompt(t, h, orgB, userB, chainIDB, "chain")
+	seedPgPrompt(t, h, orgB, userB, stepIDB, "leaf")
+	taskA := seedPgTask(t, h, orgA, userA)
+	taskB := seedPgTask(t, h, orgB, userB)
+
+	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	chains := stores.Chains
+	ctx := context.Background()
+
+	if err := chains.ReplaceSteps(ctx, orgA, chainIDA, []string{stepIDA}, nil); err != nil {
+		t.Fatalf("replace A: %v", err)
+	}
+	if err := chains.ReplaceSteps(ctx, orgB, chainIDB, []string{stepIDB}, nil); err != nil {
+		t.Fatalf("replace B: %v", err)
+	}
+
+	crA, err := chains.CreateRun(ctx, orgA, domain.ChainRun{
+		ChainPromptID: chainIDA, TaskID: taskA,
+		TriggerType: domain.ChainTriggerManual, WorktreePath: "/tmp/leak-a",
+	})
+	if err != nil {
+		t.Fatalf("CreateRun A: %v", err)
+	}
+	crB, err := chains.CreateRun(ctx, orgB, domain.ChainRun{
+		ChainPromptID: chainIDB, TaskID: taskB,
+		TriggerType: domain.ChainTriggerManual, WorktreePath: "/tmp/leak-b",
+	})
+	if err != nil {
+		t.Fatalf("CreateRun B: %v", err)
+	}
+	stepRunA := seedPgRun(t, h, orgA, userA, taskA, stepIDA, crA, 0)
+	stepRunB := seedPgRun(t, h, orgB, userB, taskB, stepIDB, crB, 0)
+
+	verdictA, _ := json.Marshal(domain.ChainVerdict{Outcome: domain.ChainVerdictFinal, Reason: "A"})
+	verdictB, _ := json.Marshal(domain.ChainVerdict{Outcome: domain.ChainVerdictFinal, Reason: "B"})
+	if err := chains.InsertVerdictSystem(ctx, orgA, stepRunA, string(verdictA)); err != nil {
+		t.Fatalf("InsertVerdictSystem A: %v", err)
+	}
+	if err := chains.InsertVerdictSystem(ctx, orgB, stepRunB, string(verdictB)); err != nil {
+		t.Fatalf("InsertVerdictSystem B: %v", err)
+	}
+
+	// ListStepsSystem on org A must not see chain B's step.
+	stepsA, err := chains.ListStepsSystem(ctx, orgA, chainIDB)
+	if err != nil {
+		t.Fatalf("ListStepsSystem A→chain B: %v", err)
+	}
+	if len(stepsA) != 0 {
+		t.Errorf("ListStepsSystem(orgA, chainIDB) leaked %d rows, want 0", len(stepsA))
+	}
+
+	// RunsForChainSystem on org A must not return cross-org step runs.
+	runsCrossOrg, err := chains.RunsForChainSystem(ctx, orgA, crB)
+	if err != nil {
+		t.Fatalf("RunsForChainSystem cross-org: %v", err)
+	}
+	if len(runsCrossOrg) != 0 {
+		t.Errorf("RunsForChainSystem(orgA, crB) leaked %d rows, want 0", len(runsCrossOrg))
+	}
+
+	// MarkRunStatusSystem on org A against org B's chain run is a no-op.
+	changed, err := chains.MarkRunStatusSystem(ctx, orgA, crB, domain.ChainRunStatusAborted, "leak", nil)
+	if err != nil {
+		t.Fatalf("MarkRunStatusSystem cross-org: %v", err)
+	}
+	if changed {
+		t.Error("MarkRunStatusSystem(orgA, crB) returned changed=true; cross-org write leaked")
+	}
+	// chain B should still be running.
+	crBRead, err := chains.GetRun(ctx, orgB, crB)
+	if err != nil {
+		t.Fatalf("GetRun B: %v", err)
+	}
+	if crBRead == nil || crBRead.Status != domain.ChainRunStatusRunning {
+		t.Errorf("chain B status = %v, want running (cross-org write should not have flipped it)", crBRead)
 	}
 }
 

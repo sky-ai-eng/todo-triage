@@ -4723,7 +4723,13 @@ CREATE TABLE public.prompt_chain_steps (
 CREATE TABLE public.chain_runs (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
-    creator_user_id uuid NOT NULL,
+    -- creator_user_id is nullable for trigger_type='event' chains
+    -- (system-emitted by the router via the admin pool); manual
+    -- chains carry the human delegator. The matching
+    -- chain_runs_creator_matches_trigger_type CHECK below pairs the
+    -- two so the seeder can't drift. Mirrors the runs table's
+    -- runs_creator_matches_trigger_type pattern.
+    creator_user_id uuid,
     chain_prompt_id text NOT NULL,
     task_id uuid NOT NULL,
     trigger_type text NOT NULL,
@@ -4734,7 +4740,8 @@ CREATE TABLE public.chain_runs (
     worktree_path text NOT NULL,
     started_at timestamp with time zone DEFAULT now() NOT NULL,
     completed_at timestamp with time zone,
-    CONSTRAINT chain_runs_status_check CHECK ((status = ANY (ARRAY['running'::text, 'completed'::text, 'aborted'::text, 'failed'::text, 'cancelled'::text])))
+    CONSTRAINT chain_runs_status_check CHECK ((status = ANY (ARRAY['running'::text, 'completed'::text, 'aborted'::text, 'failed'::text, 'cancelled'::text]))),
+    CONSTRAINT chain_runs_creator_matches_trigger_type CHECK ((((trigger_type = 'manual'::text) AND (creator_user_id IS NOT NULL)) OR ((trigger_type = 'event'::text) AND (creator_user_id IS NULL))))
 );
 
 ALTER TABLE ONLY public.prompt_chain_steps

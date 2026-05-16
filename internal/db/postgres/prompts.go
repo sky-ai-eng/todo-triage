@@ -319,7 +319,15 @@ func (s *promptStore) CountRunReferences(ctx context.Context, orgID, id string) 
 }
 
 func (s *promptStore) IncrementUsage(ctx context.Context, orgID string, id string) error {
-	_, err := s.app.ExecContext(ctx, `
+	return incrementPromptUsage(ctx, s.app, orgID, id)
+}
+
+func (s *promptStore) IncrementUsageSystem(ctx context.Context, orgID string, id string) error {
+	return incrementPromptUsage(ctx, s.admin, orgID, id)
+}
+
+func incrementPromptUsage(ctx context.Context, q queryer, orgID, id string) error {
+	_, err := q.ExecContext(ctx, `
 		UPDATE prompts SET usage_count = usage_count + 1
 		WHERE org_id = $1 AND id = $2
 	`, orgID, id)

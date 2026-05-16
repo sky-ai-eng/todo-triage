@@ -10,13 +10,18 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// pendingPRStore is the Postgres impl of db.PendingPRStore. Wired
-// against the app pool in postgres.New: every consumer is
-// request-equivalent (pending_prs handler, swipe-dismiss cleanup,
-// agent gh-create-pr tool via cmd/exec, spawner goroutine launched
-// from a request handler). RLS policy pending_prs_all gates every
-// statement via an EXISTS subquery on runs; org_id is also included
-// in every WHERE clause as defense in depth.
+// pendingPRStore is the Postgres impl of db.PendingPRStore. Holds
+// two pools:
+//
+//   - q: app pool (tf_app, RLS-active). Every request-equivalent
+//     consumer (pending_prs handler, swipe-dismiss cleanup, agent
+//     gh-create-pr tool via cmd/exec) runs here.
+//
+//   - admin: admin pool (supabase_admin, BYPASSRLS). The delegate
+//     spawner's processCompletion reads the pending PR attached to
+//     a run from a goroutine that has detached from any request
+//     context, so it routes through admin via ByRunIDSystem. org_id
+//     stays in the WHERE clause as defense in depth.
 //
 // SQL is written fresh against D3's schema: $N placeholders, org_id
 // in every INSERT, native boolean for locked / draft (no boolToInt
@@ -27,9 +32,14 @@ import (
 // a transaction wrapper. The runs row carries ON DELETE CASCADE so
 // pending_prs gets reaped automatically when its parent run is
 // removed.
-type pendingPRStore struct{ q queryer }
+type pendingPRStore struct {
+	q     queryer
+	admin queryer
+}
 
-func newPendingPRStore(q queryer) db.PendingPRStore { return &pendingPRStore{q: q} }
+func newPendingPRStore(q, admin queryer) db.PendingPRStore {
+	return &pendingPRStore{q: q, admin: admin}
+}
 
 var _ db.PendingPRStore = (*pendingPRStore)(nil)
 
@@ -64,7 +74,15 @@ func (s *pendingPRStore) Get(ctx context.Context, orgID, id string) (*domain.Pen
 }
 
 func (s *pendingPRStore) ByRunID(ctx context.Context, orgID, runID string) (*domain.PendingPR, error) {
-	row := s.q.QueryRowContext(ctx, `
+	return pendingPRByRunID(ctx, s.q, orgID, runID)
+}
+
+func (s *pendingPRStore) ByRunIDSystem(ctx context.Context, orgID, runID string) (*domain.PendingPR, error) {
+	return pendingPRByRunID(ctx, s.admin, orgID, runID)
+}
+
+func pendingPRByRunID(ctx context.Context, q queryer, orgID, runID string) (*domain.PendingPR, error) {
+	row := q.QueryRowContext(ctx, `
 		SELECT id, run_id, owner, repo, head_branch, head_sha, base_branch,
 		       title, COALESCE(body, ''),
 		       original_title, original_body,

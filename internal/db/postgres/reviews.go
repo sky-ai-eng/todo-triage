@@ -10,13 +10,18 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// reviewStore is the Postgres impl of db.ReviewStore. Wired against
-// the app pool in postgres.New: every consumer is request-equivalent
-// (reviews handler, swipe-dismiss, agent submit-review tool, spawner
-// goroutine launched from a request handler). RLS policies
-// pending_reviews_all + pending_review_comments_all gate every
-// statement; org_id is also included in every WHERE clause as
-// defense in depth.
+// reviewStore is the Postgres impl of db.ReviewStore. Holds two
+// pools:
+//
+//   - q: app pool (tf_app, RLS-active). Every request-equivalent
+//     consumer (reviews handler, swipe-dismiss, agent submit-review
+//     tool) runs here.
+//
+//   - admin: admin pool (supabase_admin, BYPASSRLS). The delegate
+//     spawner's processCompletion reads the pending review attached
+//     to a run from a goroutine that has detached from any request
+//     context, so it routes through admin via ByRunIDSystem. org_id
+//     stays in the WHERE clause as defense in depth.
 //
 // SQL is written fresh against D3's schema: $N placeholders, org_id
 // in every INSERT, NULL run_id handled via NULLIF on the empty-string
@@ -26,9 +31,14 @@ import (
 // pending_review_comments.review_id, so Delete / DeleteByRunID can
 // run a single statement against pending_reviews and the comment
 // rows go automatically.
-type reviewStore struct{ q queryer }
+type reviewStore struct {
+	q     queryer
+	admin queryer
+}
 
-func newReviewStore(q queryer) db.ReviewStore { return &reviewStore{q: q} }
+func newReviewStore(q, admin queryer) db.ReviewStore {
+	return &reviewStore{q: q, admin: admin}
+}
 
 var _ db.ReviewStore = (*reviewStore)(nil)
 
@@ -59,7 +69,15 @@ func (s *reviewStore) Get(ctx context.Context, orgID, reviewID string) (*domain.
 }
 
 func (s *reviewStore) ByRunID(ctx context.Context, orgID, runID string) (*domain.PendingReview, error) {
-	row := s.q.QueryRowContext(ctx, `
+	return reviewByRunID(ctx, s.q, orgID, runID)
+}
+
+func (s *reviewStore) ByRunIDSystem(ctx context.Context, orgID, runID string) (*domain.PendingReview, error) {
+	return reviewByRunID(ctx, s.admin, orgID, runID)
+}
+
+func reviewByRunID(ctx context.Context, q queryer, orgID, runID string) (*domain.PendingReview, error) {
+	row := q.QueryRowContext(ctx, `
 		SELECT id, pr_number, owner, repo, commit_sha,
 		       COALESCE(diff_lines, ''), COALESCE(diff_hunks, ''),
 		       COALESCE(run_id::text, ''),

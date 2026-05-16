@@ -18,12 +18,17 @@ import (
 // pointing at the local sentinel, so writes don't need to set it
 // explicitly.
 //
+// The constructor takes two queryers for signature parity with the
+// Postgres impl's (app, admin) split. SQLite has one connection so
+// the second arg is discarded; `...System` admin-pool variants are
+// thin wrappers around their non-System counterparts.
+//
 // pending_prs is a leaf table — no child rows hang off it — so
 // Delete / DeleteByRunID are single-statement on both backends and
 // don't need a transaction wrapper.
 type pendingPRStore struct{ q queryer }
 
-func newPendingPRStore(q queryer) db.PendingPRStore { return &pendingPRStore{q: q} }
+func newPendingPRStore(q, _ queryer) db.PendingPRStore { return &pendingPRStore{q: q} }
 
 var _ db.PendingPRStore = (*pendingPRStore)(nil)
 
@@ -213,6 +218,10 @@ func (s *pendingPRStore) DeleteByRunID(ctx context.Context, orgID, runID string)
 	}
 	_, err := s.q.ExecContext(ctx, `DELETE FROM pending_prs WHERE run_id = ?`, runID)
 	return err
+}
+
+func (s *pendingPRStore) ByRunIDSystem(ctx context.Context, orgID, runID string) (*domain.PendingPR, error) {
+	return s.ByRunID(ctx, orgID, runID)
 }
 
 // scanPendingPRRow shared between Get and ByRunID. *Row.Scan; on

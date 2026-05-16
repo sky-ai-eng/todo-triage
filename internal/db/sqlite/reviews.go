@@ -14,9 +14,14 @@ import (
 // ported from the pre-D2 internal/db/reviews.go; the only behavioral
 // change is the orgID assertion at each method entry. SQLite tables
 // have no org_id column — local mode is single-tenant by construction.
+//
+// The constructor takes two queryers for signature parity with the
+// Postgres impl's (app, admin) split. SQLite has one connection so
+// the second arg is discarded; `...System` admin-pool variants are
+// thin wrappers around their non-System counterparts.
 type reviewStore struct{ q queryer }
 
-func newReviewStore(q queryer) db.ReviewStore { return &reviewStore{q: q} }
+func newReviewStore(q, _ queryer) db.ReviewStore { return &reviewStore{q: q} }
 
 var _ db.ReviewStore = (*reviewStore)(nil)
 
@@ -231,6 +236,10 @@ func (s *reviewStore) IsCommentID(ctx context.Context, orgID, commentID string) 
 		return false
 	}
 	return count > 0
+}
+
+func (s *reviewStore) ByRunIDSystem(ctx context.Context, orgID, runID string) (*domain.PendingReview, error) {
+	return s.ByRunID(ctx, orgID, runID)
 }
 
 // scanReviewRow shared between Get and ByRunID. *Row.Scan; on no-rows

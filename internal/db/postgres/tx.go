@@ -131,12 +131,17 @@ func (s *Store) txStoresFromTx(tx *sql.Tx, pending *db.PendingEventHooks) db.TxS
 		Dashboard:     newDashboardStore(tx),
 		Secrets:       newSecretStore(tx),
 		EventHandlers: newTxEventHandlerStore(tx),
-		Chains:        newChainStore(tx),
-		Agents:        newTxAgentStore(tx),
-		TeamAgents:    newTxTeamAgentStore(tx),
-		Users:         newUsersStore(tx, tx),
-		Tasks:         newTaskStore(tx, s.admin),
-		Factory:       newFactoryReadStore(tx),
+		// Chains: composed half is tx; admin half stays the real
+		// admin pool so event-triggered CreateRun + the `...System`
+		// reads route around RLS. The admin writes commit
+		// autonomously from the outer tx — same pool-routing
+		// semantics as AgentRunStore.Create.
+		Chains:     newChainStore(tx, s.admin),
+		Agents:     newTxAgentStore(tx),
+		TeamAgents: newTxTeamAgentStore(tx),
+		Users:      newUsersStore(tx, tx),
+		Tasks:      newTaskStore(tx, s.admin),
+		Factory:    newFactoryReadStore(tx),
 		// AgentRuns: composed half is tx; admin half stays the
 		// real admin pool so event-triggered Create can route
 		// around RLS. The admin write commits autonomously from
@@ -144,8 +149,8 @@ func (s *Store) txStoresFromTx(tx *sql.Tx, pending *db.PendingEventHooks) db.TxS
 		// why that's the intended semantics.
 		AgentRuns:      newAgentRunStore(tx, s.admin),
 		Entities:       newEntityStore(tx, tx),
-		Reviews:        newReviewStore(tx),
-		PendingPRs:     newPendingPRStore(tx),
+		Reviews:        newReviewStore(tx, s.admin),
+		PendingPRs:     newPendingPRStore(tx, s.admin),
 		Repos:          newRepoStore(tx, tx),
 		PendingFirings: newPendingFiringsStore(tx),
 		// Projects: ListSystem routes around RLS the same way

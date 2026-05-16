@@ -146,7 +146,15 @@ func (s *agentRunStore) createManual(ctx context.Context, orgID string, run doma
 }
 
 func (s *agentRunStore) Complete(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary string) error {
-	_, err := s.q.ExecContext(ctx, `
+	return completeRun(ctx, s.q, orgID, runID, status, costUSD, durationMs, numTurns, stopReason, resultSummary)
+}
+
+func (s *agentRunStore) CompleteSystem(ctx context.Context, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary string) error {
+	return completeRun(ctx, s.admin, orgID, runID, status, costUSD, durationMs, numTurns, stopReason, resultSummary)
+}
+
+func completeRun(ctx context.Context, q queryer, orgID, runID, status string, costUSD float64, durationMs, numTurns int, stopReason, resultSummary string) error {
+	_, err := q.ExecContext(ctx, `
 		UPDATE runs
 		SET status = $1,
 		    completed_at = $2,
@@ -161,7 +169,15 @@ func (s *agentRunStore) Complete(ctx context.Context, orgID, runID, status strin
 }
 
 func (s *agentRunStore) AddPartialTotals(ctx context.Context, orgID, runID string, costUSD float64, durationMs, numTurns int) error {
-	_, err := s.q.ExecContext(ctx, `
+	return addPartialTotals(ctx, s.q, orgID, runID, costUSD, durationMs, numTurns)
+}
+
+func (s *agentRunStore) AddPartialTotalsSystem(ctx context.Context, orgID, runID string, costUSD float64, durationMs, numTurns int) error {
+	return addPartialTotals(ctx, s.admin, orgID, runID, costUSD, durationMs, numTurns)
+}
+
+func addPartialTotals(ctx context.Context, q queryer, orgID, runID string, costUSD float64, durationMs, numTurns int) error {
+	_, err := q.ExecContext(ctx, `
 		UPDATE runs
 		SET total_cost_usd = COALESCE(total_cost_usd, 0) + $1,
 		    duration_ms = COALESCE(duration_ms, 0) + $2,
@@ -172,7 +188,15 @@ func (s *agentRunStore) AddPartialTotals(ctx context.Context, orgID, runID strin
 }
 
 func (s *agentRunStore) MarkAwaitingInput(ctx context.Context, orgID, runID string) (bool, error) {
-	res, err := s.q.ExecContext(ctx, `
+	return markAwaitingInput(ctx, s.q, orgID, runID)
+}
+
+func (s *agentRunStore) MarkAwaitingInputSystem(ctx context.Context, orgID, runID string) (bool, error) {
+	return markAwaitingInput(ctx, s.admin, orgID, runID)
+}
+
+func markAwaitingInput(ctx context.Context, q queryer, orgID, runID string) (bool, error) {
+	res, err := q.ExecContext(ctx, `
 		UPDATE runs
 		SET status = 'awaiting_input'
 		WHERE org_id = $1 AND id = $2
@@ -187,7 +211,15 @@ func (s *agentRunStore) MarkAwaitingInput(ctx context.Context, orgID, runID stri
 }
 
 func (s *agentRunStore) MarkResuming(ctx context.Context, orgID, runID string) (bool, error) {
-	res, err := s.q.ExecContext(ctx, `
+	return markResuming(ctx, s.q, orgID, runID)
+}
+
+func (s *agentRunStore) MarkResumingSystem(ctx context.Context, orgID, runID string) (bool, error) {
+	return markResuming(ctx, s.admin, orgID, runID)
+}
+
+func markResuming(ctx context.Context, q queryer, orgID, runID string) (bool, error) {
+	res, err := q.ExecContext(ctx, `
 		UPDATE runs SET status = 'running'
 		WHERE org_id = $1 AND id = $2 AND status = 'awaiting_input'
 	`, orgID, runID)
@@ -199,7 +231,15 @@ func (s *agentRunStore) MarkResuming(ctx context.Context, orgID, runID string) (
 }
 
 func (s *agentRunStore) SetSession(ctx context.Context, orgID, runID, sessionID string) error {
-	_, err := s.q.ExecContext(ctx, `
+	return setRunSession(ctx, s.q, orgID, runID, sessionID)
+}
+
+func (s *agentRunStore) SetSessionSystem(ctx context.Context, orgID, runID, sessionID string) error {
+	return setRunSession(ctx, s.admin, orgID, runID, sessionID)
+}
+
+func setRunSession(ctx context.Context, q queryer, orgID, runID, sessionID string) error {
+	_, err := q.ExecContext(ctx, `
 		UPDATE runs SET session_id = $1 WHERE org_id = $2 AND id = $3
 	`, sessionID, orgID, runID)
 	return err
@@ -278,7 +318,15 @@ func (s *agentRunStore) MarkTakenOver(ctx context.Context, orgID, runID, takeove
 }
 
 func (s *agentRunStore) MarkReleased(ctx context.Context, orgID, runID string) (bool, error) {
-	res, err := s.q.ExecContext(ctx, `
+	return markReleased(ctx, s.q, orgID, runID)
+}
+
+func (s *agentRunStore) MarkReleasedSystem(ctx context.Context, orgID, runID string) (bool, error) {
+	return markReleased(ctx, s.admin, orgID, runID)
+}
+
+func markReleased(ctx context.Context, q queryer, orgID, runID string) (bool, error) {
+	res, err := q.ExecContext(ctx, `
 		UPDATE runs
 		SET worktree_path = '',
 		    result_summary = CASE
@@ -298,8 +346,16 @@ func (s *agentRunStore) MarkReleased(ctx context.Context, orgID, runID string) (
 }
 
 func (s *agentRunStore) MarkCancelledIfActive(ctx context.Context, orgID, runID, stopReason, summary string) (bool, error) {
+	return markCancelledIfActive(ctx, s.q, orgID, runID, stopReason, summary)
+}
+
+func (s *agentRunStore) MarkCancelledIfActiveSystem(ctx context.Context, orgID, runID, stopReason, summary string) (bool, error) {
+	return markCancelledIfActive(ctx, s.admin, orgID, runID, stopReason, summary)
+}
+
+func markCancelledIfActive(ctx context.Context, q queryer, orgID, runID, stopReason, summary string) (bool, error) {
 	now := time.Now()
-	res, err := s.q.ExecContext(ctx, `
+	res, err := q.ExecContext(ctx, `
 		UPDATE runs
 		SET status = 'cancelled', completed_at = $1, stop_reason = $2, result_summary = $3
 		WHERE org_id = $4 AND id = $5
@@ -349,7 +405,15 @@ const pgRunColumns = `
 `
 
 func (s *agentRunStore) Get(ctx context.Context, orgID, runID string) (*domain.AgentRun, error) {
-	row := s.q.QueryRowContext(ctx, `
+	return getRun(ctx, s.q, orgID, runID)
+}
+
+func (s *agentRunStore) GetSystem(ctx context.Context, orgID, runID string) (*domain.AgentRun, error) {
+	return getRun(ctx, s.admin, orgID, runID)
+}
+
+func getRun(ctx context.Context, q queryer, orgID, runID string) (*domain.AgentRun, error) {
+	row := q.QueryRowContext(ctx, `
 		SELECT `+pgRunColumns+`
 		FROM runs r
 		LEFT JOIN run_memory rm ON rm.run_id = r.id AND rm.org_id = r.org_id
@@ -570,6 +634,14 @@ func (s *agentRunStore) EntitiesWithAwaitingInput(ctx context.Context, orgID str
 // --- Transcript / messages ---
 
 func (s *agentRunStore) InsertMessage(ctx context.Context, orgID string, msg *domain.AgentMessage) (int64, error) {
+	return insertRunMessage(ctx, s.q, orgID, msg)
+}
+
+func (s *agentRunStore) InsertMessageSystem(ctx context.Context, orgID string, msg *domain.AgentMessage) (int64, error) {
+	return insertRunMessage(ctx, s.admin, orgID, msg)
+}
+
+func insertRunMessage(ctx context.Context, q queryer, orgID string, msg *domain.AgentMessage) (int64, error) {
 	var toolCallsJSON, metadataJSON []byte
 
 	if len(msg.ToolCalls) > 0 {
@@ -595,7 +667,7 @@ func (s *agentRunStore) InsertMessage(ctx context.Context, orgID string, msg *do
 	// auto-assigned id back via RETURNING rather than the
 	// LastInsertId Result method (which pgx doesn't implement).
 	var id int64
-	err := s.q.QueryRowContext(ctx, `
+	err := q.QueryRowContext(ctx, `
 		INSERT INTO run_messages (org_id, run_id, role, content, subtype, tool_calls,
 		                          tool_call_id, is_error, metadata, model,
 		                          input_tokens, output_tokens,
@@ -715,6 +787,14 @@ func (s *agentRunStore) TokenTotals(ctx context.Context, orgID, runID string) (*
 // --- Yields ---
 
 func (s *agentRunStore) InsertYieldRequest(ctx context.Context, orgID, runID string, req *domain.YieldRequest) (*domain.AgentMessage, error) {
+	return insertYieldRequest(ctx, s.q, orgID, runID, req)
+}
+
+func (s *agentRunStore) InsertYieldRequestSystem(ctx context.Context, orgID, runID string, req *domain.YieldRequest) (*domain.AgentMessage, error) {
+	return insertYieldRequest(ctx, s.admin, orgID, runID, req)
+}
+
+func insertYieldRequest(ctx context.Context, q queryer, orgID, runID string, req *domain.YieldRequest) (*domain.AgentMessage, error) {
 	payload, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("marshal yield request: %w", err)
@@ -725,7 +805,7 @@ func (s *agentRunStore) InsertYieldRequest(ctx context.Context, orgID, runID str
 		Subtype: db.YieldRequestSubtype,
 		Content: string(payload),
 	}
-	id, err := s.InsertMessage(ctx, orgID, msg)
+	id, err := insertRunMessage(ctx, q, orgID, msg)
 	if err != nil {
 		return nil, err
 	}
