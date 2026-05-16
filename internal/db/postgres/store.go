@@ -192,9 +192,10 @@ func New(admin, app *sql.DB) db.Stores {
 		// org_id stays in every WHERE clause as defense in depth.
 		TaskMemory: newTaskMemoryStore(app, admin),
 		// RunWorktrees wires both pools: app for cmd/exec workspace
-		// callers (SKY-302 will wrap those calls in synthetic-claims
-		// via TF_RUN_ID) and admin for the delegate spawner cleanup
-		// defers. org_id stays bound everywhere as defense in depth.
+		// callers (a separate cmd/exec auth pass owns the
+		// synthetic-claims wrap) and admin for the delegate spawner
+		// cleanup defers. org_id stays bound everywhere as defense
+		// in depth.
 		RunWorktrees: newRunWorktreeStore(app, admin),
 		Tx:           s,
 	}

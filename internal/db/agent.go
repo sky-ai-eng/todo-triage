@@ -106,6 +106,23 @@ type AgentRunStore interface {
 	// reached a terminal state. Used by takeover-rollback.
 	MarkCancelledIfActive(ctx context.Context, orgID, runID, stopReason, summary string) (bool, error)
 
+	// MarkFailedIfActive flips a run to 'failed' iff it hasn't
+	// already reached a terminal state. The delegate spawner's
+	// failRun path uses this so a racing terminal write
+	// (takeover, cancel, completion) isn't clobbered. Returns
+	// ok=false (no error) if the row is already terminal; the
+	// caller logs and continues — the racing path's terminal
+	// status stands.
+	MarkFailedIfActive(ctx context.Context, orgID, runID string) (bool, error)
+
+	// MarkPendingApprovalIfCompleted flips a 'completed' run to
+	// 'pending_approval' iff the row is currently 'completed'.
+	// The delegate spawner's processCompletion uses this when a
+	// pending review/PR side-table row gates the terminal status.
+	// Returns ok=false on a racing terminal write (cancel,
+	// takeover) so the racing path's status stands.
+	MarkPendingApprovalIfCompleted(ctx context.Context, orgID, runID string) (bool, error)
+
 	// MarkDiscarded marks a pending_approval run as cancelled
 	// when the user requeues / dismisses the task without
 	// submitting the review the agent prepared. The agent process
@@ -254,6 +271,8 @@ type AgentRunStore interface {
 	SetWorktreePathSystem(ctx context.Context, orgID, runID, path string) error
 	MarkReleasedSystem(ctx context.Context, orgID, runID string) (bool, error)
 	MarkCancelledIfActiveSystem(ctx context.Context, orgID, runID, stopReason, summary string) (bool, error)
+	MarkFailedIfActiveSystem(ctx context.Context, orgID, runID string) (bool, error)
+	MarkPendingApprovalIfCompletedSystem(ctx context.Context, orgID, runID string) (bool, error)
 	HasOtherActiveRunForTaskSystem(ctx context.Context, orgID, taskID, excludeRunID string) (bool, error)
 	InsertMessageSystem(ctx context.Context, orgID string, msg *domain.AgentMessage) (int64, error)
 	InsertYieldRequestSystem(ctx context.Context, orgID, runID string, req *domain.YieldRequest) (*domain.AgentMessage, error)

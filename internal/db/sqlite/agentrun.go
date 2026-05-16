@@ -158,6 +158,37 @@ func (s *agentRunStore) SetWorktreePath(ctx context.Context, orgID, runID, path 
 	return err
 }
 
+func (s *agentRunStore) MarkFailedIfActive(ctx context.Context, orgID, runID string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	res, err := s.q.ExecContext(ctx, `
+		UPDATE runs SET status = 'failed', completed_at = COALESCE(completed_at, ?)
+		WHERE id = ?
+		  AND status NOT IN ('completed','failed','cancelled','task_unsolvable',
+		                     'pending_approval','taken_over')
+	`, time.Now().UTC(), runID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+func (s *agentRunStore) MarkPendingApprovalIfCompleted(ctx context.Context, orgID, runID string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	res, err := s.q.ExecContext(ctx, `
+		UPDATE runs SET status = 'pending_approval' WHERE id = ? AND status = 'completed'
+	`, runID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
 func (s *agentRunStore) HasOtherActiveRunForTask(ctx context.Context, orgID, taskID, excludeRunID string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
@@ -548,6 +579,14 @@ func (s *agentRunStore) SetWorktreePathSystem(ctx context.Context, orgID, runID,
 
 func (s *agentRunStore) HasOtherActiveRunForTaskSystem(ctx context.Context, orgID, taskID, excludeRunID string) (bool, error) {
 	return s.HasOtherActiveRunForTask(ctx, orgID, taskID, excludeRunID)
+}
+
+func (s *agentRunStore) MarkFailedIfActiveSystem(ctx context.Context, orgID, runID string) (bool, error) {
+	return s.MarkFailedIfActive(ctx, orgID, runID)
+}
+
+func (s *agentRunStore) MarkPendingApprovalIfCompletedSystem(ctx context.Context, orgID, runID string) (bool, error) {
+	return s.MarkPendingApprovalIfCompleted(ctx, orgID, runID)
 }
 
 func (s *agentRunStore) MarkReleasedSystem(ctx context.Context, orgID, runID string) (bool, error) {

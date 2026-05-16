@@ -24,10 +24,9 @@ import (
 //   - Plain methods (Insert, GetByRepo, List, DeleteByRepo) run on
 //     the app pool in Postgres (RLS-active). Callers are the agent
 //     CLI subcommand cmd/exec/workspace, which runs as a subprocess
-//     of the delegated agent. Today those calls happen without any
-//     JWT context; SKY-302 will wrap them in synthetic-claims via
-//     the TF_RUN_ID env var. Pre-SKY-302 the SQLite path is
-//     unaffected because local mode has no auth concept.
+//     of the delegated agent. The CLI's pool routing is the
+//     responsibility of a separate cmd/exec auth pass; local mode
+//     is unaffected because SQLite has no auth concept.
 //
 //   - `...System` methods (ListSystem, DeleteByPathSystem) run on
 //     the admin pool (BYPASSRLS). Consumers are background

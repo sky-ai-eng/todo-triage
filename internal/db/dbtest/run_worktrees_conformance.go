@@ -35,8 +35,9 @@ type RunWorktreeSeeder struct {
 // RunRunWorktreeStoreConformance covers the RunWorktreeStore
 // contract every backend impl must hold. System variants are NOT
 // covered by parallel cases — their behavior is documented as
-// identical to the non-System counterparts; see SKY-306's cleanup
-// precedent.
+// identical to the non-System counterparts (the per-method
+// passthrough tests were intentionally pruned across the wave so
+// the conformance suite tracks contract, not pool plumbing).
 func RunRunWorktreeStoreConformance(t *testing.T, mk RunWorktreeStoreFactory) {
 	t.Helper()
 	ctx := context.Background()

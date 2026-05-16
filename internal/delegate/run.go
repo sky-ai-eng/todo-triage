@@ -362,9 +362,15 @@ func (s *Spawner) processCompletion(
 					}
 				}
 			}
-			status = "pending_approval"
-			if err := s.agentRuns.SetStatusSystem(context.Background(), runmode.LocalDefaultOrg, runID, status); err != nil {
+			// Guarded transition: only flip to pending_approval if the
+			// row is still 'completed'. A racing cancel/takeover after
+			// agentRuns.Complete would otherwise be silently clobbered
+			// by an unconditional UPDATE.
+			ok, err := s.agentRuns.MarkPendingApprovalIfCompletedSystem(context.Background(), runmode.LocalDefaultOrg, runID)
+			if err != nil {
 				log.Printf("[delegate] warning: failed to set pending_approval for run %s: %v", runID, err)
+			} else if ok {
+				status = "pending_approval"
 			}
 		}
 	}

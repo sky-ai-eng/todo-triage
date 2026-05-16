@@ -283,6 +283,48 @@ func (s *agentRunStore) HasOtherActiveRunForTaskSystem(ctx context.Context, orgI
 	return hasOtherActiveRunForTask(ctx, s.admin, orgID, taskID, excludeRunID)
 }
 
+func (s *agentRunStore) MarkFailedIfActive(ctx context.Context, orgID, runID string) (bool, error) {
+	return markFailedIfActive(ctx, s.q, orgID, runID)
+}
+
+func (s *agentRunStore) MarkFailedIfActiveSystem(ctx context.Context, orgID, runID string) (bool, error) {
+	return markFailedIfActive(ctx, s.admin, orgID, runID)
+}
+
+func markFailedIfActive(ctx context.Context, q queryer, orgID, runID string) (bool, error) {
+	res, err := q.ExecContext(ctx, `
+		UPDATE runs SET status = 'failed', completed_at = COALESCE(completed_at, $1)
+		WHERE org_id = $2 AND id = $3
+		  AND status NOT IN ('completed','failed','cancelled','task_unsolvable',
+		                     'pending_approval','taken_over')
+	`, time.Now().UTC(), orgID, runID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+func (s *agentRunStore) MarkPendingApprovalIfCompleted(ctx context.Context, orgID, runID string) (bool, error) {
+	return markPendingApprovalIfCompleted(ctx, s.q, orgID, runID)
+}
+
+func (s *agentRunStore) MarkPendingApprovalIfCompletedSystem(ctx context.Context, orgID, runID string) (bool, error) {
+	return markPendingApprovalIfCompleted(ctx, s.admin, orgID, runID)
+}
+
+func markPendingApprovalIfCompleted(ctx context.Context, q queryer, orgID, runID string) (bool, error) {
+	res, err := q.ExecContext(ctx, `
+		UPDATE runs SET status = 'pending_approval'
+		WHERE org_id = $1 AND id = $2 AND status = 'completed'
+	`, orgID, runID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
 func hasOtherActiveRunForTask(ctx context.Context, q queryer, orgID, taskID, excludeRunID string) (bool, error) {
 	var exists bool
 	err := q.QueryRowContext(ctx, `

@@ -155,9 +155,9 @@ type Stores struct {
 	// (run_id, repo_id) lazy worktree reservation a Jira-style run
 	// accumulates as the agent materializes repos via `workspace
 	// add`. Holds both pools: app for the cmd/exec workspace CLI
-	// (which SKY-302 will wrap in synthetic-claims) and admin for
-	// the spawner's runAgent + chain orchestrator cleanup defers
-	// (no JWT-claims context).
+	// (its synthetic-claims wrap is owned by a separate cmd/exec
+	// auth pass) and admin for the spawner's runAgent + chain
+	// orchestrator cleanup defers (no JWT-claims context).
 	RunWorktrees RunWorktreeStore
 
 	// Tx is the transaction runner — handlers that need atomic

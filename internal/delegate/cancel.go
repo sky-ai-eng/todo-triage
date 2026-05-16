@@ -111,7 +111,11 @@ func (s *Spawner) failRun(runID, taskID, triggerType, errMsg string) {
 	}
 	log.Printf("[delegate] run %s failed: %s", runID, errMsg)
 
-	if err := s.agentRuns.SetStatusSystem(context.Background(), runmode.LocalDefaultOrg, runID, "failed"); err != nil {
+	// Guarded — if a terminal racing path (takeover, cancel, natural
+	// completion) reached the row first, leave its status in place
+	// rather than clobbering. The wasTakenOver check above only
+	// covers takeover; cancel and completion can still race here.
+	if _, err := s.agentRuns.MarkFailedIfActiveSystem(context.Background(), runmode.LocalDefaultOrg, runID); err != nil {
 		log.Printf("[delegate] warning: failed to mark run %s as failed: %v", runID, err)
 	}
 

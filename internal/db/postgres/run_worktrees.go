@@ -20,9 +20,10 @@ import (
 // Holds two pools:
 //
 //   - q: app pool (tf_app, RLS-active). The workspace CLI subcommand
-//     (cmd/exec/workspace) routes here. SKY-302 will wrap the CLI's
-//     store calls in synthetic-claims via TF_RUN_ID so the EXISTS
-//     subquery in run_worktrees_all can resolve the parent run row.
+//     (cmd/exec/workspace) routes here. A separate cmd/exec auth pass
+//     owns wrapping the CLI's store calls in synthetic-claims so the
+//     EXISTS subquery in run_worktrees_all can resolve the parent
+//     run row.
 //
 //   - admin: admin pool (supabase_admin, BYPASSRLS). The delegate
 //     spawner's runAgent + chain orchestrator cleanup defers route
