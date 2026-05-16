@@ -415,6 +415,7 @@ const sqliteRunColumns = `
 	r.total_cost_usd, r.duration_ms, r.num_turns, r.stop_reason, r.worktree_path,
 	r.result_summary, r.session_id, r.actor_agent_id,
 	COALESCE(r.trigger_type, ''),
+	r.creator_user_id,
 	r.chain_run_id, r.chain_step_index,
 	(NULLIF(TRIM(rm.agent_content, ' ' || char(9) || char(10) || char(13)), '') IS NULL) AS memory_missing
 `
@@ -854,6 +855,10 @@ func (s *agentRunStore) TokenTotals(ctx context.Context, orgID, runID string) (*
 	return &t, nil
 }
 
+func (s *agentRunStore) TokenTotalsSystem(ctx context.Context, orgID, runID string) (*domain.TokenTotals, error) {
+	return s.TokenTotals(ctx, orgID, runID)
+}
+
 // --- Yields ---
 
 func (s *agentRunStore) InsertYieldRequest(ctx context.Context, orgID, runID string, req *domain.YieldRequest) (*domain.AgentMessage, error) {
@@ -935,18 +940,18 @@ func scanAgentRun(row *sql.Row, r *domain.AgentRun) error {
 	var completedAt sql.NullTime
 	var costUSD sql.NullFloat64
 	var durationMs, numTurns, chainStep sql.NullInt64
-	var stopReason, worktreePath, model, resultSummary, sessionID, actorAgentID, chainRunID sql.NullString
+	var stopReason, worktreePath, model, resultSummary, sessionID, actorAgentID, chainRunID, creatorUserID sql.NullString
 
 	if err := row.Scan(
 		&r.ID, &r.TaskID, &r.Status, &model, &r.StartedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &stopReason, &worktreePath,
-		&resultSummary, &sessionID, &actorAgentID, &r.TriggerType, &chainRunID, &chainStep,
+		&resultSummary, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &chainRunID, &chainStep,
 		&r.MemoryMissing,
 	); err != nil {
 		return err
 	}
 	finalizeAgentRun(r, completedAt, costUSD, durationMs, numTurns, chainStep,
-		model, stopReason, worktreePath, resultSummary, sessionID, actorAgentID, chainRunID)
+		model, stopReason, worktreePath, resultSummary, sessionID, actorAgentID, chainRunID, creatorUserID)
 	return nil
 }
 
@@ -954,30 +959,31 @@ func scanAgentRunRows(rows *sql.Rows, r *domain.AgentRun) error {
 	var completedAt sql.NullTime
 	var costUSD sql.NullFloat64
 	var durationMs, numTurns, chainStep sql.NullInt64
-	var stopReason, worktreePath, model, resultSummary, sessionID, actorAgentID, chainRunID sql.NullString
+	var stopReason, worktreePath, model, resultSummary, sessionID, actorAgentID, chainRunID, creatorUserID sql.NullString
 
 	if err := rows.Scan(
 		&r.ID, &r.TaskID, &r.Status, &model, &r.StartedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &stopReason, &worktreePath,
-		&resultSummary, &sessionID, &actorAgentID, &r.TriggerType, &chainRunID, &chainStep,
+		&resultSummary, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &chainRunID, &chainStep,
 		&r.MemoryMissing,
 	); err != nil {
 		return err
 	}
 	finalizeAgentRun(r, completedAt, costUSD, durationMs, numTurns, chainStep,
-		model, stopReason, worktreePath, resultSummary, sessionID, actorAgentID, chainRunID)
+		model, stopReason, worktreePath, resultSummary, sessionID, actorAgentID, chainRunID, creatorUserID)
 	return nil
 }
 
 func finalizeAgentRun(r *domain.AgentRun, completedAt sql.NullTime, costUSD sql.NullFloat64,
 	durationMs, numTurns, chainStep sql.NullInt64,
-	model, stopReason, worktreePath, resultSummary, sessionID, actorAgentID, chainRunID sql.NullString) {
+	model, stopReason, worktreePath, resultSummary, sessionID, actorAgentID, chainRunID, creatorUserID sql.NullString) {
 	r.Model = model.String
 	r.StopReason = stopReason.String
 	r.WorktreePath = worktreePath.String
 	r.ResultSummary = resultSummary.String
 	r.SessionID = sessionID.String
 	r.ActorAgentID = actorAgentID.String
+	r.CreatorUserID = creatorUserID.String
 	if chainRunID.Valid {
 		r.ChainRunID = chainRunID.String
 	}

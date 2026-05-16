@@ -3,12 +3,12 @@ package workspace
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/runident"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
-	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // listOutput is the JSON shape printed by `workspace list`. Two sections:
@@ -62,33 +62,40 @@ type listMaterialized struct {
 // surface at all; surfacing configured-repo discovery on those runs
 // would advertise a path the agent can't take and contradict the docs
 // in jira-tools.txt.
-func listWorkspaces(database *db.DB, runID string) (listOutput, error) {
-	if runID == "" {
+//
+// Routing (SKY-302): every read goes through `...System` admin-pool
+// methods. List is pure introspection of the run the agent already
+// owns — wrapping in synthetic-claims just to satisfy RLS for a
+// read-only inventory would be tx-machinery overhead. The
+// ResolveRunIdentity probe still happens so an invalid
+// TRIAGE_FACTORY_RUN_ID fails with a clear "spawner bug" error.
+func listWorkspaces(stores db.Stores, runID string) (listOutput, error) {
+	ctx := context.Background()
+	ident, err := runident.ResolveRunIdentity(ctx, stores, runID)
+	switch {
+	case errors.Is(err, runident.ErrRunIdentityMissing):
 		return listOutput{}, errMissingRunID
+	case errors.Is(err, runident.ErrRunIdentityNotFound):
+		return listOutput{}, fmt.Errorf("%w: %s", errRunNotFound, runID)
+	case err != nil:
+		return listOutput{}, fmt.Errorf("workspace list: %w", err)
 	}
 
-	// Construct a sqlite Stores bundle inline — cmd/exec runs as a
-	// separate process with its own connection, so wiring full stores
-	// at startup would be overkill for the few store calls this path
-	// needs. SKY-283 / SKY-285.
-	//
-	// TODO(SKY-254 / D9): cmd/exec is local-mode-only today. In
-	// multi-mode the sandbox boundary needs to inject a scoped JWT +
-	// TF_MODE=multi + Postgres DSN so this path can branch on
-	// runmode.Current() and wire pgstore.New(...) instead — with the
-	// JWT setting RLS claims on every per-request tx so the agent
-	// only sees data for the user the run was spawned by. Every other
-	// cmd/exec/* path makes the same hardcoded-sqlite assumption;
-	// grep for "SKY-254" to find them all.
-	stores := sqlitestore.New(database.Conn)
-	run, err := stores.AgentRuns.Get(context.Background(), runmode.LocalDefaultOrg, runID)
+	// Re-read the run to get task_id. ResolveRunIdentity could
+	// return it, but every other subcommand only needs the routing
+	// triple — keeping it minimal beats threading a one-call-site
+	// field through the helper.
+	run, err := stores.AgentRuns.GetSystem(ctx, ident.OrgID, ident.RunID)
 	if err != nil {
 		return listOutput{}, fmt.Errorf("workspace list: load run: %w", err)
 	}
 	if run == nil {
+		// Resolved a moment ago and the row vanished — surface as
+		// the same not-found shape rather than a confusing "load
+		// run" wrapped error.
 		return listOutput{}, fmt.Errorf("%w: %s", errRunNotFound, runID)
 	}
-	task, err := stores.Tasks.Get(context.Background(), runmode.LocalDefaultOrg, run.TaskID)
+	task, err := stores.Tasks.GetSystem(ctx, ident.OrgID, run.TaskID)
 	if err != nil {
 		return listOutput{}, fmt.Errorf("workspace list: load task: %w", err)
 	}
@@ -99,15 +106,15 @@ func listWorkspaces(database *db.DB, runID string) (listOutput, error) {
 		return listOutput{}, fmt.Errorf("%w (run task source is %q)", errNotJiraRun, task.EntitySource)
 	}
 
-	// Use GetAllRepoProfiles (not GetConfiguredRepoNames) so we can
-	// surface each repo's description in the JSON output. The
-	// description is the agent's cheapest disambiguation signal when
-	// the ticket text doesn't make the target repo obvious.
-	configured, err := stores.Repos.List(context.Background(), runmode.LocalDefaultOrgID)
+	// ListSystem (not GetConfiguredRepoNames) so we can surface
+	// each repo's description in the JSON output. The description
+	// is the agent's cheapest disambiguation signal when the ticket
+	// text doesn't make the target repo obvious.
+	configured, err := stores.Repos.ListSystem(ctx, ident.OrgID)
 	if err != nil {
 		return listOutput{}, fmt.Errorf("workspace list: load configured repos: %w", err)
 	}
-	rows, err := stores.RunWorktrees.List(context.Background(), runmode.LocalDefaultOrg, runID)
+	rows, err := stores.RunWorktrees.ListSystem(ctx, ident.OrgID, ident.RunID)
 	if err != nil {
 		return listOutput{}, fmt.Errorf("workspace list: load materialized worktrees: %w", err)
 	}
@@ -149,8 +156,8 @@ func listWorkspaces(database *db.DB, runID string) (listOutput, error) {
 }
 
 // runList is the CLI entrypoint: env → listWorkspaces → stdout/stderr.
-func runList(database *db.DB, args []string) {
-	out, err := listWorkspaces(database, os.Getenv("TRIAGE_FACTORY_RUN_ID"))
+func runList(stores db.Stores, args []string) {
+	out, err := listWorkspaces(stores, os.Getenv(runident.RunIdentityEnvVar))
 	if err != nil {
 		exitErr(err.Error())
 	}

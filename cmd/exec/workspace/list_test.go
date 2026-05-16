@@ -11,31 +11,31 @@ import (
 )
 
 func TestListWorkspaces_MissingRunID(t *testing.T) {
-	database := newTestDB(t)
-	if _, err := listWorkspaces(database, ""); !errors.Is(err, errMissingRunID) {
+	stores, _ := newTestDB(t)
+	if _, err := listWorkspaces(stores, ""); !errors.Is(err, errMissingRunID) {
 		t.Errorf("err = %v, want errMissingRunID", err)
 	}
 }
 
 func TestListWorkspaces_RunNotFound(t *testing.T) {
-	database := newTestDB(t)
-	if _, err := listWorkspaces(database, "missing-run"); !errors.Is(err, errRunNotFound) {
+	stores, _ := newTestDB(t)
+	if _, err := listWorkspaces(stores, "missing-run"); !errors.Is(err, errRunNotFound) {
 		t.Errorf("err = %v, want errRunNotFound", err)
 	}
 }
 
 func TestListWorkspaces_RejectsGitHubPRRun(t *testing.T) {
-	database := newTestDB(t)
+	stores, database := newTestDB(t)
 	seedGitHubRun(t, database, "gh-run")
 
-	_, err := listWorkspaces(database, "gh-run")
+	_, err := listWorkspaces(stores, "gh-run")
 	if !errors.Is(err, errNotJiraRun) {
 		t.Errorf("err = %v, want errNotJiraRun (workspace list must reject GitHub PR runs to keep its contract aligned with workspace add)", err)
 	}
 }
 
 func TestListWorkspaces_AvailableFiltersOutMaterialized(t *testing.T) {
-	database := newTestDB(t)
+	stores, database := newTestDB(t)
 	seedJiraRun(t, database, "r1", "SKY-1")
 	seedRepoProfile(t, database, "owner", "alpha", "https://x", "main")
 	seedRepoProfile(t, database, "owner", "beta", "https://x", "main")
@@ -49,7 +49,7 @@ func TestListWorkspaces_AvailableFiltersOutMaterialized(t *testing.T) {
 		t.Fatalf("seed materialized: %v", err)
 	}
 
-	out, err := listWorkspaces(database, "r1")
+	out, err := listWorkspaces(stores, "r1")
 	if err != nil {
 		t.Fatalf("listWorkspaces: %v", err)
 	}
@@ -78,10 +78,10 @@ func TestListWorkspaces_AvailableFiltersOutMaterialized(t *testing.T) {
 }
 
 func TestListWorkspaces_NoConfiguredRepos(t *testing.T) {
-	database := newTestDB(t)
+	stores, database := newTestDB(t)
 	seedJiraRun(t, database, "r1", "SKY-1")
 
-	out, err := listWorkspaces(database, "r1")
+	out, err := listWorkspaces(stores, "r1")
 	if err != nil {
 		t.Fatalf("listWorkspaces: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestListWorkspaces_NoConfiguredRepos(t *testing.T) {
 
 func TestListWorkspaces_ScopedToRun(t *testing.T) {
 	// Materialized worktrees from a sibling run must NOT leak into r1's list.
-	database := newTestDB(t)
+	stores, database := newTestDB(t)
 	seedJiraRun(t, database, "r1", "SKY-1")
 	seedJiraRun(t, database, "r2", "SKY-2")
 	seedRepoProfile(t, database, "owner", "shared", "https://x", "main")
@@ -107,7 +107,7 @@ func TestListWorkspaces_ScopedToRun(t *testing.T) {
 		t.Fatalf("seed r2 materialized: %v", err)
 	}
 
-	out, err := listWorkspaces(database, "r1")
+	out, err := listWorkspaces(stores, "r1")
 	if err != nil {
 		t.Fatalf("listWorkspaces r1: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestListWorkspaces_AvailableSurfacesDescription(t *testing.T) {
 	// target obvious. profile_text (the LLM-generated full profile) is
 	// deliberately NOT exposed — too verbose for a per-call discovery
 	// surface.
-	database := newTestDB(t)
+	stores, database := newTestDB(t)
 	seedJiraRun(t, database, "r1", "SKY-1")
 
 	if err := sqlitestore.New(database.Conn).Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.RepoProfile{
@@ -151,7 +151,7 @@ func TestListWorkspaces_AvailableSurfacesDescription(t *testing.T) {
 		t.Fatalf("upsert skeleton: %v", err)
 	}
 
-	out, err := listWorkspaces(database, "r1")
+	out, err := listWorkspaces(stores, "r1")
 	if err != nil {
 		t.Fatalf("listWorkspaces: %v", err)
 	}

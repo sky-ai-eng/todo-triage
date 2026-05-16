@@ -40,6 +40,20 @@ func newRunWorktreeStore(q, admin queryer) db.RunWorktreeStore {
 var _ db.RunWorktreeStore = (*runWorktreeStore)(nil)
 
 func (s *runWorktreeStore) Insert(ctx context.Context, orgID string, w domain.RunWorktree) (bool, string, error) {
+	return insertRunWorktree(ctx, s.q, orgID, w, s.GetByRepo)
+}
+
+func (s *runWorktreeStore) InsertSystem(ctx context.Context, orgID string, w domain.RunWorktree) (bool, string, error) {
+	return insertRunWorktree(ctx, s.admin, orgID, w, s.GetByRepoSystem)
+}
+
+func insertRunWorktree(
+	ctx context.Context,
+	q queryer,
+	orgID string,
+	w domain.RunWorktree,
+	lookup func(context.Context, string, string, string) (*domain.RunWorktree, error),
+) (bool, string, error) {
 	// The path the caller passes is the deterministic target
 	// ({runRoot}/{owner}/{repo}) — `CreateForBranchInRoot` always
 	// lands there, so we can record the path BEFORE creating the
@@ -50,7 +64,7 @@ func (s *runWorktreeStore) Insert(ctx context.Context, orgID string, w domain.Ru
 	// supposed to handle them. With insert first, the loser sees
 	// inserted=false and returns the winner's path without
 	// touching git.
-	res, err := s.q.ExecContext(ctx, `
+	res, err := q.ExecContext(ctx, `
 		INSERT INTO run_worktrees (run_id, org_id, repo_id, path, feature_branch)
 		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT (run_id, repo_id) DO NOTHING
@@ -65,7 +79,7 @@ func (s *runWorktreeStore) Insert(ctx context.Context, orgID string, w domain.Ru
 	if rows == 1 {
 		return true, w.Path, nil
 	}
-	existing, err := s.GetByRepo(ctx, orgID, w.RunID, w.RepoID)
+	existing, err := lookup(ctx, orgID, w.RunID, w.RepoID)
 	if err != nil {
 		return false, "", fmt.Errorf("read existing run_worktree after conflict: %w", err)
 	}
@@ -76,7 +90,15 @@ func (s *runWorktreeStore) Insert(ctx context.Context, orgID string, w domain.Ru
 }
 
 func (s *runWorktreeStore) GetByRepo(ctx context.Context, orgID, runID, repoID string) (*domain.RunWorktree, error) {
-	row := s.q.QueryRowContext(ctx, `
+	return getRunWorktreeByRepo(ctx, s.q, orgID, runID, repoID)
+}
+
+func (s *runWorktreeStore) GetByRepoSystem(ctx context.Context, orgID, runID, repoID string) (*domain.RunWorktree, error) {
+	return getRunWorktreeByRepo(ctx, s.admin, orgID, runID, repoID)
+}
+
+func getRunWorktreeByRepo(ctx context.Context, q queryer, orgID, runID, repoID string) (*domain.RunWorktree, error) {
+	row := q.QueryRowContext(ctx, `
 		SELECT run_id, repo_id, path, feature_branch, created_at
 		FROM run_worktrees
 		WHERE org_id = $1 AND run_id = $2 AND repo_id = $3
@@ -122,7 +144,15 @@ func listRunWorktrees(ctx context.Context, q queryer, orgID, runID string) ([]do
 }
 
 func (s *runWorktreeStore) DeleteByRepo(ctx context.Context, orgID, runID, repoID string) error {
-	_, err := s.q.ExecContext(ctx, `
+	return deleteRunWorktreeByRepo(ctx, s.q, orgID, runID, repoID)
+}
+
+func (s *runWorktreeStore) DeleteByRepoSystem(ctx context.Context, orgID, runID, repoID string) error {
+	return deleteRunWorktreeByRepo(ctx, s.admin, orgID, runID, repoID)
+}
+
+func deleteRunWorktreeByRepo(ctx context.Context, q queryer, orgID, runID, repoID string) error {
+	_, err := q.ExecContext(ctx, `
 		DELETE FROM run_worktrees
 		WHERE org_id = $1 AND run_id = $2 AND repo_id = $3
 	`, orgID, runID, repoID)

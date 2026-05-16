@@ -224,6 +224,16 @@ func (s *pendingPRStore) ByRunIDSystem(ctx context.Context, orgID, runID string)
 	return s.ByRunID(ctx, orgID, runID)
 }
 
+// --- SKY-302 admin-pool variants — SQLite collapses to non-System ---
+
+func (s *pendingPRStore) CreateSystem(ctx context.Context, orgID string, p domain.PendingPR) error {
+	return s.Create(ctx, orgID, p)
+}
+
+func (s *pendingPRStore) LockSystem(ctx context.Context, orgID, id, title, body string) error {
+	return s.Lock(ctx, orgID, id, title, body)
+}
+
 // scanPendingPRRow shared between Get and ByRunID. *Row.Scan; on
 // no-rows returns (nil, nil) per the read-path contract.
 func scanPendingPRRow(row *sql.Row) (*domain.PendingPR, error) {

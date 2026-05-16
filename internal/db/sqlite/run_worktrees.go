@@ -117,3 +117,17 @@ func (s *runWorktreeStore) DeleteByPathSystem(ctx context.Context, orgID, runID,
 	`, runID, path)
 	return err
 }
+
+// --- SKY-302 admin-pool variants — SQLite collapses to non-System ---
+
+func (s *runWorktreeStore) InsertSystem(ctx context.Context, orgID string, w domain.RunWorktree) (bool, string, error) {
+	return s.Insert(ctx, orgID, w)
+}
+
+func (s *runWorktreeStore) GetByRepoSystem(ctx context.Context, orgID, runID, repoID string) (*domain.RunWorktree, error) {
+	return s.GetByRepo(ctx, orgID, runID, repoID)
+}
+
+func (s *runWorktreeStore) DeleteByRepoSystem(ctx context.Context, orgID, runID, repoID string) error {
+	return s.DeleteByRepo(ctx, orgID, runID, repoID)
+}

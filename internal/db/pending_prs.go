@@ -141,4 +141,13 @@ type PendingPRStore interface {
 	// the only difference is which Postgres pool the statement runs
 	// on; SQLite has one connection and the two variants collapse.
 	ByRunIDSystem(ctx context.Context, orgID, runID string) (*domain.PendingPR, error)
+
+	// --- Admin-pool variants for the cmd/exec event-triggered branch (SKY-302) ---
+	//
+	// `triagefactory exec gh pr-create` invoked by an event-triggered
+	// agent run has no user identity to wrap synthetic claims around,
+	// so its inserts route through the admin pool here. Manual runs
+	// go through SyntheticClaimsWithTx + the non-System methods.
+	CreateSystem(ctx context.Context, orgID string, p domain.PendingPR) error
+	LockSystem(ctx context.Context, orgID, id, title, body string) error
 }

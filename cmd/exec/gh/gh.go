@@ -56,7 +56,7 @@ Repo Resolution (all gh commands):
   Commands fail with a clear error if none resolve.`
 
 // Handle dispatches gh subcommands.
-func Handle(client *github.Client, database *db.DB, args []string) {
+func Handle(client *github.Client, stores db.Stores, args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
 		printHelp()
 		return
@@ -67,7 +67,7 @@ func Handle(client *github.Client, database *db.DB, args []string) {
 
 	switch resource {
 	case "pr":
-		handlePR(client, database, cmdArgs)
+		handlePR(client, stores, cmdArgs)
 	case "actions":
 		handleActions(client, cmdArgs)
 	default:

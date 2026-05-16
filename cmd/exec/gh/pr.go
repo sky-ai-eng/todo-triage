@@ -12,13 +12,30 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/runident"
 	"github.com/sky-ai-eng/triage-factory/internal/agentmeta"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
-	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
+
+// resolveIdent is the per-subcommand entry point for SKY-302 routing.
+// Every prFoo function that touches the DB calls this first to pick
+// synthetic-claims (manual) vs admin-pool (event-triggered) for its
+// subsequent writes. Errors are translated to exitErr so the agent
+// sees a clear message and the subcommand exits non-zero.
+//
+// We keep `Get` reads on the admin pool throughout — they're cold-
+// path identity probes that have no visibility gate beyond run
+// existence (the agent has already proven it can act for this run
+// by virtue of TRIAGE_FACTORY_RUN_ID being injected by the spawner).
+func resolveIdent(stores db.Stores) runident.RunIdentity {
+	ident, err := runident.ResolveRunIdentityFromEnv(context.Background(), stores)
+	if err != nil {
+		exitErr(err.Error())
+	}
+	return ident
+}
 
 // getDiffShapes fetches the PR diff and returns both representations we
 // persist on a pending review: a flat per-file set of commentable lines
@@ -42,7 +59,7 @@ func getDiffShapes(client *ghclient.Client, owner, repo string, number int) (map
 	return ghclient.DiffLines(diff), ghclient.DiffHunks(diff), nil
 }
 
-func handlePR(client *ghclient.Client, database *db.DB, args []string) {
+func handlePR(client *ghclient.Client, stores db.Stores, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: triagefactory exec gh pr <action> [flags]")
 	}
@@ -52,7 +69,7 @@ func handlePR(client *ghclient.Client, database *db.DB, args []string) {
 
 	switch action {
 	case "create":
-		prCreate(client, database, flags)
+		prCreate(client, stores, flags)
 	case "view":
 		prView(client, flags)
 	case "diff":
@@ -64,17 +81,17 @@ func handlePR(client *ghclient.Client, database *db.DB, args []string) {
 	case "review-view":
 		prReviewView(client, flags)
 	case "review-delete":
-		prReviewDelete(database, flags)
+		prReviewDelete(stores, flags)
 	case "review-dismiss":
 		prReviewDismiss(client, flags)
 	case "start-review":
-		prStartReview(client, database, flags)
+		prStartReview(client, stores, flags)
 	case "add-review-comment":
-		prAddReviewComment(database, flags)
+		prAddReviewComment(stores, flags)
 	case "submit-review":
-		prSubmitReview(client, database, flags)
+		prSubmitReview(client, stores, flags)
 	case "comment-list-pending":
-		prListPending(database, flags)
+		prListPending(stores, flags)
 	case "add-comment":
 		prAddComment(client, flags)
 	case "comment-reply":
@@ -82,9 +99,9 @@ func handlePR(client *ghclient.Client, database *db.DB, args []string) {
 	case "comment-react":
 		prCommentReact(client, flags)
 	case "comment-update":
-		prCommentUpdate(client, database, flags)
+		prCommentUpdate(client, stores, flags)
 	case "comment-delete":
-		prCommentDelete(client, database, flags)
+		prCommentDelete(client, stores, flags)
 	default:
 		exitErr(fmt.Sprintf("unknown pr action: %s", action))
 	}
@@ -154,12 +171,21 @@ func prReviewView(client *ghclient.Client, args []string) {
 	printJSON(detail)
 }
 
-func prReviewDelete(database *db.DB, args []string) {
+func prReviewDelete(stores db.Stores, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: gh pr review-delete <review_id>")
 	}
 	reviewID := args[0]
-	err := sqlitestore.New(database.Conn).Reviews.Delete(context.Background(), runmode.LocalDefaultOrgID, reviewID)
+	ident := resolveIdent(stores)
+	ctx := context.Background()
+	var err error
+	if ident.IsEventTriggered {
+		err = stores.Reviews.DeleteSystem(ctx, ident.OrgID, reviewID)
+	} else {
+		err = stores.Tx.SyntheticClaimsWithTx(ctx, ident.OrgID, ident.UserID, func(ts db.TxStores) error {
+			return ts.Reviews.Delete(ctx, ident.OrgID, reviewID)
+		})
+	}
 	exitOnErr(err)
 	printJSON(map[string]any{"ok": true, "review_id": reviewID})
 }
@@ -182,8 +208,9 @@ func prReviewDismiss(client *ghclient.Client, args []string) {
 
 // --- Review lifecycle (local state) ---
 
-func prStartReview(client *ghclient.Client, database *db.DB, args []string) {
+func prStartReview(client *ghclient.Client, stores db.Stores, args []string) {
 	owner, repo, number := parseRepoAndNumber(args)
+	ident := resolveIdent(stores)
 	// Fetch head SHA for the review
 	pr, err := client.GetPR(owner, repo, number, false)
 	exitOnErr(err)
@@ -213,7 +240,7 @@ func prStartReview(client *ghclient.Client, database *db.DB, args []string) {
 	diffHunksJSON, _ := json.Marshal(hunksMap)
 
 	reviewID := uuid.New().String()
-	err = sqlitestore.New(database.Conn).Reviews.Create(context.Background(), runmode.LocalDefaultOrgID, domain.PendingReview{
+	row := domain.PendingReview{
 		ID:        reviewID,
 		PRNumber:  number,
 		Owner:     owner,
@@ -221,8 +248,16 @@ func prStartReview(client *ghclient.Client, database *db.DB, args []string) {
 		CommitSHA: pr.HeadSHA,
 		DiffLines: string(diffLinesJSON),
 		DiffHunks: string(diffHunksJSON),
-		RunID:     os.Getenv("TRIAGE_FACTORY_RUN_ID"),
-	})
+		RunID:     ident.RunID,
+	}
+	ctx := context.Background()
+	if ident.IsEventTriggered {
+		err = stores.Reviews.CreateSystem(ctx, ident.OrgID, row)
+	} else {
+		err = stores.Tx.SyntheticClaimsWithTx(ctx, ident.OrgID, ident.UserID, func(ts db.TxStores) error {
+			return ts.Reviews.Create(ctx, ident.OrgID, row)
+		})
+	}
 	exitOnErr(err)
 
 	printJSON(map[string]any{
@@ -234,7 +269,7 @@ func prStartReview(client *ghclient.Client, database *db.DB, args []string) {
 	})
 }
 
-func prAddReviewComment(database *db.DB, args []string) {
+func prAddReviewComment(stores db.Stores, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: gh pr add-review-comment <review_id> --file <path> --line <N> --body <text> [--start-line <N>]")
 	}
@@ -253,8 +288,13 @@ func prAddReviewComment(database *db.DB, args []string) {
 		startLine = &v
 	}
 
-	// Verify review exists
-	review, err := sqlitestore.New(database.Conn).Reviews.Get(context.Background(), runmode.LocalDefaultOrgID, reviewID)
+	ident := resolveIdent(stores)
+	ctx := context.Background()
+
+	// Verify review exists. Admin-pool read — the row is keyed by
+	// review_id which the agent provided; identity routing applies
+	// to the AddComment write below.
+	review, err := stores.Reviews.GetSystem(ctx, ident.OrgID, reviewID)
 	exitOnErr(err)
 	if review == nil {
 		exitErr(fmt.Sprintf("pending review %s not found", reviewID))
@@ -325,7 +365,13 @@ func prAddReviewComment(database *db.DB, args []string) {
 		Body:      body,
 	}
 
-	err = sqlitestore.New(database.Conn).Reviews.AddComment(context.Background(), runmode.LocalDefaultOrgID, comment)
+	if ident.IsEventTriggered {
+		err = stores.Reviews.AddCommentSystem(ctx, ident.OrgID, comment)
+	} else {
+		err = stores.Tx.SyntheticClaimsWithTx(ctx, ident.OrgID, ident.UserID, func(ts db.TxStores) error {
+			return ts.Reviews.AddComment(ctx, ident.OrgID, comment)
+		})
+	}
 	exitOnErr(err)
 
 	printJSON(map[string]any{
@@ -335,7 +381,7 @@ func prAddReviewComment(database *db.DB, args []string) {
 	})
 }
 
-func prSubmitReview(client *ghclient.Client, database *db.DB, args []string) {
+func prSubmitReview(client *ghclient.Client, stores db.Stores, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: gh pr submit-review <review_id> --event <approve|comment|request_changes> --body <text>")
 	}
@@ -357,15 +403,19 @@ func prSubmitReview(client *ghclient.Client, database *db.DB, args []string) {
 		ghEvent = event
 	}
 
-	// Load pending review
-	review, err := sqlitestore.New(database.Conn).Reviews.Get(context.Background(), runmode.LocalDefaultOrgID, reviewID)
+	ident := resolveIdent(stores)
+	ctx := context.Background()
+
+	// Load pending review — admin-pool read; identity routing
+	// applies to the Lock/Delete writes below.
+	review, err := stores.Reviews.GetSystem(ctx, ident.OrgID, reviewID)
 	exitOnErr(err)
 	if review == nil {
 		exitErr(fmt.Sprintf("pending review %s not found", reviewID))
 	}
 
-	// Load pending comments
-	pendingComments, err := sqlitestore.New(database.Conn).Reviews.ListComments(context.Background(), runmode.LocalDefaultOrgID, reviewID)
+	// Load pending comments via the admin pool — same rationale.
+	pendingComments, err := stores.Reviews.ListCommentsSystem(ctx, ident.OrgID, reviewID)
 	exitOnErr(err)
 
 	// Convert to GitHub format
@@ -389,7 +439,13 @@ func prSubmitReview(client *ghclient.Client, database *db.DB, args []string) {
 	// the pending_approval response, mistaking it for "still pending,
 	// keep going."
 	if os.Getenv("TRIAGE_FACTORY_REVIEW_PREVIEW") == "1" {
-		err = sqlitestore.New(database.Conn).Reviews.LockSubmission(context.Background(), runmode.LocalDefaultOrgID, reviewID, body, ghEvent)
+		if ident.IsEventTriggered {
+			err = stores.Reviews.LockSubmissionSystem(ctx, ident.OrgID, reviewID, body, ghEvent)
+		} else {
+			err = stores.Tx.SyntheticClaimsWithTx(ctx, ident.OrgID, ident.UserID, func(ts db.TxStores) error {
+				return ts.Reviews.LockSubmission(ctx, ident.OrgID, reviewID, body, ghEvent)
+			})
+		}
 		if errors.Is(err, db.ErrPendingReviewAlreadySubmitted) {
 			exitErr(fmt.Sprintf(
 				"review %s has already been queued for human approval. Do not call submit-review again — your work on this review is complete. Finish the run by writing $TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/<run_id>.md and returning your completion JSON.",
@@ -416,13 +472,15 @@ func prSubmitReview(client *ghclient.Client, database *db.DB, args []string) {
 		return
 	}
 
-	// Inject footer with run metadata.
-	// TODO(SKY-254 / D9): hardcoded sqlitestore is the local-mode
-	// path; multi-mode needs the sandbox to inject mode + JWT + DSN
-	// so this branches to pgstore.New under the run's user claims.
-	// Same assumption every other cmd/exec/* path makes — grep for
-	// "SKY-254".
-	body = body + agentmeta.Build(sqlitestore.New(database.Conn).AgentRuns, os.Getenv("TRIAGE_FACTORY_RUN_ID"), "review")
+	// Inject footer with run metadata. Build reads via the admin
+	// pool internally (SKY-302) so we don't need to wrap the
+	// formatter in a synthetic-claims tx — it'd span the GitHub
+	// HTTP call below and a long-running tx across network I/O is
+	// exactly what the issue's note flagged as the wrong shape.
+	// TODO(SKY-303): the sandboxed-agent path will route this read
+	// through the host-daemon IPC client instead of the direct DB
+	// access this subprocess does today.
+	body = body + agentmeta.Build(stores.AgentRuns, ident.RunID, "review")
 
 	// Submit atomically to GitHub
 	ghReviewID, actualEvent, err := client.SubmitReview(
@@ -431,8 +489,16 @@ func prSubmitReview(client *ghclient.Client, database *db.DB, args []string) {
 	)
 	exitOnErr(err)
 
-	// Clean up local state
-	if err := sqlitestore.New(database.Conn).Reviews.Delete(context.Background(), runmode.LocalDefaultOrgID, reviewID); err != nil {
+	// Clean up local state. Routed per ident — same SKY-302 branch
+	// as the Lock above.
+	if ident.IsEventTriggered {
+		err = stores.Reviews.DeleteSystem(ctx, ident.OrgID, reviewID)
+	} else {
+		err = stores.Tx.SyntheticClaimsWithTx(ctx, ident.OrgID, ident.UserID, func(ts db.TxStores) error {
+			return ts.Reviews.Delete(ctx, ident.OrgID, reviewID)
+		})
+	}
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: failed to clean up local review state: %v\n", err)
 	}
 
@@ -457,7 +523,7 @@ func prSubmitReview(client *ghclient.Client, database *db.DB, args []string) {
 // Standalone mode (env unset, e.g. a human running this directly
 // from a checkout): pre-apply the footer and POST to GitHub
 // immediately. Same shape as prSubmitReview's standalone branch.
-func prCreate(client *ghclient.Client, database *db.DB, args []string) {
+func prCreate(client *ghclient.Client, stores db.Stores, args []string) {
 	title := flagVal(args, "--title")
 	body := flagVal(args, "--body")
 	bodyFile := flagVal(args, "--body-file")
@@ -555,10 +621,8 @@ func prCreate(client *ghclient.Client, database *db.DB, args []string) {
 	}
 
 	if os.Getenv("TRIAGE_FACTORY_REVIEW_PREVIEW") == "1" {
-		runID := os.Getenv("TRIAGE_FACTORY_RUN_ID")
-		if runID == "" {
-			exitErr("TRIAGE_FACTORY_REVIEW_PREVIEW=1 but TRIAGE_FACTORY_RUN_ID is empty; this command was meant to be invoked by the delegated agent")
-		}
+		ident := resolveIdent(stores)
+		ctx := context.Background()
 
 		// Capture the head sha at queue time so the UI can flag drift if
 		// the agent pushes a fixup mid-approval. Best-effort: if
@@ -579,28 +643,42 @@ func prCreate(client *ghclient.Client, database *db.DB, args []string) {
 		// surfaces as a generic SQL constraint error that doesn't
 		// teach the agent to stop calling. Check up front so the
 		// agent gets a clear "already queued" message on retry,
-		// matching what submit-review does for reviews.
-		// TODO(SKY-254 / D9): replace hardcoded sqlitestore wiring with
-		// the orgID-aware store passed in by the caller once
-		// cmd/exec gets its multi-mode constructor.
-		pendingPRs := sqlitestore.New(database.Conn).PendingPRs
-		if existing, err := pendingPRs.ByRunID(context.Background(), runmode.LocalDefaultOrgID, runID); err != nil {
-			exitErr("lookup existing pending PR for run: " + err.Error())
+		// matching what submit-review does for reviews. Admin-pool
+		// read — identity routing applies to the Create + Lock
+		// writes below.
+		// TODO(SKY-303): IPC transition for sandboxed agents.
+		if existing, lookupErr := stores.PendingPRs.ByRunIDSystem(ctx, ident.OrgID, ident.RunID); lookupErr != nil {
+			exitErr("lookup existing pending PR for run: " + lookupErr.Error())
 		} else if existing != nil {
 			exitErr(fmt.Sprintf(
 				"a PR for run %s has already been queued for human approval. Do not call pr create again — your work is complete. Finish the run by writing $TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/<run_id>.md and returning your completion JSON.",
-				runID,
+				ident.RunID,
 			))
 		}
 
 		id := uuid.NewString()
-		if err := pendingPRs.Create(context.Background(), runmode.LocalDefaultOrgID, domain.PendingPR{
-			ID: id, RunID: runID,
+		row := domain.PendingPR{
+			ID: id, RunID: ident.RunID,
 			Owner: owner, Repo: repo,
 			HeadBranch: head, HeadSHA: headSHA, BaseBranch: base,
 			Title: title, Body: body,
 			Draft: draft,
-		}); err != nil {
+		}
+		// Batch Create + Lock in one synthetic-claims tx for manual
+		// runs so a crash between them doesn't strand an unlocked
+		// row; event-triggered runs sequence the admin-pool calls
+		// (no shared tx surface across pools).
+		if ident.IsEventTriggered {
+			err = stores.PendingPRs.CreateSystem(ctx, ident.OrgID, row)
+		} else {
+			err = stores.Tx.SyntheticClaimsWithTx(ctx, ident.OrgID, ident.UserID, func(ts db.TxStores) error {
+				if cerr := ts.PendingPRs.Create(ctx, ident.OrgID, row); cerr != nil {
+					return cerr
+				}
+				return ts.PendingPRs.Lock(ctx, ident.OrgID, id, title, body)
+			})
+		}
+		if err != nil {
 			// The pre-check above is racy: two concurrent `pr create`
 			// invocations on different DB connections can both pass
 			// it before either has inserted, then one wins the
@@ -609,11 +687,19 @@ func prCreate(client *ghclient.Client, database *db.DB, args []string) {
 			// row exists, treat this as the same SKY-212 retry case
 			// the pre-check normally catches and surface the clean
 			// "already queued" message instead of a confusing SQL
-			// error the agent doesn't know how to interpret.
-			if existing, lookupErr := pendingPRs.ByRunID(context.Background(), runmode.LocalDefaultOrgID, runID); lookupErr == nil && existing != nil {
+			// error the agent doesn't know how to interpret. Also
+			// catches the ErrPendingPRAlreadyQueued from the inner
+			// Lock call when the manual-branch tx hit the lock race.
+			if errors.Is(err, db.ErrPendingPRAlreadyQueued) {
 				exitErr(fmt.Sprintf(
 					"a PR for run %s has already been queued for human approval. Do not call pr create again — your work is complete. Finish the run by writing $TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/<run_id>.md and returning your completion JSON.",
-					runID,
+					ident.RunID,
+				))
+			}
+			if existing, lookupErr := stores.PendingPRs.ByRunIDSystem(ctx, ident.OrgID, ident.RunID); lookupErr == nil && existing != nil {
+				exitErr(fmt.Sprintf(
+					"a PR for run %s has already been queued for human approval. Do not call pr create again — your work is complete. Finish the run by writing $TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/<run_id>.md and returning your completion JSON.",
+					ident.RunID,
 				))
 			}
 			exitErr("failed to insert pending PR: " + err.Error())
@@ -623,16 +709,19 @@ func prCreate(client *ghclient.Client, database *db.DB, args []string) {
 		// bearing for the race where two `pr create` invocations
 		// arrive at this point simultaneously (the pre-check happens
 		// in two separate connections and both see "no existing
-		// row"). The lock's WHERE locked = 0 gate serializes them at
-		// the DB layer; the loser sees ErrPendingPRAlreadyQueued.
-		if err := pendingPRs.Lock(context.Background(), runmode.LocalDefaultOrgID, id, title, body); err != nil {
-			if errors.Is(err, db.ErrPendingPRAlreadyQueued) {
-				exitErr(fmt.Sprintf(
-					"a PR for run %s has already been queued for human approval. Do not call pr create again — your work is complete. Finish the run by writing $TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/<run_id>.md and returning your completion JSON.",
-					runID,
-				))
+		// row"). The manual branch already ran Lock inside its tx
+		// above; only the event-triggered branch needs the explicit
+		// lock here.
+		if ident.IsEventTriggered {
+			if lerr := stores.PendingPRs.LockSystem(ctx, ident.OrgID, id, title, body); lerr != nil {
+				if errors.Is(lerr, db.ErrPendingPRAlreadyQueued) {
+					exitErr(fmt.Sprintf(
+						"a PR for run %s has already been queued for human approval. Do not call pr create again — your work is complete. Finish the run by writing $TRIAGE_FACTORY_RUN_ROOT/_scratch/entity-memory/<run_id>.md and returning your completion JSON.",
+						ident.RunID,
+					))
+				}
+				exitErr("failed to lock pending PR: " + lerr.Error())
 			}
-			exitErr("failed to lock pending PR: " + err.Error())
 		}
 
 		printJSON(map[string]any{
@@ -650,9 +739,10 @@ func prCreate(client *ghclient.Client, database *db.DB, args []string) {
 	}
 
 	// Standalone mode: open the PR immediately, with footer pre-applied.
-	// TODO(SKY-254 / D9): hardcoded sqlitestore — see review path
-	// above for the multi-mode plumbing this needs.
-	body = body + agentmeta.Build(sqlitestore.New(database.Conn).AgentRuns, os.Getenv("TRIAGE_FACTORY_RUN_ID"), "PR")
+	// agentmeta.Build reads via the admin pool internally (SKY-302),
+	// so we don't need to wrap it in a synthetic-claims tx.
+	// TODO(SKY-303): IPC transition for sandboxed agents.
+	body = body + agentmeta.Build(stores.AgentRuns, os.Getenv(runident.RunIdentityEnvVar), "PR")
 	number, htmlURL, err := client.CreatePR(owner, repo, head, base, title, body, draft)
 	exitOnErr(err)
 
@@ -663,12 +753,15 @@ func prCreate(client *ghclient.Client, database *db.DB, args []string) {
 	})
 }
 
-func prListPending(database *db.DB, args []string) {
+func prListPending(stores db.Stores, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: gh pr comment-list-pending <review_id>")
 	}
 	reviewID := args[0]
-	comments, err := sqlitestore.New(database.Conn).Reviews.ListComments(context.Background(), runmode.LocalDefaultOrgID, reviewID)
+	// Read-only inventory — admin pool read post-identity probe so
+	// an invalid TRIAGE_FACTORY_RUN_ID still fails loudly.
+	ident := resolveIdent(stores)
+	comments, err := stores.Reviews.ListCommentsSystem(context.Background(), ident.OrgID, reviewID)
 	exitOnErr(err)
 	if comments == nil {
 		comments = []domain.PendingReviewComment{}
@@ -720,7 +813,7 @@ func prCommentReact(client *ghclient.Client, args []string) {
 	printJSON(map[string]any{"ok": true})
 }
 
-func prCommentUpdate(client *ghclient.Client, database *db.DB, args []string) {
+func prCommentUpdate(client *ghclient.Client, stores db.Stores, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: gh pr comment-update <comment_id> --body <text>")
 	}
@@ -732,7 +825,16 @@ func prCommentUpdate(client *ghclient.Client, database *db.DB, args []string) {
 
 	// Check if it's a local pending comment (UUID) vs remote (integer)
 	if isLocalID(commentID) {
-		err := sqlitestore.New(database.Conn).Reviews.UpdateComment(context.Background(), runmode.LocalDefaultOrgID, commentID, body)
+		ident := resolveIdent(stores)
+		ctx := context.Background()
+		var err error
+		if ident.IsEventTriggered {
+			err = stores.Reviews.UpdateCommentSystem(ctx, ident.OrgID, commentID, body)
+		} else {
+			err = stores.Tx.SyntheticClaimsWithTx(ctx, ident.OrgID, ident.UserID, func(ts db.TxStores) error {
+				return ts.Reviews.UpdateComment(ctx, ident.OrgID, commentID, body)
+			})
+		}
 		exitOnErr(err)
 		printJSON(map[string]any{"ok": true, "scope": "local"})
 	} else {
@@ -744,14 +846,23 @@ func prCommentUpdate(client *ghclient.Client, database *db.DB, args []string) {
 	}
 }
 
-func prCommentDelete(client *ghclient.Client, database *db.DB, args []string) {
+func prCommentDelete(client *ghclient.Client, stores db.Stores, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: gh pr comment-delete <comment_id>")
 	}
 	commentID := args[0]
 
 	if isLocalID(commentID) {
-		err := sqlitestore.New(database.Conn).Reviews.DeleteComment(context.Background(), runmode.LocalDefaultOrgID, commentID)
+		ident := resolveIdent(stores)
+		ctx := context.Background()
+		var err error
+		if ident.IsEventTriggered {
+			err = stores.Reviews.DeleteCommentSystem(ctx, ident.OrgID, commentID)
+		} else {
+			err = stores.Tx.SyntheticClaimsWithTx(ctx, ident.OrgID, ident.UserID, func(ts db.TxStores) error {
+				return ts.Reviews.DeleteComment(ctx, ident.OrgID, commentID)
+			})
+		}
 		exitOnErr(err)
 		printJSON(map[string]any{"ok": true, "scope": "local"})
 	} else {

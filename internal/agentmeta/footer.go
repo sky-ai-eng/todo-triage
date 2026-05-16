@@ -43,6 +43,16 @@ import (
 // bare branding-only footer rather than blocking the submit — the
 // disclosure is still meaningful (a run did exist) even if we
 // couldn't render the metrics.
+//
+// Reads route through the admin-pool `...System` variants (SKY-302).
+// Build is a pure read-only formatting utility invoked from contexts
+// that don't carry JWT claims — the cmd/exec agent subcommands
+// (review/PR submit) and the server's post-approval cleanup paths.
+// Wrapping the two-row read in its own synthetic-claims tx just to
+// satisfy RLS for a footer would be tx-machinery overhead with no
+// visibility benefit (the agent has already proven it can act as
+// this run via TRIAGE_FACTORY_RUN_ID → ResolveRunIdentity, and the
+// server path is system-driven).
 func Build(agentRuns db.AgentRunStore, runID, kind string) string {
 	if runID == "" {
 		return ""
@@ -55,7 +65,7 @@ func Build(agentRuns db.AgentRunStore, runID, kind string) string {
 	bare := "\n\n---\n" + disclaimer
 
 	ctx := context.Background()
-	run, err := agentRuns.Get(ctx, runmode.LocalDefaultOrg, runID)
+	run, err := agentRuns.GetSystem(ctx, runmode.LocalDefaultOrg, runID)
 	if err != nil || run == nil {
 		return bare
 	}
@@ -98,7 +108,7 @@ func costFromRun(ctx context.Context, agentRuns db.AgentRunStore, runID string, 
 	if run.TotalCostUSD != nil {
 		return *run.TotalCostUSD, ""
 	}
-	totals, err := agentRuns.TokenTotals(ctx, runmode.LocalDefaultOrg, runID)
+	totals, err := agentRuns.TokenTotalsSystem(ctx, runmode.LocalDefaultOrg, runID)
 	if err != nil {
 		return 0, ""
 	}

@@ -45,7 +45,15 @@ var _ db.ReviewStore = (*reviewStore)(nil)
 // --- Reviews ---
 
 func (s *reviewStore) Create(ctx context.Context, orgID string, r domain.PendingReview) error {
-	_, err := s.q.ExecContext(ctx, `
+	return createReview(ctx, s.q, orgID, r)
+}
+
+func (s *reviewStore) CreateSystem(ctx context.Context, orgID string, r domain.PendingReview) error {
+	return createReview(ctx, s.admin, orgID, r)
+}
+
+func createReview(ctx context.Context, q queryer, orgID string, r domain.PendingReview) error {
+	_, err := q.ExecContext(ctx, `
 		INSERT INTO pending_reviews (id, org_id, pr_number, owner, repo, commit_sha,
 		                             diff_lines, diff_hunks, run_id)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, '')::uuid)
@@ -57,7 +65,15 @@ func (s *reviewStore) Create(ctx context.Context, orgID string, r domain.Pending
 }
 
 func (s *reviewStore) Get(ctx context.Context, orgID, reviewID string) (*domain.PendingReview, error) {
-	row := s.q.QueryRowContext(ctx, `
+	return getReview(ctx, s.q, orgID, reviewID)
+}
+
+func (s *reviewStore) GetSystem(ctx context.Context, orgID, reviewID string) (*domain.PendingReview, error) {
+	return getReview(ctx, s.admin, orgID, reviewID)
+}
+
+func getReview(ctx context.Context, q queryer, orgID, reviewID string) (*domain.PendingReview, error) {
+	row := q.QueryRowContext(ctx, `
 		SELECT id, pr_number, owner, repo, commit_sha,
 		       COALESCE(diff_lines, ''), COALESCE(diff_hunks, ''),
 		       COALESCE(run_id::text, ''),
@@ -91,10 +107,18 @@ func reviewByRunID(ctx context.Context, q queryer, orgID, runID string) (*domain
 }
 
 func (s *reviewStore) Delete(ctx context.Context, orgID, reviewID string) error {
+	return deleteReview(ctx, s.q, orgID, reviewID)
+}
+
+func (s *reviewStore) DeleteSystem(ctx context.Context, orgID, reviewID string) error {
+	return deleteReview(ctx, s.admin, orgID, reviewID)
+}
+
+func deleteReview(ctx context.Context, q queryer, orgID, reviewID string) error {
 	// pending_review_comments.review_id has ON DELETE CASCADE, so a
 	// single DELETE against pending_reviews tears down the comments
 	// too. No manual transaction needed.
-	_, err := s.q.ExecContext(ctx,
+	_, err := q.ExecContext(ctx,
 		`DELETE FROM pending_reviews WHERE org_id = $1 AND id = $2`, orgID, reviewID)
 	return err
 }
@@ -118,7 +142,15 @@ func (s *reviewStore) SetSubmission(ctx context.Context, orgID, reviewID, body, 
 }
 
 func (s *reviewStore) LockSubmission(ctx context.Context, orgID, reviewID, body, event string) error {
-	res, err := s.q.ExecContext(ctx, `
+	return lockReviewSubmission(ctx, s.q, orgID, reviewID, body, event)
+}
+
+func (s *reviewStore) LockSubmissionSystem(ctx context.Context, orgID, reviewID, body, event string) error {
+	return lockReviewSubmission(ctx, s.admin, orgID, reviewID, body, event)
+}
+
+func lockReviewSubmission(ctx context.Context, q queryer, orgID, reviewID, body, event string) error {
+	res, err := q.ExecContext(ctx, `
 		UPDATE pending_reviews
 		SET review_body = $1,
 		    review_event = $2,
@@ -139,7 +171,7 @@ func (s *reviewStore) LockSubmission(ctx context.Context, orgID, reviewID, body,
 		// The lookup is cheap and the row is already in the page
 		// cache from the prSubmitReview load.
 		var exists int
-		if err := s.q.QueryRowContext(ctx,
+		if err := q.QueryRowContext(ctx,
 			`SELECT COUNT(*) FROM pending_reviews WHERE org_id = $1 AND id = $2`,
 			orgID, reviewID,
 		).Scan(&exists); err != nil {
@@ -156,6 +188,14 @@ func (s *reviewStore) LockSubmission(ctx context.Context, orgID, reviewID, body,
 // --- Comments ---
 
 func (s *reviewStore) AddComment(ctx context.Context, orgID string, c domain.PendingReviewComment) error {
+	return addReviewComment(ctx, s.q, orgID, c)
+}
+
+func (s *reviewStore) AddCommentSystem(ctx context.Context, orgID string, c domain.PendingReviewComment) error {
+	return addReviewComment(ctx, s.admin, orgID, c)
+}
+
+func addReviewComment(ctx context.Context, q queryer, orgID string, c domain.PendingReviewComment) error {
 	// start_line is *int — nil binds as SQL NULL.
 	var startLine any
 	if c.StartLine != nil {
@@ -168,7 +208,7 @@ func (s *reviewStore) AddComment(ctx context.Context, orgID string, c domain.Pen
 	// would share the same created_at and ListComments's id
 	// tiebreaker (random UUIDs) would scramble insertion order.
 	// clock_timestamp() advances per row.
-	_, err := s.q.ExecContext(ctx, `
+	_, err := q.ExecContext(ctx, `
 		INSERT INTO pending_review_comments (id, org_id, review_id, path, line, start_line, body, original_body, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $7, clock_timestamp())
 	`, c.ID, orgID, c.ReviewID, c.Path, c.Line, startLine, c.Body)
@@ -176,7 +216,15 @@ func (s *reviewStore) AddComment(ctx context.Context, orgID string, c domain.Pen
 }
 
 func (s *reviewStore) UpdateComment(ctx context.Context, orgID, commentID, body string) error {
-	res, err := s.q.ExecContext(ctx,
+	return updateReviewComment(ctx, s.q, orgID, commentID, body)
+}
+
+func (s *reviewStore) UpdateCommentSystem(ctx context.Context, orgID, commentID, body string) error {
+	return updateReviewComment(ctx, s.admin, orgID, commentID, body)
+}
+
+func updateReviewComment(ctx context.Context, q queryer, orgID, commentID, body string) error {
+	res, err := q.ExecContext(ctx,
 		`UPDATE pending_review_comments SET body = $1 WHERE org_id = $2 AND id = $3`,
 		body, orgID, commentID,
 	)
@@ -191,7 +239,15 @@ func (s *reviewStore) UpdateComment(ctx context.Context, orgID, commentID, body 
 }
 
 func (s *reviewStore) DeleteComment(ctx context.Context, orgID, commentID string) error {
-	res, err := s.q.ExecContext(ctx,
+	return deleteReviewComment(ctx, s.q, orgID, commentID)
+}
+
+func (s *reviewStore) DeleteCommentSystem(ctx context.Context, orgID, commentID string) error {
+	return deleteReviewComment(ctx, s.admin, orgID, commentID)
+}
+
+func deleteReviewComment(ctx context.Context, q queryer, orgID, commentID string) error {
+	res, err := q.ExecContext(ctx,
 		`DELETE FROM pending_review_comments WHERE org_id = $1 AND id = $2`,
 		orgID, commentID,
 	)
@@ -206,12 +262,20 @@ func (s *reviewStore) DeleteComment(ctx context.Context, orgID, commentID string
 }
 
 func (s *reviewStore) ListComments(ctx context.Context, orgID, reviewID string) ([]domain.PendingReviewComment, error) {
+	return listReviewComments(ctx, s.q, orgID, reviewID)
+}
+
+func (s *reviewStore) ListCommentsSystem(ctx context.Context, orgID, reviewID string) ([]domain.PendingReviewComment, error) {
+	return listReviewComments(ctx, s.admin, orgID, reviewID)
+}
+
+func listReviewComments(ctx context.Context, q queryer, orgID, reviewID string) ([]domain.PendingReviewComment, error) {
 	// Order by created_at then id — Postgres has no implicit
 	// insertion order like SQLite's rowid. created_at NOT NULL
 	// DEFAULT now() makes this stable per-INSERT; the id tiebreaker
 	// keeps the order deterministic when two rows land in the same
 	// microsecond bucket.
-	rows, err := s.q.QueryContext(ctx, `
+	rows, err := q.QueryContext(ctx, `
 		SELECT id, review_id, path, line, start_line, body, original_body
 		FROM pending_review_comments
 		WHERE org_id = $1 AND review_id = $2

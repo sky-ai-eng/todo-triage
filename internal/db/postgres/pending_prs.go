@@ -44,11 +44,19 @@ func newPendingPRStore(q, admin queryer) db.PendingPRStore {
 var _ db.PendingPRStore = (*pendingPRStore)(nil)
 
 func (s *pendingPRStore) Create(ctx context.Context, orgID string, p domain.PendingPR) error {
+	return createPendingPR(ctx, s.q, orgID, p)
+}
+
+func (s *pendingPRStore) CreateSystem(ctx context.Context, orgID string, p domain.PendingPR) error {
+	return createPendingPR(ctx, s.admin, orgID, p)
+}
+
+func createPendingPR(ctx context.Context, q queryer, orgID string, p domain.PendingPR) error {
 	// NULLIF on body so an empty string becomes SQL NULL — matches
 	// the SQLite impl's nullIfEmpty(body), which exists so the
 	// human-feedback formatter can distinguish "no body captured"
 	// (NULL) from "body was a real empty string."
-	_, err := s.q.ExecContext(ctx, `
+	_, err := q.ExecContext(ctx, `
 		INSERT INTO pending_prs
 		  (id, org_id, run_id, owner, repo, head_branch, head_sha, base_branch,
 		   title, body, original_title, original_body, draft)
@@ -133,7 +141,15 @@ func (s *pendingPRStore) UpdateTitleBody(ctx context.Context, orgID, id, title, 
 }
 
 func (s *pendingPRStore) Lock(ctx context.Context, orgID, id, title, body string) error {
-	res, err := s.q.ExecContext(ctx, `
+	return lockPendingPR(ctx, s.q, orgID, id, title, body)
+}
+
+func (s *pendingPRStore) LockSystem(ctx context.Context, orgID, id, title, body string) error {
+	return lockPendingPR(ctx, s.admin, orgID, id, title, body)
+}
+
+func lockPendingPR(ctx context.Context, q queryer, orgID, id, title, body string) error {
+	res, err := q.ExecContext(ctx, `
 		UPDATE pending_prs
 		   SET title = $1,
 		       body = NULLIF($2, ''),
@@ -155,7 +171,7 @@ func (s *pendingPRStore) Lock(ctx context.Context, orgID, id, title, body string
 		// A bogus id shouldn't get the lock message; the agent should
 		// see a different error pointing at the argument.
 		var exists int
-		if err := s.q.QueryRowContext(ctx,
+		if err := q.QueryRowContext(ctx,
 			`SELECT COUNT(*) FROM pending_prs WHERE org_id = $1 AND id = $2`,
 			orgID, id,
 		).Scan(&exists); err != nil {

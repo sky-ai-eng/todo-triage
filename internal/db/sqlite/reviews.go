@@ -242,6 +242,40 @@ func (s *reviewStore) ByRunIDSystem(ctx context.Context, orgID, runID string) (*
 	return s.ByRunID(ctx, orgID, runID)
 }
 
+// --- SKY-302 admin-pool variants — SQLite collapses to non-System ---
+
+func (s *reviewStore) CreateSystem(ctx context.Context, orgID string, r domain.PendingReview) error {
+	return s.Create(ctx, orgID, r)
+}
+
+func (s *reviewStore) GetSystem(ctx context.Context, orgID, reviewID string) (*domain.PendingReview, error) {
+	return s.Get(ctx, orgID, reviewID)
+}
+
+func (s *reviewStore) DeleteSystem(ctx context.Context, orgID, reviewID string) error {
+	return s.Delete(ctx, orgID, reviewID)
+}
+
+func (s *reviewStore) LockSubmissionSystem(ctx context.Context, orgID, reviewID, body, event string) error {
+	return s.LockSubmission(ctx, orgID, reviewID, body, event)
+}
+
+func (s *reviewStore) AddCommentSystem(ctx context.Context, orgID string, c domain.PendingReviewComment) error {
+	return s.AddComment(ctx, orgID, c)
+}
+
+func (s *reviewStore) UpdateCommentSystem(ctx context.Context, orgID, commentID, body string) error {
+	return s.UpdateComment(ctx, orgID, commentID, body)
+}
+
+func (s *reviewStore) DeleteCommentSystem(ctx context.Context, orgID, commentID string) error {
+	return s.DeleteComment(ctx, orgID, commentID)
+}
+
+func (s *reviewStore) ListCommentsSystem(ctx context.Context, orgID, reviewID string) ([]domain.PendingReviewComment, error) {
+	return s.ListComments(ctx, orgID, reviewID)
+}
+
 // scanReviewRow shared between Get and ByRunID. *Row.Scan; on no-rows
 // returns (nil, nil) per the read-path contract.
 func scanReviewRow(row *sql.Row) (*domain.PendingReview, error) {
