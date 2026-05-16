@@ -112,7 +112,7 @@ func TestDrainEntity_ClosedTask(t *testing.T) {
 	database := newTestDB(t)
 	entityID, taskID, triggerID, eventID := setupDrainScenario(t, database)
 
-	if _, err := db.EnqueuePendingFiring(database, entityID, taskID, triggerID, eventID); err != nil {
+	if _, err := sqlitestore.New(database).PendingFirings.Enqueue(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultUserID, entityID, taskID, triggerID, eventID); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
@@ -122,10 +122,10 @@ func TestDrainEntity_ClosedTask(t *testing.T) {
 		t.Fatalf("close task: %v", err)
 	}
 
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, nil, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, nil, noopScorer{}, websocket.NewHub())
 	router.DrainEntity(entityID)
 
-	rows, err := db.ListPendingFiringsForEntity(database, entityID)
+	rows, err := sqlitestore.New(database).PendingFirings.ListForEntity(t.Context(), runmode.LocalDefaultOrg, entityID)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestRevertTaskStatus_PreservesClaim(t *testing.T) {
 		t.Fatalf("pre-stage status: %v", err)
 	}
 
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, nil, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, nil, noopScorer{}, websocket.NewHub())
 	router.revertTaskStatus(taskID, "queued")
 
 	task, err := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrg, taskID)
@@ -195,7 +195,7 @@ func TestDrainEntity_SnoozedTask(t *testing.T) {
 	database := newTestDB(t)
 	entityID, taskID, triggerID, eventID := setupDrainScenario(t, database)
 
-	if _, err := db.EnqueuePendingFiring(database, entityID, taskID, triggerID, eventID); err != nil {
+	if _, err := sqlitestore.New(database).PendingFirings.Enqueue(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultUserID, entityID, taskID, triggerID, eventID); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
@@ -211,10 +211,10 @@ func TestDrainEntity_SnoozedTask(t *testing.T) {
 		t.Fatalf("snooze task: %v", err)
 	}
 
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, nil, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, nil, noopScorer{}, websocket.NewHub())
 	router.DrainEntity(entityID)
 
-	rows, err := db.ListPendingFiringsForEntity(database, entityID)
+	rows, err := sqlitestore.New(database).PendingFirings.ListForEntity(t.Context(), runmode.LocalDefaultOrg, entityID)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -237,16 +237,16 @@ func TestDrainEntity_DisabledTrigger(t *testing.T) {
 	database := newTestDB(t)
 	entityID, taskID, triggerID, eventID := setupDrainScenario(t, database)
 
-	if _, err := db.EnqueuePendingFiring(database, entityID, taskID, triggerID, eventID); err != nil {
+	if _, err := sqlitestore.New(database).PendingFirings.Enqueue(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultUserID, entityID, taskID, triggerID, eventID); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
 	setTriggerEnabledForTestRouting(t, database, triggerID, false)
 
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, nil, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, nil, noopScorer{}, websocket.NewHub())
 	router.DrainEntity(entityID)
 
-	rows, err := db.ListPendingFiringsForEntity(database, entityID)
+	rows, err := sqlitestore.New(database).PendingFirings.ListForEntity(t.Context(), runmode.LocalDefaultOrg, entityID)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -294,7 +294,7 @@ func TestDrainEntity_MultipleStaleFirings(t *testing.T) {
 		})
 		triggerIDs = append(triggerIDs, trigID)
 
-		if _, err := db.EnqueuePendingFiring(database, entityID, task.ID, trigID, eventID); err != nil {
+		if _, err := sqlitestore.New(database).PendingFirings.Enqueue(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultUserID, entityID, task.ID, trigID, eventID); err != nil {
 			t.Fatalf("enqueue %d: %v", i, err)
 		}
 	}
@@ -306,10 +306,10 @@ func TestDrainEntity_MultipleStaleFirings(t *testing.T) {
 		}
 	}
 
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, nil, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, nil, noopScorer{}, websocket.NewHub())
 	router.DrainEntity(entityID)
 
-	rows, err := db.ListPendingFiringsForEntity(database, entityID)
+	rows, err := sqlitestore.New(database).PendingFirings.ListForEntity(t.Context(), runmode.LocalDefaultOrg, entityID)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -333,10 +333,10 @@ func TestDrainEntity_EmptyQueue(t *testing.T) {
 	database := newTestDB(t)
 	entityID, _, _, _ := setupDrainScenario(t, database)
 
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, nil, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, nil, noopScorer{}, websocket.NewHub())
 	router.DrainEntity(entityID) // must not panic or error visibly
 
-	rows, err := db.ListPendingFiringsForEntity(database, entityID)
+	rows, err := sqlitestore.New(database).PendingFirings.ListForEntity(t.Context(), runmode.LocalDefaultOrg, entityID)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -362,12 +362,12 @@ func TestDrainEntity_ConcurrentDrainsDoNotDoubleFire(t *testing.T) {
 	database := newTestDB(t)
 	entityID, taskID, triggerID, eventID := setupDrainScenario(t, database)
 
-	if _, err := db.EnqueuePendingFiring(database, entityID, taskID, triggerID, eventID); err != nil {
+	if _, err := sqlitestore.New(database).PendingFirings.Enqueue(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultUserID, entityID, taskID, triggerID, eventID); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
 	stub := &stubDelegator{db: database}
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, stub, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, stub, noopScorer{}, websocket.NewHub())
 
 	const drainers = 5
 	var wg sync.WaitGroup
@@ -386,7 +386,7 @@ func TestDrainEntity_ConcurrentDrainsDoNotDoubleFire(t *testing.T) {
 			drainers, calls)
 	}
 
-	rows, err := db.ListPendingFiringsForEntity(database, entityID)
+	rows, err := sqlitestore.New(database).PendingFirings.ListForEntity(t.Context(), runmode.LocalDefaultOrg, entityID)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -415,12 +415,12 @@ func TestRunDrainSweeper_PicksUpStuckFiring(t *testing.T) {
 	database := newTestDB(t)
 	entityID, taskID, triggerID, eventID := setupDrainScenario(t, database)
 
-	if _, err := db.EnqueuePendingFiring(database, entityID, taskID, triggerID, eventID); err != nil {
+	if _, err := sqlitestore.New(database).PendingFirings.Enqueue(t.Context(), runmode.LocalDefaultOrg, runmode.LocalDefaultUserID, entityID, taskID, triggerID, eventID); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
 	stub := &stubDelegator{db: database}
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, stub, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, stub, noopScorer{}, websocket.NewHub())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -436,7 +436,7 @@ func TestRunDrainSweeper_PicksUpStuckFiring(t *testing.T) {
 	// is genuinely wrong.
 	deadline := time.Now().Add(1 * time.Second)
 	for time.Now().Before(deadline) {
-		rows, err := db.ListPendingFiringsForEntity(database, entityID)
+		rows, err := sqlitestore.New(database).PendingFirings.ListForEntity(t.Context(), runmode.LocalDefaultOrg, entityID)
 		if err == nil && len(rows) == 1 && rows[0].Status == domain.PendingFiringStatusFired {
 			break
 		}
@@ -447,7 +447,7 @@ func TestRunDrainSweeper_PicksUpStuckFiring(t *testing.T) {
 		t.Fatalf("expected sweeper to fire the stuck firing exactly once, got %d calls", calls)
 	}
 
-	rows, err := db.ListPendingFiringsForEntity(database, entityID)
+	rows, err := sqlitestore.New(database).PendingFirings.ListForEntity(t.Context(), runmode.LocalDefaultOrg, entityID)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -468,7 +468,7 @@ func TestRunDrainSweeper_NoOpWhenIdle(t *testing.T) {
 	_ = entityID
 
 	stub := &stubDelegator{db: database}
-	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, stub, noopScorer{}, websocket.NewHub())
+	router := NewRouter(database, testPromptStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings, stub, noopScorer{}, websocket.NewHub())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

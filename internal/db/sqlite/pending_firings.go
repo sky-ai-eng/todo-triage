@@ -1,0 +1,230 @@
+package sqlite
+
+import (
+	"context"
+	"database/sql"
+	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+)
+
+// pendingFiringsStore is the SQLite impl of db.PendingFiringsStore.
+// SQL bodies are moved verbatim from the pre-D2
+// internal/db/pending_firings.go; the only behavioral changes are the
+// orgID assertion at each method entry and the ctx-aware database/sql
+// methods.
+//
+// userID is accepted on Enqueue for signature parity with the Postgres
+// impl but ignored — the local SQLite schema has no creator column on
+// pending_firings.
+type pendingFiringsStore struct{ q queryer }
+
+func newPendingFiringsStore(q queryer) db.PendingFiringsStore {
+	return &pendingFiringsStore{q: q}
+}
+
+var _ db.PendingFiringsStore = (*pendingFiringsStore)(nil)
+
+func (s *pendingFiringsStore) Enqueue(ctx context.Context, orgID, userID, entityID, taskID, triggerID, triggeringEventID string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	_ = userID // ignored in local mode
+	res, err := s.q.ExecContext(ctx, `
+		INSERT INTO pending_firings (entity_id, task_id, trigger_id, triggering_event_id, status, queued_at)
+		VALUES (?, ?, ?, ?, 'pending', ?)
+		ON CONFLICT (task_id, trigger_id) WHERE status = 'pending' DO NOTHING
+	`, entityID, taskID, triggerID, triggeringEventID, time.Now())
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+func (s *pendingFiringsStore) PopForEntity(ctx context.Context, orgID, entityID string) (*domain.PendingFiring, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	row := s.q.QueryRowContext(ctx, `
+		SELECT id, entity_id, task_id, trigger_id, triggering_event_id,
+		       status, COALESCE(skip_reason, ''), queued_at, drained_at, fired_run_id
+		FROM pending_firings
+		WHERE entity_id = ? AND status = 'pending'
+		ORDER BY queued_at ASC, id ASC
+		LIMIT 1
+	`, entityID)
+	return scanSqlitePendingFiring(row)
+}
+
+func (s *pendingFiringsStore) MarkFired(ctx context.Context, orgID string, firingID int64, runID string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	_, err := s.q.ExecContext(ctx, `
+		UPDATE pending_firings
+		SET status = 'fired', drained_at = ?, fired_run_id = ?
+		WHERE id = ? AND status = 'pending'
+	`, time.Now(), runID, firingID)
+	return err
+}
+
+func (s *pendingFiringsStore) MarkSkipped(ctx context.Context, orgID string, firingID int64, reason string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	_, err := s.q.ExecContext(ctx, `
+		UPDATE pending_firings
+		SET status = 'skipped_stale', drained_at = ?, skip_reason = ?
+		WHERE id = ? AND status = 'pending'
+	`, time.Now(), reason, firingID)
+	return err
+}
+
+func (s *pendingFiringsStore) HasActiveAutoRunForEntity(ctx context.Context, orgID, entityID string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	var count int
+	err := s.q.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM runs r
+		JOIN tasks t ON t.id = r.task_id
+		WHERE t.entity_id = ?
+		  AND r.trigger_type = 'event'
+		  AND r.status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable', 'pending_approval', 'taken_over')
+	`, entityID).Scan(&count)
+	return count > 0, err
+}
+
+func (s *pendingFiringsStore) HasPendingForEntity(ctx context.Context, orgID, entityID string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	var count int
+	err := s.q.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM pending_firings
+		WHERE entity_id = ? AND status = 'pending'
+	`, entityID).Scan(&count)
+	return count > 0, err
+}
+
+func (s *pendingFiringsStore) EntityCanFireImmediately(ctx context.Context, orgID, entityID string) (bool, error) {
+	active, err := s.HasActiveAutoRunForEntity(ctx, orgID, entityID)
+	if err != nil {
+		return false, err
+	}
+	if active {
+		return false, nil
+	}
+	pending, err := s.HasPendingForEntity(ctx, orgID, entityID)
+	if err != nil {
+		return false, err
+	}
+	return !pending, nil
+}
+
+func (s *pendingFiringsStore) ListEntitiesWithPending(ctx context.Context, orgID string) ([]string, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT DISTINCT entity_id FROM pending_firings WHERE status = 'pending'
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+func (s *pendingFiringsStore) ListForEntity(ctx context.Context, orgID, entityID string) ([]domain.PendingFiring, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT id, entity_id, task_id, trigger_id, triggering_event_id,
+		       status, COALESCE(skip_reason, ''), queued_at, drained_at, fired_run_id
+		FROM pending_firings
+		WHERE entity_id = ?
+		ORDER BY queued_at ASC, id ASC
+	`, entityID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []domain.PendingFiring{}
+	for rows.Next() {
+		f, err := scanSqlitePendingFiringRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		if f != nil {
+			out = append(out, *f)
+		}
+	}
+	return out, rows.Err()
+}
+
+// scanSqlitePendingFiring scans a sql.Row into *domain.PendingFiring.
+// (nil, nil) on sql.ErrNoRows so callers can treat "no pending" as a
+// non-error empty result.
+func scanSqlitePendingFiring(row *sql.Row) (*domain.PendingFiring, error) {
+	var (
+		f          domain.PendingFiring
+		drainedAt  sql.NullTime
+		firedRunID sql.NullString
+	)
+	err := row.Scan(
+		&f.ID, &f.EntityID, &f.TaskID, &f.TriggerID, &f.TriggeringEventID,
+		&f.Status, &f.SkipReason, &f.QueuedAt, &drainedAt, &firedRunID,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if drainedAt.Valid {
+		t := drainedAt.Time
+		f.DrainedAt = &t
+	}
+	if firedRunID.Valid {
+		s := firedRunID.String
+		f.FiredRunID = &s
+	}
+	return &f, nil
+}
+
+// scanSqlitePendingFiringRow is the sql.Rows variant.
+func scanSqlitePendingFiringRow(rows *sql.Rows) (*domain.PendingFiring, error) {
+	var (
+		f          domain.PendingFiring
+		drainedAt  sql.NullTime
+		firedRunID sql.NullString
+	)
+	err := rows.Scan(
+		&f.ID, &f.EntityID, &f.TaskID, &f.TriggerID, &f.TriggeringEventID,
+		&f.Status, &f.SkipReason, &f.QueuedAt, &drainedAt, &firedRunID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if drainedAt.Valid {
+		t := drainedAt.Time
+		f.DrainedAt = &t
+	}
+	if firedRunID.Valid {
+		s := firedRunID.String
+		f.FiredRunID = &s
+	}
+	return &f, nil
+}

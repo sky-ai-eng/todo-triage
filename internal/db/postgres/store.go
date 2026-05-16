@@ -146,7 +146,14 @@ func New(admin, app *sql.DB) db.Stores {
 		// (org_id = current_org_id() AND user_has_org_access);
 		// org_id defense-in-depth fires in every WHERE clause.
 		Repos: newRepoStore(app),
-		Tx:    s,
+		// PendingFirings wires admin — the router has no per-user
+		// identity (system service) and the drain sweeper runs as a
+		// background goroutine, so impersonating any one user via
+		// the app pool would be wrong. RLS still gates statements
+		// via an EXISTS subquery against tasks; org_id defense-in-
+		// depth fires in every WHERE/INSERT clause regardless.
+		PendingFirings: newPendingFiringsStore(admin),
+		Tx:             s,
 	}
 	return s.stores
 }
@@ -192,10 +199,11 @@ func NewForTx(tx *sql.Tx) db.TxStores {
 		// (event-triggered AgentRunStore.Create) need the
 		// production WithTx wiring instead, which gets the real
 		// admin pool via Store.admin.
-		AgentRuns:  newAgentRunStore(tx, tx),
-		Entities:   newEntityStore(tx),
-		Repos:      newRepoStore(tx),
-		Reviews:    newReviewStore(tx),
-		PendingPRs: newPendingPRStore(tx),
+		AgentRuns:      newAgentRunStore(tx, tx),
+		Entities:       newEntityStore(tx),
+		Repos:          newRepoStore(tx),
+		Reviews:        newReviewStore(tx),
+		PendingPRs:     newPendingPRStore(tx),
+		PendingFirings: newPendingFiringsStore(tx),
 	}
 }

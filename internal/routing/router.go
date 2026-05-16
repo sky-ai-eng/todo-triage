@@ -52,11 +52,12 @@ type Router struct {
 	prompts    dbpkg.PromptStore
 	handlers   dbpkg.EventHandlerStore
 	agents     dbpkg.AgentStore
-	teamAgents dbpkg.TeamAgentStore // SKY-261: read team_agents.enabled before auto-firing triggers
-	users      dbpkg.UsersStore     // SKY-270: read local user's jira_account_id for inline close gates
-	tasks      dbpkg.TaskStore      // SKY-283: task lifecycle, dedup, claims, breaker
-	agentRuns  dbpkg.AgentRunStore  // SKY-285: lookup active runs for the task-close cancel cascade
-	entities   dbpkg.EntityStore    // SKY-284: closed-entity guard + entity-terminating close cascade
+	teamAgents dbpkg.TeamAgentStore      // SKY-261: read team_agents.enabled before auto-firing triggers
+	users      dbpkg.UsersStore          // SKY-270: read local user's jira_account_id for inline close gates
+	tasks      dbpkg.TaskStore           // SKY-283: task lifecycle, dedup, claims, breaker
+	agentRuns  dbpkg.AgentRunStore       // SKY-285: lookup active runs for the task-close cancel cascade
+	entities   dbpkg.EntityStore         // SKY-284: closed-entity guard + entity-terminating close cascade
+	firings    dbpkg.PendingFiringsStore // SKY-289: per-entity firing queue + active-run gate
 	spawner    Delegator
 	scorer     Scorer
 	ws         *websocket.Hub
@@ -83,7 +84,7 @@ type Router struct {
 // behavior). users is nil-safe too — the SKY-270 inline-close gate
 // degrades to "treat every reassignment as away-from-me" when missing,
 // which over-closes (acceptable: user can reopen via the next poll).
-func NewRouter(db *sql.DB, prompts dbpkg.PromptStore, handlers dbpkg.EventHandlerStore, agents dbpkg.AgentStore, teamAgents dbpkg.TeamAgentStore, users dbpkg.UsersStore, tasks dbpkg.TaskStore, agentRuns dbpkg.AgentRunStore, entities dbpkg.EntityStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
+func NewRouter(db *sql.DB, prompts dbpkg.PromptStore, handlers dbpkg.EventHandlerStore, agents dbpkg.AgentStore, teamAgents dbpkg.TeamAgentStore, users dbpkg.UsersStore, tasks dbpkg.TaskStore, agentRuns dbpkg.AgentRunStore, entities dbpkg.EntityStore, firings dbpkg.PendingFiringsStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
 	return &Router{
 		db:         db,
 		prompts:    prompts,
@@ -94,6 +95,7 @@ func NewRouter(db *sql.DB, prompts dbpkg.PromptStore, handlers dbpkg.EventHandle
 		tasks:      tasks,
 		agentRuns:  agentRuns,
 		entities:   entities,
+		firings:    firings,
 		spawner:    spawner,
 		scorer:     scorer,
 		ws:         ws,
@@ -357,13 +359,13 @@ func (r *Router) tryAutoDelegate(task *domain.Task, trigger domain.EventHandler,
 
 	// Per-entity gate. Closed if any auto run is active on the entity OR
 	// any pending_firings rows are already queued (FIFO fairness).
-	canFire, err := dbpkg.EntityCanFireImmediately(r.db, entityID)
+	canFire, err := r.firings.EntityCanFireImmediately(context.Background(), runmode.LocalDefaultOrg, entityID)
 	if err != nil {
 		log.Printf("[router] entity gate query error for %s: %v", entityID, err)
 		return
 	}
 	if !canFire {
-		inserted, err := dbpkg.EnqueuePendingFiring(r.db, entityID, task.ID, trigger.ID, triggeringEventID)
+		inserted, err := r.firings.Enqueue(context.Background(), runmode.LocalDefaultOrg, runmode.LocalDefaultUserID, entityID, task.ID, trigger.ID, triggeringEventID)
 		if err != nil {
 			log.Printf("[router] enqueue firing failed (entity %s task %s trigger %s): %v",
 				entityID, task.ID, trigger.ID, err)
@@ -530,7 +532,7 @@ func (r *Router) DrainEntity(entityID string) {
 	defer mu.Unlock()
 
 	for {
-		firing, err := dbpkg.PopPendingFiringForEntity(r.db, entityID)
+		firing, err := r.firings.PopForEntity(context.Background(), runmode.LocalDefaultOrg, entityID)
 		if err != nil {
 			log.Printf("[router] drain pop error for entity %s: %v", entityID, err)
 			return
@@ -551,7 +553,7 @@ func (r *Router) DrainEntity(entityID string) {
 			return
 		}
 		if runID != "" {
-			if err := dbpkg.MarkPendingFiringFired(r.db, firing.ID, runID); err != nil {
+			if err := r.firings.MarkFired(context.Background(), runmode.LocalDefaultOrg, firing.ID, runID); err != nil {
 				// Durability race: the run was created (side-effect
 				// committed inside the spawner goroutine) but the UPDATE
 				// that records the firing→run association failed. The
@@ -579,7 +581,7 @@ func (r *Router) DrainEntity(entityID string) {
 			return // one fire per drain — the new run gates the rest
 		}
 		// Skipped or fire failed; record reason and continue draining.
-		if err := dbpkg.MarkPendingFiringSkipped(r.db, firing.ID, skipReason); err != nil {
+		if err := r.firings.MarkSkipped(context.Background(), runmode.LocalDefaultOrg, firing.ID, skipReason); err != nil {
 			log.Printf("[router] mark firing %d skipped (%s): %v", firing.ID, skipReason, err)
 			return
 		}
@@ -613,13 +615,13 @@ func (r *Router) RunDrainSweeper(ctx context.Context, interval time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			ids, err := dbpkg.ListEntitiesWithPendingFirings(r.db)
+			ids, err := r.firings.ListEntitiesWithPending(ctx, runmode.LocalDefaultOrg)
 			if err != nil {
 				log.Printf("[router] drain sweeper: list error: %v", err)
 				continue
 			}
 			for _, eid := range ids {
-				active, err := dbpkg.HasActiveAutoRunForEntity(r.db, eid)
+				active, err := r.firings.HasActiveAutoRunForEntity(ctx, runmode.LocalDefaultOrg, eid)
 				if err != nil {
 					log.Printf("[router] drain sweeper: active-check error for %s: %v", eid, err)
 					continue
