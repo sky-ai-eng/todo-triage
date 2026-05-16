@@ -43,7 +43,7 @@ func New(conn *sql.DB) db.Stores {
 		Agents:         newAgentStore(conn, conn),
 		TeamAgents:     newTeamAgentStore(conn),
 		Users:          users,
-		Tasks:          newTaskStore(conn),
+		Tasks:          newTaskStore(conn, conn),
 		Factory:        newFactoryReadStore(conn),
 		AgentRuns:      newAgentRunStore(conn),
 		Entities:       newEntityStore(conn, conn),
@@ -51,7 +51,7 @@ func New(conn *sql.DB) db.Stores {
 		PendingPRs:     newPendingPRStore(conn),
 		Repos:          newRepoStore(conn, conn),
 		PendingFirings: newPendingFiringsStore(conn),
-		Projects:       newProjectStore(conn),
+		Projects:       newProjectStore(conn, conn),
 		Tx:             s,
 	}
 	return s.stores

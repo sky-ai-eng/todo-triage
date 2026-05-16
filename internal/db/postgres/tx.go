@@ -122,7 +122,7 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		Agents:        newTxAgentStore(tx),
 		TeamAgents:    newTxTeamAgentStore(tx),
 		Users:         newUsersStore(tx, tx),
-		Tasks:         newTaskStore(tx),
+		Tasks:         newTaskStore(tx, s.admin),
 		Factory:       newFactoryReadStore(tx),
 		// AgentRuns: composed half is tx; admin half stays the
 		// real admin pool so event-triggered Create can route
@@ -135,6 +135,10 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		PendingPRs:     newPendingPRStore(tx),
 		Repos:          newRepoStore(tx, tx),
 		PendingFirings: newPendingFiringsStore(tx),
-		Projects:       newProjectStore(tx),
+		// Projects: ListSystem routes around RLS the same way
+		// AgentRuns' event-triggered Create does. Keeping the admin
+		// half pinned to s.admin lets the classifier read each org's
+		// project set even when composed inside a claims-set tx.
+		Projects: newProjectStore(tx, s.admin),
 	}
 }

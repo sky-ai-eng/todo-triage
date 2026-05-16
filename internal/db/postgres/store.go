@@ -97,11 +97,13 @@ func New(admin, app *sql.DB) db.Stores {
 		// GetGitHubUsernameSystem read at startup. Row creation is an
 		// auth-flow concern owned by SKY-251.
 		Users: newUsersStore(app, admin),
-		// Tasks runs on app — every consumer (server tasks handler,
-		// router, delegate) is request-equivalent. The AI scorer uses
-		// the admin-pooled ScoreStore for its system-service reads, so
-		// TaskStore doesn't need an admin variant.
-		Tasks: newTaskStore(app),
+		// Tasks wires both pools (SKY-297): app for request-equivalent
+		// consumers (server tasks handler, router, delegate) and admin
+		// for the tracker's stale-review reconciliation read via
+		// FindActiveByEntityAndTypeSystem. The AI scorer still uses
+		// the admin-pooled ScoreStore for its system-service reads
+		// rather than going through TaskStore.
+		Tasks: newTaskStore(app, admin),
 		// Factory wires admin — the snapshot is a system-level view
 		// (no per-user identity, must see every in-flight run
 		// regardless of creator) and the LifetimeDistinctCounter
@@ -157,11 +159,12 @@ func New(admin, app *sql.DB) db.Stores {
 		// via an EXISTS subquery against tasks; org_id defense-in-
 		// depth fires in every WHERE/INSERT clause regardless.
 		PendingFirings: newPendingFiringsStore(admin),
-		// Projects wires app — every consumer is request-equivalent
-		// or runs in a startup goroutine that operates within the
-		// org's identity scope. projects_* RLS policies gate
-		// statements by visibility + team membership.
-		Projects: newProjectStore(app),
+		// Projects wires both pools (SKY-297): app for request-equivalent
+		// consumers and admin for ListSystem, the project classifier's
+		// cross-org read. projects_* RLS policies gate the app side
+		// by visibility + team membership; admin bypasses RLS, and
+		// org_id stays in every WHERE clause as defense in depth.
+		Projects: newProjectStore(app, admin),
 		Tx:       s,
 	}
 	return s.stores
@@ -201,7 +204,7 @@ func NewForTx(tx *sql.Tx) db.TxStores {
 		Agents:        newTxAgentStore(tx),
 		TeamAgents:    newTxTeamAgentStore(tx),
 		Users:         newUsersStore(tx, tx),
-		Tasks:         newTaskStore(tx),
+		Tasks:         newTaskStore(tx, tx),
 		Factory:       newFactoryReadStore(tx),
 		// NewForTx is a test door — both pools collapse to the
 		// supplied tx. Tests that exercise the admin-only branch
@@ -215,6 +218,6 @@ func NewForTx(tx *sql.Tx) db.TxStores {
 		Reviews:        newReviewStore(tx),
 		PendingPRs:     newPendingPRStore(tx),
 		PendingFirings: newPendingFiringsStore(tx),
-		Projects:       newProjectStore(tx),
+		Projects:       newProjectStore(tx, tx),
 	}
 }

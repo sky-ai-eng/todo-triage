@@ -62,7 +62,7 @@ func (s *Store) runTx(ctx context.Context, orgID, userID string, fn func(db.TxSt
 		Agents:         newAgentStore(tx, tx),
 		TeamAgents:     newTeamAgentStore(tx),
 		Users:          users,
-		Tasks:          newTaskStore(tx),
+		Tasks:          newTaskStore(tx, tx),
 		Factory:        newFactoryReadStore(tx),
 		AgentRuns:      newAgentRunStore(tx),
 		Entities:       newEntityStore(tx, tx),
@@ -70,7 +70,7 @@ func (s *Store) runTx(ctx context.Context, orgID, userID string, fn func(db.TxSt
 		PendingPRs:     newPendingPRStore(tx),
 		Repos:          newRepoStore(tx, tx),
 		PendingFirings: newPendingFiringsStore(tx),
-		Projects:       newProjectStore(tx),
+		Projects:       newProjectStore(tx, tx),
 	}
 	if err := fn(txStores); err != nil {
 		return err

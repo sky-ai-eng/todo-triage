@@ -13,19 +13,33 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// projectStore is the Postgres impl of db.ProjectStore. Wired against
-// the app pool in postgres.New: every consumer is request-equivalent
-// (projects handler, curator, backfill, project_entities) or runs in
-// a startup goroutine that already operates within the org's identity
-// scope. RLS policies projects_{select,insert,update,delete} gate
-// every statement; org_id defense-in-depth fires alongside.
+// projectStore is the Postgres impl of db.ProjectStore. Holds two
+// pools (SKY-297):
+//
+//   - q: app pool (tf_app, RLS-active). Every request-equivalent
+//     consumer (projects handler, curator, backfill, project_entities)
+//     hits this side. RLS policies projects_{select,insert,update,delete}
+//     gate every statement; org_id defense-in-depth fires alongside.
+//
+//   - admin: admin pool (supabase_admin, BYPASSRLS). The project
+//     classifier (internal/projectclassify) reads every org's project
+//     set during its fan-out and has no JWT-claims context. ListSystem
+//     routes through admin so the classifier can pair each org's
+//     unclassified entities against that org's projects without
+//     impersonating any one user. Same pattern EntityStore /
+//     RepoStore / AgentRunStore use.
 //
 // pinned_repos is jsonb in Postgres vs text-JSON in SQLite. The
 // jsonb cast happens at the placeholder level ($N::jsonb) — callers
 // always pass a marshalled string, and the impl coerces.
-type projectStore struct{ q queryer }
+type projectStore struct {
+	q     queryer
+	admin queryer
+}
 
-func newProjectStore(q queryer) db.ProjectStore { return &projectStore{q: q} }
+func newProjectStore(q, admin queryer) db.ProjectStore {
+	return &projectStore{q: q, admin: admin}
+}
 
 var _ db.ProjectStore = (*projectStore)(nil)
 
@@ -101,7 +115,15 @@ func (s *projectStore) Get(ctx context.Context, orgID, id string) (*domain.Proje
 }
 
 func (s *projectStore) List(ctx context.Context, orgID string) ([]domain.Project, error) {
-	rows, err := s.q.QueryContext(ctx, `
+	return listProjects(ctx, s.q, orgID)
+}
+
+func (s *projectStore) ListSystem(ctx context.Context, orgID string) ([]domain.Project, error) {
+	return listProjects(ctx, s.admin, orgID)
+}
+
+func listProjects(ctx context.Context, q queryer, orgID string) ([]domain.Project, error) {
+	rows, err := q.QueryContext(ctx, `
 		SELECT id, name, description, curator_session_id, pinned_repos,
 		       jira_project_key, linear_project_key, spec_authorship_prompt_id,
 		       created_at, updated_at
