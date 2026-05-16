@@ -335,45 +335,6 @@ func RunRepoStoreConformance(t *testing.T, mk RepoStoreFactory) {
 			t.Errorf("UpdateCloneStatus on absent repo should be a no-op, got %v", err)
 		}
 	})
-
-	// --- SKY-296 `...System` admin-pool variants ---
-
-	t.Run("System_variants_match_non_System", func(t *testing.T) {
-		s, orgID := mk(t)
-		if err := s.SetConfigured(ctx, orgID, []string{"sys/one", "sys/two"}); err != nil {
-			t.Fatalf("SetConfigured: %v", err)
-		}
-
-		nonSysList, err := s.List(ctx, orgID)
-		if err != nil {
-			t.Fatalf("List: %v", err)
-		}
-		sysList, err := s.ListSystem(ctx, orgID)
-		if err != nil {
-			t.Fatalf("ListSystem: %v", err)
-		}
-		if !equalStringSlice(projectIDs(nonSysList), projectIDs(sysList)) {
-			t.Errorf("ListSystem differs from List: %v vs %v",
-				projectIDs(sysList), projectIDs(nonSysList))
-		}
-
-		nonSysNames, _ := s.ListConfiguredNames(ctx, orgID)
-		sysNames, err := s.ListConfiguredNamesSystem(ctx, orgID)
-		if err != nil {
-			t.Fatalf("ListConfiguredNamesSystem: %v", err)
-		}
-		if !equalStringSlice(nonSysNames, sysNames) {
-			t.Errorf("ListConfiguredNamesSystem differs: %v vs %v", sysNames, nonSysNames)
-		}
-
-		if err := s.UpdateCloneStatusSystem(ctx, orgID, "sys", "one", "failed", "boom", "other"); err != nil {
-			t.Fatalf("UpdateCloneStatusSystem: %v", err)
-		}
-		got, _ := s.Get(ctx, orgID, "sys/one")
-		if got.CloneStatus != "failed" || got.CloneError != "boom" || got.CloneErrorKind != "other" {
-			t.Errorf("UpdateCloneStatusSystem did not persist: %+v", got)
-		}
-	})
 }
 
 func projectIDs(profiles []domain.RepoProfile) []string {

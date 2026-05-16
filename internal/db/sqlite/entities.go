@@ -394,6 +394,13 @@ func (s *entityStore) MarkClosedSystem(ctx context.Context, orgID, id string) er
 	return s.MarkClosed(ctx, orgID, id)
 }
 
+// CloseSystem mirrors Close (active→closed transition). The router's
+// entity-lifecycle path consumes this through the admin pool in
+// Postgres; SQLite collapses to the non-System variant.
+func (s *entityStore) CloseSystem(ctx context.Context, orgID, id string) error {
+	return s.Close(ctx, orgID, id)
+}
+
 func (s *entityStore) ReactivateSystem(ctx context.Context, orgID, id string) (bool, error) {
 	return s.Reactivate(ctx, orgID, id)
 }

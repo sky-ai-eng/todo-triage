@@ -23,6 +23,10 @@ var _ db.TeamAgentStore = (*teamAgentStore)(nil)
 const sqliteTeamAgentColumns = `team_id, agent_id, enabled, per_team_model,
        per_team_autonomy_suitability, added_at`
 
+func (s *teamAgentStore) GetForTeamSystem(ctx context.Context, orgID, teamID, agentID string) (*domain.TeamAgent, error) {
+	return s.GetForTeam(ctx, orgID, teamID, agentID)
+}
+
 func (s *teamAgentStore) GetForTeam(ctx context.Context, orgID, teamID, agentID string) (*domain.TeamAgent, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err

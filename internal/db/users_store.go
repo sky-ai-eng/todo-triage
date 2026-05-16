@@ -64,4 +64,10 @@ type UsersStore interface {
 	// matches GetGitHubUsername; SQLite collapses the two variants
 	// to one connection.
 	GetGitHubUsernameSystem(ctx context.Context, userID string) (string, error)
+
+	// GetJiraIdentitySystem mirrors GetJiraIdentity but routes through
+	// the admin pool in Postgres. The router's inline close-check on
+	// Jira reassignment consumes this from its eventbus subscriber
+	// goroutine, which has no JWT-claims context.
+	GetJiraIdentitySystem(ctx context.Context, userID string) (accountID, displayName string, err error)
 }

@@ -152,10 +152,18 @@ func (s *eventHandlerStore) List(ctx context.Context, orgID string, kind string)
 }
 
 func (s *eventHandlerStore) Get(ctx context.Context, orgID, id string) (*domain.EventHandler, error) {
+	return getEventHandler(ctx, s.app, orgID, id)
+}
+
+func (s *eventHandlerStore) GetSystem(ctx context.Context, orgID, id string) (*domain.EventHandler, error) {
+	return getEventHandler(ctx, s.admin, orgID, id)
+}
+
+func getEventHandler(ctx context.Context, q queryer, orgID, id string) (*domain.EventHandler, error) {
 	if !isValidUUID(id) {
 		return nil, nil
 	}
-	row := s.app.QueryRowContext(ctx, `
+	row := q.QueryRowContext(ctx, `
 		SELECT `+pgEventHandlerColumns+`
 		FROM event_handlers
 		WHERE org_id = $1 AND id = $2
@@ -171,12 +179,20 @@ func (s *eventHandlerStore) Get(ctx context.Context, orgID, id string) (*domain.
 }
 
 func (s *eventHandlerStore) GetEnabledForEvent(ctx context.Context, orgID, eventType string) ([]domain.EventHandler, error) {
+	return getEnabledEventHandlers(ctx, s.app, orgID, eventType)
+}
+
+func (s *eventHandlerStore) GetEnabledForEventSystem(ctx context.Context, orgID, eventType string) ([]domain.EventHandler, error) {
+	return getEnabledEventHandlers(ctx, s.admin, orgID, eventType)
+}
+
+func getEnabledEventHandlers(ctx context.Context, q queryer, orgID, eventType string) ([]domain.EventHandler, error) {
 	// kind ordering: 'rule' < 'trigger' alphabetically, so a plain
 	// ORDER BY kind ASC keeps the rules-before-triggers invariant
 	// that the router relies on (same observable behavior as the
 	// pre-unification two-phase loop). sort_order then breaks ties
 	// among rules; created_at DESC orders triggers.
-	rows, err := s.app.QueryContext(ctx, `
+	rows, err := q.QueryContext(ctx, `
 		SELECT `+pgEventHandlerColumns+`
 		FROM event_handlers
 		WHERE org_id = $1 AND event_type = $2 AND enabled = TRUE

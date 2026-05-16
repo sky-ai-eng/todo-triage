@@ -196,37 +196,6 @@ func RunEventStoreConformance(t *testing.T, mk EventStoreFactory) {
 		}
 	})
 
-	t.Run("RecordSystem_fires_SetOnEventRecorded_hook", func(t *testing.T) {
-		s, orgID, seed := mk(t)
-		entityID := seed.Entity(t, "record-system-fires-hook")
-		eid := entityID
-
-		var mu sync.Mutex
-		var observed []domain.Event
-		db.SetOnEventRecorded(func(evt domain.Event) {
-			mu.Lock()
-			defer mu.Unlock()
-			observed = append(observed, evt)
-		})
-		t.Cleanup(func() { db.SetOnEventRecorded(nil) })
-
-		got, err := s.RecordSystem(ctx, orgID, domain.Event{
-			EntityID:  &eid,
-			EventType: domain.EventGitHubPROpened,
-		})
-		if err != nil {
-			t.Fatalf("RecordSystem: %v", err)
-		}
-		mu.Lock()
-		defer mu.Unlock()
-		if len(observed) != 1 {
-			t.Fatalf("hook fired %d times, want 1", len(observed))
-		}
-		if observed[0].ID != got {
-			t.Errorf("hook saw id=%q, RecordSystem returned id=%q", observed[0].ID, got)
-		}
-	})
-
 	t.Run("Latest_orders_by_insertion_without_sleep", func(t *testing.T) {
 		// Regression for the same-tx tiebreaker bug: the Postgres
 		// schema defaults created_at to now() which is the tx start

@@ -179,6 +179,7 @@ type EntityStore interface {
 	UpdateDescriptionSystem(ctx context.Context, orgID, id, description string) error
 	AssignProjectSystem(ctx context.Context, orgID, id string, projectID *string, rationale string) error
 	MarkClosedSystem(ctx context.Context, orgID, id string) error
+	CloseSystem(ctx context.Context, orgID, id string) error
 	ReactivateSystem(ctx context.Context, orgID, id string) (bool, error)
 
 	// DescriptionsSystem mirrors Descriptions for the AI scorer —

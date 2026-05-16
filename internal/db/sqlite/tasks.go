@@ -132,6 +132,54 @@ func (s *taskStore) FindActiveByEntityAndTypeSystem(ctx context.Context, orgID, 
 	return s.FindActiveByEntityAndType(ctx, orgID, entityID, eventType)
 }
 
+// --- Admin-pool variants ---
+//
+// All `...System` methods below delegate straight through to their
+// non-System counterparts. SQLite has one connection so the pool
+// distinction doesn't exist; the wrappers are kept for signature
+// parity with Postgres. The router consumes these from its eventbus
+// subscriber goroutine.
+
+func (s *taskStore) GetSystem(ctx context.Context, orgID, taskID string) (*domain.Task, error) {
+	return s.Get(ctx, orgID, taskID)
+}
+
+func (s *taskStore) FindActiveByEntitySystem(ctx context.Context, orgID, entityID string) ([]domain.Task, error) {
+	return s.FindActiveByEntity(ctx, orgID, entityID)
+}
+
+func (s *taskStore) FindOrCreateAtSystem(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error) {
+	return s.FindOrCreateAt(ctx, orgID, teamID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt)
+}
+
+func (s *taskStore) BumpSystem(ctx context.Context, orgID, taskID, eventID string) error {
+	return s.Bump(ctx, orgID, taskID, eventID)
+}
+
+func (s *taskStore) CloseSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType string) error {
+	return s.Close(ctx, orgID, taskID, closeReason, closeEventType)
+}
+
+func (s *taskStore) CloseAllForEntitySystem(ctx context.Context, orgID, entityID, closeReason string) (int, error) {
+	return s.CloseAllForEntity(ctx, orgID, entityID, closeReason)
+}
+
+func (s *taskStore) SetStatusSystem(ctx context.Context, orgID, taskID, status string) error {
+	return s.SetStatus(ctx, orgID, taskID, status)
+}
+
+func (s *taskStore) RecordEventSystem(ctx context.Context, orgID, taskID, eventID, kind string) error {
+	return s.RecordEvent(ctx, orgID, taskID, eventID, kind)
+}
+
+func (s *taskStore) CountConsecutiveFailedRunsSystem(ctx context.Context, orgID, entityID, promptID string) (int, error) {
+	return s.CountConsecutiveFailedRuns(ctx, orgID, entityID, promptID)
+}
+
+func (s *taskStore) StampAgentClaimIfUnclaimedSystem(ctx context.Context, orgID, taskID, agentID string) (bool, error) {
+	return s.StampAgentClaimIfUnclaimed(ctx, orgID, taskID, agentID)
+}
+
 func (s *taskStore) FindActiveByEntity(ctx context.Context, orgID, entityID string) ([]domain.Task, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err

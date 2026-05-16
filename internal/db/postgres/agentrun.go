@@ -419,8 +419,16 @@ func (s *agentRunStore) HasActiveForTask(ctx context.Context, orgID, taskID stri
 // task that belongs to the entity. Manual delegations are excluded.
 // Used by the router's per-entity firing gate (SKY-189).
 func (s *agentRunStore) HasActiveAutoRunForEntity(ctx context.Context, orgID, entityID string) (bool, error) {
+	return hasActiveAutoRunForEntity(ctx, s.q, orgID, entityID)
+}
+
+func (s *agentRunStore) HasActiveAutoRunForEntitySystem(ctx context.Context, orgID, entityID string) (bool, error) {
+	return hasActiveAutoRunForEntity(ctx, s.admin, orgID, entityID)
+}
+
+func hasActiveAutoRunForEntity(ctx context.Context, q queryer, orgID, entityID string) (bool, error) {
 	var count int
-	err := s.q.QueryRowContext(ctx, `
+	err := q.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM runs r
 		JOIN tasks t ON t.id = r.task_id AND t.org_id = r.org_id
 		WHERE r.org_id = $1
@@ -433,7 +441,15 @@ func (s *agentRunStore) HasActiveAutoRunForEntity(ctx context.Context, orgID, en
 }
 
 func (s *agentRunStore) ActiveIDsForTask(ctx context.Context, orgID, taskID string) ([]string, error) {
-	rows, err := s.q.QueryContext(ctx, `
+	return activeRunIDsForTask(ctx, s.q, orgID, taskID)
+}
+
+func (s *agentRunStore) ActiveIDsForTaskSystem(ctx context.Context, orgID, taskID string) ([]string, error) {
+	return activeRunIDsForTask(ctx, s.admin, orgID, taskID)
+}
+
+func activeRunIDsForTask(ctx context.Context, q queryer, orgID, taskID string) ([]string, error) {
+	rows, err := q.QueryContext(ctx, `
 		SELECT id FROM runs
 		WHERE org_id = $1 AND task_id = $2
 		  AND status NOT IN ('completed', 'failed', 'cancelled', 'task_unsolvable',

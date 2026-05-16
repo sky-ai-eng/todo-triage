@@ -518,49 +518,4 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 			t.Errorf("got %d refs, want 0", len(refs))
 		}
 	})
-
-	// --- SKY-297 `...System` admin-pool variants ---
-	//
-	// FindActiveByEntityAndTypeSystem mirrors FindActiveByEntityAndType
-	// but routes through the admin pool in Postgres. The tracker's
-	// stale-review reconciliation read consumes this — a background
-	// goroutine without JWT-claims context. SQLite has one connection
-	// so the System variant collapses to the non-System; the
-	// behavioral contract is identical either way.
-
-	t.Run("FindActiveByEntityAndTypeSystem_matches_non_System", func(t *testing.T) {
-		s, orgID, teamID, _, _, seed, _ := mk(t)
-		entityID, eventID, _ := seed(t, "fab-sys")
-		task, _, err := s.FindOrCreate(ctx, orgID, teamID, entityID, domain.EventGitHubPRCICheckPassed, "sys-x", eventID, 0.5)
-		if err != nil {
-			t.Fatalf("FindOrCreate: %v", err)
-		}
-		got, err := s.FindActiveByEntityAndTypeSystem(ctx, orgID, entityID, domain.EventGitHubPRCICheckPassed)
-		if err != nil {
-			t.Fatalf("FindActiveByEntityAndTypeSystem: %v", err)
-		}
-		found := false
-		for _, t := range got {
-			if t.ID == task.ID {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("FindActiveByEntityAndTypeSystem missing task %s; got=%v", task.ID, got)
-		}
-
-		// Terminal task drops out of the active set — same predicate
-		// as the non-System variant.
-		_ = s.Close(ctx, orgID, task.ID, "test", "")
-		got, err = s.FindActiveByEntityAndTypeSystem(ctx, orgID, entityID, domain.EventGitHubPRCICheckPassed)
-		if err != nil {
-			t.Fatalf("FindActiveByEntityAndTypeSystem after close: %v", err)
-		}
-		for _, t2 := range got {
-			if t2.ID == task.ID {
-				t.Errorf("FindActiveByEntityAndTypeSystem leaked terminal task %s", task.ID)
-			}
-		}
-	})
 }

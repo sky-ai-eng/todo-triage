@@ -85,6 +85,10 @@ func (s *usersStore) GetJiraIdentity(ctx context.Context, userID string) (string
 	return accountID.String, displayName.String, nil
 }
 
+func (s *usersStore) GetJiraIdentitySystem(ctx context.Context, userID string) (string, string, error) {
+	return s.GetJiraIdentity(ctx, userID)
+}
+
 func (s *usersStore) GetGitHubUsernameSystem(ctx context.Context, userID string) (string, error) {
 	return s.GetGitHubUsername(ctx, userID)
 }

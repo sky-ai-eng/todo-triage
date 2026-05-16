@@ -71,6 +71,12 @@ type TeamAgentStore interface {
 	// Used by the admin UI's per-team config table and by future
 	// router optimization that wants the full set in memory.
 	ListForOrg(ctx context.Context, orgID, agentID string) ([]domain.TeamAgent, error)
+
+	// GetForTeamSystem mirrors GetForTeam but routes through the admin
+	// pool in Postgres. The router reads this on every auto-trigger
+	// fire from its eventbus subscriber goroutine, which has no JWT
+	// claims set.
+	GetForTeamSystem(ctx context.Context, orgID, teamID, agentID string) (*domain.TeamAgent, error)
 }
 
 // LocalDefaultTeamID is the synthetic team id used in local mode.

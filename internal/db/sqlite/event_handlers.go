@@ -539,3 +539,18 @@ func substituteEmptyAllowlists(predJSON, identity string, keys ...string) string
 	}
 	return string(out)
 }
+
+// --- Admin-pool variants ---
+//
+// SQLite has one connection; the router's eventbus subscriber goroutine
+// reaches these via the same path as the app variants. Wrappers exist
+// for signature parity with the Postgres impl, which routes admin calls
+// through BYPASSRLS.
+
+func (s *eventHandlerStore) GetSystem(ctx context.Context, orgID, id string) (*domain.EventHandler, error) {
+	return s.Get(ctx, orgID, id)
+}
+
+func (s *eventHandlerStore) GetEnabledForEventSystem(ctx context.Context, orgID, eventType string) ([]domain.EventHandler, error) {
+	return s.GetEnabledForEvent(ctx, orgID, eventType)
+}

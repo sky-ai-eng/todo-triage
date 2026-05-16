@@ -105,4 +105,10 @@ type PromptStore interface {
 	// lands (wave 3b) this stays put — the read still keys on
 	// prompt_id and PromptStore is the right ownership root.
 	Stats(ctx context.Context, orgID string, id string) (*domain.PromptStats, error)
+
+	// GetSystem mirrors Get but routes through the admin pool in
+	// Postgres. The router's breaker-tripped toast looks up the
+	// prompt name from its eventbus subscriber goroutine, which has
+	// no JWT-claims context.
+	GetSystem(ctx context.Context, orgID string, id string) (*domain.Prompt, error)
 }

@@ -18,18 +18,18 @@ import (
 // against D3's schema: org_id in every WHERE clause as defense in depth
 // alongside RLS, $N placeholders, JSONB extraction for snapshot_json.
 //
-// Holds two pools (SKY-297):
+// Holds two pools:
 //
 //   - q: app pool (tf_app, RLS-active). Every request-equivalent
-//     consumer (server tasks handler, router, delegate) runs here.
+//     consumer (server tasks handler, swipe handlers) runs here.
 //     The scorer reads tasks via the admin-pooled ScoreStore — not
 //     this store.
 //
-//   - admin: admin pool (supabase_admin, BYPASSRLS). The tracker's
-//     stale-review reconciliation read (`FindActiveByEntityAndTypeSystem`)
-//     routes through admin because the tracker is a background
-//     goroutine with no JWT-claims context. org_id stays in the
-//     WHERE clause as defense in depth.
+//   - admin: admin pool (supabase_admin, BYPASSRLS). Background
+//     goroutines (router eventbus subscriber, tracker stale-review
+//     reconciliation) route through admin because they have no
+//     JWT-claims context. org_id stays in the WHERE clause as
+//     defense in depth.
 //
 // Slice binds pass `[]string` directly into ANY($N) — pgx's
 // database/sql adapter handles slice-to-array conversion natively,
@@ -48,8 +48,16 @@ var _ db.TaskStore = (*taskStore)(nil)
 // --- Lookup ---
 
 func (s *taskStore) Get(ctx context.Context, orgID, taskID string) (*domain.Task, error) {
+	return getTask(ctx, s.q, orgID, taskID)
+}
+
+func (s *taskStore) GetSystem(ctx context.Context, orgID, taskID string) (*domain.Task, error) {
+	return getTask(ctx, s.admin, orgID, taskID)
+}
+
+func getTask(ctx context.Context, q queryer, orgID, taskID string) (*domain.Task, error) {
 	var t domain.Task
-	err := scanTaskFromRow(s.q.QueryRowContext(ctx, `
+	err := scanTaskFromRow(q.QueryRowContext(ctx, `
 		SELECT `+pgTaskColumnsWithEntity+`
 		FROM tasks t
 		JOIN entities e ON t.entity_id = e.id AND e.org_id = t.org_id
@@ -138,7 +146,15 @@ func findActiveTasksByEntityAndType(ctx context.Context, q queryer, orgID, entit
 }
 
 func (s *taskStore) FindActiveByEntity(ctx context.Context, orgID, entityID string) ([]domain.Task, error) {
-	return queryTasksCtx(ctx, s.q, `
+	return findActiveTasksByEntity(ctx, s.q, orgID, entityID)
+}
+
+func (s *taskStore) FindActiveByEntitySystem(ctx context.Context, orgID, entityID string) ([]domain.Task, error) {
+	return findActiveTasksByEntity(ctx, s.admin, orgID, entityID)
+}
+
+func findActiveTasksByEntity(ctx context.Context, q queryer, orgID, entityID string) ([]domain.Task, error) {
+	return queryTasksCtx(ctx, q, `
 		SELECT `+pgTaskColumnsWithEntity+`
 		FROM tasks t
 		JOIN entities e ON t.entity_id = e.id AND e.org_id = t.org_id
@@ -208,6 +224,14 @@ func (s *taskStore) FindOrCreate(ctx context.Context, orgID, teamID, entityID, e
 }
 
 func (s *taskStore) FindOrCreateAt(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error) {
+	return findOrCreateTaskAt(ctx, s.q, orgID, teamID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt)
+}
+
+func (s *taskStore) FindOrCreateAtSystem(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error) {
+	return findOrCreateTaskAt(ctx, s.admin, orgID, teamID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt)
+}
+
+func findOrCreateTaskAt(ctx context.Context, q queryer, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error) {
 	// SKY-295: team_id is caller-supplied. User-source handlers carry a
 	// real team UUID. Org-visible handlers (visibility='org', team_id NULL)
 	// collapse to runmode.LocalDefaultTeamID in handlerTeamID(); resolve
@@ -217,7 +241,7 @@ func (s *taskStore) FindOrCreateAt(ctx context.Context, orgID, teamID, entityID,
 	teamBind := teamID
 	if teamBind == runmode.LocalDefaultTeamID {
 		var canonical string
-		if err := s.q.QueryRowContext(ctx,
+		if err := q.QueryRowContext(ctx,
 			`SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1`,
 			orgID,
 		).Scan(&canonical); err != nil {
@@ -236,7 +260,7 @@ func (s *taskStore) FindOrCreateAt(ctx context.Context, orgID, teamID, entityID,
 	// INSERT — SKY-295 made it per-team so the same event matching
 	// N teams' rules fans out to N tasks.
 	var existing domain.Task
-	err := scanTaskFromRow(s.q.QueryRowContext(ctx, `
+	err := scanTaskFromRow(q.QueryRowContext(ctx, `
 		SELECT `+pgTaskColumnsWithEntity+`
 		FROM tasks t
 		JOIN entities e ON t.entity_id = e.id AND e.org_id = t.org_id
@@ -255,7 +279,7 @@ func (s *taskStore) FindOrCreateAt(ctx context.Context, orgID, teamID, entityID,
 	// ON CONFLICT keys off the partial unique index — on a lost race
 	// the INSERT no-ops and we re-read.
 	taskID := uuid.New().String()
-	res, err := s.q.ExecContext(ctx, `
+	res, err := q.ExecContext(ctx, `
 		INSERT INTO tasks (id, org_id, entity_id, event_type, dedup_key, primary_event_id,
 		                   status, priority_score, scoring_status, created_at,
 		                   team_id, visibility,
@@ -275,7 +299,7 @@ func (s *taskStore) FindOrCreateAt(ctx context.Context, orgID, teamID, entityID,
 		// Lost the race — another goroutine inserted between our
 		// SELECT and INSERT. Re-read to return the winner's row.
 		var raced domain.Task
-		err2 := scanTaskFromRow(s.q.QueryRowContext(ctx, `
+		err2 := scanTaskFromRow(q.QueryRowContext(ctx, `
 			SELECT `+pgTaskColumnsWithEntity+`
 			FROM tasks t
 			JOIN entities e ON t.entity_id = e.id AND e.org_id = t.org_id
@@ -290,7 +314,7 @@ func (s *taskStore) FindOrCreateAt(ctx context.Context, orgID, teamID, entityID,
 		return &raced, false, nil
 	}
 
-	task, err := s.Get(ctx, orgID, taskID)
+	task, err := getTask(ctx, q, orgID, taskID)
 	if err != nil {
 		return nil, false, err
 	}
@@ -298,7 +322,15 @@ func (s *taskStore) FindOrCreateAt(ctx context.Context, orgID, teamID, entityID,
 }
 
 func (s *taskStore) Bump(ctx context.Context, orgID, taskID, eventID string) error {
-	_, err := s.q.ExecContext(ctx, `
+	return bumpTask(ctx, s.q, orgID, taskID)
+}
+
+func (s *taskStore) BumpSystem(ctx context.Context, orgID, taskID, eventID string) error {
+	return bumpTask(ctx, s.admin, orgID, taskID)
+}
+
+func bumpTask(ctx context.Context, q queryer, orgID, taskID string) error {
+	_, err := q.ExecContext(ctx, `
 		UPDATE tasks
 		SET status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END,
 		    snooze_until = CASE WHEN status = 'snoozed' THEN NULL ELSE snooze_until END
@@ -308,11 +340,19 @@ func (s *taskStore) Bump(ctx context.Context, orgID, taskID, eventID string) err
 }
 
 func (s *taskStore) Close(ctx context.Context, orgID, taskID, closeReason, closeEventType string) error {
+	return closeTask(ctx, s.q, orgID, taskID, closeReason, closeEventType)
+}
+
+func (s *taskStore) CloseSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType string) error {
+	return closeTask(ctx, s.admin, orgID, taskID, closeReason, closeEventType)
+}
+
+func closeTask(ctx context.Context, q queryer, orgID, taskID, closeReason, closeEventType string) error {
 	var cet any
 	if closeEventType != "" {
 		cet = closeEventType
 	}
-	_, err := s.q.ExecContext(ctx, `
+	_, err := q.ExecContext(ctx, `
 		UPDATE tasks SET status = 'done', close_reason = $1, close_event_type = $2,
 		                 closed_at = NOW()
 		WHERE org_id = $3 AND id = $4 AND status NOT IN ('done', 'dismissed')
@@ -321,7 +361,15 @@ func (s *taskStore) Close(ctx context.Context, orgID, taskID, closeReason, close
 }
 
 func (s *taskStore) CloseAllForEntity(ctx context.Context, orgID, entityID, closeReason string) (int, error) {
-	res, err := s.q.ExecContext(ctx, `
+	return closeAllTasksForEntity(ctx, s.q, orgID, entityID, closeReason)
+}
+
+func (s *taskStore) CloseAllForEntitySystem(ctx context.Context, orgID, entityID, closeReason string) (int, error) {
+	return closeAllTasksForEntity(ctx, s.admin, orgID, entityID, closeReason)
+}
+
+func closeAllTasksForEntity(ctx context.Context, q queryer, orgID, entityID, closeReason string) (int, error) {
+	res, err := q.ExecContext(ctx, `
 		UPDATE tasks SET status = 'done', close_reason = $1, closed_at = NOW()
 		WHERE org_id = $2 AND entity_id = $3 AND status NOT IN ('done', 'dismissed')
 	`, closeReason, orgID, entityID)
@@ -333,16 +381,32 @@ func (s *taskStore) CloseAllForEntity(ctx context.Context, orgID, entityID, clos
 }
 
 func (s *taskStore) SetStatus(ctx context.Context, orgID, taskID, status string) error {
-	_, err := s.q.ExecContext(ctx, `
+	return setTaskStatus(ctx, s.q, orgID, taskID, status)
+}
+
+func (s *taskStore) SetStatusSystem(ctx context.Context, orgID, taskID, status string) error {
+	return setTaskStatus(ctx, s.admin, orgID, taskID, status)
+}
+
+func setTaskStatus(ctx context.Context, q queryer, orgID, taskID, status string) error {
+	_, err := q.ExecContext(ctx, `
 		UPDATE tasks SET status = $1 WHERE org_id = $2 AND id = $3
 	`, status, orgID, taskID)
 	return err
 }
 
 func (s *taskStore) RecordEvent(ctx context.Context, orgID, taskID, eventID, kind string) error {
+	return recordTaskEvent(ctx, s.q, orgID, taskID, eventID, kind)
+}
+
+func (s *taskStore) RecordEventSystem(ctx context.Context, orgID, taskID, eventID, kind string) error {
+	return recordTaskEvent(ctx, s.admin, orgID, taskID, eventID, kind)
+}
+
+func recordTaskEvent(ctx context.Context, q queryer, orgID, taskID, eventID, kind string) error {
 	// task_events has org_id NOT NULL in D3 schema; populate it so the
 	// composite FK to (org_id, task_id) resolves.
-	_, err := s.q.ExecContext(ctx, `
+	_, err := q.ExecContext(ctx, `
 		INSERT INTO task_events (org_id, task_id, event_id, kind, created_at)
 		VALUES ($1, $2, $3, $4, NOW())
 		ON CONFLICT DO NOTHING
@@ -381,10 +445,18 @@ func (s *taskStore) SetClaimedByUser(ctx context.Context, orgID, taskID, userID 
 }
 
 func (s *taskStore) StampAgentClaimIfUnclaimed(ctx context.Context, orgID, taskID, agentID string) (bool, error) {
+	return stampAgentClaimIfUnclaimed(ctx, s.q, orgID, taskID, agentID)
+}
+
+func (s *taskStore) StampAgentClaimIfUnclaimedSystem(ctx context.Context, orgID, taskID, agentID string) (bool, error) {
+	return stampAgentClaimIfUnclaimed(ctx, s.admin, orgID, taskID, agentID)
+}
+
+func stampAgentClaimIfUnclaimed(ctx context.Context, q queryer, orgID, taskID, agentID string) (bool, error) {
 	if agentID == "" {
 		return false, errors.New("StampAgentClaimIfUnclaimed: empty agentID")
 	}
-	res, err := s.q.ExecContext(ctx, `
+	res, err := q.ExecContext(ctx, `
 		UPDATE tasks
 		   SET claimed_by_agent_id = $1,
 		       snooze_until = NULL,
@@ -508,12 +580,20 @@ func (s *taskStore) ClaimQueuedForUser(ctx context.Context, orgID, taskID, userI
 // --- Breaker ---
 
 func (s *taskStore) CountConsecutiveFailedRuns(ctx context.Context, orgID, entityID, promptID string) (int, error) {
+	return countConsecutiveFailedRuns(ctx, s.q, orgID, entityID, promptID)
+}
+
+func (s *taskStore) CountConsecutiveFailedRunsSystem(ctx context.Context, orgID, entityID, promptID string) (int, error) {
+	return countConsecutiveFailedRuns(ctx, s.admin, orgID, entityID, promptID)
+}
+
+func countConsecutiveFailedRuns(ctx context.Context, q queryer, orgID, entityID, promptID string) (int, error) {
 	// Same shape as SQLite. Postgres' ROW_NUMBER / OVER / CTEs are
 	// identical syntax-wise; the only difference is the started_at
 	// fallback literal (Postgres requires a typed cast on the
 	// '1970-01-01' default for the comparison).
 	var count int
-	err := s.q.QueryRowContext(ctx, `
+	err := q.QueryRowContext(ctx, `
 		WITH recent AS (
 			SELECT
 				CASE
