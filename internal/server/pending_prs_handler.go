@@ -257,62 +257,79 @@ func (s *Server) handlePendingPRSubmit(w http.ResponseWriter, r *http.Request) {
 
 	// Post-success cleanup runs detached from r.Context(): the GitHub
 	// PR is already open, so a client disconnect must not leave the
-	// pending row + run/task in a half-cleaned state. The whole batch
-	// runs as one tx under the submitting user's claims so multi-mode
-	// RLS gates pass uniformly.
+	// pending row + run/task in a half-cleaned state.
+	//
+	// Each logical step gets its OWN small tx wrap so a failure in
+	// one doesn't roll back the others. The MarkSubmitted guard set
+	// above is in a separate (already-committed) write — bundling the
+	// post-success cleanup into a single all-or-nothing tx would
+	// leave that guard stuck with the pending row visible on any
+	// bookkeeping failure, locking the user out of retry even though
+	// GitHub already has the PR.
 	cleanupCtx := context.WithoutCancel(r.Context())
-	var chainRun *domain.ChainRun
-	if err := s.tx.WithTx(cleanupCtx, runmode.LocalDefaultOrg, runmode.LocalDefaultUserID, func(tx db.TxStores) error {
-		// Capture the human's verdict (title/body diff vs agent
-		// draft) while the originals are still in scope. The next
-		// retry of this ticket should see what the human changed.
-		if pr.RunID != "" {
-			humanContent := FormatHumanFeedbackPR(pr, pr.Title, pr.Body)
-			if err := tx.TaskMemory.UpdateRunMemoryHumanContent(cleanupCtx, runmode.LocalDefaultOrg, pr.RunID, humanContent); err != nil {
-				return fmt.Errorf("human_content: %w", err)
-			}
+
+	// Step 1: best-effort human verdict capture. The format mirrors
+	// the SKY-205 submit-time block so the next retry of this ticket
+	// sees what the human changed vs the agent's draft.
+	if pr.RunID != "" {
+		humanContent := FormatHumanFeedbackPR(pr, pr.Title, pr.Body)
+		if err := s.tx.WithTx(cleanupCtx, runmode.LocalDefaultOrg, runmode.LocalDefaultUserID, func(tx db.TxStores) error {
+			return tx.TaskMemory.UpdateRunMemoryHumanContent(cleanupCtx, runmode.LocalDefaultOrg, pr.RunID, humanContent)
+		}); err != nil {
+			log.Printf("[pending-prs] warning: failed to record human verdict for run %s: %v", pr.RunID, err)
 		}
-		if err := tx.PendingPRs.Delete(cleanupCtx, runmode.LocalDefaultOrgID, id); err != nil {
-			return fmt.Errorf("pending_prs delete: %w", err)
-		}
-		if pr.RunID == "" {
-			return nil
-		}
-		if _, err := tx.AgentRuns.MarkCompletedIfPendingApproval(cleanupCtx, runmode.LocalDefaultOrg, pr.RunID); err != nil {
-			return fmt.Errorf("mark run completed: %w", err)
-		}
-		// Skip the blanket task-mark-done for chain steps;
-		// terminateChain owns task closure so the chain_runs row
-		// finalizes first. A chain lookup error leaves the task open
-		// for human follow-up rather than racing terminateChain.
-		cr, _, chainLookupErr := tx.Chains.GetRunForRun(cleanupCtx, runmode.LocalDefaultOrg, pr.RunID)
-		if chainLookupErr != nil {
-			log.Printf("[pending-prs] warning: chain lookup failed for run %s; skipping task closure: %v", pr.RunID, chainLookupErr)
-			return nil
-		}
-		chainRun = cr
-		if cr != nil {
-			return nil
-		}
-		// Stand-alone run: resolve the run's task_id and flip the
-		// task to done. Reads the run row to recover task_id (the
-		// old raw query nested SELECT task_id FROM runs into the
-		// UPDATE; the explicit two-step composes cleanly via store
-		// methods).
-		run, runErr := tx.AgentRuns.Get(cleanupCtx, runmode.LocalDefaultOrg, pr.RunID)
-		if runErr != nil || run == nil {
-			log.Printf("[pending-prs] warning: read run %s for task closure: %v", pr.RunID, runErr)
-			return nil
-		}
-		if err := tx.Tasks.SetStatus(cleanupCtx, runmode.LocalDefaultOrg, run.TaskID, "done"); err != nil {
-			log.Printf("[pending-prs] warning: failed to update task status for run %s: %v", pr.RunID, err)
-		}
-		return nil
-	}); err != nil {
-		log.Printf("[pending-prs] warning: post-submit cleanup for pending PR %s: %v", id, err)
 	}
 
+	// Step 2: clear the pending PR row. The whole point of this
+	// post-success cleanup is to leave the queue consistent with
+	// GitHub state — if the delete itself fails, the row stays
+	// visible (and the MarkSubmitted guard returns "in-flight" on
+	// retry), which is the same failure mode as before SKY-300.
+	if err := s.tx.WithTx(cleanupCtx, runmode.LocalDefaultOrg, runmode.LocalDefaultUserID, func(tx db.TxStores) error {
+		return tx.PendingPRs.Delete(cleanupCtx, runmode.LocalDefaultOrgID, id)
+	}); err != nil {
+		log.Printf("[pending-prs] warning: failed to clean up pending PR %s after submit: %v", id, err)
+	}
+
+	// Step 3: run/task bookkeeping. Independent of the row delete
+	// above — a failure here is best-effort logging; the user's
+	// GitHub PR exists and the pending row is gone (or kept under
+	// step 2's failure path).
+	var chainRun *domain.ChainRun
 	if pr.RunID != "" {
+		if err := s.tx.WithTx(cleanupCtx, runmode.LocalDefaultOrg, runmode.LocalDefaultUserID, func(tx db.TxStores) error {
+			if _, err := tx.AgentRuns.MarkCompletedIfPendingApproval(cleanupCtx, runmode.LocalDefaultOrg, pr.RunID); err != nil {
+				return fmt.Errorf("mark run completed: %w", err)
+			}
+			// Skip the blanket task-mark-done for chain steps;
+			// terminateChain owns task closure so the chain_runs
+			// row finalizes first. A chain lookup error leaves the
+			// task open for human follow-up rather than racing
+			// terminateChain.
+			cr, _, chainLookupErr := tx.Chains.GetRunForRun(cleanupCtx, runmode.LocalDefaultOrg, pr.RunID)
+			if chainLookupErr != nil {
+				log.Printf("[pending-prs] warning: chain lookup failed for run %s; skipping task closure: %v", pr.RunID, chainLookupErr)
+				return nil
+			}
+			chainRun = cr
+			if cr != nil {
+				return nil
+			}
+			// Stand-alone run: resolve the run's task_id and flip
+			// the task to done.
+			run, runErr := tx.AgentRuns.Get(cleanupCtx, runmode.LocalDefaultOrg, pr.RunID)
+			if runErr != nil || run == nil {
+				log.Printf("[pending-prs] warning: read run %s for task closure: %v", pr.RunID, runErr)
+				return nil
+			}
+			if err := tx.Tasks.SetStatus(cleanupCtx, runmode.LocalDefaultOrg, run.TaskID, "done"); err != nil {
+				log.Printf("[pending-prs] warning: failed to update task status for run %s: %v", pr.RunID, err)
+			}
+			return nil
+		}); err != nil {
+			log.Printf("[pending-prs] warning: post-submit run bookkeeping for %s: %v", pr.RunID, err)
+		}
+
 		s.ws.Broadcast(websocket.Event{
 			Type:  "agent_run_update",
 			RunID: pr.RunID,

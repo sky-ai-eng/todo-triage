@@ -149,48 +149,61 @@ func (s *Server) handleReviewSubmit(w http.ResponseWriter, r *http.Request) {
 
 	// Post-submit cleanup runs detached from r.Context(): the GitHub
 	// review is already posted, so a client disconnect must not leave
-	// the pending row + run/task in a half-cleaned state. The whole
-	// batch runs as one tx under the submitting user's claims so
-	// multi-mode RLS gates pass uniformly.
+	// the pending row + run/task in a half-cleaned state.
+	//
+	// Each logical step is its own small tx so a failure in the
+	// run/task bookkeeping doesn't roll back the pending_reviews
+	// delete. Reviews have no MarkSubmitted-style guard, so a
+	// rolled-back delete leaves the row visible and lets the user
+	// retry from the UI — which would re-post the same review to
+	// GitHub. Splitting the txs keeps the delete durable once GitHub
+	// has accepted the submit, regardless of downstream bookkeeping
+	// outcomes.
 	cleanupCtx := context.WithoutCancel(r.Context())
-	var chainRun *domain.ChainRun
+
+	// Step 1: clear the pending review. Must commit on its own to
+	// prevent a double-submit on retry (no guard equivalent to
+	// pending_prs.submitted_at exists on this path).
 	if err := s.tx.WithTx(cleanupCtx, runmode.LocalDefaultOrg, runmode.LocalDefaultUserID, func(tx db.TxStores) error {
-		if err := tx.Reviews.Delete(cleanupCtx, runmode.LocalDefaultOrgID, reviewID); err != nil {
-			return fmt.Errorf("reviews delete: %w", err)
-		}
-		if review.RunID == "" {
-			return nil
-		}
-		if _, err := tx.AgentRuns.MarkCompletedIfPendingApproval(cleanupCtx, runmode.LocalDefaultOrg, review.RunID); err != nil {
-			return fmt.Errorf("mark run completed: %w", err)
-		}
-		// Skip the blanket task-mark-done for chain steps;
-		// terminateChain owns task closure so the chain_runs row
-		// finalizes first. A chain lookup error leaves the task open
-		// for human follow-up rather than racing terminateChain.
-		cr, _, chainLookupErr := tx.Chains.GetRunForRun(cleanupCtx, runmode.LocalDefaultOrg, review.RunID)
-		if chainLookupErr != nil {
-			log.Printf("[reviews] warning: chain lookup failed for run %s; skipping task closure: %v", review.RunID, chainLookupErr)
-			return nil
-		}
-		chainRun = cr
-		if cr != nil {
-			return nil
-		}
-		run, runErr := tx.AgentRuns.Get(cleanupCtx, runmode.LocalDefaultOrg, review.RunID)
-		if runErr != nil || run == nil {
-			log.Printf("[reviews] warning: read run %s for task closure: %v", review.RunID, runErr)
-			return nil
-		}
-		if err := tx.Tasks.SetStatus(cleanupCtx, runmode.LocalDefaultOrg, run.TaskID, "done"); err != nil {
-			log.Printf("[reviews] warning: failed to update task status for run %s: %v", review.RunID, err)
-		}
-		return nil
+		return tx.Reviews.Delete(cleanupCtx, runmode.LocalDefaultOrgID, reviewID)
 	}); err != nil {
-		log.Printf("[reviews] warning: post-submit cleanup for review %s: %v", reviewID, err)
+		log.Printf("[reviews] warning: failed to clean up review %s: %v", reviewID, err)
 	}
 
+	// Step 2: run/task bookkeeping. Independent of the delete above.
+	var chainRun *domain.ChainRun
 	if review.RunID != "" {
+		if err := s.tx.WithTx(cleanupCtx, runmode.LocalDefaultOrg, runmode.LocalDefaultUserID, func(tx db.TxStores) error {
+			if _, err := tx.AgentRuns.MarkCompletedIfPendingApproval(cleanupCtx, runmode.LocalDefaultOrg, review.RunID); err != nil {
+				return fmt.Errorf("mark run completed: %w", err)
+			}
+			// Skip the blanket task-mark-done for chain steps;
+			// terminateChain owns task closure so the chain_runs
+			// row finalizes first. A chain lookup error leaves the
+			// task open for human follow-up rather than racing
+			// terminateChain.
+			cr, _, chainLookupErr := tx.Chains.GetRunForRun(cleanupCtx, runmode.LocalDefaultOrg, review.RunID)
+			if chainLookupErr != nil {
+				log.Printf("[reviews] warning: chain lookup failed for run %s; skipping task closure: %v", review.RunID, chainLookupErr)
+				return nil
+			}
+			chainRun = cr
+			if cr != nil {
+				return nil
+			}
+			run, runErr := tx.AgentRuns.Get(cleanupCtx, runmode.LocalDefaultOrg, review.RunID)
+			if runErr != nil || run == nil {
+				log.Printf("[reviews] warning: read run %s for task closure: %v", review.RunID, runErr)
+				return nil
+			}
+			if err := tx.Tasks.SetStatus(cleanupCtx, runmode.LocalDefaultOrg, run.TaskID, "done"); err != nil {
+				log.Printf("[reviews] warning: failed to update task status for run %s: %v", review.RunID, err)
+			}
+			return nil
+		}); err != nil {
+			log.Printf("[reviews] warning: post-submit run bookkeeping for %s: %v", review.RunID, err)
+		}
+
 		s.ws.Broadcast(websocket.Event{
 			Type:  "agent_run_update",
 			RunID: review.RunID,
