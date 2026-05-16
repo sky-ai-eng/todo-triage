@@ -138,4 +138,3 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		Projects:       newProjectStore(tx),
 	}
 }
-
