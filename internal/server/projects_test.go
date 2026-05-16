@@ -506,20 +506,22 @@ func TestValidatePinnedRepos_RejectsUnconfigured(t *testing.T) {
 	srv := newTestServer(t)
 	seedConfiguredRepo(t, srv, "sky-ai-eng", "configured")
 
+	ctx := t.Context()
+
 	// All-configured passes.
-	if _, errMsg := validatePinnedRepos(srv.db, []string{"sky-ai-eng/configured"}); errMsg != "" {
+	if _, errMsg := validatePinnedRepos(ctx, srv.repos, []string{"sky-ai-eng/configured"}); errMsg != "" {
 		t.Errorf("configured slug should pass, got %q", errMsg)
 	}
 
 	// Mix of configured + unconfigured rejects on the unconfigured one.
-	if _, errMsg := validatePinnedRepos(srv.db, []string{"sky-ai-eng/configured", "stranger/repo"}); errMsg == "" {
+	if _, errMsg := validatePinnedRepos(ctx, srv.repos, []string{"sky-ai-eng/configured", "stranger/repo"}); errMsg == "" {
 		t.Error("unconfigured slug should reject")
 	} else if !strings.Contains(errMsg, "stranger/repo") {
 		t.Errorf("error should name the offending slug, got %q", errMsg)
 	}
 
 	// Empty input still passes (no profiles needed).
-	if _, errMsg := validatePinnedRepos(srv.db, nil); errMsg != "" {
+	if _, errMsg := validatePinnedRepos(ctx, srv.repos, nil); errMsg != "" {
 		t.Errorf("nil input should pass, got %q", errMsg)
 	}
 }

@@ -7,9 +7,8 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/config"
-	"github.com/sky-ai-eng/triage-factory/internal/db"
-	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // handleGitHubRepos returns all repositories the authenticated user has access to.
@@ -38,13 +37,10 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 
 // handleRepoProfiles returns all configured repo profiles from the DB.
 func (s *Server) handleRepoProfiles(w http.ResponseWriter, r *http.Request) {
-	profiles, err := db.GetAllRepoProfiles(s.db)
+	profiles, err := s.repos.List(r.Context(), runmode.LocalDefaultOrgID)
 	if err != nil {
 		internalError(w, "repos", err)
 		return
-	}
-	if profiles == nil {
-		profiles = []domain.RepoProfile{}
 	}
 
 	type repoJSON struct {
@@ -117,7 +113,7 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid base_branch value"})
 			return
 		}
-		if err := db.UpdateRepoBaseBranch(s.db, repoID, branch); err != nil {
+		if err := s.repos.UpdateBaseBranch(r.Context(), runmode.LocalDefaultOrgID, repoID, branch); err != nil {
 			internalError(w, "repos", err)
 			return
 		}
@@ -168,7 +164,7 @@ func (s *Server) handleReposSave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := db.SetConfiguredRepos(s.db, req.Repos); err != nil {
+	if err := s.repos.SetConfigured(r.Context(), runmode.LocalDefaultOrgID, req.Repos); err != nil {
 		internalError(w, "repos", err)
 		return
 	}

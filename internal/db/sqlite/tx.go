@@ -47,6 +47,7 @@ func (s *Store) WithTx(ctx context.Context, orgID, userID string, fn func(db.TxS
 		Entities:      newEntityStore(tx),
 		Reviews:       newReviewStore(tx),
 		PendingPRs:    newPendingPRStore(tx),
+		Repos:         newRepoStore(tx),
 	}
 	if err := fn(txStores); err != nil {
 		return err

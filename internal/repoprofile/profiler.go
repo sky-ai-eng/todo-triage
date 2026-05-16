@@ -15,6 +15,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
@@ -30,12 +31,14 @@ const (
 type Profiler struct {
 	gh       *github.Client
 	database *sql.DB
+	repos    db.RepoStore // SKY-288: profile reads + upserts go through the store
 	ws       *websocket.Hub
 }
 
-// NewProfiler creates a Profiler with the given GitHub client, DB handle, and WS hub.
-func NewProfiler(gh *github.Client, database *sql.DB, ws *websocket.Hub) *Profiler {
-	return &Profiler{gh: gh, database: database, ws: ws}
+// NewProfiler creates a Profiler with the given GitHub client, DB handle,
+// repo store, and WS hub.
+func NewProfiler(gh *github.Client, database *sql.DB, repos db.RepoStore, ws *websocket.Hub) *Profiler {
+	return &Profiler{gh: gh, database: database, repos: repos, ws: ws}
 }
 
 // repoWithDocs groups a repo profile with the documentation text to send to the LLM.
@@ -85,7 +88,7 @@ func (p *Profiler) Run(ctx context.Context, repos []string, force bool) error {
 
 		// Skip repos that were recently profiled (unless forced)
 		if !force {
-			existing, err := db.GetRepoProfile(p.database, name)
+			existing, err := p.repos.Get(ctx, runmode.LocalDefaultOrgID, name)
 			if err != nil {
 				log.Printf("[repoprofile] %s: failed to check profile: %v", name, err)
 				continue
@@ -143,7 +146,7 @@ func (p *Profiler) Run(ctx context.Context, repos []string, force bool) error {
 		}
 
 		// Persist docs flags immediately so the UI can show them before profiling completes
-		if err := db.UpsertRepoProfile(p.database, prof); err != nil {
+		if err := p.repos.Upsert(ctx, runmode.LocalDefaultOrgID, prof); err != nil {
 			log.Printf("[repoprofile] upsert %s (docs flags): %v", name, err)
 		}
 		if p.ws != nil {
@@ -191,7 +194,7 @@ func (p *Profiler) Run(ctx context.Context, repos []string, force bool) error {
 			toast.Warning(p.ws, fmt.Sprintf("Profiling failed for %s — rows saved without AI summary", strings.Join(repoNames, ", ")))
 			// Fallback: upsert without profile_text so the row at least exists.
 			for _, d := range batch {
-				if uErr := db.UpsertRepoProfile(p.database, d.profile); uErr != nil {
+				if uErr := p.repos.Upsert(ctx, runmode.LocalDefaultOrgID, d.profile); uErr != nil {
 					log.Printf("[repoprofile] upsert %s (fallback): %v", d.profile.ID, uErr)
 				}
 			}
@@ -210,7 +213,7 @@ func (p *Profiler) Run(ctx context.Context, repos []string, force bool) error {
 				prof.ProfileText = text
 				prof.ProfiledAt = &now
 			}
-			if err := db.UpsertRepoProfile(p.database, prof); err != nil {
+			if err := p.repos.Upsert(ctx, runmode.LocalDefaultOrgID, prof); err != nil {
 				log.Printf("[repoprofile] upsert %s: %v", prof.ID, err)
 				continue
 			}

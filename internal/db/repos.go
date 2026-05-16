@@ -1,253 +1,87 @@
 package db
 
 import (
-	"database/sql"
+	"context"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// UpsertRepoProfile inserts or updates a repo profile.
-// On conflict it updates profiling metadata but preserves user-configured fields (base_branch).
-func UpsertRepoProfile(database *sql.DB, p domain.RepoProfile) error {
-	_, err := database.Exec(`
-		INSERT INTO repo_profiles (id, owner, repo, description, has_readme, has_claude_md, has_agents_md, profile_text, clone_url, default_branch, profiled_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-		ON CONFLICT(id) DO UPDATE SET
-			description    = excluded.description,
-			has_readme     = excluded.has_readme,
-			has_claude_md  = excluded.has_claude_md,
-			has_agents_md  = excluded.has_agents_md,
-			profile_text   = excluded.profile_text,
-			clone_url      = excluded.clone_url,
-			default_branch = excluded.default_branch,
-			profiled_at    = excluded.profiled_at,
-			updated_at     = datetime('now')
-	`,
-		p.ID, p.Owner, p.Repo,
-		nullIfEmpty(p.Description),
-		p.HasReadme, p.HasClaudeMd, p.HasAgentsMd,
-		nullIfEmpty(p.ProfileText),
-		nullIfEmpty(p.CloneURL),
-		nullIfEmpty(p.DefaultBranch),
-		p.ProfiledAt,
-	)
-	return err
-}
+//go:generate go run github.com/vektra/mockery/v2 --name=RepoStore --output=./mocks --case=underscore --with-expecter
 
-// GetAllRepoProfiles returns all repo profiles, including those without profile text.
-func GetAllRepoProfiles(database *sql.DB) ([]domain.RepoProfile, error) {
-	rows, err := database.Query(`
-		SELECT id, owner, repo, description, has_readme, has_claude_md, has_agents_md, profile_text, clone_url, default_branch, base_branch, profiled_at, clone_status, clone_error, clone_error_kind
-		FROM repo_profiles
-		ORDER BY id
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var profiles []domain.RepoProfile
-	for rows.Next() {
-		var p domain.RepoProfile
-		var description, profileText, cloneURL, defaultBranch, baseBranch, cloneError, cloneErrorKind sql.NullString
-		var profiledAt sql.NullTime
-		if err := rows.Scan(&p.ID, &p.Owner, &p.Repo, &description, &p.HasReadme, &p.HasClaudeMd, &p.HasAgentsMd, &profileText, &cloneURL, &defaultBranch, &baseBranch, &profiledAt, &p.CloneStatus, &cloneError, &cloneErrorKind); err != nil {
-			return nil, err
-		}
-		p.Description = description.String
-		p.ProfileText = profileText.String
-		p.CloneURL = cloneURL.String
-		p.DefaultBranch = defaultBranch.String
-		p.BaseBranch = baseBranch.String
-		p.CloneError = cloneError.String
-		p.CloneErrorKind = cloneErrorKind.String
-		if profiledAt.Valid {
-			p.ProfiledAt = &profiledAt.Time
-		}
-		profiles = append(profiles, p)
-	}
-	return profiles, rows.Err()
-}
-
-// GetRepoProfilesWithContent returns all repo profiles that have a non-null profile_text.
-func GetRepoProfilesWithContent(database *sql.DB) ([]domain.RepoProfile, error) {
-	rows, err := database.Query(`
-		SELECT id, owner, repo, description, has_readme, has_claude_md, has_agents_md, profile_text, clone_url, default_branch, base_branch
-		FROM repo_profiles
-		WHERE profile_text IS NOT NULL AND profile_text != ''
-		ORDER BY id
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var profiles []domain.RepoProfile
-	for rows.Next() {
-		var p domain.RepoProfile
-		var description, profileText, cloneURL, defaultBranch, baseBranch sql.NullString
-		if err := rows.Scan(&p.ID, &p.Owner, &p.Repo, &description, &p.HasReadme, &p.HasClaudeMd, &p.HasAgentsMd, &profileText, &cloneURL, &defaultBranch, &baseBranch); err != nil {
-			return nil, err
-		}
-		p.Description = description.String
-		p.ProfileText = profileText.String
-		p.CloneURL = cloneURL.String
-		p.DefaultBranch = defaultBranch.String
-		p.BaseBranch = baseBranch.String
-		profiles = append(profiles, p)
-	}
-	return profiles, rows.Err()
-}
-
-// SetConfiguredRepos syncs the repo_profiles table with the given list of repo names.
-// New repos get skeleton rows (no profile text). Removed repos are deleted.
-func SetConfiguredRepos(database *sql.DB, repoNames []string) error {
-	tx, err := database.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	// Build set of desired repos
-	desired := make(map[string]bool, len(repoNames))
-	for _, name := range repoNames {
-		desired[name] = true
-	}
-
-	// Delete repos no longer selected
-	existing, err := getRepoIDs(tx)
-	if err != nil {
-		return err
-	}
-	for _, id := range existing {
-		if !desired[id] {
-			if _, err := tx.Exec(`DELETE FROM repo_profiles WHERE id = ?`, id); err != nil {
-				return err
-			}
-		}
-	}
-
-	// Upsert skeleton rows for new repos (preserve existing profile data)
-	for _, name := range repoNames {
-		parts := splitOwnerRepo(name)
-		if parts[0] == "" || parts[1] == "" {
-			continue
-		}
-		_, err := tx.Exec(`
-			INSERT INTO repo_profiles (id, owner, repo, updated_at)
-			VALUES (?, ?, ?, datetime('now'))
-			ON CONFLICT(id) DO UPDATE SET updated_at = datetime('now')
-		`, name, parts[0], parts[1])
-		if err != nil {
-			return err
-		}
-	}
-
-	return tx.Commit()
-}
-
-// GetConfiguredRepoNames returns just the IDs (owner/repo) of all configured repos.
-func GetConfiguredRepoNames(database *sql.DB) ([]string, error) {
-	rows, err := database.Query(`SELECT id FROM repo_profiles ORDER BY id`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var names []string
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return nil, err
-		}
-		names = append(names, name)
-	}
-	return names, rows.Err()
-}
-
-// CountConfiguredRepos returns the number of configured repos.
-func CountConfiguredRepos(database *sql.DB) (int, error) {
-	var count int
-	err := database.QueryRow(`SELECT COUNT(*) FROM repo_profiles`).Scan(&count)
-	return count, err
-}
-
-func getRepoIDs(tx *sql.Tx) ([]string, error) {
-	rows, err := tx.Query(`SELECT id FROM repo_profiles`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	return ids, rows.Err()
-}
-
-func splitOwnerRepo(s string) [2]string {
-	for i, c := range s {
-		if c == '/' {
-			return [2]string{s[:i], s[i+1:]}
-		}
-	}
-	return [2]string{s, ""}
-}
-
-// UpdateRepoBaseBranch sets the base branch for a repo. Empty string stores NULL.
-func UpdateRepoBaseBranch(database *sql.DB, repoID, baseBranch string) error {
-	_, err := database.Exec(`UPDATE repo_profiles SET base_branch = ?, updated_at = datetime('now') WHERE id = ?`,
-		nullIfEmpty(baseBranch), repoID)
-	return err
-}
-
-// GetRepoProfile returns a single repo profile by ID (owner/repo), or nil if not found.
-func GetRepoProfile(database *sql.DB, repoID string) (*domain.RepoProfile, error) {
-	var p domain.RepoProfile
-	var description, profileText, cloneURL, defaultBranch, baseBranch, cloneError, cloneErrorKind sql.NullString
-	var profiledAt sql.NullTime
-	err := database.QueryRow(`
-		SELECT id, owner, repo, description, has_readme, has_claude_md, has_agents_md, profile_text, clone_url, default_branch, base_branch, profiled_at, clone_status, clone_error, clone_error_kind
-		FROM repo_profiles WHERE id = ?
-	`, repoID).Scan(&p.ID, &p.Owner, &p.Repo, &description, &p.HasReadme, &p.HasClaudeMd, &p.HasAgentsMd, &profileText, &cloneURL, &defaultBranch, &baseBranch, &profiledAt, &p.CloneStatus, &cloneError, &cloneErrorKind)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	p.Description = description.String
-	p.ProfileText = profileText.String
-	p.CloneURL = cloneURL.String
-	p.DefaultBranch = defaultBranch.String
-	p.BaseBranch = baseBranch.String
-	p.CloneError = cloneError.String
-	p.CloneErrorKind = cloneErrorKind.String
-	if profiledAt.Valid {
-		p.ProfiledAt = &profiledAt.Time
-	}
-	return &p, nil
-}
-
-// UpdateRepoCloneStatus records the outcome of an EnsureBareClone attempt
-// for the given repo. status is "ok" | "failed" | "pending"; errMsg and
-// errKind are stored as TEXT (empty string serializes to NULL) — kind is
-// "ssh" when our SSH preflight has confirmed the SSH side is the cause,
-// "other" when the failure is on the git/transport side, and empty for
-// status="ok".
+// RepoStore owns the repo_profiles table — the user-configured GitHub
+// repos plus their AI-generated profile cache and clone-attempt state.
 //
-// No-ops silently when the repo isn't in repo_profiles (configured-repos
-// only invariant — clone hooks fire after repo selection).
-func UpdateRepoCloneStatus(database *sql.DB, owner, repo, status, errMsg, errKind string) error {
-	_, err := database.Exec(`
-		UPDATE repo_profiles
-		SET clone_status = ?, clone_error = ?, clone_error_kind = ?, updated_at = datetime('now')
-		WHERE owner = ? AND repo = ?
-	`, status, nullIfEmpty(errMsg), nullIfEmpty(errKind), owner, repo)
-	return err
+// All methods take orgID; local mode passes runmode.LocalDefaultOrgID.
+// Postgres impl filters on org_id alongside the
+// (org_id = current_org_id()) RLS policy as defense in depth; SQLite
+// impl asserts orgID equals the local sentinel and otherwise ignores
+// it (single-tenant by design).
+//
+// # repoID identity across backends
+//
+// The store API surfaces every repo by its natural "owner/repo"
+// string as repoID — that's what callers pass and what
+// domain.RepoProfile.ID returns. SQLite stores that string directly
+// in the id column. Postgres uses a synthetic uuid id internally
+// plus a UNIQUE(org_id, owner, repo) natural key; the Postgres impl
+// splits the passed-in "owner/repo" and queries by (org_id, owner,
+// repo) so callers never see the synthetic uuid. The synthetic id
+// exists because the PG style is "every table has a uuid PK" — not
+// because callers need it.
+type RepoStore interface {
+	// Upsert inserts or updates a repo profile. On conflict it
+	// refreshes profiling metadata (description, has_readme,
+	// has_claude_md, has_agents_md, profile_text, clone_url,
+	// default_branch, profiled_at) but PRESERVES user-configured
+	// base_branch and clone-status fields — those are mutated by
+	// dedicated methods and shouldn't be clobbered by a re-profile.
+	Upsert(ctx context.Context, orgID string, p domain.RepoProfile) error
+
+	// List returns every configured repo, including those without
+	// profile text. Ordered by repoID for stable display.
+	List(ctx context.Context, orgID string) ([]domain.RepoProfile, error)
+
+	// ListWithContent returns only repos that have a non-empty
+	// profile_text — the subset the curator + delegate context
+	// loaders care about. Subset of List by predicate; safe to call
+	// before the profiler completes (returns empty slice).
+	ListWithContent(ctx context.Context, orgID string) ([]domain.RepoProfile, error)
+
+	// SetConfigured syncs the repo_profiles table with the given
+	// "owner/repo" list. New entries get skeleton rows (no profile
+	// text); entries no longer in the list are deleted. Single
+	// transaction so the table can't observe a partial mid-sync
+	// state.
+	SetConfigured(ctx context.Context, orgID string, repoNames []string) error
+
+	// ListConfiguredNames returns just the "owner/repo" IDs of
+	// every configured repo. Ordered.
+	ListConfiguredNames(ctx context.Context, orgID string) ([]string, error)
+
+	// CountConfigured returns the number of configured repos. Used
+	// by the settings endpoint to short-circuit a "no repos
+	// configured yet" UI state without paying the full SELECT cost.
+	CountConfigured(ctx context.Context, orgID string) (int, error)
+
+	// UpdateBaseBranch sets the user-configured base branch for a
+	// repo. Empty string stores SQL NULL → falls back to the
+	// detected default_branch at use-site.
+	UpdateBaseBranch(ctx context.Context, orgID, repoID, baseBranch string) error
+
+	// Get returns a single repo profile by "owner/repo" id, or nil
+	// if not configured.
+	Get(ctx context.Context, orgID, repoID string) (*domain.RepoProfile, error)
+
+	// UpdateCloneStatus records the outcome of an EnsureBareClone
+	// attempt for the given repo. status is "ok" | "failed" |
+	// "pending"; errMsg and errKind are stored as TEXT (empty
+	// string serializes to NULL) — kind is "ssh" when our SSH
+	// preflight has confirmed the SSH side is the cause, "other"
+	// when the failure is on the git/transport side, and empty for
+	// status="ok".
+	//
+	// No-ops silently when the repo isn't in repo_profiles
+	// (configured-repos-only invariant — clone hooks fire after
+	// repo selection).
+	UpdateCloneStatus(ctx context.Context, orgID, owner, repo, status, errMsg, errKind string) error
 }

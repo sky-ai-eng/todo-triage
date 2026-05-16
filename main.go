@@ -80,8 +80,8 @@ func pluralize(n int, singular, plural string) string {
 // transient DB issue shouldn't crash the main path, and the lazy
 // clone inside CreateForPR / CreateForBranch will recover the
 // affected delegations on next run.
-func bootstrapBareClones(database *sql.DB) {
-	profiles, err := db.GetAllRepoProfiles(database)
+func bootstrapBareClones(database *sql.DB, repos db.RepoStore) {
+	profiles, err := repos.List(context.Background(), runmode.LocalDefaultOrgID)
 	if err != nil {
 		log.Printf("[worktree] bootstrap: load profiles: %v", err)
 		return
@@ -377,7 +377,7 @@ func main() {
 		openBrowser(browserURL)
 	}
 
-	srv := server.New(database, stores.Prompts, stores.Swipes, stores.Dashboard, stores.EventHandlers, stores.Agents, stores.TeamAgents, stores.Users, stores.Chains, stores.Tasks, stores.Factory, stores.AgentRuns, stores.Entities, stores.Reviews, stores.PendingPRs)
+	srv := server.New(database, stores.Prompts, stores.Swipes, stores.Dashboard, stores.EventHandlers, stores.Agents, stores.TeamAgents, stores.Users, stores.Chains, stores.Tasks, stores.Factory, stores.AgentRuns, stores.Entities, stores.Reviews, stores.PendingPRs, stores.Repos)
 
 	distFS, err := frontendDist()
 	if err != nil {
@@ -463,7 +463,7 @@ func main() {
 	// ("Fix in Settings" for SSH issues, raw stderr otherwise).
 	worktree.SetOnCloneResult(func(owner, repo string, cloneErr error) {
 		if cloneErr == nil {
-			if err := db.UpdateRepoCloneStatus(database, owner, repo, "ok", "", ""); err != nil {
+			if err := stores.Repos.UpdateCloneStatus(context.Background(), runmode.LocalDefaultOrgID, owner, repo, "ok", "", ""); err != nil {
 				log.Printf("[clone-status] update %s/%s ok: %v", owner, repo, err)
 			}
 			wsHub.Broadcast(websocket.Event{
@@ -497,7 +497,7 @@ func main() {
 			log.Printf("[clone-status] %s/%s load config to classify: %v (defaulting to kind=other)", owner, repo, cErr)
 		}
 
-		if err := db.UpdateRepoCloneStatus(database, owner, repo, "failed", cloneErr.Error(), kind); err != nil {
+		if err := stores.Repos.UpdateCloneStatus(context.Background(), runmode.LocalDefaultOrgID, owner, repo, "failed", cloneErr.Error(), kind); err != nil {
 			log.Printf("[clone-status] update %s/%s failed: %v", owner, repo, err)
 		}
 		wsHub.Broadcast(websocket.Event{
@@ -620,7 +620,7 @@ func main() {
 		errorThrottleMu sync.Mutex
 		lastErrorToast  = map[string]time.Time{}
 	)
-	pollerMgr := poller.NewManager(database, bus, stores.Users, stores.Tasks, stores.Entities)
+	pollerMgr := poller.NewManager(database, bus, stores.Users, stores.Tasks, stores.Entities, stores.Repos)
 	pollerMgr.OnError = func(source string, err error) {
 		errorThrottleMu.Lock()
 		if last, ok := lastErrorToast[source]; ok && time.Since(last) < errorToastMinInterval {
@@ -665,7 +665,7 @@ func main() {
 	} else if n > 0 {
 		log.Printf("[curator] cancelled %d orphaned non-terminal curator requests from prior process", n)
 	}
-	curatorRuntime := curator.New(database, stores.Prompts, wsHub, "")
+	curatorRuntime := curator.New(database, stores.Prompts, stores.Repos, wsHub, "")
 	srv.SetCurator(curatorRuntime)
 
 	// Knowledge-base file watcher — fires `project_knowledge_updated`
@@ -753,15 +753,15 @@ func main() {
 
 			// Re-profile, then signal ready and restart all pollers
 			go func() {
-				profiler := repoprofile.NewProfiler(ghClient, database, wsHub)
-				repos, _ := db.GetConfiguredRepoNames(database)
+				profiler := repoprofile.NewProfiler(ghClient, database, stores.Repos, wsHub)
+				repos, _ := stores.Repos.ListConfiguredNames(context.Background(), runmode.LocalDefaultOrgID)
 				if err := profiler.Run(context.Background(), repos, true); err != nil {
 					log.Printf("[repoprofile] profiling failed: %v", err)
 				}
 				profileGate.Signal()
 				pollerMgr.RestartAll()
 				scorer.Trigger()
-				bootstrapBareClones(database)
+				bootstrapBareClones(database, stores.Repos)
 			}()
 		} else {
 			spawner.UpdateCredentials(nil, "")
@@ -843,7 +843,7 @@ func main() {
 	// Initial start with current credentials
 	cfg, _ := config.Load()
 	creds, _ := auth.Load()
-	repoCount, _ := db.CountConfiguredRepos(database)
+	repoCount, _ := stores.Repos.CountConfigured(context.Background(), runmode.LocalDefaultOrgID)
 
 	if cfg.GitHub.Ready(creds.GitHubPAT, creds.GitHubURL) && repoCount > 0 {
 		ghClient := ghclient.NewClient(creds.GitHubURL, creds.GitHubPAT)
@@ -854,15 +854,15 @@ func main() {
 
 		// Profile repos, then signal ready, start pollers, and trigger scoring
 		go func() {
-			profiler := repoprofile.NewProfiler(ghClient, database, wsHub)
-			repos, _ := db.GetConfiguredRepoNames(database)
+			profiler := repoprofile.NewProfiler(ghClient, database, stores.Repos, wsHub)
+			repos, _ := stores.Repos.ListConfiguredNames(context.Background(), runmode.LocalDefaultOrgID)
 			if err := profiler.Run(context.Background(), repos, false); err != nil {
 				log.Printf("[repoprofile] initial profiling failed: %v", err)
 			}
 			profileGate.Signal()
 			pollerMgr.RestartAll()
 			scorer.Trigger()
-			bootstrapBareClones(database)
+			bootstrapBareClones(database, stores.Repos)
 		}()
 	} else {
 		// Not fully configured — start pollers immediately (may be empty)

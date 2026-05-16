@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 	_ "modernc.org/sqlite"
@@ -45,7 +46,7 @@ func seedProject(t *testing.T, database *sql.DB, name string) string {
 func TestCurator_SendMessage_RejectsAfterShutdown(t *testing.T) {
 	database := newTestDB(t)
 	projectID := seedProject(t, database, "p")
-	c := New(database, testPromptStore(database), nil, "")
+	c := New(database, testPromptStore(database), sqlitestore.New(database).Repos, nil, "")
 	c.Shutdown()
 
 	_, err := c.SendMessage(projectID, "hi")
@@ -79,7 +80,7 @@ func TestCurator_CancelProject_FlipsQueuedRows(t *testing.T) {
 	id1, _ := db.CreateCuratorRequest(database, projectID, "first")
 	id2, _ := db.CreateCuratorRequest(database, projectID, "second")
 
-	c := New(database, testPromptStore(database), nil, "")
+	c := New(database, testPromptStore(database), sqlitestore.New(database).Repos, nil, "")
 	t.Cleanup(c.Shutdown)
 	c.CancelProject(projectID)
 
@@ -102,7 +103,7 @@ func TestCurator_CancelProject_KillsActiveSession(t *testing.T) {
 	projectID := seedProject(t, database, "active")
 
 	hub := websocket.NewHub()
-	c := New(database, testPromptStore(database), hub, "")
+	c := New(database, testPromptStore(database), sqlitestore.New(database).Repos, hub, "")
 	t.Cleanup(c.Shutdown)
 
 	// SendMessage spawns the per-project goroutine if absent. The
@@ -140,7 +141,7 @@ func TestCurator_CrossProjectParallel(t *testing.T) {
 	projectA := seedProject(t, database, "A")
 	projectB := seedProject(t, database, "B")
 
-	c := New(database, testPromptStore(database), nil, "")
+	c := New(database, testPromptStore(database), sqlitestore.New(database).Repos, nil, "")
 	t.Cleanup(c.Shutdown)
 
 	var wg sync.WaitGroup

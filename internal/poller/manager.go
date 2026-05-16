@@ -24,6 +24,7 @@ type Manager struct {
 	bus      *eventbus.Bus
 	tracker  *tracker.Tracker
 	users    db.UsersStore // SKY-264: source of the session user's github_username
+	repos    db.RepoStore  // SKY-288: configured-repo names for GitHub poller startup
 
 	// OnError fires when a poll cycle returns an error. Source is "github"
 	// or "jira". Wired from main to a toast helper so users see the
@@ -35,12 +36,13 @@ type Manager struct {
 	jiraStop chan struct{}
 }
 
-func NewManager(database *sql.DB, bus *eventbus.Bus, users db.UsersStore, tasks db.TaskStore, entities db.EntityStore) *Manager {
+func NewManager(database *sql.DB, bus *eventbus.Bus, users db.UsersStore, tasks db.TaskStore, entities db.EntityStore, repos db.RepoStore) *Manager {
 	return &Manager{
 		database: database,
 		bus:      bus,
 		tracker:  tracker.New(database, bus, tasks, entities),
 		users:    users,
+		repos:    repos,
 	}
 }
 
@@ -126,7 +128,7 @@ func (m *Manager) startGitHub(cfg config.Config, creds auth.Credentials) {
 		return
 	}
 
-	repos, err := db.GetConfiguredRepoNames(m.database)
+	repos, err := m.repos.ListConfiguredNames(context.Background(), runmode.LocalDefaultOrgID)
 	if err != nil {
 		log.Printf("[github] error loading configured repos: %v", err)
 		return
