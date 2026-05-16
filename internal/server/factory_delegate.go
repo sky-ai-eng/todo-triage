@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -252,7 +253,11 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	// task.ClaimedByAgentID is set so spawner.Delegate's actor stamping
 	// reads it correctly.
 	task.ClaimedByAgentID = a.ID
-	runID, err := s.spawner.Delegate(*task, req.PromptID, "manual", "")
+	runID, err := s.spawner.Delegate(*task, delegate.DelegateOpts{
+		ExplicitPromptID: req.PromptID,
+		TriggerType:      "manual",
+		CreatorUserID:    runmode.LocalDefaultUserID,
+	})
 	if err != nil {
 		// Claim is already stamped (and broadcast), swipe audit
 		// already recorded. The run didn't fire — mirror the

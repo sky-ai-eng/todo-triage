@@ -144,6 +144,7 @@ type ChainStore interface {
 	// with COALESCE fallback.
 	ListStepsSystem(ctx context.Context, orgID string, chainPromptID string) ([]domain.ChainStep, error)
 	GetRunSystem(ctx context.Context, orgID string, id string) (*domain.ChainRun, error)
+	GetRunForRunSystem(ctx context.Context, orgID string, runID string) (*domain.ChainRun, *int, error)
 	MarkRunStatusSystem(ctx context.Context, orgID string, id string, status domain.ChainRunStatus, abortReason string, abortedAtStep *int) (changed bool, err error)
 	RunsForChainSystem(ctx context.Context, orgID string, chainRunID string) ([]domain.AgentRun, error)
 	ActiveStepRunIDsSystem(ctx context.Context, orgID string, chainRunID string) ([]string, error)

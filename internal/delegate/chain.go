@@ -38,8 +38,8 @@ var chainStepSystemPrompt string
 // the caller already has the chain_run id and the UI subscribes to
 // the chain row by id, so a synchronous error wouldn't be reflected
 // anywhere visible.
-func (s *Spawner) delegateChain(task domain.Task, chainPrompt *domain.Prompt, triggerType, triggerID string, gh *ghclient.Client, model string) (string, error) {
-	steps, err := s.chains.ListSteps(context.Background(), runmode.LocalDefaultOrg, chainPrompt.ID)
+func (s *Spawner) delegateChain(task domain.Task, chainPrompt *domain.Prompt, triggerType, triggerID, creatorUserID string, gh *ghclient.Client, model string) (string, error) {
+	steps, err := s.chains.ListStepsSystem(context.Background(), runmode.LocalDefaultOrg, chainPrompt.ID)
 	if err != nil {
 		return "", fmt.Errorf("load chain steps: %w", err)
 	}
@@ -129,7 +129,7 @@ func (s *Spawner) delegateChain(task domain.Task, chainPrompt *domain.Prompt, tr
 		toast.Info(s.wsHub, fmt.Sprintf("%s: %s (%s)",
 			verb, truncateToastMsg(chainPrompt.Name, 60), shortRunID(chainRunID)))
 
-		s.runChain(ctx, chainRunID, task, chainPrompt, steps, cfg, startTime, model, triggerType)
+		s.runChain(ctx, chainRunID, task, chainPrompt, steps, cfg, startTime, model, triggerType, creatorUserID)
 	}()
 
 	return chainRunID, nil
@@ -156,28 +156,29 @@ func (s *Spawner) runChain(
 	startTime time.Time,
 	model string,
 	triggerType string,
+	creatorUserID string,
 ) {
 	if len(steps) == 0 {
-		s.terminateChain(chainRunID, task.ID, triggerType, startTime, cfg, domain.ChainRunStatusFailed,
+		s.terminateChain(chainRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.ChainRunStatusFailed,
 			"chain has no steps", nil, false)
 		return
 	}
 
 	for i, step := range steps {
 		if ctx.Err() != nil {
-			s.terminateChain(chainRunID, task.ID, triggerType, startTime, cfg, domain.ChainRunStatusCancelled,
+			s.terminateChain(chainRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.ChainRunStatusCancelled,
 				"cancelled", &step.StepIndex, false)
 			return
 		}
 
-		stepPrompt, err := s.prompts.Get(ctx, runmode.LocalDefaultOrg, step.StepPromptID)
+		stepPrompt, err := s.prompts.GetSystem(ctx, runmode.LocalDefaultOrg, step.StepPromptID)
 		if err != nil || stepPrompt == nil {
-			s.terminateChain(chainRunID, task.ID, triggerType, startTime, cfg, domain.ChainRunStatusFailed,
+			s.terminateChain(chainRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.ChainRunStatusFailed,
 				fmt.Sprintf("step %d prompt fetch failed", i), &step.StepIndex, false)
 			return
 		}
 		if stepPrompt.Kind == domain.PromptKindChain {
-			s.terminateChain(chainRunID, task.ID, triggerType, startTime, cfg, domain.ChainRunStatusAborted,
+			s.terminateChain(chainRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.ChainRunStatusAborted,
 				"nested_chain_step", &step.StepIndex, false)
 			return
 		}
@@ -189,7 +190,7 @@ func (s *Spawner) runChain(
 		}
 		slug := skills.SlugForChainStep(i, stepPrompt.Name)
 		if err := skills.MaterializeStepSkill(cfg.wtPath, slug, stepPrompt, step.Brief); err != nil {
-			s.terminateChain(chainRunID, task.ID, triggerType, startTime, cfg, domain.ChainRunStatusFailed,
+			s.terminateChain(chainRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.ChainRunStatusFailed,
 				fmt.Sprintf("materialize step %d skill: %s", i, err.Error()), &step.StepIndex, false)
 			return
 		}
@@ -199,6 +200,12 @@ func (s *Spawner) runChain(
 		// + chain_step_index thread it back to the chain instance.
 		stepRunID := uuid.New().String()
 		stepIdxCopy := i
+		// Step runs inherit the chain's creator: manual chain steps
+		// attribute to the user who initiated the chain (not the org
+		// owner the createManual COALESCE would otherwise fall back to);
+		// event-triggered chain steps stay creator-less (the
+		// trigger_type='event' + creator_user_id IS NULL CHECK is what
+		// the createEventTriggered routing satisfies).
 		if err := s.agentRuns.Create(context.Background(), runmode.LocalDefaultOrg, domain.AgentRun{
 			ID:             stepRunID,
 			TaskID:         task.ID,
@@ -206,17 +213,26 @@ func (s *Spawner) runChain(
 			Status:         "initializing",
 			Model:          model,
 			TriggerType:    triggerType,
+			CreatorUserID:  creatorUserID,
 			ChainRunID:     chainRunID,
 			ChainStepIndex: &stepIdxCopy,
 			WorktreePath:   cfg.wtPath,
 		}); err != nil {
-			s.terminateChain(chainRunID, task.ID, triggerType, startTime, cfg, domain.ChainRunStatusFailed,
+			s.terminateChain(chainRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.ChainRunStatusFailed,
 				fmt.Sprintf("create step %d run: %s", i, err.Error()), &step.StepIndex, false)
 			return
 		}
 		s.broadcastRunUpdate(stepRunID, "initializing")
-		if err := s.prompts.IncrementUsage(ctx, runmode.LocalDefaultOrg, stepPrompt.ID); err != nil {
-			log.Printf("[chain] warning: failed to increment usage for step prompt %s: %v", stepPrompt.ID, err)
+		var incErr error
+		if triggerType == "manual" {
+			incErr = s.tx.SyntheticClaimsWithTx(ctx, runmode.LocalDefaultOrg, creatorUserID, func(ts db.TxStores) error {
+				return ts.Prompts.IncrementUsage(ctx, runmode.LocalDefaultOrg, stepPrompt.ID)
+			})
+		} else {
+			incErr = s.prompts.IncrementUsageSystem(ctx, runmode.LocalDefaultOrg, stepPrompt.ID)
+		}
+		if incErr != nil {
+			log.Printf("[chain] warning: failed to increment usage for step prompt %s: %v", stepPrompt.ID, incErr)
 		}
 
 		// Per-step cancel handle so Cancel(stepRunID) cancels just the
@@ -235,7 +251,7 @@ func (s *Spawner) runChain(
 
 		var nextStepName string
 		if i+1 < len(steps) {
-			if np, err := s.prompts.Get(ctx, runmode.LocalDefaultOrg, steps[i+1].StepPromptID); err == nil && np != nil {
+			if np, err := s.prompts.GetSystem(ctx, runmode.LocalDefaultOrg, steps[i+1].StepPromptID); err == nil && np != nil {
 				nextStepName = np.Name
 			}
 		}
@@ -244,7 +260,7 @@ func (s *Spawner) runChain(
 		toast.Info(s.wsHub, fmt.Sprintf("Chain step %d/%d: %s (%s)",
 			i+1, len(steps), truncateToastMsg(stepPrompt.Name, 60), shortRunID(stepRunID)))
 
-		s.runAgent(stepCtx, stepRunID, task, mission, stepCfg, time.Now(), model, triggerType)
+		s.runAgent(stepCtx, stepRunID, task, mission, stepCfg, time.Now(), model, triggerType, creatorUserID)
 
 		// Clear the cancel handle now that the step has returned.
 		s.mu.Lock()
@@ -255,9 +271,9 @@ func (s *Spawner) runChain(
 		// Re-read the run row to learn its terminal status. runAgent's
 		// return is unconditional — completion / failure / cancellation
 		// / pending_approval / yield all come back through here.
-		stepRun, err := s.agentRuns.Get(context.Background(), runmode.LocalDefaultOrg, stepRunID)
+		stepRun, err := s.agentRuns.GetSystem(context.Background(), runmode.LocalDefaultOrg, stepRunID)
 		if err != nil || stepRun == nil {
-			s.terminateChain(chainRunID, task.ID, triggerType, startTime, cfg, domain.ChainRunStatusFailed,
+			s.terminateChain(chainRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.ChainRunStatusFailed,
 				fmt.Sprintf("read step %d run after agent: %v", i, err), &step.StepIndex, false)
 			return
 		}
@@ -272,12 +288,12 @@ func (s *Spawner) runChain(
 		}
 
 		if stepRun.Status == "cancelled" {
-			s.terminateChain(chainRunID, task.ID, triggerType, startTime, cfg, domain.ChainRunStatusCancelled,
+			s.terminateChain(chainRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.ChainRunStatusCancelled,
 				"step cancelled", &step.StepIndex, false)
 			return
 		}
 		if stepRun.Status == "failed" || stepRun.Status == "task_unsolvable" {
-			s.terminateChain(chainRunID, task.ID, triggerType, startTime, cfg, domain.ChainRunStatusFailed,
+			s.terminateChain(chainRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.ChainRunStatusFailed,
 				"step "+stepRun.Status, &step.StepIndex, false)
 			return
 		}
@@ -286,12 +302,12 @@ func (s *Spawner) runChain(
 			// is the most likely candidate) ends the chain in failed
 			// state. taken_over runs are owned by the user from here on,
 			// so the chain can't sensibly continue.
-			s.terminateChain(chainRunID, task.ID, triggerType, startTime, cfg, domain.ChainRunStatusFailed,
+			s.terminateChain(chainRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.ChainRunStatusFailed,
 				"step ended with status "+stepRun.Status, &step.StepIndex, false)
 			return
 		}
 
-		verdict, err := s.chains.GetLatestVerdict(ctx, runmode.LocalDefaultOrg, stepRunID)
+		verdict, err := s.chains.GetLatestVerdictSystem(ctx, runmode.LocalDefaultOrg, stepRunID)
 		if err != nil {
 			log.Printf("[chain] run %s step %d: read verdict: %v", chainRunID, i, err)
 		}
@@ -304,11 +320,20 @@ func (s *Spawner) runChain(
 				Synthetic: true,
 			}
 			if payload, err := json.Marshal(synthetic); err == nil {
-				if insertErr := s.chains.InsertVerdict(ctx, runmode.LocalDefaultOrg, stepRunID, string(payload)); insertErr != nil {
+				payloadStr := string(payload)
+				var insertErr error
+				if triggerType == "manual" {
+					insertErr = s.tx.SyntheticClaimsWithTx(ctx, runmode.LocalDefaultOrg, creatorUserID, func(ts db.TxStores) error {
+						return ts.Chains.InsertVerdict(ctx, runmode.LocalDefaultOrg, stepRunID, payloadStr)
+					})
+				} else {
+					insertErr = s.chains.InsertVerdictSystem(ctx, runmode.LocalDefaultOrg, stepRunID, payloadStr)
+				}
+				if insertErr != nil {
 					log.Printf("[chain] run %s step %d: insert synthetic verdict artifact: %v", chainRunID, i, insertErr)
 				}
 			}
-			s.terminateChain(chainRunID, task.ID, triggerType, startTime, cfg, domain.ChainRunStatusAborted,
+			s.terminateChain(chainRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.ChainRunStatusAborted,
 				"no-verdict", &step.StepIndex, false)
 			return
 		}
@@ -321,7 +346,7 @@ func (s *Spawner) runChain(
 			if reason == "" {
 				reason = "step recorded --final"
 			}
-			s.terminateChain(chainRunID, task.ID, triggerType, startTime, cfg, domain.ChainRunStatusCompleted,
+			s.terminateChain(chainRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.ChainRunStatusCompleted,
 				reason, &step.StepIndex, false)
 			return
 		case domain.ChainVerdictAbort:
@@ -329,19 +354,19 @@ func (s *Spawner) runChain(
 			if reason == "" {
 				reason = "step recorded --abort"
 			}
-			s.terminateChain(chainRunID, task.ID, triggerType, startTime, cfg, domain.ChainRunStatusAborted,
+			s.terminateChain(chainRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.ChainRunStatusAborted,
 				reason, &step.StepIndex, false)
 			return
 		case domain.ChainVerdictAdvance:
 		default:
 			// Unknown outcome — treat as abort.
-			s.terminateChain(chainRunID, task.ID, triggerType, startTime, cfg, domain.ChainRunStatusAborted,
+			s.terminateChain(chainRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.ChainRunStatusAborted,
 				"unknown verdict outcome: "+string(verdict.Outcome), &step.StepIndex, false)
 			return
 		}
 	}
 
-	s.terminateChain(chainRunID, task.ID, triggerType, startTime, cfg, domain.ChainRunStatusCompleted,
+	s.terminateChain(chainRunID, task.ID, triggerType, creatorUserID, startTime, cfg, domain.ChainRunStatusCompleted,
 		"", nil, false)
 }
 
@@ -351,8 +376,13 @@ func (s *Spawner) runChain(
 // would" (status=completed) from "stopped early — leave the task open
 // for human review" (any other terminal). skipCleanup short-circuits
 // when the worktree itself is already gone (worktree_lost path).
+//
+// triggerType + creatorUserID route the terminal writes. Manual chains
+// (and user-initiated CancelChain / Resume* that pass "manual" + the
+// requesting user's ID) write under synthetic claims; event-triggered
+// chains write through the admin pool.
 func (s *Spawner) terminateChain(
-	chainRunID, taskID, triggerType string,
+	chainRunID, taskID, triggerType, creatorUserID string,
 	startTime time.Time,
 	cfg runConfig,
 	status domain.ChainRunStatus,
@@ -360,15 +390,33 @@ func (s *Spawner) terminateChain(
 	abortedAtStep *int,
 	skipCleanup bool,
 ) {
-	if _, err := s.chains.MarkRunStatus(context.Background(), runmode.LocalDefaultOrg, chainRunID, status, abortReason, abortedAtStep); err != nil {
-		log.Printf("[chain] FATAL: mark chain_run %s status=%s: %v — skipping cleanup to keep chain row consistent", chainRunID, status, err)
+	bgCtx := context.Background()
+	var markErr error
+	if triggerType == "manual" {
+		markErr = s.tx.SyntheticClaimsWithTx(bgCtx, runmode.LocalDefaultOrg, creatorUserID, func(ts db.TxStores) error {
+			_, mErr := ts.Chains.MarkRunStatus(bgCtx, runmode.LocalDefaultOrg, chainRunID, status, abortReason, abortedAtStep)
+			return mErr
+		})
+	} else {
+		_, markErr = s.chains.MarkRunStatusSystem(bgCtx, runmode.LocalDefaultOrg, chainRunID, status, abortReason, abortedAtStep)
+	}
+	if markErr != nil {
+		log.Printf("[chain] FATAL: mark chain_run %s status=%s: %v — skipping cleanup to keep chain row consistent", chainRunID, status, markErr)
 		return
 	}
 
 	if status == domain.ChainRunStatusCompleted {
 		// Mirror single-run behavior: a clean chain finalization closes the task.
-		if err := s.tasks.Close(context.Background(), runmode.LocalDefaultOrg, taskID, "run_completed", ""); err != nil {
-			log.Printf("[chain] close task %s: %v", taskID, err)
+		var closeErr error
+		if triggerType == "manual" {
+			closeErr = s.tx.SyntheticClaimsWithTx(bgCtx, runmode.LocalDefaultOrg, creatorUserID, func(ts db.TxStores) error {
+				return ts.Tasks.Close(bgCtx, runmode.LocalDefaultOrg, taskID, "run_completed", "")
+			})
+		} else {
+			closeErr = s.tasks.CloseSystem(bgCtx, runmode.LocalDefaultOrg, taskID, "run_completed", "")
+		}
+		if closeErr != nil {
+			log.Printf("[chain] close task %s: %v", taskID, closeErr)
 		}
 	}
 	// Aborted / failed / cancelled chains intentionally do NOT mark
@@ -407,7 +455,7 @@ func (s *Spawner) runChainWorktreeCleanup(chainRunID string, cfg runConfig) {
 		// agent's TRIAGE_FACTORY_RUN_ID), not by the chain_run_id.
 		// Iterate every step run in the chain so we actually find and
 		// remove their reservations.
-		stepRuns, err := s.chains.RunsForChain(context.Background(), runmode.LocalDefaultOrg, chainRunID)
+		stepRuns, err := s.chains.RunsForChainSystem(context.Background(), runmode.LocalDefaultOrg, chainRunID)
 		if err != nil {
 			log.Printf("[chain] run %s: list step runs for cleanup: %v", chainRunID, err)
 		}
@@ -438,7 +486,7 @@ func (s *Spawner) runChainWorktreeCleanup(chainRunID string, cfg runConfig) {
 // taskEntityID resolves the entity_id for a task. Used to drain the
 // per-entity firing queue at chain terminal.
 func taskEntityID(tasks db.TaskStore, taskID string) string {
-	t, err := tasks.Get(context.Background(), runmode.LocalDefaultOrg, taskID)
+	t, err := tasks.GetSystem(context.Background(), runmode.LocalDefaultOrg, taskID)
 	if err != nil {
 		log.Printf("[chain] taskEntityID: failed to resolve entity for task %s: %v", taskID, err)
 		return ""
@@ -485,8 +533,15 @@ func buildChainStepWrapperPrompt(task domain.Task, step domain.ChainStep, stepPr
 // CancelChain cancels every step inside a chain run, marks the chain
 // row cancelled, and lets the active step's runAgent return naturally.
 // Safe to call when the chain is already terminal.
-func (s *Spawner) CancelChain(chainRunID string) error {
-	cr, err := s.chains.GetRun(context.Background(), runmode.LocalDefaultOrg, chainRunID)
+//
+// userID identifies the actor for audit. The cancel is always a
+// user-initiated action (user clicked Cancel), so writes route under
+// the user's synthetic claims regardless of the underlying chain's
+// original trigger_type. In local mode callers pass
+// runmode.LocalDefaultUserID; multi-mode handlers extract the user
+// from JWT claims.
+func (s *Spawner) CancelChain(chainRunID, userID string) error {
+	cr, err := s.chains.GetRunSystem(context.Background(), runmode.LocalDefaultOrg, chainRunID)
 	if err != nil {
 		return fmt.Errorf("load chain run: %w", err)
 	}
@@ -538,27 +593,53 @@ func (s *Spawner) CancelChain(chainRunID string) error {
 	// Paused chain: rebuild just enough cfg for terminateChain's worktree
 	// cleanup (mirrors ResumeChainAfterApproval — owner/repo/prNumber
 	// aren't persisted on chain_runs, so CleanupPRConfig is skipped).
-	task, err := s.tasks.Get(context.Background(), runmode.LocalDefaultOrg, cr.TaskID)
+	task, err := s.tasks.GetSystem(context.Background(), runmode.LocalDefaultOrg, cr.TaskID)
 	if err != nil || task == nil {
 		log.Printf("[chain] CancelChain: load task for paused chain_run %s: %v", chainRunID, err)
-		_, markErr := s.chains.MarkRunStatus(context.Background(), runmode.LocalDefaultOrg, chainRunID, domain.ChainRunStatusCancelled, "user_cancelled", nil)
+		// User-initiated cancel — write under the cancelling user's
+		// synthetic claims rather than the chain's original trigger
+		// identity. Audit shows "user X cancelled this chain".
+		var markErr error
+		_, markErr = s.markChainRunStatusAsUser(context.Background(), userID, chainRunID, domain.ChainRunStatusCancelled, "user_cancelled", nil)
 		return markErr
 	}
 	cfg := runConfig{wtPath: cr.WorktreePath}
 	if task.EntitySource == "github" {
 		cfg.hasWT = true
 	}
-	s.terminateChain(cr.ID, cr.TaskID, string(cr.TriggerType), cr.StartedAt, cfg,
+	// User-initiated cancel uses "manual" routing with the cancelling
+	// user's identity regardless of the chain's original trigger type.
+	s.terminateChain(cr.ID, cr.TaskID, "manual", userID, cr.StartedAt, cfg,
 		domain.ChainRunStatusCancelled, "user_cancelled", nil, false)
 	return nil
+}
+
+// markChainRunStatusAsUser writes a chain_run status transition under
+// the given user's synthetic claims. Used by user-initiated CancelChain
+// / Resume* paths that need to attribute the write to the requesting
+// user even though the chain's original trigger_type may have been
+// 'event'.
+func (s *Spawner) markChainRunStatusAsUser(ctx context.Context, userID, chainRunID string, status domain.ChainRunStatus, abortReason string, abortedAtStep *int) (bool, error) {
+	var changed bool
+	err := s.tx.SyntheticClaimsWithTx(ctx, runmode.LocalDefaultOrg, userID, func(ts db.TxStores) error {
+		c, mErr := ts.Chains.MarkRunStatus(ctx, runmode.LocalDefaultOrg, chainRunID, status, abortReason, abortedAtStep)
+		changed = c
+		return mErr
+	})
+	return changed, err
 }
 
 // ResumeChainAfterYield re-enters the orchestrator loop for the
 // remaining steps after a yield-resume completes successfully.
 // Currently not fully implemented: marks the chain aborted so it
 // doesn't silently stall in 'running'.
-func (s *Spawner) ResumeChainAfterYield(stepRunID string) {
-	cr, stepIdx, err := s.chains.GetRunForRun(context.Background(), runmode.LocalDefaultOrg, stepRunID)
+//
+// userID identifies the actor for audit (the user whose response
+// resumed the yielded run). Local mode passes
+// runmode.LocalDefaultUserID; multi-mode handlers extract it from
+// JWT claims.
+func (s *Spawner) ResumeChainAfterYield(stepRunID, userID string) {
+	cr, stepIdx, err := s.chains.GetRunForRunSystem(context.Background(), runmode.LocalDefaultOrg, stepRunID)
 	if err != nil || cr == nil {
 		return
 	}
@@ -566,18 +647,19 @@ func (s *Spawner) ResumeChainAfterYield(stepRunID string) {
 		return
 	}
 	log.Printf("[chain] yield-resume not yet implemented for chain_run %s step run %s; aborting chain", cr.ID, stepRunID)
-	task, err := s.tasks.Get(context.Background(), runmode.LocalDefaultOrg, cr.TaskID)
+	task, err := s.tasks.GetSystem(context.Background(), runmode.LocalDefaultOrg, cr.TaskID)
 	if err != nil || task == nil {
 		log.Printf("[chain] yield-resume: load task for chain_run %s: %v", cr.ID, err)
 		// Fall back to a bare MarkChainRunStatus without full cleanup.
-		_, _ = s.chains.MarkRunStatus(context.Background(), runmode.LocalDefaultOrg, cr.ID, domain.ChainRunStatusAborted, "yield_resume_not_implemented", stepIdx)
+		// User-initiated — attribute to the resuming user.
+		_, _ = s.markChainRunStatusAsUser(context.Background(), userID, cr.ID, domain.ChainRunStatusAborted, "yield_resume_not_implemented", stepIdx)
 		return
 	}
 	cfg := runConfig{wtPath: cr.WorktreePath}
 	if task.EntitySource == "github" {
 		cfg.hasWT = true
 	}
-	s.terminateChain(cr.ID, cr.TaskID, string(cr.TriggerType), cr.StartedAt, cfg,
+	s.terminateChain(cr.ID, cr.TaskID, "manual", userID, cr.StartedAt, cfg,
 		domain.ChainRunStatusAborted, "yield_resume_not_implemented", stepIdx, false)
 }
 
@@ -592,8 +674,12 @@ func (s *Spawner) ResumeChainAfterYield(stepRunID string) {
 // 'running' on the assumption that something raced or the agent
 // recorded the wrong verdict; a human can inspect chain_runs and
 // resolve manually rather than have us guess.
-func (s *Spawner) ResumeChainAfterApproval(stepRunID string) {
-	cr, stepIdx, err := s.chains.GetRunForRun(context.Background(), runmode.LocalDefaultOrg, stepRunID)
+//
+// userID identifies the approving user for audit. Local mode passes
+// runmode.LocalDefaultUserID; multi-mode handlers extract it from JWT
+// claims.
+func (s *Spawner) ResumeChainAfterApproval(stepRunID, userID string) {
+	cr, stepIdx, err := s.chains.GetRunForRunSystem(context.Background(), runmode.LocalDefaultOrg, stepRunID)
 	if err != nil || cr == nil {
 		return
 	}
@@ -601,7 +687,7 @@ func (s *Spawner) ResumeChainAfterApproval(stepRunID string) {
 		return
 	}
 
-	verdict, err := s.chains.GetLatestVerdict(context.Background(), runmode.LocalDefaultOrg, stepRunID)
+	verdict, err := s.chains.GetLatestVerdictSystem(context.Background(), runmode.LocalDefaultOrg, stepRunID)
 	if err != nil {
 		log.Printf("[chain] approval-resume run %s: read verdict: %v", stepRunID, err)
 		return
@@ -611,7 +697,7 @@ func (s *Spawner) ResumeChainAfterApproval(stepRunID string) {
 		return
 	}
 
-	task, err := s.tasks.Get(context.Background(), runmode.LocalDefaultOrg, cr.TaskID)
+	task, err := s.tasks.GetSystem(context.Background(), runmode.LocalDefaultOrg, cr.TaskID)
 	if err != nil || task == nil {
 		log.Printf("[chain] approval-resume chain_run %s: load task: %v", cr.ID, err)
 		return
@@ -633,7 +719,7 @@ func (s *Spawner) ResumeChainAfterApproval(stepRunID string) {
 	if reason == "" {
 		reason = "step recorded --final"
 	}
-	s.terminateChain(cr.ID, cr.TaskID, string(cr.TriggerType), cr.StartedAt, cfg,
+	s.terminateChain(cr.ID, cr.TaskID, "manual", userID, cr.StartedAt, cfg,
 		domain.ChainRunStatusCompleted, reason, stepIdx, false)
 }
 

@@ -105,6 +105,7 @@ func (s *Spawner) runMemoryGate(
 	runID, taskID, cwd string,
 	initial *agentproc.Result,
 	sessionID, model, repoEnv, extraAllowedTools string,
+	triggerType, creatorUserID string,
 ) *agentproc.Result {
 	if memoryFileExists(cwd, runID) {
 		return initial
@@ -129,7 +130,7 @@ func (s *Spawner) runMemoryGate(
 				"your completion JSON again.",
 			runID,
 		)
-		outcome, err := s.ResumeWithMessage(ctx, runID, sessionID, cwd, msg, resumeOpts)
+		outcome, err := s.ResumeWithMessage(ctx, runID, sessionID, cwd, msg, resumeOpts, triggerType, creatorUserID)
 		if err != nil {
 			log.Printf("[delegate] run %s: resume attempt %d failed: %v", runID, attempt, err)
 			// Give up on further retries — the caller will mark
@@ -207,7 +208,7 @@ func materializePriorMemories(taskMemory db.TaskMemoryStore, cwd, entityID strin
 // logged and treated as "not assigned" — the spawner degrades gracefully
 // rather than blocking the run on a non-essential context lookup.
 func lookupEntityProjectID(entities db.EntityStore, entityID string) *string {
-	entity, err := entities.Get(context.Background(), runmode.LocalDefaultOrgID, entityID)
+	entity, err := entities.GetSystem(context.Background(), runmode.LocalDefaultOrgID, entityID)
 	if err != nil {
 		log.Printf("[delegate] warning: failed to load entity %s for project lookup: %v", entityID, err)
 		return nil

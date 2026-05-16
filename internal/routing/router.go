@@ -11,6 +11,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/config"
 	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -29,8 +30,8 @@ type Scorer interface {
 // up a worktree, the agent subprocess, etc. Production wiring passes a
 // *delegate.Spawner.
 type Delegator interface {
-	Delegate(task domain.Task, promptID, triggerType, triggerID string) (string, error)
-	Cancel(runID string) error
+	Delegate(task domain.Task, opts delegate.DelegateOpts) (string, error)
+	Cancel(runID, userID string) error
 }
 
 // Router is the central eventbus subscriber that replaces the old auto-
@@ -611,7 +612,11 @@ func (r *Router) fireDelegate(task *domain.Task, trigger domain.EventHandler) (s
 		return "", fmt.Errorf("task %s disappeared before spawn", task.ID)
 	}
 
-	runID, err := r.spawner.Delegate(*fresh, trigger.PromptID, "event", trigger.ID)
+	runID, err := r.spawner.Delegate(*fresh, delegate.DelegateOpts{
+		ExplicitPromptID: trigger.PromptID,
+		TriggerType:      "event",
+		TriggerID:        trigger.ID,
+	})
 	if err != nil {
 		// Post-B+: nothing to revert status-wise (status stayed 'queued').
 		// stampAgentClaim hasn't run yet either — the caller only calls
@@ -690,7 +695,7 @@ func (r *Router) DrainEntity(entityID string) {
 				log.Printf("[router] mark firing %d fired (run %s) failed: %v — rolling back: cancelling run + reverting task to queued",
 					firing.ID, runID, err)
 				if r.spawner != nil {
-					if cerr := r.spawner.Cancel(runID); cerr != nil {
+					if cerr := r.spawner.Cancel(runID, ""); cerr != nil {
 						log.Printf("[router] cancel run %s after mark-fired failure: %v — run may already be terminal, drain still triggers from its defer",
 							runID, cerr)
 					}
@@ -1026,7 +1031,7 @@ func (r *Router) cancelActiveRunsForTask(taskID string) {
 		return
 	}
 	for _, id := range ids {
-		if err := r.spawner.Cancel(id); err != nil {
+		if err := r.spawner.Cancel(id, ""); err != nil {
 			log.Printf("[router] cancel run %s on close of task %s: %v", id, taskID, err)
 		}
 	}

@@ -43,14 +43,14 @@ type QueueDrainer interface {
 type Spawner struct {
 	database   *sql.DB
 	prompts    db.PromptStore
-	agents     db.AgentStore // SKY-261: resolves actor for run.actor_agent_id stamping
+	agents     db.AgentStore // resolves actor for run.actor_agent_id stamping
 	chains     db.ChainStore
-	tasks      db.TaskStore      // SKY-283: re-read tasks for run lifecycle handlers
-	agentRuns  db.AgentRunStore  // SKY-285: run lifecycle + transcript + yields
-	entities   db.EntityStore    // SKY-284: entity reads for project lookup + resume context
-	reviews    db.ReviewStore    // SKY-286: pending review cleanup on discard / cancel paths
-	pendingPRs db.PendingPRStore // SKY-287: pending PR lookup on processCompletion / cleanup paths
-	events     db.EventStore     // SKY-305: admin-pool GetMetadataSystem for post-run prompt building
+	tasks      db.TaskStore      // re-read tasks for run lifecycle handlers
+	agentRuns  db.AgentRunStore  // run lifecycle + transcript + yields
+	entities   db.EntityStore    // entity reads for project lookup + resume context
+	reviews    db.ReviewStore    // pending review cleanup on discard / cancel paths
+	pendingPRs db.PendingPRStore // pending PR lookup on processCompletion / cleanup paths
+	events     db.EventStore     // admin-pool GetMetadataSystem for post-run prompt building
 	// taskMemory routes the post-completion UpsertAgentMemorySystem
 	// and the run-start GetMemoriesForEntitySystem through the dual-
 	// pool store. Both fire inside the runAgent goroutine, which has
@@ -61,7 +61,15 @@ type Spawner struct {
 	// CLI; the defer iterates and removes them). Goroutine-internal
 	// callers, all routed through the admin-pool System variants.
 	runWorktrees db.RunWorktreeStore
-	wsHub        *websocket.Hub
+	// tx runs synthetic-claims write batches for manual runs (the
+	// run's creator_user_id is the synthetic claim subject, so RLS
+	// policies on the writes pass under tf_app). Event-triggered runs
+	// don't construct a tx — their writes go through `...System`
+	// admin-pool methods directly. Routing is inline at each call
+	// site: `if triggerType == "manual" { s.tx.SyntheticClaimsWithTx
+	// (..., creatorUserID, fn) } else { s.x.MethodSystem(...) }`.
+	tx    db.TxRunner
+	wsHub *websocket.Hub
 
 	mu                    sync.Mutex
 	ghClient              *ghclient.Client
@@ -76,7 +84,7 @@ type Spawner struct {
 	agentToolsCache string
 }
 
-func NewSpawner(database *sql.DB, prompts db.PromptStore, agents db.AgentStore, chains db.ChainStore, tasks db.TaskStore, agentRuns db.AgentRunStore, entities db.EntityStore, reviews db.ReviewStore, pendingPRs db.PendingPRStore, events db.EventStore, taskMemory db.TaskMemoryStore, runWorktrees db.RunWorktreeStore, ghClient *ghclient.Client, wsHub *websocket.Hub, model string) *Spawner {
+func NewSpawner(database *sql.DB, prompts db.PromptStore, agents db.AgentStore, chains db.ChainStore, tasks db.TaskStore, agentRuns db.AgentRunStore, entities db.EntityStore, reviews db.ReviewStore, pendingPRs db.PendingPRStore, events db.EventStore, taskMemory db.TaskMemoryStore, runWorktrees db.RunWorktreeStore, tx db.TxRunner, ghClient *ghclient.Client, wsHub *websocket.Hub, model string) *Spawner {
 	return &Spawner{
 		database:     database,
 		prompts:      prompts,
@@ -90,6 +98,7 @@ func NewSpawner(database *sql.DB, prompts db.PromptStore, agents db.AgentStore, 
 		events:       events,
 		taskMemory:   taskMemory,
 		runWorktrees: runWorktrees,
+		tx:           tx,
 		ghClient:     ghClient,
 		wsHub:        wsHub,
 		model:        model,

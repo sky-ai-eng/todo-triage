@@ -277,35 +277,70 @@ func getChainRun(ctx context.Context, q queryer, orgID, id string) (*domain.Chai
 }
 
 func (s *chainStore) GetRunForRun(ctx context.Context, orgID, runID string) (*domain.ChainRun, *int, error) {
+	return getRunForRun(ctx, s.app, s, orgID, runID)
+}
+
+func (s *chainStore) GetRunForRunSystem(ctx context.Context, orgID, runID string) (*domain.ChainRun, *int, error) {
+	return getRunForRunSystem(ctx, s.admin, s, orgID, runID)
+}
+
+func getRunForRun(ctx context.Context, q queryer, store *chainStore, orgID, runID string) (*domain.ChainRun, *int, error) {
 	if !isValidUUID(runID) {
 		return nil, nil, nil
 	}
+	chainRunID, stepIndex, err := readRunChainPointer(ctx, q, orgID, runID)
+	if err != nil || chainRunID == "" {
+		return nil, nil, err
+	}
+	cr, err := store.GetRun(ctx, orgID, chainRunID)
+	if err != nil || cr == nil {
+		return nil, nil, err
+	}
+	return cr, stepIndex, nil
+}
+
+func getRunForRunSystem(ctx context.Context, q queryer, store *chainStore, orgID, runID string) (*domain.ChainRun, *int, error) {
+	if !isValidUUID(runID) {
+		return nil, nil, nil
+	}
+	chainRunID, stepIndex, err := readRunChainPointer(ctx, q, orgID, runID)
+	if err != nil || chainRunID == "" {
+		return nil, nil, err
+	}
+	cr, err := store.GetRunSystem(ctx, orgID, chainRunID)
+	if err != nil || cr == nil {
+		return nil, nil, err
+	}
+	return cr, stepIndex, nil
+}
+
+// readRunChainPointer reads runs.chain_run_id + chain_step_index for a
+// single run. Factored so GetRunForRun + GetRunForRunSystem can share
+// the pre-join lookup with the appropriate pool while delegating the
+// chain-row read to GetRun / GetRunSystem.
+func readRunChainPointer(ctx context.Context, q queryer, orgID, runID string) (string, *int, error) {
 	var (
 		chainRunID sql.NullString
 		stepIndex  sql.NullInt64
 	)
-	err := s.app.QueryRowContext(ctx,
+	err := q.QueryRowContext(ctx,
 		`SELECT chain_run_id, chain_step_index FROM runs WHERE org_id = $1 AND id = $2`,
 		orgID, runID).Scan(&chainRunID, &stepIndex)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil, nil
+		return "", nil, nil
 	}
 	if err != nil {
-		return nil, nil, err
+		return "", nil, err
 	}
 	if !chainRunID.Valid {
-		return nil, nil, nil
-	}
-	cr, err := s.GetRun(ctx, orgID, chainRunID.String)
-	if err != nil || cr == nil {
-		return nil, nil, err
+		return "", nil, nil
 	}
 	var idx *int
 	if stepIndex.Valid {
 		v := int(stepIndex.Int64)
 		idx = &v
 	}
-	return cr, idx, nil
+	return chainRunID.String, idx, nil
 }
 
 func (s *chainStore) MarkRunStatus(ctx context.Context, orgID, id string, status domain.ChainRunStatus, abortReason string, abortedAtStep *int) (bool, error) {

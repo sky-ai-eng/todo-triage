@@ -41,7 +41,7 @@ func (s *Spawner) resolvePrompt(task domain.Task, explicitPromptID string) (*dom
 		return nil, fmt.Errorf("%w — select one from the prompt picker", ErrPromptUnspecified)
 	}
 
-	p, err := s.prompts.Get(context.Background(), runmode.LocalDefaultOrg, explicitPromptID)
+	p, err := s.prompts.GetSystem(context.Background(), runmode.LocalDefaultOrg, explicitPromptID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load prompt %s: %w", explicitPromptID, err)
 	}

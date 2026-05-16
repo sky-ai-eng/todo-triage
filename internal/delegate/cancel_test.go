@@ -51,11 +51,11 @@ func TestCancel_AwaitingInputAutoRun_DrainsQueue(t *testing.T) {
 		t.Fatalf("park run: %v", err)
 	}
 
-	s := NewSpawner(database, testPromptStore(database), nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, sqlitestore.New(database).Reviews, sqlitestore.New(database).PendingPRs, sqlitestore.New(database).Events, sqlitestore.New(database).TaskMemory, sqlitestore.New(database).RunWorktrees, nil, nil, "claude-sonnet-4-6")
+	s := NewSpawner(database, testPromptStore(database), nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, sqlitestore.New(database).Reviews, sqlitestore.New(database).PendingPRs, sqlitestore.New(database).Events, sqlitestore.New(database).TaskMemory, sqlitestore.New(database).RunWorktrees, sqlitestore.New(database).Tx, nil, nil, "claude-sonnet-4-6")
 	drainer := newFakeDrainer()
 	s.SetQueueDrainer(drainer)
 
-	if err := s.Cancel("r1"); err != nil {
+	if err := s.Cancel("r1", ""); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
 
@@ -89,11 +89,11 @@ func TestCancel_AwaitingInputManualRun_NoDrain(t *testing.T) {
 		t.Fatalf("park run: %v", err)
 	}
 
-	s := NewSpawner(database, testPromptStore(database), nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, sqlitestore.New(database).Reviews, sqlitestore.New(database).PendingPRs, sqlitestore.New(database).Events, sqlitestore.New(database).TaskMemory, sqlitestore.New(database).RunWorktrees, nil, nil, "claude-sonnet-4-6")
+	s := NewSpawner(database, testPromptStore(database), nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, sqlitestore.New(database).Reviews, sqlitestore.New(database).PendingPRs, sqlitestore.New(database).Events, sqlitestore.New(database).TaskMemory, sqlitestore.New(database).RunWorktrees, sqlitestore.New(database).Tx, nil, nil, "claude-sonnet-4-6")
 	drainer := newFakeDrainer()
 	s.SetQueueDrainer(drainer)
 
-	if err := s.Cancel("r-manual"); err != nil {
+	if err := s.Cancel("r-manual", ""); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
 
@@ -122,11 +122,11 @@ func TestCancel_AlreadyTerminal_NoDrain(t *testing.T) {
 		t.Fatalf("complete run: %v", err)
 	}
 
-	s := NewSpawner(database, testPromptStore(database), nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, sqlitestore.New(database).Reviews, sqlitestore.New(database).PendingPRs, sqlitestore.New(database).Events, sqlitestore.New(database).TaskMemory, sqlitestore.New(database).RunWorktrees, nil, nil, "claude-sonnet-4-6")
+	s := NewSpawner(database, testPromptStore(database), nil, nil, testTaskStore(database), sqlitestore.New(database).AgentRuns, sqlitestore.New(database).Entities, sqlitestore.New(database).Reviews, sqlitestore.New(database).PendingPRs, sqlitestore.New(database).Events, sqlitestore.New(database).TaskMemory, sqlitestore.New(database).RunWorktrees, sqlitestore.New(database).Tx, nil, nil, "claude-sonnet-4-6")
 	drainer := newFakeDrainer()
 	s.SetQueueDrainer(drainer)
 
-	if err := s.Cancel("r-done"); err == nil {
+	if err := s.Cancel("r-done", ""); err == nil {
 		t.Fatal("expected 'no active run' error on terminal row")
 	}
 

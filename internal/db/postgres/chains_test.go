@@ -178,6 +178,22 @@ func TestChainStore_Postgres_RunLifecycle(t *testing.T) {
 	if idx == nil || *idx != 0 {
 		t.Errorf("GetRunForRun stepIdx = %v, want 0", idx)
 	}
+
+	// GetRunForRunSystem mirrors GetRunForRun for goroutine-internal
+	// callers (chain orchestrator cleanup, post-yield resume) that
+	// have no JWT-claims context. The contract is identical — both
+	// arms read the same row — so the assertion is just that the
+	// admin-pool variant returns the same values.
+	cr3, idx3, err := chains.GetRunForRunSystem(ctx, orgID, stepRunID)
+	if err != nil {
+		t.Fatalf("GetRunForRunSystem: %v", err)
+	}
+	if cr3 == nil || cr3.ID != chainRunID {
+		t.Errorf("GetRunForRunSystem chain = %+v, want id=%s", cr3, chainRunID)
+	}
+	if idx3 == nil || *idx3 != 0 {
+		t.Errorf("GetRunForRunSystem stepIdx = %v, want 0", idx3)
+	}
 }
 
 // TestChainStore_Postgres_CreateRun_UnderAppPoolRLS pins the

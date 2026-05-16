@@ -199,6 +199,14 @@ func (s *chainStore) GetRunForRun(ctx context.Context, orgID, runID string) (*do
 	return cr, idx, nil
 }
 
+// GetRunForRunSystem is a passthrough to GetRunForRun on SQLite — one
+// connection, no dual-pool routing. The method exists for signature
+// parity with the Postgres impl so spawner / chain orchestrator code
+// targets the System variant uniformly.
+func (s *chainStore) GetRunForRunSystem(ctx context.Context, orgID, runID string) (*domain.ChainRun, *int, error) {
+	return s.GetRunForRun(ctx, orgID, runID)
+}
+
 func (s *chainStore) MarkRunStatus(ctx context.Context, orgID, id string, status domain.ChainRunStatus, abortReason string, abortedAtStep *int) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
