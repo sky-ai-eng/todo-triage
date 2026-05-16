@@ -2,6 +2,8 @@ package dbtest
 
 import (
 	"context"
+	"encoding/json"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -9,6 +11,30 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
+
+// jsonEqual compares two JSON strings for semantic equality.
+// Postgres stores metadata_json as JSONB and re-serializes it with
+// canonical whitespace on read (`{"k": "v"}` instead of the
+// caller-supplied `{"k":"v"}`); SQLite returns the bytes verbatim.
+// The store contract is "metadata_json round-trips as JSON," not
+// "byte-identical." Use this for every metadata assertion in the
+// conformance suite so both backends pass the same checks.
+func jsonEqual(t *testing.T, got, want string) bool {
+	t.Helper()
+	if got == want {
+		return true
+	}
+	var gotV, wantV any
+	if err := json.Unmarshal([]byte(got), &gotV); err != nil {
+		t.Errorf("json.Unmarshal got=%q: %v", got, err)
+		return false
+	}
+	if err := json.Unmarshal([]byte(want), &wantV); err != nil {
+		t.Errorf("json.Unmarshal want=%q: %v", want, err)
+		return false
+	}
+	return reflect.DeepEqual(gotV, wantV)
+}
 
 // EventStoreFactory is what a per-backend test file hands to
 // RunEventStoreConformance. Returns:
@@ -71,8 +97,8 @@ func RunEventStoreConformance(t *testing.T, mk EventStoreFactory) {
 		if latest.ID != evt.ID {
 			t.Errorf("Latest.ID = %q, want %q", latest.ID, evt.ID)
 		}
-		if latest.MetadataJSON != evt.MetadataJSON {
-			t.Errorf("Latest.MetadataJSON = %q, want %q", latest.MetadataJSON, evt.MetadataJSON)
+		if !jsonEqual(t, latest.MetadataJSON, evt.MetadataJSON) {
+			t.Errorf("Latest.MetadataJSON = %q, want JSON-equivalent to %q", latest.MetadataJSON, evt.MetadataJSON)
 		}
 		if latest.EntityID == nil || *latest.EntityID != entityID {
 			t.Errorf("Latest.EntityID = %v, want %q", latest.EntityID, entityID)
@@ -301,8 +327,8 @@ func RunEventStoreConformance(t *testing.T, mk EventStoreFactory) {
 		if err != nil {
 			t.Fatalf("GetMetadataSystem: %v", err)
 		}
-		if got != want {
-			t.Errorf("GetMetadataSystem = %q, want %q", got, want)
+		if !jsonEqual(t, got, want) {
+			t.Errorf("GetMetadataSystem = %q, want JSON-equivalent to %q", got, want)
 		}
 	})
 
