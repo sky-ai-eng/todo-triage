@@ -184,7 +184,7 @@ func materializeWorkspace(database *db.DB, runID, ownerRepoArg string, deps addD
 	// so no agent process invokes workspace add for a row whose dir was
 	// wiped post-crash. Genuinely stale rows
 	// outlive only their original run and are unreachable.
-	existing, err := db.GetRunWorktreeByRepo(database.Conn, runID, repoID)
+	existing, err := stores.RunWorktrees.GetByRepo(context.Background(), runmode.LocalDefaultOrg, runID, repoID)
 	if err != nil {
 		return "", fmt.Errorf("workspace add: lookup existing worktree: %w", err)
 	}
@@ -206,7 +206,7 @@ func materializeWorkspace(database *db.DB, runID, ownerRepoArg string, deps addD
 			// completed worktree. Drop and fall through to re-reserve.
 			log.Printf("workspace add: dropping stale reservation for run %s repo %s (path %s missing, row age %s exceeds threshold %s)",
 				runID, repoID, existing.Path, age, staleReservationAge)
-			if delErr := db.DeleteRunWorktree(database.Conn, runID, repoID); delErr != nil {
+			if delErr := stores.RunWorktrees.DeleteByRepo(context.Background(), runmode.LocalDefaultOrg, runID, repoID); delErr != nil {
 				return "", fmt.Errorf("workspace add: delete stale reservation: %w", delErr)
 			}
 		default:
@@ -240,7 +240,7 @@ func materializeWorkspace(database *db.DB, runID, ownerRepoArg string, deps addD
 
 	// Reserve. Two concurrent processes that both reach this point
 	// race at the PK; the loser short-circuits before touching git.
-	inserted, winningPath, err := db.InsertRunWorktree(database.Conn, domain.RunWorktree{
+	inserted, winningPath, err := stores.RunWorktrees.Insert(context.Background(), runmode.LocalDefaultOrg, domain.RunWorktree{
 		RunID:         runID,
 		RepoID:        repoID,
 		Path:          wtPath,
@@ -271,7 +271,7 @@ func materializeWorkspace(database *db.DB, runID, ownerRepoArg string, deps addD
 		// Release the reservation so the next attempt can retry.
 		// Delete failures are logged but don't shadow the create error
 		// the caller actually needs.
-		if delErr := db.DeleteRunWorktree(database.Conn, runID, repoID); delErr != nil {
+		if delErr := stores.RunWorktrees.DeleteByRepo(context.Background(), runmode.LocalDefaultOrg, runID, repoID); delErr != nil {
 			log.Printf("workspace add: release reservation after create failure: %v", delErr)
 		}
 		return "", fmt.Errorf("workspace add: create worktree: %w", err)

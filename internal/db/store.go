@@ -151,6 +151,15 @@ type Stores struct {
 	// start materializer, both without a JWT-claims context).
 	TaskMemory TaskMemoryStore
 
+	// RunWorktrees owns the run_worktrees table — one row per
+	// (run_id, repo_id) lazy worktree reservation a Jira-style run
+	// accumulates as the agent materializes repos via `workspace
+	// add`. Holds both pools: app for the cmd/exec workspace CLI
+	// (its synthetic-claims wrap is owned by a separate cmd/exec
+	// auth pass) and admin for the spawner's runAgent + chain
+	// orchestrator cleanup defers (no JWT-claims context).
+	RunWorktrees RunWorktreeStore
+
 	// Tx is the transaction runner — handlers that need atomic
 	// multi-store writes call Tx.WithTx and receive a TxStores with
 	// every field tx-bound. Postgres impl also sets the JWT claims
@@ -185,6 +194,7 @@ type TxStores struct {
 	Projects       ProjectStore
 	Events         EventStore
 	TaskMemory     TaskMemoryStore
+	RunWorktrees   RunWorktreeStore
 }
 
 // TxRunner runs fn inside a single database transaction. Postgres

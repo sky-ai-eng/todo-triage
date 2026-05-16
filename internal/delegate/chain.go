@@ -2,7 +2,6 @@ package delegate
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -415,7 +414,7 @@ func (s *Spawner) runChainWorktreeCleanup(chainRunID string, cfg runConfig) {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		for _, sr := range stepRuns {
-			rows, err := db.GetRunWorktrees(s.database, sr.ID)
+			rows, err := s.runWorktrees.ListSystem(context.Background(), runmode.LocalDefaultOrg, sr.ID)
 			if err != nil {
 				log.Printf("[chain] run %s: list run_worktrees for step %s: %v", chainRunID, sr.ID, err)
 				// Log but continue to attempt DB row deletion below.
@@ -426,8 +425,7 @@ func (s *Spawner) runChainWorktreeCleanup(chainRunID string, cfg runConfig) {
 					log.Printf("[chain] run %s: remove worktree %s: %v", chainRunID, w.Path, err)
 					// Still attempt the DB row deletion even if the worktree remove failed.
 				}
-				if _, err := s.database.ExecContext(cleanupCtx,
-					"DELETE FROM run_worktrees WHERE run_id = ? AND path = ?", sr.ID, w.Path); err != nil {
+				if err := s.runWorktrees.DeleteByPathSystem(cleanupCtx, runmode.LocalDefaultOrg, sr.ID, w.Path); err != nil {
 					log.Printf("[chain] run %s: delete run_worktrees row for %s: %v", chainRunID, w.Path, err)
 				}
 			}
@@ -511,19 +509,13 @@ func (s *Spawner) CancelChain(chainRunID string) error {
 	// goroutine has already exited, so no later path will run cleanup.
 	// In that case we drive terminateChain ourselves below.
 	var anyActive bool
-	rows, err := s.database.Query(`SELECT id FROM runs WHERE chain_run_id = ? AND status NOT IN
-		('completed','failed','cancelled','task_unsolvable','pending_approval','taken_over','awaiting_input')`,
-		chainRunID)
+	stepIDs, err := s.chains.ActiveStepRunIDsSystem(context.Background(), runmode.LocalDefaultOrg, chainRunID)
 	if err == nil {
-		defer rows.Close()
 		s.mu.Lock()
-		for rows.Next() {
-			var runID string
-			if err := rows.Scan(&runID); err == nil {
-				if cancel, ok := s.cancels[runID]; ok {
-					cancel()
-					anyActive = true
-				}
+		for _, runID := range stepIDs {
+			if cancel, ok := s.cancels[runID]; ok {
+				cancel()
+				anyActive = true
 			}
 		}
 		// Also cancel the chain-level context registered at delegateChain.
@@ -653,28 +645,26 @@ func (s *Spawner) ResumeChainAfterApproval(stepRunID string) {
 // non-final ensures the pending-approval guard still engages even when
 // the DB is flaky, preventing unintended mid-chain external actions.
 func (s *Spawner) isNonFinalChainStep(runID string) bool {
-	var chainRunID sql.NullString
-	var stepIndex sql.NullInt64
-	if err := s.database.QueryRow(
-		`SELECT chain_run_id, chain_step_index FROM runs WHERE id = ?`, runID,
-	).Scan(&chainRunID, &stepIndex); err != nil || !chainRunID.Valid || !stepIndex.Valid {
-		if err != nil && err != sql.ErrNoRows {
-			log.Printf("[chain] isNonFinalChainStep: query run %s: %v", runID, err)
-			return true
-		}
+	run, err := s.agentRuns.GetSystem(context.Background(), runmode.LocalDefaultOrg, runID)
+	if err != nil {
+		log.Printf("[chain] isNonFinalChainStep: query run %s: %v", runID, err)
+		return true
+	}
+	if run == nil || run.ChainRunID == "" || run.ChainStepIndex == nil {
 		return false
 	}
-	var chainPromptID string
-	if err := s.database.QueryRow(
-		`SELECT chain_prompt_id FROM chain_runs WHERE id = ?`, chainRunID.String,
-	).Scan(&chainPromptID); err != nil {
-		log.Printf("[chain] isNonFinalChainStep: query chain_run %s for run %s: %v", chainRunID.String, runID, err)
-		return true
-	}
-	steps, err := s.chains.ListSteps(context.Background(), runmode.LocalDefaultOrg, chainPromptID)
+	chainRun, err := s.chains.GetRunSystem(context.Background(), runmode.LocalDefaultOrg, run.ChainRunID)
 	if err != nil {
-		log.Printf("[chain] isNonFinalChainStep: list steps for chain %s run %s: %v", chainRunID.String, runID, err)
+		log.Printf("[chain] isNonFinalChainStep: query chain_run %s for run %s: %v", run.ChainRunID, runID, err)
 		return true
 	}
-	return int(stepIndex.Int64)+1 < len(steps)
+	if chainRun == nil {
+		return false
+	}
+	steps, err := s.chains.ListStepsSystem(context.Background(), runmode.LocalDefaultOrg, chainRun.ChainPromptID)
+	if err != nil {
+		log.Printf("[chain] isNonFinalChainStep: list steps for chain %s run %s: %v", run.ChainRunID, runID, err)
+		return true
+	}
+	return *run.ChainStepIndex+1 < len(steps)
 }

@@ -90,6 +90,11 @@ func (s *Spawner) ResumeAfterYield(runID, agentMessage string) error {
 	cwd := run.WorktreePath
 	model := run.Model
 	taskCopy := *task
+	// trigger_type is non-null in the schema (the CHECK pairs it
+	// with creator_user_id nullability), so this fallback only
+	// defends against legacy / test fixture rows that left the
+	// column unset. Keeping it cheap and explicit rather than
+	// trusting the read.
 	triggerType := run.TriggerType
 	if triggerType == "" {
 		triggerType = "manual"

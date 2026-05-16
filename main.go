@@ -638,7 +638,7 @@ func main() {
 	}
 
 	// Create spawner once — credentials are hot-swapped in place
-	spawner := delegate.NewSpawner(database, stores.Prompts, stores.Agents, stores.Chains, stores.Tasks, stores.AgentRuns, stores.Entities, stores.Reviews, stores.PendingPRs, stores.Events, stores.TaskMemory, nil, wsHub, "")
+	spawner := delegate.NewSpawner(database, stores.Prompts, stores.Agents, stores.Chains, stores.Tasks, stores.AgentRuns, stores.Entities, stores.Reviews, stores.PendingPRs, stores.Events, stores.TaskMemory, stores.RunWorktrees, nil, wsHub, "")
 	srv.SetSpawner(spawner)
 
 	// SKY-220: wire the classifier wait into the spawner's setup path.

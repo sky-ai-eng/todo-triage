@@ -147,6 +147,14 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		if got.Status != "running" {
 			t.Errorf("status = %q, want running", got.Status)
 		}
+		// trigger_type is part of the standard Get projection. Pinning
+		// the round-trip here so a future projection edit can't
+		// silently drop the column — when the column was missing,
+		// every caller saw "" and the resume goroutine treated event
+		// runs as manual on yield/resume.
+		if got.TriggerType != "event" {
+			t.Errorf("TriggerType = %q, want event", got.TriggerType)
+		}
 	})
 
 	t.Run("Get_ReturnsNilForMissingID", func(t *testing.T) {
@@ -441,6 +449,46 @@ func RunAgentRunStoreConformance(t *testing.T, mk AgentRunStoreFactory) {
 		if runs[0].ID != second || runs[1].ID != first {
 			t.Errorf("order = [%s, %s], want [%s, %s] (newest first)",
 				runs[0].ID, runs[1].ID, second, first)
+		}
+	})
+
+	t.Run("ListForTask_PreservesTriggerType", func(t *testing.T) {
+		// Same projection bug that motivated the Get assertion above
+		// applies to ListForTask (shares pgRunColumns / sqliteRunColumns).
+		// Cover both branches: manual round-trip + event round-trip
+		// across a mixed list.
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		ent := seed.Entity(t, "list-trigger")
+		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+		manualID := uuid.New().String()
+		if err := store.Create(ctx, orgID, domain.AgentRun{
+			ID: manualID, TaskID: taskID, PromptID: agentRunTestPrompt(t),
+			Status: "running", Model: "m", TriggerType: "manual",
+		}); err != nil {
+			t.Fatalf("Create manual: %v", err)
+		}
+		eventID := uuid.New().String()
+		if err := store.Create(ctx, orgID, domain.AgentRun{
+			ID: eventID, TaskID: taskID, PromptID: agentRunTestPrompt(t),
+			Status: "running", Model: "m", TriggerType: "event",
+		}); err != nil {
+			t.Fatalf("Create event: %v", err)
+		}
+		runs, err := store.ListForTask(ctx, orgID, taskID)
+		if err != nil {
+			t.Fatalf("ListForTask: %v", err)
+		}
+		gotByID := make(map[string]string, len(runs))
+		for _, r := range runs {
+			gotByID[r.ID] = r.TriggerType
+		}
+		if gotByID[manualID] != "manual" {
+			t.Errorf("manual run TriggerType = %q, want manual", gotByID[manualID])
+		}
+		if gotByID[eventID] != "event" {
+			t.Errorf("event run TriggerType = %q, want event", gotByID[eventID])
 		}
 	})
 

@@ -172,5 +172,11 @@ func (s *Store) txStoresFromTx(tx *sql.Tx, pending *db.PendingEventHooks) db.TxS
 		// autonomously, same shape Events / AgentRuns use for their
 		// admin-pool halves.
 		TaskMemory: newTaskMemoryStore(tx, s.admin),
+		// RunWorktrees: app-side write routes through the tx; admin
+		// half stays pinned to s.admin so DeleteByPathSystem +
+		// ListSystem inside WithTx route outside the tx — those
+		// writes commit autonomously, same shape Events /
+		// AgentRuns / TaskMemory use for their admin-pool halves.
+		RunWorktrees: newRunWorktreeStore(tx, s.admin),
 	}
 }

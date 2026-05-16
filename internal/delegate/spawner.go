@@ -16,6 +16,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -55,7 +56,12 @@ type Spawner struct {
 	// pool store. Both fire inside the runAgent goroutine, which has
 	// no JWT-claims context, so they hit the admin pool in Postgres.
 	taskMemory db.TaskMemoryStore
-	wsHub      *websocket.Hub
+	// runWorktrees serves the spawner's per-run cleanup defers (Jira
+	// runs accumulate lazy worktrees via the agent's `workspace add`
+	// CLI; the defer iterates and removes them). Goroutine-internal
+	// callers, all routed through the admin-pool System variants.
+	runWorktrees db.RunWorktreeStore
+	wsHub        *websocket.Hub
 
 	mu                    sync.Mutex
 	ghClient              *ghclient.Client
@@ -70,25 +76,26 @@ type Spawner struct {
 	agentToolsCache string
 }
 
-func NewSpawner(database *sql.DB, prompts db.PromptStore, agents db.AgentStore, chains db.ChainStore, tasks db.TaskStore, agentRuns db.AgentRunStore, entities db.EntityStore, reviews db.ReviewStore, pendingPRs db.PendingPRStore, events db.EventStore, taskMemory db.TaskMemoryStore, ghClient *ghclient.Client, wsHub *websocket.Hub, model string) *Spawner {
+func NewSpawner(database *sql.DB, prompts db.PromptStore, agents db.AgentStore, chains db.ChainStore, tasks db.TaskStore, agentRuns db.AgentRunStore, entities db.EntityStore, reviews db.ReviewStore, pendingPRs db.PendingPRStore, events db.EventStore, taskMemory db.TaskMemoryStore, runWorktrees db.RunWorktreeStore, ghClient *ghclient.Client, wsHub *websocket.Hub, model string) *Spawner {
 	return &Spawner{
-		database:    database,
-		prompts:     prompts,
-		agents:      agents,
-		chains:      chains,
-		tasks:       tasks,
-		agentRuns:   agentRuns,
-		entities:    entities,
-		reviews:     reviews,
-		pendingPRs:  pendingPRs,
-		events:      events,
-		taskMemory:  taskMemory,
-		ghClient:    ghClient,
-		wsHub:       wsHub,
-		model:       model,
-		cancels:     make(map[string]context.CancelFunc),
-		takenOver:   make(map[string]bool),
-		chainRunIDs: make(map[string]bool),
+		database:     database,
+		prompts:      prompts,
+		agents:       agents,
+		chains:       chains,
+		tasks:        tasks,
+		agentRuns:    agentRuns,
+		entities:     entities,
+		reviews:      reviews,
+		pendingPRs:   pendingPRs,
+		events:       events,
+		taskMemory:   taskMemory,
+		runWorktrees: runWorktrees,
+		ghClient:     ghClient,
+		wsHub:        wsHub,
+		model:        model,
+		cancels:      make(map[string]context.CancelFunc),
+		takenOver:    make(map[string]bool),
+		chainRunIDs:  make(map[string]bool),
 	}
 }
 
@@ -180,7 +187,11 @@ func (s *Spawner) UpdateCredentials(ghClient *ghclient.Client, model string) {
 }
 
 func (s *Spawner) updateStatus(runID, status string) {
-	if _, err := s.database.Exec(`UPDATE runs SET status = ? WHERE id = ?`, status, runID); err != nil {
+	// Transient progress states (fetching, cloning, agent_starting,
+	// running) — no guard needed; the caller knows the prior row is
+	// non-terminal. Goroutine-internal, no JWT claims in scope, so
+	// admin pool.
+	if err := s.agentRuns.SetStatusSystem(context.Background(), runmode.LocalDefaultOrg, runID, status); err != nil {
 		log.Printf("[delegate] warning: failed to update status for run %s: %v", runID, err)
 	}
 	s.broadcastRunUpdate(runID, status)

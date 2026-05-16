@@ -74,6 +74,19 @@ type AgentRunStore interface {
 	// check.
 	SetSession(ctx context.Context, orgID, runID, sessionID string) error
 
+	// SetStatus writes runs.status without a guard. Used by the
+	// delegate spawner for transient progress transitions
+	// (fetching, cloning, agent_starting, running) and the
+	// completed → pending_approval flip the side-table gates
+	// trigger. Guarded transitions go through the Mark* methods.
+	SetStatus(ctx context.Context, orgID, runID, status string) error
+
+	// SetWorktreePath writes runs.worktree_path. Set as the
+	// spawner finishes worktree setup (GitHub PR clone, Jira
+	// run-root creation); takeover transitions use MarkTakenOver
+	// to set the path atomically with the status flip.
+	SetWorktreePath(ctx context.Context, orgID, runID, path string) error
+
 	// MarkTakenOver atomically flips runs.status to 'taken_over'
 	// AND (when claimUserID != "") flips the parent task's claim
 	// from the bot to the user in a single transaction. SKY-261
@@ -92,6 +105,23 @@ type AgentRunStore interface {
 	// stop_reason / summary, but only if the row hasn't already
 	// reached a terminal state. Used by takeover-rollback.
 	MarkCancelledIfActive(ctx context.Context, orgID, runID, stopReason, summary string) (bool, error)
+
+	// MarkFailedIfActive flips a run to 'failed' iff it hasn't
+	// already reached a terminal state. The delegate spawner's
+	// failRun path uses this so a racing terminal write
+	// (takeover, cancel, completion) isn't clobbered. Returns
+	// ok=false (no error) if the row is already terminal; the
+	// caller logs and continues — the racing path's terminal
+	// status stands.
+	MarkFailedIfActive(ctx context.Context, orgID, runID string) (bool, error)
+
+	// MarkPendingApprovalIfCompleted flips a 'completed' run to
+	// 'pending_approval' iff the row is currently 'completed'.
+	// The delegate spawner's processCompletion uses this when a
+	// pending review/PR side-table row gates the terminal status.
+	// Returns ok=false on a racing terminal write (cancel,
+	// takeover) so the racing path's status stands.
+	MarkPendingApprovalIfCompleted(ctx context.Context, orgID, runID string) (bool, error)
 
 	// MarkDiscarded marks a pending_approval run as cancelled
 	// when the user requeues / dismisses the task without
@@ -118,6 +148,13 @@ type AgentRunStore interface {
 	// run that hasn't reached a terminal state. Used as an
 	// in-flight gate for auto-delegation.
 	HasActiveForTask(ctx context.Context, orgID, taskID string) (bool, error)
+
+	// HasOtherActiveRunForTask returns true if the task has any
+	// non-terminal run other than excludeRunID. Used by the
+	// spawner's processCompletion to decide whether to flip the
+	// parent task to 'done' on terminal — if a newer run is in
+	// flight (user re-delegated mid-stream), the task stays open.
+	HasOtherActiveRunForTask(ctx context.Context, orgID, taskID, excludeRunID string) (bool, error)
 
 	// HasActiveAutoRunForEntity returns true if any task on the
 	// entity has a non-terminal run with trigger_type='event'.
@@ -230,8 +267,13 @@ type AgentRunStore interface {
 	MarkAwaitingInputSystem(ctx context.Context, orgID, runID string) (bool, error)
 	MarkResumingSystem(ctx context.Context, orgID, runID string) (bool, error)
 	SetSessionSystem(ctx context.Context, orgID, runID, sessionID string) error
+	SetStatusSystem(ctx context.Context, orgID, runID, status string) error
+	SetWorktreePathSystem(ctx context.Context, orgID, runID, path string) error
 	MarkReleasedSystem(ctx context.Context, orgID, runID string) (bool, error)
 	MarkCancelledIfActiveSystem(ctx context.Context, orgID, runID, stopReason, summary string) (bool, error)
+	MarkFailedIfActiveSystem(ctx context.Context, orgID, runID string) (bool, error)
+	MarkPendingApprovalIfCompletedSystem(ctx context.Context, orgID, runID string) (bool, error)
+	HasOtherActiveRunForTaskSystem(ctx context.Context, orgID, taskID, excludeRunID string) (bool, error)
 	InsertMessageSystem(ctx context.Context, orgID string, msg *domain.AgentMessage) (int64, error)
 	InsertYieldRequestSystem(ctx context.Context, orgID, runID string, req *domain.YieldRequest) (*domain.AgentMessage, error)
 }

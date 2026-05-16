@@ -82,6 +82,7 @@ func (s *Store) runTx(ctx context.Context, orgID, userID string, fn func(db.TxSt
 		Projects:       newProjectStore(tx, tx),
 		Events:         newTxEventStore(tx, tx, pending.Add, pending.Add),
 		TaskMemory:     newTaskMemoryStore(tx, tx),
+		RunWorktrees:   newRunWorktreeStore(tx, tx),
 	}
 	if err := fn(txStores); err != nil {
 		return err

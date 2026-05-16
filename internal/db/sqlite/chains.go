@@ -410,12 +410,45 @@ func (s *chainStore) LatestVerdictsForRuns(ctx context.Context, orgID string, ru
 // parity with Postgres. The chain orchestrator goroutine consumes
 // these from its detached-context lifecycle.
 
+func (s *chainStore) ActiveStepRunIDs(ctx context.Context, orgID, chainRunID string) ([]string, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT id FROM runs
+		WHERE chain_run_id = ?
+		  AND status NOT IN ('completed','failed','cancelled','task_unsolvable',
+		                     'pending_approval','taken_over','awaiting_input')
+	`, chainRunID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 func (s *chainStore) ListStepsSystem(ctx context.Context, orgID, chainPromptID string) ([]domain.ChainStep, error) {
 	return s.ListSteps(ctx, orgID, chainPromptID)
 }
 
 func (s *chainStore) MarkRunStatusSystem(ctx context.Context, orgID, id string, status domain.ChainRunStatus, abortReason string, abortedAtStep *int) (bool, error) {
 	return s.MarkRunStatus(ctx, orgID, id, status, abortReason, abortedAtStep)
+}
+
+func (s *chainStore) GetRunSystem(ctx context.Context, orgID, id string) (*domain.ChainRun, error) {
+	return s.GetRun(ctx, orgID, id)
+}
+
+func (s *chainStore) ActiveStepRunIDsSystem(ctx context.Context, orgID, chainRunID string) ([]string, error) {
+	return s.ActiveStepRunIDs(ctx, orgID, chainRunID)
 }
 
 func (s *chainStore) RunsForChainSystem(ctx context.Context, orgID, chainRunID string) ([]domain.AgentRun, error) {

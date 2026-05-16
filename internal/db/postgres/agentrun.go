@@ -245,6 +245,101 @@ func setRunSession(ctx context.Context, q queryer, orgID, runID, sessionID strin
 	return err
 }
 
+func (s *agentRunStore) SetStatus(ctx context.Context, orgID, runID, status string) error {
+	return setRunStatus(ctx, s.q, orgID, runID, status)
+}
+
+func (s *agentRunStore) SetStatusSystem(ctx context.Context, orgID, runID, status string) error {
+	return setRunStatus(ctx, s.admin, orgID, runID, status)
+}
+
+func setRunStatus(ctx context.Context, q queryer, orgID, runID, status string) error {
+	_, err := q.ExecContext(ctx, `
+		UPDATE runs SET status = $1 WHERE org_id = $2 AND id = $3
+	`, status, orgID, runID)
+	return err
+}
+
+func (s *agentRunStore) SetWorktreePath(ctx context.Context, orgID, runID, path string) error {
+	return setRunWorktreePath(ctx, s.q, orgID, runID, path)
+}
+
+func (s *agentRunStore) SetWorktreePathSystem(ctx context.Context, orgID, runID, path string) error {
+	return setRunWorktreePath(ctx, s.admin, orgID, runID, path)
+}
+
+func setRunWorktreePath(ctx context.Context, q queryer, orgID, runID, path string) error {
+	_, err := q.ExecContext(ctx, `
+		UPDATE runs SET worktree_path = $1 WHERE org_id = $2 AND id = $3
+	`, path, orgID, runID)
+	return err
+}
+
+func (s *agentRunStore) HasOtherActiveRunForTask(ctx context.Context, orgID, taskID, excludeRunID string) (bool, error) {
+	return hasOtherActiveRunForTask(ctx, s.q, orgID, taskID, excludeRunID)
+}
+
+func (s *agentRunStore) HasOtherActiveRunForTaskSystem(ctx context.Context, orgID, taskID, excludeRunID string) (bool, error) {
+	return hasOtherActiveRunForTask(ctx, s.admin, orgID, taskID, excludeRunID)
+}
+
+func (s *agentRunStore) MarkFailedIfActive(ctx context.Context, orgID, runID string) (bool, error) {
+	return markFailedIfActive(ctx, s.q, orgID, runID)
+}
+
+func (s *agentRunStore) MarkFailedIfActiveSystem(ctx context.Context, orgID, runID string) (bool, error) {
+	return markFailedIfActive(ctx, s.admin, orgID, runID)
+}
+
+func markFailedIfActive(ctx context.Context, q queryer, orgID, runID string) (bool, error) {
+	res, err := q.ExecContext(ctx, `
+		UPDATE runs SET status = 'failed', completed_at = COALESCE(completed_at, $1)
+		WHERE org_id = $2 AND id = $3
+		  AND status NOT IN ('completed','failed','cancelled','task_unsolvable',
+		                     'pending_approval','taken_over')
+	`, time.Now().UTC(), orgID, runID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+func (s *agentRunStore) MarkPendingApprovalIfCompleted(ctx context.Context, orgID, runID string) (bool, error) {
+	return markPendingApprovalIfCompleted(ctx, s.q, orgID, runID)
+}
+
+func (s *agentRunStore) MarkPendingApprovalIfCompletedSystem(ctx context.Context, orgID, runID string) (bool, error) {
+	return markPendingApprovalIfCompleted(ctx, s.admin, orgID, runID)
+}
+
+func markPendingApprovalIfCompleted(ctx context.Context, q queryer, orgID, runID string) (bool, error) {
+	res, err := q.ExecContext(ctx, `
+		UPDATE runs SET status = 'pending_approval'
+		WHERE org_id = $1 AND id = $2 AND status = 'completed'
+	`, orgID, runID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+func hasOtherActiveRunForTask(ctx context.Context, q queryer, orgID, taskID, excludeRunID string) (bool, error) {
+	var exists bool
+	err := q.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM runs
+			WHERE org_id = $1 AND task_id = $2 AND id != $3
+			  AND status NOT IN ('completed','failed','cancelled','task_unsolvable','taken_over','pending_approval')
+		)
+	`, orgID, taskID, excludeRunID).Scan(&exists)
+	if err != nil {
+		return false, err
+	}
+	return exists, nil
+}
+
 func (s *agentRunStore) MarkTakenOver(ctx context.Context, orgID, runID, takeoverPath, claimUserID string) (bool, error) {
 	rolled, err := s.runScoped(ctx, func(tx queryer) error {
 		now := time.Now()
@@ -400,6 +495,7 @@ const pgRunColumns = `
 	COALESCE(r.stop_reason, ''), COALESCE(r.worktree_path, ''),
 	COALESCE(r.result_summary, ''), COALESCE(r.session_id, ''),
 	COALESCE(r.actor_agent_id::text, ''),
+	COALESCE(r.trigger_type, ''),
 	r.chain_run_id, r.chain_step_index,
 	(NULLIF(BTRIM(rm.agent_content, E' \t\n\r'), '') IS NULL) AS memory_missing
 `
@@ -872,7 +968,7 @@ func scanAgentRun(row *sql.Row, r *domain.AgentRun) error {
 	if err := row.Scan(
 		&r.ID, &r.TaskID, &r.Status, &r.Model, &r.StartedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &r.StopReason, &r.WorktreePath,
-		&r.ResultSummary, &r.SessionID, &r.ActorAgentID, &chainRunID, &chainStep,
+		&r.ResultSummary, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &chainRunID, &chainStep,
 		&r.MemoryMissing,
 	); err != nil {
 		return err
@@ -890,7 +986,7 @@ func scanAgentRunRows(rows *sql.Rows, r *domain.AgentRun) error {
 	if err := rows.Scan(
 		&r.ID, &r.TaskID, &r.Status, &r.Model, &r.StartedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &r.StopReason, &r.WorktreePath,
-		&r.ResultSummary, &r.SessionID, &r.ActorAgentID, &chainRunID, &chainStep,
+		&r.ResultSummary, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &chainRunID, &chainStep,
 		&r.MemoryMissing,
 	); err != nil {
 		return err

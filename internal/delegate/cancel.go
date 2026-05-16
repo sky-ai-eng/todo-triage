@@ -46,20 +46,20 @@ func (s *Spawner) Cancel(runID string) error {
 	// delete can't strand us; drain only on a successful flip so we
 	// don't double-drain a row another path already terminated.
 	//
-	// Done as a direct query rather than via GetAgentRun + GetTask
-	// because GetAgentRun's SELECT doesn't include trigger_type
-	// (it's not part of the API/UI projection), and we need both
-	// fields atomically for the manual-run filter to work.
+	// Two reads instead of the previous joined query — agentRuns.Get
+	// returns trigger_type on the AgentRun struct, and tasks.Get gives
+	// us entity_id. Both miss the JWT-claims context (Cancel is a
+	// detached-context path so its writes survive request
+	// cancellation), so route through the System variants. Errors are
+	// swallowed: the flip below decides whether to surface that as
+	// "no active run" or proceed; drain just won't fire if entityID
+	// stays empty.
 	var triggerType, entityID string
-	if err := s.database.QueryRow(`
-		SELECT COALESCE(r.trigger_type, ''), COALESCE(t.entity_id, '')
-		FROM runs r LEFT JOIN tasks t ON t.id = r.task_id
-		WHERE r.id = ?
-	`, runID).Scan(&triggerType, &entityID); err != nil {
-		// Row missing or query error — let the flip below decide
-		// whether to surface that as "no active run" or proceed.
-		// Drain just won't fire if entityID stays empty.
-		_ = err
+	if run, _ := s.agentRuns.GetSystem(context.Background(), runmode.LocalDefaultOrg, runID); run != nil {
+		triggerType = run.TriggerType
+		if task, _ := s.tasks.GetSystem(context.Background(), runmode.LocalDefaultOrg, run.TaskID); task != nil {
+			entityID = task.EntityID
+		}
 	}
 
 	flipped, err := s.agentRuns.MarkCancelledIfActive(context.Background(), runmode.LocalDefaultOrg, runID, "user_cancelled", "Run cancelled by user")
@@ -111,7 +111,11 @@ func (s *Spawner) failRun(runID, taskID, triggerType, errMsg string) {
 	}
 	log.Printf("[delegate] run %s failed: %s", runID, errMsg)
 
-	if _, err := s.database.Exec(`UPDATE runs SET status = 'failed' WHERE id = ?`, runID); err != nil {
+	// Guarded — if a terminal racing path (takeover, cancel, natural
+	// completion) reached the row first, leave its status in place
+	// rather than clobbering. The wasTakenOver check above only
+	// covers takeover; cancel and completion can still race here.
+	if _, err := s.agentRuns.MarkFailedIfActiveSystem(context.Background(), runmode.LocalDefaultOrg, runID); err != nil {
 		log.Printf("[delegate] warning: failed to mark run %s as failed: %v", runID, err)
 	}
 

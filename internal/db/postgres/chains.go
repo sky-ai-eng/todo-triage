@@ -226,6 +226,14 @@ func (s *chainStore) createRunManual(ctx context.Context, orgID string, cr domai
 }
 
 func (s *chainStore) GetRun(ctx context.Context, orgID, id string) (*domain.ChainRun, error) {
+	return getChainRun(ctx, s.app, orgID, id)
+}
+
+func (s *chainStore) GetRunSystem(ctx context.Context, orgID, id string) (*domain.ChainRun, error) {
+	return getChainRun(ctx, s.admin, orgID, id)
+}
+
+func getChainRun(ctx context.Context, q queryer, orgID, id string) (*domain.ChainRun, error) {
 	// chain_runs.id is UUID-typed; non-UUID strings would error at the
 	// column type layer (22P02) before WHERE evaluates. Treat as
 	// not-found to match the SQLite TEXT-keyed semantics.
@@ -239,7 +247,7 @@ func (s *chainStore) GetRun(ctx context.Context, orgID, id string) (*domain.Chai
 		abortedAtStep sql.NullInt64
 		completedAt   sql.NullTime
 	)
-	err := s.app.QueryRowContext(ctx, `
+	err := q.QueryRowContext(ctx, `
 		SELECT id, chain_prompt_id, task_id, trigger_type, trigger_id, status,
 		       abort_reason, aborted_at_step, worktree_path, started_at, completed_at
 		FROM chain_runs WHERE org_id = $1 AND id = $2
@@ -344,6 +352,39 @@ func (s *chainStore) RunsForChain(ctx context.Context, orgID, chainRunID string)
 
 func (s *chainStore) RunsForChainSystem(ctx context.Context, orgID, chainRunID string) ([]domain.AgentRun, error) {
 	return runsForChain(ctx, s.admin, orgID, chainRunID)
+}
+
+func (s *chainStore) ActiveStepRunIDs(ctx context.Context, orgID, chainRunID string) ([]string, error) {
+	return activeStepRunIDs(ctx, s.app, orgID, chainRunID)
+}
+
+func (s *chainStore) ActiveStepRunIDsSystem(ctx context.Context, orgID, chainRunID string) ([]string, error) {
+	return activeStepRunIDs(ctx, s.admin, orgID, chainRunID)
+}
+
+func activeStepRunIDs(ctx context.Context, q queryer, orgID, chainRunID string) ([]string, error) {
+	if !isValidUUID(chainRunID) {
+		return nil, nil
+	}
+	rows, err := q.QueryContext(ctx, `
+		SELECT id FROM runs
+		WHERE org_id = $1 AND chain_run_id = $2
+		  AND status NOT IN ('completed','failed','cancelled','task_unsolvable',
+		                     'pending_approval','taken_over','awaiting_input')
+	`, orgID, chainRunID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
 }
 
 func runsForChain(ctx context.Context, q queryer, orgID, chainRunID string) ([]domain.AgentRun, error) {

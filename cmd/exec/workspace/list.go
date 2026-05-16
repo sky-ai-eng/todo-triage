@@ -107,7 +107,7 @@ func listWorkspaces(database *db.DB, runID string) (listOutput, error) {
 	if err != nil {
 		return listOutput{}, fmt.Errorf("workspace list: load configured repos: %w", err)
 	}
-	rows, err := db.GetRunWorktrees(database.Conn, runID)
+	rows, err := stores.RunWorktrees.List(context.Background(), runmode.LocalDefaultOrg, runID)
 	if err != nil {
 		return listOutput{}, fmt.Errorf("workspace list: load materialized worktrees: %w", err)
 	}
