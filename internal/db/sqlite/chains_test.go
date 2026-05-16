@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -41,7 +40,7 @@ func seedEntityEventTask(t *testing.T, conn *sql.DB, suffix string) *domain.Task
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
-	eventID, err := db.RecordEvent(conn, domain.Event{
+	eventID, err := sqlitestore.New(conn).Events.Record(context.Background(), runmode.LocalDefaultOrg, domain.Event{
 		EventType:    domain.EventGitHubPRCICheckFailed,
 		EntityID:     &entity.ID,
 		MetadataJSON: `{"check_name":"build"}`,

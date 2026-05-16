@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	_ "modernc.org/sqlite"
 )
@@ -47,14 +49,24 @@ func makeEntity(t *testing.T, database *sql.DB, i int) *domain.Entity {
 }
 
 // recordEvent inserts a real entity-attached event for tests. Returns
-// the event's UUID. Wraps RecordEvent to centralize the t.Fatalf on
-// errors. Shared by lifetime_counter and events tests after
-// factory_test.go was retired in SKY-291.
+// the event's UUID. After SKY-305 the events.go top-level RecordEvent
+// is gone (lifted into the per-backend EventStore impls); this helper
+// does the seed-only raw INSERT plus fires the SetOnEventRecorded
+// hook so lifetime_counter and similar internal-package tests that
+// rely on the hook observe the same fan-out the real store impls
+// provide.
+//
+// Lives in package db (not sqlite) so it doesn't import the sqlite
+// store and form a cycle — sqlite imports db, not the other way.
 func recordEvent(t *testing.T, database *sql.DB, entityID, eventType string) string {
 	t.Helper()
-	id, err := RecordEvent(database, domain.Event{EntityID: &entityID, EventType: eventType})
-	if err != nil {
-		t.Fatalf("RecordEvent(%s, %s): %v", entityID, eventType, err)
+	id := uuid.New().String()
+	if _, err := database.Exec(`
+		INSERT INTO events (id, entity_id, event_type, dedup_key, metadata_json)
+		VALUES (?, ?, ?, '', NULL)
+	`, id, entityID, eventType); err != nil {
+		t.Fatalf("recordEvent(%s, %s): %v", entityID, eventType, err)
 	}
+	NotifyEventRecorded(domain.Event{ID: id, EntityID: &entityID, EventType: eventType})
 	return id
 }

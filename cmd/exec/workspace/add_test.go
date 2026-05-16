@@ -75,7 +75,7 @@ func seedJiraRun(t *testing.T, database *db.DB, runID, issueKey string) {
 	if err != nil {
 		t.Fatalf("entity: %v", err)
 	}
-	evt, err := db.RecordEvent(database.Conn, domain.Event{
+	evt, err := sqlitestore.New(database.Conn).Events.Record(context.Background(), runmode.LocalDefaultOrg, domain.Event{
 		EventType:    domain.EventJiraIssueAssigned,
 		EntityID:     &entity.ID,
 		MetadataJSON: `{}`,
@@ -104,7 +104,7 @@ func seedGitHubRun(t *testing.T, database *db.DB, runID string) {
 	if err != nil {
 		t.Fatalf("entity: %v", err)
 	}
-	evt, err := db.RecordEvent(database.Conn, domain.Event{
+	evt, err := sqlitestore.New(database.Conn).Events.Record(context.Background(), runmode.LocalDefaultOrg, domain.Event{
 		EventType:    domain.EventGitHubPRCICheckFailed,
 		EntityID:     &entity.ID,
 		MetadataJSON: `{}`,

@@ -140,5 +140,10 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// half pinned to s.admin lets the classifier read each org's
 		// project set even when composed inside a claims-set tx.
 		Projects: newProjectStore(tx, s.admin),
+		// Events: same pattern. The admin half stays pinned to the
+		// real admin pool so a RecordSystem / GetMetadataSystem call
+		// inside WithTx routes outside the tx, matching the
+		// AgentRunStore + Projects + TaskStore precedent.
+		Events: newEventStore(tx, s.admin),
 	}
 }

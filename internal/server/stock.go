@@ -1,7 +1,7 @@
 package server
 
 import (
-	"database/sql"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -13,7 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/config"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
+	jiraevents "github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
@@ -422,10 +422,10 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 			var eventID string
 			if isAvailable {
 				eventType = domain.EventJiraIssueAvailable
-				eventID, err = recordCarryOverAvailableEvent(s.db, entity.ID, snap)
+				eventID, err = recordCarryOverAvailableEvent(r.Context(), s.events, entity.ID, snap)
 			} else {
 				eventType = domain.EventJiraIssueAssigned
-				eventID, err = recordCarryOverAssignedEvent(s.db, entity.ID, snap)
+				eventID, err = recordCarryOverAssignedEvent(r.Context(), s.events, entity.ID, snap)
 			}
 			if err != nil {
 				failed = append(failed, stockFailure{a.IssueKey, a.Action, "record event: " + err.Error()})
@@ -480,7 +480,7 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 			// jira:issue:assigned event — after the AssignToSelf call, the
 			// user is the assignee in Jira too, so the event metadata is
 			// accurate for either starting state.
-			eventID, err := recordCarryOverAssignedEvent(s.db, entity.ID, snap)
+			eventID, err := recordCarryOverAssignedEvent(r.Context(), s.events, entity.ID, snap)
 			if err != nil {
 				failed = append(failed, stockFailure{a.IssueKey, a.Action, "record event: " + err.Error()})
 				continue
@@ -569,14 +569,17 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 // primary_event_id FK to events.id, but carry-over has no upstream event —
 // the tracker seeded the snapshot silently on first poll per the "no events
 // on initial load" rule. Semantically this matches what would have fired if
-// the ticket had been assigned after we started watching. Uses RecordEvent
-// (not bus.Publish) so downstream handlers don't double-create a task.
+// the ticket had been assigned after we started watching. Routes through the
+// app-pool EventStore.Record (not bus.Publish) so downstream handlers don't
+// double-create a task. In multi-mode this caller will be WithTx-wrapped by
+// SKY-253 D9 so JWT claims are set for RLS; local-mode passes through
+// assertLocalOrg cleanly without a wrapping tx.
 //
 // SKY-270: account ID flows through from the (caller-mutated) snap so the
 // metadata carries the stable identifier the matcher needs. The display
 // name in metadata is informational; matching keys on account ID.
-func recordCarryOverAssignedEvent(database *sql.DB, entityID string, snap domain.JiraSnapshot) (string, error) {
-	meta := events.JiraIssueAssignedMetadata{
+func recordCarryOverAssignedEvent(ctx context.Context, events_ db.EventStore, entityID string, snap domain.JiraSnapshot) (string, error) {
+	meta := jiraevents.JiraIssueAssignedMetadata{
 		Assignee:          snap.Assignee,
 		AssigneeAccountID: snap.AssigneeAccountID,
 		IssueKey:          snap.Key,
@@ -591,7 +594,7 @@ func recordCarryOverAssignedEvent(database *sql.DB, entityID string, snap domain
 		return "", err
 	}
 	eid := entityID
-	return db.RecordEvent(database, domain.Event{
+	return events_.Record(ctx, runmode.LocalDefaultOrg, domain.Event{
 		EntityID:     &eid,
 		EventType:    domain.EventJiraIssueAssigned,
 		MetadataJSON: string(metaJSON),
@@ -604,8 +607,8 @@ func recordCarryOverAssignedEvent(database *sql.DB, entityID string, snap domain
 // row to hang the task off. Mirrors the tracker's own emission path for
 // first-discovered available tickets (diff.go). No actor identity carried
 // on this event — the ticket is unassigned by definition.
-func recordCarryOverAvailableEvent(database *sql.DB, entityID string, snap domain.JiraSnapshot) (string, error) {
-	meta := events.JiraIssueAvailableMetadata{
+func recordCarryOverAvailableEvent(ctx context.Context, events_ db.EventStore, entityID string, snap domain.JiraSnapshot) (string, error) {
+	meta := jiraevents.JiraIssueAvailableMetadata{
 		IssueKey:  snap.Key,
 		Project:   projectFromKey(snap.Key),
 		IssueType: snap.IssueType,
@@ -618,7 +621,7 @@ func recordCarryOverAvailableEvent(database *sql.DB, entityID string, snap domai
 		return "", err
 	}
 	eid := entityID
-	return db.RecordEvent(database, domain.Event{
+	return events_.Record(ctx, runmode.LocalDefaultOrg, domain.Event{
 		EntityID:     &eid,
 		EventType:    domain.EventJiraIssueAvailable,
 		MetadataJSON: string(metaJSON),

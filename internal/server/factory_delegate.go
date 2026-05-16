@@ -86,7 +86,7 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	// (label_added "bug"). If no matching event exists the entity
 	// isn't actually at this station; refuse rather than fabricate
 	// an anchor.
-	primaryEvent, err := db.LatestEventForEntityTypeAndDedupKey(s.db, req.EntityID, req.EventType, req.DedupKey)
+	primaryEvent, err := s.events.LatestForEntityTypeAndDedupKey(r.Context(), runmode.LocalDefaultOrg, req.EntityID, req.EventType, req.DedupKey)
 	if err != nil {
 		internalError(w, "factory", err)
 		return

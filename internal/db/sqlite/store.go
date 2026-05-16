@@ -52,7 +52,10 @@ func New(conn *sql.DB) db.Stores {
 		Repos:          newRepoStore(conn, conn),
 		PendingFirings: newPendingFiringsStore(conn),
 		Projects:       newProjectStore(conn, conn),
-		Tx:             s,
+		// Events wires both args to conn — SQLite has one connection
+		// so the dual-pool constructor collapses, same as TaskStore.
+		Events: newEventStore(conn, conn),
+		Tx:     s,
 	}
 	return s.stores
 }

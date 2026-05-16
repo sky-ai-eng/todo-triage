@@ -71,6 +71,7 @@ func (s *Store) runTx(ctx context.Context, orgID, userID string, fn func(db.TxSt
 		Repos:          newRepoStore(tx, tx),
 		PendingFirings: newPendingFiringsStore(tx),
 		Projects:       newProjectStore(tx, tx),
+		Events:         newEventStore(tx, tx),
 	}
 	if err := fn(txStores); err != nil {
 		return err

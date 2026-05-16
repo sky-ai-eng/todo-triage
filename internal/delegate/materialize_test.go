@@ -72,7 +72,7 @@ func TestMaterializePriorMemories_WritesPriors(t *testing.T) {
 		t.Fatalf("entity: %v", err)
 	}
 	// Seed task + run + memory chain so GetMemoriesForEntity returns one row.
-	evt, err := db.RecordEvent(database, domain.Event{
+	evt, err := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrg, domain.Event{
 		EventType: domain.EventJiraIssueAssigned, EntityID: &entity.ID, MetadataJSON: `{}`,
 	})
 	if err != nil {

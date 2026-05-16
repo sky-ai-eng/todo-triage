@@ -58,6 +58,7 @@ type Router struct {
 	agentRuns  dbpkg.AgentRunStore       // SKY-285: lookup active runs for the task-close cancel cascade
 	entities   dbpkg.EntityStore         // SKY-284: closed-entity guard + entity-terminating close cascade
 	firings    dbpkg.PendingFiringsStore // SKY-289: per-entity firing queue + active-run gate
+	events     dbpkg.EventStore          // SKY-305: admin-pool RecordSystem + GetMetadataSystem for the background subscriber
 	spawner    Delegator
 	scorer     Scorer
 	ws         *websocket.Hub
@@ -84,7 +85,7 @@ type Router struct {
 // behavior). users is nil-safe too — the SKY-270 inline-close gate
 // degrades to "treat every reassignment as away-from-me" when missing,
 // which over-closes (acceptable: user can reopen via the next poll).
-func NewRouter(db *sql.DB, prompts dbpkg.PromptStore, handlers dbpkg.EventHandlerStore, agents dbpkg.AgentStore, teamAgents dbpkg.TeamAgentStore, users dbpkg.UsersStore, tasks dbpkg.TaskStore, agentRuns dbpkg.AgentRunStore, entities dbpkg.EntityStore, firings dbpkg.PendingFiringsStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
+func NewRouter(db *sql.DB, prompts dbpkg.PromptStore, handlers dbpkg.EventHandlerStore, agents dbpkg.AgentStore, teamAgents dbpkg.TeamAgentStore, users dbpkg.UsersStore, tasks dbpkg.TaskStore, agentRuns dbpkg.AgentRunStore, entities dbpkg.EntityStore, firings dbpkg.PendingFiringsStore, events dbpkg.EventStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
 	return &Router{
 		db:         db,
 		prompts:    prompts,
@@ -96,6 +97,7 @@ func NewRouter(db *sql.DB, prompts dbpkg.PromptStore, handlers dbpkg.EventHandle
 		agentRuns:  agentRuns,
 		entities:   entities,
 		firings:    firings,
+		events:     events,
 		spawner:    spawner,
 		scorer:     scorer,
 		ws:         ws,
@@ -122,7 +124,7 @@ func (r *Router) HandleEvent(evt domain.Event) {
 	// Step 1: Always record — durable audit log regardless of routing outcome.
 	// Later routing logic relies on evt.ID referring to a persisted event row,
 	// so stop here if the insert fails.
-	id, err := dbpkg.RecordEvent(r.db, evt)
+	id, err := r.events.RecordSystem(context.Background(), runmode.LocalDefaultOrgID, evt)
 	if err != nil {
 		log.Printf("[router] failed to record event %s: %v", evt.EventType, err)
 		return
@@ -929,7 +931,7 @@ func (r *Router) reDeriveTask(taskID string) {
 	}
 
 	// Fetch the primary event's metadata for predicate matching.
-	metadata, err := dbpkg.GetEventMetadata(r.db, task.PrimaryEventID)
+	metadata, err := r.events.GetMetadataSystem(context.Background(), runmode.LocalDefaultOrgID, task.PrimaryEventID)
 	if err != nil {
 		log.Printf("[router] re-derive: failed to fetch event metadata for %s: %v", task.PrimaryEventID, err)
 		return
