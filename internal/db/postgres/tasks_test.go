@@ -13,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // TestTaskStore_Postgres runs the shared conformance suite against
@@ -191,4 +192,74 @@ func TestTaskStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	if len(refs) != 0 {
 		t.Errorf("orgB looking at entA returned %d refs; want 0 (cross-org leak)", len(refs))
 	}
+}
+
+// TestTaskStore_Postgres_OrgHandlerSentinel pins the fix for the case
+// where org-visible event handlers (visibility='org', team_id NULL)
+// route through handlerTeamID to runmode.LocalDefaultTeamID. The
+// Postgres FindOrCreate used to reject that sentinel; this test
+// verifies it now resolves to the org's canonical team and creates the
+// task successfully.
+func TestTaskStore_Postgres_OrgHandlerSentinel(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID, _ := seedPgOrgUserAgent(t, h)
+	entityID, eventID, _ := seedPgEntityEvent(t, h.AdminDB, orgID, "sentinel")
+
+	stores := pgstore.New(h.AdminDB, h.AdminDB)
+	ctx := context.Background()
+
+	task, created, err := stores.Tasks.FindOrCreate(
+		ctx, orgID, runmode.LocalDefaultTeamID,
+		entityID, "github:pr:ci_check_failed", "", eventID, 0.5,
+	)
+	if err != nil {
+		t.Fatalf("FindOrCreate with LocalDefaultTeamID sentinel: %v", err)
+	}
+	if !created {
+		t.Error("expected task to be created, got created=false")
+	}
+	if task == nil {
+		t.Fatal("FindOrCreate returned nil task")
+	}
+
+	// Idempotent: second call with the same sentinel should find the
+	// existing task, not create a second one.
+	task2, created2, err := stores.Tasks.FindOrCreate(
+		ctx, orgID, runmode.LocalDefaultTeamID,
+		entityID, "github:pr:ci_check_failed", "", eventID, 0.5,
+	)
+	if err != nil {
+		t.Fatalf("FindOrCreate sentinel idempotent: %v", err)
+	}
+	if created2 {
+		t.Error("expected task to be found (not created) on second call")
+	}
+	if task2 == nil || task2.ID != task.ID {
+		t.Errorf("idempotent call returned task %v, want %s", task2, task.ID)
+	}
+}
+
+// seedPgEntityEvent inserts a bare entity + event (no task) and
+// returns their IDs. Used by tests that call FindOrCreate themselves.
+func seedPgEntityEvent(t *testing.T, conn *sql.DB, orgID, suffix string) (entityID, eventID string) {
+	t.Helper()
+	now := time.Now().UTC()
+	entityID = uuid.New().String()
+	eventID = uuid.New().String()
+	sourceID := fmt.Sprintf("sentinel-%s-%d", suffix, now.UnixNano())
+
+	if _, err := conn.Exec(`
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
+		VALUES ($1, $2, 'github', $3, 'pr', $4, $5, '{}'::jsonb, $6)
+	`, entityID, orgID, sourceID, "Sentinel "+suffix, "https://example/"+sourceID, now); err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	if _, err := conn.Exec(`
+		INSERT INTO events (id, org_id, entity_id, event_type, dedup_key, metadata_json, created_at)
+		VALUES ($1, $2, $3, 'github:pr:ci_check_failed', '', '{}'::jsonb, $4)
+	`, eventID, orgID, entityID, now); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	return entityID, eventID
 }

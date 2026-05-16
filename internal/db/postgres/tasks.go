@@ -186,17 +186,25 @@ func (s *taskStore) FindOrCreate(ctx context.Context, orgID, teamID, entityID, e
 }
 
 func (s *taskStore) FindOrCreateAt(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error) {
-	// SKY-295: team_id is caller-supplied. The router threads
-	// handler.TeamID from the matched event_handler; the SQLite-only
-	// LocalDefaultTeamID sentinel does not satisfy the tasks_insert
-	// RLS policy and is filtered to empty here. Same shape ProjectStore
-	// uses. Empty team_id then trips the explicit guard below.
+	// SKY-295: team_id is caller-supplied. User-source handlers carry a
+	// real team UUID. Org-visible handlers (visibility='org', team_id NULL)
+	// collapse to runmode.LocalDefaultTeamID in handlerTeamID(); resolve
+	// that sentinel to the org's canonical team (oldest by created_at) so
+	// shipped system rules create tasks in Postgres mode. A truly-empty
+	// teamBind (caller passed "") still trips the guard below.
 	teamBind := teamID
 	if teamBind == runmode.LocalDefaultTeamID {
-		teamBind = ""
+		var canonical string
+		if err := s.q.QueryRowContext(ctx,
+			`SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1`,
+			orgID,
+		).Scan(&canonical); err != nil {
+			return nil, false, fmt.Errorf("task store: resolve canonical team for org %s: %w", orgID, err)
+		}
+		teamBind = canonical
 	}
 	if teamBind == "" {
-		return nil, false, fmt.Errorf("task store: team_id required for Postgres FindOrCreate (router must thread the user-selected team from the matched event_handler; the SQLite-only LocalDefaultTeamID sentinel does not satisfy the tasks_insert RLS policy)")
+		return nil, false, fmt.Errorf("task store: team_id required for Postgres FindOrCreate (router must thread the user-selected team from the matched event_handler)")
 	}
 
 	// SELECT first so the common path (task already exists) stays a
