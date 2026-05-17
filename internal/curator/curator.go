@@ -207,6 +207,20 @@ func (c *Curator) Shutdown() {
 	}
 }
 
+// cancelQueuedRows flips never-picked-up queued curator_requests for a
+// project to cancelled. Called from CancelProject (handler-side) and
+// from the fallback path in SendMessage when the curator is shut down.
+//
+// TODO(SKY-253/D9): both QueuedCuratorRequestsForProject and
+// MarkCuratorRequestCancelledIfActive run against *sql.DB without JWT
+// claims set. In multi-mode Postgres tf_app + RLS will hide the rows
+// from the SELECT and reject the UPDATE, leaving queued rows dangling
+// after a project-delete or shutdown. Must be routed through a
+// per-user synthetic-claims wrap (looping over requesting users) or
+// through admin-pool `...System` variants before multi-mode curator
+// ships. Identity-per-row is recoverable from curator_requests.creator_user_id;
+// the harder question is which pool (admin vs. per-user) attribution
+// belongs to for system-driven cancels.
 func (c *Curator) cancelQueuedRows(projectID, reason string) {
 	queued, err := db.QueuedCuratorRequestsForProject(c.database, projectID)
 	if err != nil {

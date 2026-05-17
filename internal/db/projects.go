@@ -71,7 +71,15 @@ type ProjectStore interface {
 	// identity, since the bookkeeping write is part of that user's
 	// turn. updated_at is stamped server-side. Idempotent — repeating
 	// the same value is a harmless no-op (the per-request sink also
-	// short-circuits via persistOnce).
+	// short-circuits via sync.Once).
+	//
+	// Best-effort on missing row: if the project was deleted between
+	// request dispatch and first-session capture, the UPDATE silently
+	// affects 0 rows and returns nil. The caller (curator sink) has
+	// nothing useful to do with a sql.ErrNoRows here — the chat turn
+	// is already in flight and the FK cascade on project delete will
+	// drop the curator_requests row alongside the project. Diverges
+	// intentionally from Update/Delete's sql.ErrNoRows behavior.
 	SetCuratorSessionID(ctx context.Context, orgID, projectID, sessionID string) error
 
 	// BumpUpdatedAt stamps updated_at = now() without changing any

@@ -208,6 +208,113 @@ func TestCuratorStore_SQLite_PendingContextRoundTrip(t *testing.T) {
 	}
 }
 
+// TestCuratorStore_SQLite_RevertCleansAuditRow pins the compound
+// revert-and-delete-audit-row path that the goroutine's
+// revertPendingFor helper drives on terminal cancel/fail. The audit
+// row is the `context_change` curator_messages entry the dispatch
+// loop persists when it renders a pending-context note into the
+// user's message — if the turn doesn't complete successfully, the
+// chat history must not show a phantom "context noted" entry for a
+// delta the agent never absorbed.
+func TestCuratorStore_SQLite_RevertCleansAuditRow(t *testing.T) {
+	conn := newSQLiteForCuratorTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+
+	projectID, err := stores.Projects.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
+		domain.Project{Name: "p", CuratorSessionID: "sess-1"})
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if err := db.InsertPendingContext(conn, projectID, "sess-1", domain.ChangeTypePinnedRepos, `["foo/bar"]`); err != nil {
+		t.Fatalf("seed pending: %v", err)
+	}
+	requestID, err := db.CreateCuratorRequest(conn, projectID, "msg")
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+
+	// Drive consume + audit-row insert under the same identity the
+	// goroutine would use — this mirrors the dispatch sequence in
+	// session.go around the context-change rendering.
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, func(ts db.TxStores) error {
+		if _, _, err := ts.Curator.ConsumePendingContext(ctx, runmode.LocalDefaultOrgID, projectID, requestID); err != nil {
+			return err
+		}
+		_, err := ts.Curator.InsertMessage(ctx, runmode.LocalDefaultOrgID, &domain.CuratorMessage{
+			RequestID: requestID,
+			Role:      "system",
+			Subtype:   "context_change",
+			Content:   "pinned_repos changed",
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("consume + audit insert: %v", err)
+	}
+
+	// Audit row should be present before revert.
+	auditCount := countMessages(t, conn, requestID, "context_change")
+	if auditCount != 1 {
+		t.Fatalf("pre-revert audit row count = %d, want 1", auditCount)
+	}
+
+	// Revert + DeleteMessagesBySubtype — the exact pair revertPendingFor runs.
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, func(ts db.TxStores) error {
+		if err := ts.Curator.RevertPendingContext(ctx, runmode.LocalDefaultOrgID, requestID); err != nil {
+			return err
+		}
+		return ts.Curator.DeleteMessagesBySubtype(ctx, runmode.LocalDefaultOrgID, requestID, "context_change")
+	}); err != nil {
+		t.Fatalf("revert + audit delete: %v", err)
+	}
+
+	// Audit row gone.
+	if got := countMessages(t, conn, requestID, "context_change"); got != 0 {
+		t.Errorf("post-revert audit row count = %d, want 0", got)
+	}
+	// Pending row re-armed (un-consumed).
+	pending, err := db.ListPendingContext(conn, projectID)
+	if err != nil {
+		t.Fatalf("list pending: %v", err)
+	}
+	if len(pending) != 1 || pending[0].ConsumedAt != nil {
+		t.Errorf("expected 1 unconsumed pending row after revert; got %+v", pending)
+	}
+
+	// Other-subtype messages on the same request must NOT be touched.
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, func(ts db.TxStores) error {
+		_, err := ts.Curator.InsertMessage(ctx, runmode.LocalDefaultOrgID, &domain.CuratorMessage{
+			RequestID: requestID,
+			Role:      "assistant",
+			Subtype:   "text",
+			Content:   "should survive",
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("insert assistant message: %v", err)
+	}
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, func(ts db.TxStores) error {
+		return ts.Curator.DeleteMessagesBySubtype(ctx, runmode.LocalDefaultOrgID, requestID, "context_change")
+	}); err != nil {
+		t.Fatalf("second delete: %v", err)
+	}
+	if got := countMessages(t, conn, requestID, "text"); got != 1 {
+		t.Errorf("text subtype message count = %d, want 1 (DeleteMessagesBySubtype clobbered an unrelated subtype)", got)
+	}
+}
+
+func countMessages(t *testing.T, conn *sql.DB, requestID, subtype string) int {
+	t.Helper()
+	var n int
+	if err := conn.QueryRow(
+		`SELECT COUNT(*) FROM curator_messages WHERE request_id = ? AND subtype = ?`,
+		requestID, subtype,
+	).Scan(&n); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	return n
+}
+
 // TestProjectStore_SQLite_SetCuratorSessionID verifies the new
 // ProjectStore method used by the curator sink on first-session
 // capture. Idempotent set-then-read.
@@ -236,6 +343,15 @@ func TestProjectStore_SQLite_SetCuratorSessionID(t *testing.T) {
 	// Idempotent re-set.
 	if err := stores.Projects.SetCuratorSessionID(ctx, runmode.LocalDefaultOrgID, projectID, "sess-xyz"); err != nil {
 		t.Errorf("re-SetCuratorSessionID should be idempotent, got %v", err)
+	}
+
+	// Missing project: silently no-op (nil error), not sql.ErrNoRows.
+	// Pinned by the interface doc — diverges intentionally from
+	// Update/Delete's not-found semantics because the curator sink
+	// has nothing useful to do with an error when the project was
+	// deleted mid-turn.
+	if err := stores.Projects.SetCuratorSessionID(ctx, runmode.LocalDefaultOrgID, "00000000-0000-0000-0000-000000000ghost", "sess-x"); err != nil {
+		t.Errorf("SetCuratorSessionID on missing project should be best-effort nil, got %v", err)
 	}
 }
 
