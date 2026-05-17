@@ -4,8 +4,6 @@ import (
 	"context"
 	"testing"
 
-	"github.com/google/uuid"
-
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
@@ -27,14 +25,14 @@ func TestCuratorStore_Postgres_AttributesPerUser(t *testing.T) {
 
 	orgID, alice, _ := seedPgProjectOrg(t, h)
 	bob := seedAdditionalUser(t, h, orgID, "bob")
-	teamID := firstTeamForOrg(t, h, orgID)
 
-	projectID, err := stores.Projects.Create(ctx, orgID, teamID, domain.Project{
-		Name: "shared", Description: "",
-	})
-	if err != nil {
-		t.Fatalf("create project: %v", err)
-	}
+	// Seed the project via the admin pool — pgstore.New here wires
+	// Projects against AppDB (tf_app) and a bare Create call from a
+	// test context has no JWT claims set, so the projects_insert RLS
+	// policy would reject it. The CuratorStore writes that follow
+	// drive each through SyntheticClaimsWithTx with explicit claims,
+	// which IS the production goroutine code path.
+	projectID := seedPgEntityProject(t, h, orgID, alice, "shared")
 
 	// Alice's turn: capture all the writes the goroutine would do.
 	aliceReq, aliceMsg := runFullTurn(t, ctx, stores, orgID, alice, projectID)
@@ -74,19 +72,14 @@ func TestCuratorStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	ctx := context.Background()
 
 	orgA, alice, _ := seedPgProjectOrg(t, h)
-	teamA := firstTeamForOrg(t, h, orgA)
 	orgB, _, _ := seedPgProjectOrg(t, h)
-	teamB := firstTeamForOrg(t, h, orgB)
 
-	_, err := stores.Projects.Create(ctx, orgB, teamB, domain.Project{Name: "bee"})
-	if err != nil {
-		t.Fatalf("create orgB project: %v", err)
-	}
-	// Use a project that lives in orgA for the valid write check.
-	projectA, err := stores.Projects.Create(ctx, orgA, teamA, domain.Project{Name: "aye"})
-	if err != nil {
-		t.Fatalf("create orgA project: %v", err)
-	}
+	// Seed orgA's project via admin — pgstore.New here wires Projects
+	// against AppDB (tf_app) and a bare Create call from a test
+	// context has no JWT claims set. orgB doesn't need its own
+	// project row; the count assertion below just verifies no
+	// curator_requests rows land in orgB regardless.
+	projectA := seedPgEntityProject(t, h, orgA, alice, "aye")
 
 	// Alice creates a request in orgA — this must work.
 	var goodRequestID string
@@ -108,11 +101,10 @@ func TestCuratorStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	// the call — the FK against projects(id, org_id) refuses the
 	// insert because (projectA, orgB) doesn't exist as a project
 	// row; RLS additionally fires on (org_id = current_org_id()).
-	err = stores.Tx.SyntheticClaimsWithTx(ctx, orgA, alice, func(ts db.TxStores) error {
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgA, alice, func(ts db.TxStores) error {
 		_, err := ts.Curator.CreateRequest(ctx, orgB, projectA, alice, "cross-org attempt")
 		return err
-	})
-	if err == nil {
+	}); err == nil {
 		t.Error("expected cross-org CreateRequest to fail; got nil error")
 	}
 
@@ -144,12 +136,9 @@ func TestCuratorStore_Postgres_GetRequestRLS(t *testing.T) {
 
 	orgID, alice, _ := seedPgProjectOrg(t, h)
 	bob := seedAdditionalUser(t, h, orgID, "bob")
-	teamID := firstTeamForOrg(t, h, orgID)
 
-	projectID, err := stores.Projects.Create(ctx, orgID, teamID, domain.Project{Name: "shared"})
-	if err != nil {
-		t.Fatalf("create project: %v", err)
-	}
+	// Admin-seed the project — see comment in AttributesPerUser.
+	projectID := seedPgEntityProject(t, h, orgID, alice, "shared")
 
 	// Alice creates a request.
 	var aliceReq string
@@ -272,34 +261,21 @@ func readCuratorMessageCreator(t *testing.T, h *pgtest.Harness, messageID int64)
 	return got
 }
 
-// seedAdditionalUser adds a second user to an existing org so tests
-// can exercise multi-user attribution paths against the same project.
-// Returns the new user's id.
+// seedAdditionalUser adds a second user to an existing org + the
+// org's default team so tests can exercise multi-user attribution
+// paths against the same project. Returns the new user's id. The
+// team-membership row goes into `memberships`, the same table
+// seedPgDefaultTeam writes to — there's no separate
+// `team_memberships` table, despite the name pattern elsewhere.
 func seedAdditionalUser(t *testing.T, h *pgtest.Harness, orgID, label string) string {
 	t.Helper()
-	userID := uuid.New().String()
-	email := label + "-" + userID[:8] + "@test.local"
-	h.SeedAuthUser(t, userID, email)
-	if _, err := h.AdminDB.Exec(
-		`INSERT INTO users (id, display_name) VALUES ($1, $2)`,
-		userID, label,
-	); err != nil {
-		t.Fatalf("seed public.users: %v", err)
-	}
-	if _, err := h.AdminDB.Exec(
-		`INSERT INTO org_memberships (org_id, user_id, role) VALUES ($1, $2, 'member')`,
-		orgID, userID,
-	); err != nil {
-		t.Fatalf("seed org_membership: %v", err)
-	}
-	// Add to the org's default team so user_has_org_access and any
-	// team-membership predicate stay true.
+	userID := seedPgMember(t, h, orgID, label, "member")
 	teamID := firstTeamForOrg(t, h, orgID)
 	if _, err := h.AdminDB.Exec(
-		`INSERT INTO team_memberships (team_id, user_id) VALUES ($1, $2)`,
-		teamID, userID,
+		`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'member')`,
+		userID, teamID,
 	); err != nil {
-		t.Fatalf("seed team_membership: %v", err)
+		t.Fatalf("seed team membership: %v", err)
 	}
 	return userID
 }
