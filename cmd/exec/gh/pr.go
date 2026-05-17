@@ -668,6 +668,16 @@ func prCreate(client *ghclient.Client, stores db.Stores, args []string) {
 		// runs so a crash between them doesn't strand an unlocked
 		// row; event-triggered runs sequence the admin-pool calls
 		// (no shared tx surface across pools).
+		//
+		// TODO(SKY-303): the event-triggered Create + Lock pair is NOT
+		// atomic — a crash between CreateSystem (below) and LockSystem
+		// (after the err check) leaves a pending_prs row with
+		// locked=0. The retry's pre-check finds the row and exits with
+		// "already queued" before re-running Lock, so the unlocked row
+		// strands. Narrow window in local mode; the proper fix is a
+		// CreateLockedSystem variant that INSERTs with locked=true
+		// directly. Defer to SKY-303 since the host-daemon IPC will
+		// re-shape this path anyway.
 		if ident.IsEventTriggered {
 			err = stores.PendingPRs.CreateSystem(ctx, ident.OrgID, row)
 		} else {

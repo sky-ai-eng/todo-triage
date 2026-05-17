@@ -26,6 +26,7 @@ import (
 	"os"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -40,6 +41,13 @@ const RunIdentityEnvVar = "TRIAGE_FACTORY_RUN_ID"
 // "spawner bug" message — an agent invoking these commands without
 // the env var present means the spawner failed to inject it.
 var ErrRunIdentityMissing = errors.New("TRIAGE_FACTORY_RUN_ID not set; this command must be invoked by the delegated agent spawner")
+
+// ErrRunIdentityNotFound is returned by ResolveRunIdentity when the
+// supplied runID doesn't match a row in the agent_runs table. Surfaces
+// as a clear "stale env var / spawner bug" message in subcommand
+// stderr. Subcommands errors.Is against this sentinel when they want
+// to remap to their own package-level "not found" sentinels.
+var ErrRunIdentityNotFound = errors.New("TRIAGE_FACTORY_RUN_ID points at a run that does not exist; check spawner injection")
 
 // RunIdentity is the resolved (orgID, userID, runID) triple for a
 // cmd/exec subcommand invocation. Returned by ResolveRunIdentity at
@@ -72,13 +80,6 @@ type RunIdentity struct {
 	// bookkeeping.
 	IsEventTriggered bool
 }
-
-// ErrRunIdentityNotFound is returned by ResolveRunIdentity when the
-// supplied runID doesn't match a row in the agent_runs table. Surfaces
-// as a clear "stale env var / spawner bug" message in subcommand
-// stderr. Subcommands errors.Is against this sentinel when they want
-// to remap to their own package-level "not found" sentinels.
-var ErrRunIdentityNotFound = errors.New("TRIAGE_FACTORY_RUN_ID points at a run that does not exist; check spawner injection")
 
 // ResolveRunIdentityFromEnv is the CLI entry-point helper that reads
 // TRIAGE_FACTORY_RUN_ID from the process env and delegates to
@@ -117,36 +118,6 @@ func ResolveRunIdentity(ctx context.Context, stores db.Stores, runID string) (Ru
 		OrgID:            orgID,
 		UserID:           run.CreatorUserID,
 		RunID:            runID,
-		IsEventTriggered: run.TriggerType == "event",
+		IsEventTriggered: run.TriggerType == domain.TriggerTypeEvent,
 	}, nil
-}
-
-// WithIdentityTx wraps a store-writing closure in either
-// SyntheticClaimsWithTx (manual runs — the closure receives a
-// db.TxStores bundle) or runs the admin-only closure directly
-// (event-triggered runs — no tx, the closure passes through the
-// admin-pool `...System` methods on db.Stores).
-//
-// This is the cmd/exec equivalent of the per-write branch the
-// delegate spawner spells out inline in internal/delegate/run.go.
-// Subcommands with a single store call can pick the branch by hand;
-// subcommands that need to atomically batch multiple writes should
-// use this helper so the manual path stays in one tx and the event
-// path sequences the admin-pool calls.
-//
-// manualFn is invoked when the run is manual (under synthetic
-// claims). systemFn is invoked when the run is event-triggered (no
-// tx, against the supplied stores bundle directly). Exactly one
-// runs per call.
-func WithIdentityTx(
-	ctx context.Context,
-	stores db.Stores,
-	ident RunIdentity,
-	manualFn func(db.TxStores) error,
-	systemFn func(db.Stores) error,
-) error {
-	if ident.IsEventTriggered {
-		return systemFn(stores)
-	}
-	return stores.Tx.SyntheticClaimsWithTx(ctx, ident.OrgID, ident.UserID, manualFn)
 }
