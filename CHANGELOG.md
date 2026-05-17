@@ -1,5 +1,71 @@
 # Changelog
 
+## [1.11.0](https://github.com/sky-ai-eng/triage-factory/compare/v1.10.1...v1.11.0) (2026-05-17)
+
+
+### Features
+
+* **agent:** switch runtime from claude CLI to Agent SDK ([#135](https://github.com/sky-ai-eng/triage-factory/issues/135)) ([7c2bdd4](https://github.com/sky-ai-eng/triage-factory/commit/7c2bdd4f93a25a4e654e9d747aa78ae942aa789e))
+* **auth:** SKY-250 – GoTrue substrate + JWKS verify (RS256) ([#171](https://github.com/sky-ai-eng/triage-factory/issues/171)) ([a295f0e](https://github.com/sky-ai-eng/triage-factory/commit/a295f0eef084c7d99c152c97c783e4864d042c4e))
+* **auth:** SKY-251 – auth middleware + sessions ([#172](https://github.com/sky-ai-eng/triage-factory/issues/172)) ([4be3c6c](https://github.com/sky-ai-eng/triage-factory/commit/4be3c6c08ea182469f439683937d8e97c6b825e0))
+* **board:** full-screen agent session view ([#155](https://github.com/sky-ai-eng/triage-factory/issues/155)) ([87cfe44](https://github.com/sky-ai-eng/triage-factory/commit/87cfe44ec1cff38e2fbe759c60ffa0a68be7c0ed))
+* **chain:** prompt chaining — linear multi-step delegation ([#164](https://github.com/sky-ai-eng/triage-factory/issues/164)) ([ee5fc5e](https://github.com/sky-ai-eng/triage-factory/commit/ee5fc5e37f741b35e4b36135d68678b6fa90e363))
+* **cloud:** add org-scoped event bus routing (SKY-310) ([#197](https://github.com/sky-ai-eng/triage-factory/issues/197)) ([bb9c734](https://github.com/sky-ai-eng/triage-factory/commit/bb9c734ffe72e38846768bb3b4e27fad6213b7c8))
+* **cmd/exec:** SKY-302 run identity + synthetic-claims routing ([#195](https://github.com/sky-ai-eng/triage-factory/issues/195)) ([aaa71bf](https://github.com/sky-ai-eng/triage-factory/commit/aaa71bfa788c00e57a98e6874d7270afc53412fd))
+* **curator:** SKY-298 — per-turn synthetic-claims for goroutine writes ([#194](https://github.com/sky-ai-eng/triage-factory/issues/194)) ([ba46b0c](https://github.com/sky-ai-eng/triage-factory/commit/ba46b0c0991fc148c5b554d31655cd5868cd66b5))
+* **db:** add admin-pool routes for cross-org defense ([#189](https://github.com/sky-ai-eng/triage-factory/issues/189)) ([fcd6eac](https://github.com/sky-ai-eng/triage-factory/commit/fcd6eac4a55f147bca029e5d8a029e6ecb13415d))
+* **db:** add admin-pool variants for background goroutines ([#185](https://github.com/sky-ai-eng/triage-factory/issues/185)) ([75b86b1](https://github.com/sky-ai-eng/triage-factory/commit/75b86b1735c74bc941729921d00158b4a5f77908))
+* **db:** admin-pool routing and redundant tests ([#187](https://github.com/sky-ai-eng/triage-factory/issues/187)) ([072cb57](https://github.com/sky-ai-eng/triage-factory/commit/072cb5781f9cf09bbb52eb9a02e1dbe455341458))
+* **db:** continue migration from raw SQL -&gt; stores ([#190](https://github.com/sky-ai-eng/triage-factory/issues/190)) ([533c6ee](https://github.com/sky-ai-eng/triage-factory/commit/533c6eeb7a48307fea9cb6f035a568bbcbb7b0e2))
+* **db:** handler-spawned cleanup — WithoutCancel + WithTx ([#193](https://github.com/sky-ai-eng/triage-factory/issues/193)) ([86d262a](https://github.com/sky-ai-eng/triage-factory/commit/86d262a4350c19935f7eda9282e56c15eeb0f737))
+* **db:** lift events into per-backend EventStore interface ([#186](https://github.com/sky-ai-eng/triage-factory/issues/186)) ([4779ba8](https://github.com/sky-ai-eng/triage-factory/commit/4779ba8c60bd4ba5220ab04bef16758e9cffb5ff))
+* **db:** refactor TaskMemoryStore with dual-pool architecture ([#188](https://github.com/sky-ai-eng/triage-factory/issues/188)) ([914cf8a](https://github.com/sky-ai-eng/triage-factory/commit/914cf8a3ae8a61cc6dcdb09c57d1a8905de6e612))
+* **db:** server startup + session middleware - admin pool routing ([#192](https://github.com/sky-ai-eng/triage-factory/issues/192)) ([050b9e4](https://github.com/sky-ai-eng/triage-factory/commit/050b9e426369b97ab65c81dbc8a72428b1478c7c))
+* **db:** SKY-246 D2 — Swipe + Dashboard + Secret stores ([#144](https://github.com/sky-ai-eng/triage-factory/issues/144)) ([594e445](https://github.com/sky-ai-eng/triage-factory/commit/594e44513ed649d078fcdf1a8ed3a84e07df16b8))
+* **db:** SKY-246 D2 — TaskRuleStore for both backends ([#146](https://github.com/sky-ai-eng/triage-factory/issues/146)) ([4e007e3](https://github.com/sky-ai-eng/triage-factory/commit/4e007e3a53d2773732983700c61acafd96030a68))
+* **db:** SKY-246 D2 — TriggerStore for both backends ([#148](https://github.com/sky-ai-eng/triage-factory/issues/148)) ([a67e256](https://github.com/sky-ai-eng/triage-factory/commit/a67e2560fba61e54196bb6a49ebfec586c980ac5))
+* **db:** SKY-246 D2 wave 0 + ScoreStore pilot ([#142](https://github.com/sky-ai-eng/triage-factory/issues/142)) ([c4f3c2b](https://github.com/sky-ai-eng/triage-factory/commit/c4f3c2b5aa32e63e0d6eb18709ef4bc98102542e))
+* **db:** SKY-246 D2 wave 1 — PromptStore for both backends ([#143](https://github.com/sky-ai-eng/triage-factory/issues/143)) ([6ad0c18](https://github.com/sky-ai-eng/triage-factory/commit/6ad0c18602a1d57cf0b04491a1f231e9ec1442c4))
+* **db:** SKY-247 D3 multi-tenant Postgres baseline ([#141](https://github.com/sky-ai-eng/triage-factory/issues/141)) ([9795b7b](https://github.com/sky-ai-eng/triage-factory/commit/9795b7bd4d9bfbc1797197344d17e5e96195751a))
+* **db:** SKY-259 — unify task_rules + prompt_triggers into event_handlers ([#156](https://github.com/sky-ai-eng/triage-factory/issues/156)) ([99df393](https://github.com/sky-ai-eng/triage-factory/commit/99df39394f8d19b544b0ad2b49445c5eb2549557))
+* **db:** SKY-260 — agents + team_agents stores + bootstrap ([#150](https://github.com/sky-ai-eng/triage-factory/issues/150)) ([d7128d4](https://github.com/sky-ai-eng/triage-factory/commit/d7128d46e7904fe426653fabd717ab0c830a0252))
+* **db:** SKY-261 — claim flow on tasks + runs ([#159](https://github.com/sky-ai-eng/triage-factory/issues/159)) ([490c794](https://github.com/sky-ai-eng/triage-factory/commit/490c7946c85a077c726a145aa4f61251b77ecda7))
+* **db:** SKY-269 — synthetic tenancy rows in SQLite ([#153](https://github.com/sky-ai-eng/triage-factory/issues/153)) ([268562e](https://github.com/sky-ai-eng/triage-factory/commit/268562e428bd193b6d4cdb39ff43f68356ca425c))
+* **db:** SKY-283 – TaskStore (SQLite + Postgres) ([#174](https://github.com/sky-ai-eng/triage-factory/issues/174)) ([718fef1](https://github.com/sky-ai-eng/triage-factory/commit/718fef1f6235e0d4e6884242c5bab7ea9a5daf30))
+* **db:** SKY-284 – EntityStore for both backends ([#177](https://github.com/sky-ai-eng/triage-factory/issues/177)) ([10b59ce](https://github.com/sky-ai-eng/triage-factory/commit/10b59cead3d46b5bb1739b76fc58ae8473330584))
+* **db:** SKY-285 – AgentRunStore for both backends ([#176](https://github.com/sky-ai-eng/triage-factory/issues/176)) ([b82d02d](https://github.com/sky-ai-eng/triage-factory/commit/b82d02d9fe8fd0bd8b32e7c2d65d1634f57eeea1))
+* **db:** SKY-286 – ReviewStore for both backends ([#178](https://github.com/sky-ai-eng/triage-factory/issues/178)) ([78b0c6f](https://github.com/sky-ai-eng/triage-factory/commit/78b0c6f057dab899c3d6f9b5eab910638284ba9e))
+* **db:** SKY-287 – PendingPRStore for both backends ([#179](https://github.com/sky-ai-eng/triage-factory/issues/179)) ([565222e](https://github.com/sky-ai-eng/triage-factory/commit/565222eb42a617be5c54434be152a852895af826))
+* **db:** SKY-288 – RepoStore for both backends ([#180](https://github.com/sky-ai-eng/triage-factory/issues/180)) ([92f60f3](https://github.com/sky-ai-eng/triage-factory/commit/92f60f39664d6f0e6d07edde20d4166613a53ddf))
+* **db:** SKY-289 — PendingFiringsStore for both backends ([#181](https://github.com/sky-ai-eng/triage-factory/issues/181)) ([c928e52](https://github.com/sky-ai-eng/triage-factory/commit/c928e527f82449d079a7cf3c06ad97adb7ff0631))
+* **db:** SKY-290 – ProjectStore for both backends ([#182](https://github.com/sky-ai-eng/triage-factory/issues/182)) ([16f13b2](https://github.com/sky-ai-eng/triage-factory/commit/16f13b266850ce2209854017d6a616f9702ec33f))
+* **db:** SKY-292 – FactoryReadStore for both backends ([#175](https://github.com/sky-ai-eng/triage-factory/issues/175)) ([f98303b](https://github.com/sky-ai-eng/triage-factory/commit/f98303b407c823b55d52768bd563cac3a6dae293))
+* **db:** v1.11.0 hard cutover — brick pre-v1.11.0 installs, collapse migration tree ([#162](https://github.com/sky-ai-eng/triage-factory/issues/162)) ([6744853](https://github.com/sky-ai-eng/triage-factory/commit/67448539fb403006c8d356ddfc4fa3c433af3590))
+* **delegate:** synthetic-claims for manual runs, admin pool for event-triggered ([#191](https://github.com/sky-ai-eng/triage-factory/issues/191)) ([7fa095e](https://github.com/sky-ai-eng/triage-factory/commit/7fa095ed29483556a8eafb39528ae378051e2517))
+* **frontend:** SKY-252 – multi-mode auth integration ([#173](https://github.com/sky-ai-eng/triage-factory/issues/173)) ([4929256](https://github.com/sky-ai-eng/triage-factory/commit/492925660408e94581326de58fe2ca64ea9f5ade))
+* **jira:** per-project Jira status rules configuration ([#165](https://github.com/sky-ai-eng/triage-factory/issues/165)) ([9e7c9df](https://github.com/sky-ai-eng/triage-factory/commit/9e7c9dfd6866fcee25e7679755c98ca0317c8eff))
+* **poller:** iterate orgs in background services (SKY-312) ([#196](https://github.com/sky-ai-eng/triage-factory/issues/196)) ([92e4188](https://github.com/sky-ai-eng/triage-factory/commit/92e4188a840ef83f5c7166faeb67bc2f735138a1))
+* **predicate:** Jira *_is_self → *_in allowlist cutover ([#166](https://github.com/sky-ai-eng/triage-factory/issues/166)) ([069bc44](https://github.com/sky-ai-eng/triage-factory/commit/069bc443186523b34a2c19360d11a75bb7d8bb85))
+* **predicate:** SKY-264 — author_in / reviewer_in / commenter_in ([#161](https://github.com/sky-ai-eng/triage-factory/issues/161)) ([f659d63](https://github.com/sky-ai-eng/triage-factory/commit/f659d63cbc796195acd4b8366876054a23c6651c))
+* **prompts:** per-prompt model override ([#149](https://github.com/sky-ai-eng/triage-factory/issues/149)) ([608b48e](https://github.com/sky-ai-eng/triage-factory/commit/608b48e591e9e65d8dd200b79653462919602b11))
+* **routing:** tasks-per-team, remove tracker shortcut ([#183](https://github.com/sky-ai-eng/triage-factory/issues/183)) ([29f5c25](https://github.com/sky-ai-eng/triage-factory/commit/29f5c2576210bf63ed34d9d419ec8dcf3acb2c1d))
+* **runmode:** mode flag infrastructure (SKY-248 D4a) ([#139](https://github.com/sky-ai-eng/triage-factory/issues/139)) ([237c524](https://github.com/sky-ai-eng/triage-factory/commit/237c5247a43b718c4ad2037e79500fba7ecef377))
+* **server:** bind to 127.0.0.1 by default, add --host flag ([#169](https://github.com/sky-ai-eng/triage-factory/issues/169)) ([b542a16](https://github.com/sky-ai-eng/triage-factory/commit/b542a16e6e21b72700e33592024f24dbcfd8f3b6))
+* **ui:** add light/dark/auto theme with flat-surface palette ([#160](https://github.com/sky-ai-eng/triage-factory/issues/160)) ([6cdc105](https://github.com/sky-ai-eng/triage-factory/commit/6cdc105496cf52bbaf7f846509969c150b47f201))
+
+
+### Bug Fixes
+
+* address Copilot review comments ([3eba6fc](https://github.com/sky-ai-eng/triage-factory/commit/3eba6fc9664914c6a1e641dc13ef5cc9c3708eeb))
+* **db:** detect partial-legacy install state (SKY-245 hotfix) ([#140](https://github.com/sky-ai-eng/triage-factory/issues/140)) ([8961968](https://github.com/sky-ai-eng/triage-factory/commit/8961968556d760786240ca2ef3d3c3e9c30618e6))
+* **db:** tighten SQLite to match PG, normalize settings ([#163](https://github.com/sky-ai-eng/triage-factory/issues/163)) ([68f3114](https://github.com/sky-ai-eng/triage-factory/commit/68f3114c927ccf48dc2000b4c747a787e6de4c8c))
+* **db:** unblock main after PR [#149](https://github.com/sky-ai-eng/triage-factory/issues/149)/[#150](https://github.com/sky-ai-eng/triage-factory/issues/150) collision ([#151](https://github.com/sky-ai-eng/triage-factory/issues/151)) ([7548863](https://github.com/sky-ai-eng/triage-factory/commit/7548863c82315ce24e1e7130ca04bfa52de9115a))
+* **domain:** move 12 projection/view types from db/ to domain/ ([#145](https://github.com/sky-ai-eng/triage-factory/issues/145)) ([e76b881](https://github.com/sky-ai-eng/triage-factory/commit/e76b881d870c066cb02a1d07a754c1ecb952c0d0))
+* **exec:** silence goose logger to drop "no migrations to run" noise ([#157](https://github.com/sky-ai-eng/triage-factory/issues/157)) ([37b7641](https://github.com/sky-ai-eng/triage-factory/commit/37b7641f6f097193047ebce852e1d06533e2ae3b))
+* **frontend:** unbreak `npm run dev` for Babylon scenes ([#154](https://github.com/sky-ai-eng/triage-factory/issues/154)) ([62c495c](https://github.com/sky-ai-eng/triage-factory/commit/62c495c4b6e9e8060cd75f128ff2f51b8020f699))
+* **ui:** Use better contrast ([#152](https://github.com/sky-ai-eng/triage-factory/issues/152)) ([4336093](https://github.com/sky-ai-eng/triage-factory/commit/4336093e4cc83e6aabd64c0c23bb52d7c1f1665d))
+* **workspace:** validate task entity key before composing feature branch ([#170](https://github.com/sky-ai-eng/triage-factory/issues/170)) ([3471170](https://github.com/sky-ai-eng/triage-factory/commit/347117024654fa281b0ae18d3c0ecec9041e831e))
+
 ## [1.10.1](https://github.com/sky-ai-eng/triage-factory/compare/v1.10.0...v1.10.1) (2026-05-08)
 
 
