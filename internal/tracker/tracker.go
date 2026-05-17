@@ -42,11 +42,30 @@ type Tracker struct {
 	bus      *eventbus.Bus
 	tasks    db.TaskStore   // SKY-283: tracker creates review_requested tasks during discovery + reconciles stale ones
 	entities db.EntityStore // SKY-284: entity lifecycle (find/create, snapshot, title/description, close/reactivate)
+	// orgID is the tenant this tracker emits events for. SKY-310 / D9a:
+	// every event the tracker publishes is stamped with this so the bus
+	// can route to org-scoped subscribers. Today there's one Tracker per
+	// process pinned to runmode.LocalDefaultOrgID; D9c lifts this to
+	// per-org loops.
+	orgID string
 }
 
 // New creates a Tracker.
 func New(database *sql.DB, bus *eventbus.Bus, tasks db.TaskStore, entities db.EntityStore) *Tracker {
-	return &Tracker{database: database, bus: bus, tasks: tasks, entities: entities}
+	return &Tracker{database: database, bus: bus, tasks: tasks, entities: entities, orgID: runmode.LocalDefaultOrgID}
+}
+
+// publish stamps evt.OrgID with the tracker's configured tenant before
+// forwarding to the bus. Callers should funnel every Publish through
+// here so org-scoped subscribers (SKY-310 / D9a) see a tagged event.
+// A pre-set evt.OrgID is left intact so future callers stamping their
+// own org (carry-over, backfill in another tenant) override the
+// tracker's default.
+func (t *Tracker) publish(evt domain.Event) {
+	if evt.OrgID == "" {
+		evt.OrgID = t.orgID
+	}
+	t.bus.Publish(evt)
 }
 
 // --- GitHub ---
@@ -196,7 +215,7 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, userTe
 						Title:    snap.Title,
 					})
 					eid := e.ID
-					t.bus.Publish(domain.Event{
+					t.publish(domain.Event{
 						EventType:    domain.EventGitHubPRReviewRequestRemoved,
 						EntityID:     &eid,
 						MetadataJSON: string(meta),
@@ -276,7 +295,7 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, userTe
 
 		// Publish events to bus. Recording + routing happens downstream.
 		for _, evt := range events {
-			t.bus.Publish(evt)
+			t.publish(evt)
 			eventsEmitted++
 		}
 	}
@@ -382,7 +401,7 @@ func (t *Tracker) backfillReviewRequested(entityID string, snap domain.PRSnapsho
 		}
 	}
 	eid := entityID
-	t.bus.Publish(domain.Event{
+	t.publish(domain.Event{
 		EntityID:     &eid,
 		EventType:    domain.EventGitHubPRReviewRequested,
 		MetadataJSON: string(metaJSON),
@@ -621,7 +640,7 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 		// only place that actually carries the field in the response.
 
 		for _, evt := range events {
-			t.bus.Publish(evt)
+			t.publish(evt)
 			eventsEmitted++
 		}
 	}
@@ -876,7 +895,7 @@ func truncateDescription(s string, maxRunes int) string {
 // subscribers can ignore sentinels emitted by pre-restart poll generations
 // (an old RefreshXxx goroutine that finishes after a config-triggered restart).
 func (t *Tracker) EmitPollComplete(source string, startedAt time.Time, entityCount, eventCount int) {
-	t.bus.Publish(domain.Event{
+	t.publish(domain.Event{
 		EventType: domain.EventSystemPollCompleted,
 		MetadataJSON: mustJSON(events.SystemPollCompletedMetadata{
 			Source:    source,

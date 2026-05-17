@@ -533,7 +533,14 @@ func main() {
 	srv.SetLifetimeCounter(lifetimeCounter)
 	db.SetOnEventRecorded(lifetimeCounter.Record)
 
-	// Subscriber: WS broadcaster — forwards ALL events to the frontend
+	// Subscriber: WS broadcaster — forwards ALL events to the frontend.
+	//
+	// Classified as system-service for the SKY-310 / D9a bus profiles:
+	// the WS hub itself is not yet per-(user, org) scoped. D9b lifts
+	// the hub to a per-org fanout, at which point this becomes either
+	// an org-scoped SubscribeFor or a system-service that dispatches
+	// per-OrgID. For now the local-mode promise holds because every
+	// published event carries LocalDefaultOrgID and there's one hub.
 	bus.Subscribe(eventbus.Subscriber{
 		Name: "ws-broadcast",
 		Handle: func(evt domain.Event) {
@@ -591,7 +598,11 @@ func main() {
 	srv.SetScorerTrigger(scorer.Trigger)
 	log.Println("[ai] scorer started (model: haiku)")
 
-	// Subscriber: scorer trigger — only reacts to poll-complete sentinels
+	// Subscriber: scorer trigger — only reacts to poll-complete sentinels.
+	// System-service profile (D9a): one scorer per process today, gets
+	// triggered by any tenant's poll completion. D9c's per-org poller
+	// loops will continue to fan poll-complete sentinels here regardless
+	// of OrgID — the scorer rotates through orgs internally.
 	bus.Subscribe(eventbus.Subscriber{
 		Name:   "scorer",
 		Filter: []string{"system:poll:"},
@@ -607,6 +618,8 @@ func main() {
 	classifier := projectclassify.NewRunner(database, stores.Entities, stores.Projects)
 	classifier.Start()
 	log.Println("[classify] project classifier started (model: haiku)")
+	// System-service profile (D9a): kicked by any tenant's poll
+	// completion; the classifier rotates through orgs internally.
 	bus.Subscribe(eventbus.Subscriber{
 		Name:   "classifier",
 		Filter: []string{"system:poll:"},
@@ -691,6 +704,10 @@ func main() {
 	// matching triggers, runs inline close checks. Also handles post-scoring
 	// re-derive via the scorer callback wired above.
 	eventRouter = routing.NewRouter(stores.Prompts, stores.EventHandlers, stores.Agents, stores.TeamAgents, stores.Users, stores.Tasks, stores.AgentRuns, stores.Entities, stores.PendingFirings, stores.Events, spawner, scorer, wsHub)
+	// System-service profile (D9a): the router branches on evt.OrgID
+	// itself when persisting and fanning out — every event flows here
+	// regardless of tenant. Multi-mode handlers thread the orgID into
+	// the per-handler store calls.
 	bus.Subscribe(eventbus.Subscriber{
 		Name:   "router",
 		Filter: []string{"github:", "jira:"},
@@ -805,6 +822,12 @@ func main() {
 	// Jira: gates /api/jira/stock so it knows when snapshots are ready.
 	// Both: surface a one-shot "first poll complete after config change"
 	// toast so users can see their settings change actually took effect.
+	//
+	// System-service profile (D9a): poll-completed sentinels are
+	// per-source, not per-tenant, in local mode. D9c's per-org loops
+	// will emit one sentinel per (org, source) and the announce/stock
+	// state machine here is org-agnostic — it just cares that *a* poll
+	// completed.
 	bus.Subscribe(eventbus.Subscriber{
 		Name:   "poll-tracker",
 		Filter: []string{"system:poll:"},
