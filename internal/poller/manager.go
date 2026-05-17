@@ -217,6 +217,25 @@ func (m *Manager) runGitHubCycle(client *ghclient.Client, userTeams []string) {
 		// NULL/empty github_username means identity hasn't been
 		// captured yet (fresh install before first Settings save)
 		// — skip this org without surfacing as an error.
+		//
+		// Local-mode bridge: the poller acts as the lone local user,
+		// so we read their github_username to drive predicates like
+		// "PR review requested from me". The localGitHubUserID
+		// sentinel resolves to that one user.
+		//
+		// Multi-mode replacement lives in two future tickets:
+		//   - SKY-263 (D11): per-org GitHub App; the bot acts as the
+		//     App's installation identity, not a borrowed user PAT.
+		//     The "username" the poller threads downstream becomes
+		//     the App's bot username, resolved via GitHubClientFor
+		//     (ctx, orgID) rather than this users-table read.
+		//   - SKY-265 (D15): webhooks shrink polling pressure; the
+		//     comprehensive per-repo fetch + predicate-match-against-
+		//     org-members shape (see SKY-263 for the scaling concern)
+		//     only works if push-style delivery replaces the constant
+		//     poll. One-bot-per-team is the other escape hatch.
+		// Both are out of scope for D9c (SKY-312) which only
+		// handles the per-org outer loop.
 		username, err := m.users.GetGitHubUsernameSystem(ctx, localGitHubUserID)
 		if err != nil {
 			log.Printf("[github] org %s: read users.github_username: %v", orgID, err)
