@@ -160,6 +160,15 @@ type Stores struct {
 	// orchestrator cleanup defers (no JWT-claims context).
 	RunWorktrees RunWorktreeStore
 
+	// Curator owns the curator-runtime tables (curator_requests,
+	// curator_messages, curator_pending_context). App pool in
+	// Postgres — the per-project goroutine wraps each turn's
+	// writes in Tx.SyntheticClaimsWithTx with the requesting
+	// user's identity (creator_user_id read from the request row
+	// at dequeue). RLS policies gate every row on the
+	// (org_id, creator_user_id) pair. See SKY-298.
+	Curator CuratorStore
+
 	// Tx is the transaction runner — handlers that need atomic
 	// multi-store writes call Tx.WithTx and receive a TxStores with
 	// every field tx-bound. Postgres impl also sets the JWT claims
@@ -195,6 +204,7 @@ type TxStores struct {
 	Events         EventStore
 	TaskMemory     TaskMemoryStore
 	RunWorktrees   RunWorktreeStore
+	Curator        CuratorStore
 }
 
 // TxRunner runs fn inside a single database transaction. Postgres

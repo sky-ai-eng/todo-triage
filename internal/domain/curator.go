@@ -11,17 +11,21 @@ import "time"
 // in curator_messages — that table holds only the agent's side of the
 // exchange, same way run_messages does.
 type CuratorRequest struct {
-	ID         string     `json:"id"`
-	ProjectID  string     `json:"project_id"`
-	Status     string     `json:"status"` // queued | running | done | cancelled | failed
-	UserInput  string     `json:"user_input"`
-	ErrorMsg   string     `json:"error_msg,omitempty"`
-	CostUSD    float64    `json:"cost_usd"`
-	DurationMs int        `json:"duration_ms"`
-	NumTurns   int        `json:"num_turns"`
-	StartedAt  *time.Time `json:"started_at,omitempty"`
-	FinishedAt *time.Time `json:"finished_at,omitempty"`
-	CreatedAt  time.Time  `json:"created_at"`
+	ID        string `json:"id"`
+	ProjectID string `json:"project_id"`
+	Status    string `json:"status"` // queued | running | done | cancelled | failed
+	UserInput string `json:"user_input"`
+	// CreatorUserID is the requesting user (curator_requests.creator_user_id).
+	// The per-project goroutine reads this when dequeuing a row so each turn's
+	// writes attribute to the user that sent the message — see SKY-298.
+	CreatorUserID string     `json:"creator_user_id,omitempty"`
+	ErrorMsg      string     `json:"error_msg,omitempty"`
+	CostUSD       float64    `json:"cost_usd"`
+	DurationMs    int        `json:"duration_ms"`
+	NumTurns      int        `json:"num_turns"`
+	StartedAt     *time.Time `json:"started_at,omitempty"`
+	FinishedAt    *time.Time `json:"finished_at,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
 }
 
 // IsTerminal reports whether the request has reached a final status.

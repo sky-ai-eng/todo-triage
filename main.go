@@ -672,7 +672,7 @@ func main() {
 	} else if n > 0 {
 		log.Printf("[curator] cancelled %d orphaned non-terminal curator requests from prior process", n)
 	}
-	curatorRuntime := curator.New(database, stores.Prompts, stores.Repos, wsHub, "")
+	curatorRuntime := curator.New(database, stores, wsHub, "")
 	srv.SetCurator(curatorRuntime)
 
 	// Knowledge-base file watcher — fires `project_knowledge_updated`

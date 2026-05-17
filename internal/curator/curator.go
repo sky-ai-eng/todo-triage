@@ -17,10 +17,14 @@ import (
 // first SendMessage. Cross-project messages run in parallel; same-
 // project messages queue serially so the conversation history stays
 // coherent.
+//
+// The per-project goroutine processes each turn under the requesting
+// user's identity (curator_requests.creator_user_id), wrapping every
+// store call in stores.Tx.SyntheticClaimsWithTx so multi-mode RLS
+// policies on (org_id, creator_user_id) gate the writes. SKY-298.
 type Curator struct {
 	database *sql.DB
-	prompts  db.PromptStore
-	repos    db.RepoStore // SKY-288: pinned-repo lookups during materialization
+	stores   db.Stores
 	wsHub    *websocket.Hub
 
 	mu       sync.Mutex
@@ -33,11 +37,19 @@ type Curator struct {
 
 // New constructs a Curator. Call db.CancelOrphanedNonTerminalCuratorRequests
 // at startup before constructing — see main.go wiring.
-func New(database *sql.DB, prompts db.PromptStore, repos db.RepoStore, wsHub *websocket.Hub, model string) *Curator {
+//
+// stores carries the Tx runner (for SyntheticClaimsWithTx wraps), the
+// CuratorStore (per-turn writes), the ProjectStore (session-id
+// bookkeeping), the PromptStore (skill materialization), and the
+// RepoStore (pinned-repo materialization). The package-level
+// *sql.DB is retained for handler-side helpers (cancel paths, queued
+// drain on project delete) still tracked by SKY-253 — those run
+// outside the per-project goroutine and are not on the synthetic-
+// claims path yet.
+func New(database *sql.DB, stores db.Stores, wsHub *websocket.Hub, model string) *Curator {
 	return &Curator{
 		database: database,
-		prompts:  prompts,
-		repos:    repos,
+		stores:   stores,
 		wsHub:    wsHub,
 		model:    model,
 		sessions: make(map[string]*projectSession),
@@ -53,10 +65,32 @@ func (c *Curator) UpdateCredentials(model string) {
 	c.model = model
 }
 
+// queueItem carries everything the per-project goroutine needs to
+// dispatch a turn under the requesting user's identity. orgID +
+// creatorUserID are captured at enqueue time (SendMessage's handler
+// context) so the goroutine doesn't have to read the curator_requests
+// row again just to figure out who to bill the writes to — that read
+// would itself need claims set under Postgres RLS, creating a chicken-
+// and-egg problem. See SKY-298 routing notes.
+type queueItem struct {
+	requestID     string
+	orgID         string
+	creatorUserID string
+}
+
 // SendMessage records the user's input as a queued curator_request,
 // hands it to the project's goroutine, and returns the request id.
 // The HTTP handler returns 202 + this id; the per-project goroutine
 // flips status to running on pickup and to terminal on completion.
+//
+// orgID + creatorUserID identify the requesting user — every write
+// the goroutine produces for this turn (running flip, agent stream
+// messages, pending-context consume/finalize/revert, terminal status)
+// runs inside Stores.Tx.SyntheticClaimsWithTx with these claims set
+// so multi-mode RLS attributes the rows correctly. In local mode the
+// handler passes runmode.LocalDefaultOrgID + LocalDefaultUserID; the
+// D9 sweep (SKY-253) will replace those with values from request
+// context.
 //
 // The user's content is required (empty/whitespace-only is rejected
 // at the handler before reaching us); the project must exist
@@ -70,20 +104,32 @@ func (c *Curator) UpdateCredentials(model string) {
 // before it spawns claude — or (b) loses the lock and gets nil back,
 // in which case the persisted row is flipped to cancelled before we
 // return. Either way, no message reaches a non-running goroutine.
-func (c *Curator) SendMessage(projectID, content string) (string, error) {
-	requestID, err := db.CreateCuratorRequest(c.database, projectID, content)
-	if err != nil {
+func (c *Curator) SendMessage(ctx context.Context, projectID, orgID, creatorUserID, content string) (string, error) {
+	var requestID string
+	if err := c.stores.Tx.SyntheticClaimsWithTx(ctx, orgID, creatorUserID, func(ts db.TxStores) error {
+		id, err := ts.Curator.CreateRequest(ctx, orgID, projectID, creatorUserID, content)
+		if err != nil {
+			return err
+		}
+		requestID = id
+		return nil
+	}); err != nil {
 		return "", fmt.Errorf("create curator request: %w", err)
 	}
 
 	session := c.getOrStartSession(projectID)
 	if session == nil {
+		// Best-effort cancel on the package-level helper — the
+		// "curator is shut down" path runs from the handler goroutine
+		// (not the per-project goroutine) and is covered by the D9
+		// handler sweep. SKY-253.
 		_, _ = db.MarkCuratorRequestCancelledIfActive(c.database, requestID, "curator is shut down")
 		return "", errors.New("curator is shut down")
 	}
 
+	item := queueItem{requestID: requestID, orgID: orgID, creatorUserID: creatorUserID}
 	select {
-	case session.queue <- requestID:
+	case session.queue <- item:
 		c.broadcastRequestUpdate(projectID, requestID, "queued")
 		return requestID, nil
 	default:
@@ -161,6 +207,20 @@ func (c *Curator) Shutdown() {
 	}
 }
 
+// cancelQueuedRows flips never-picked-up queued curator_requests for a
+// project to cancelled. Called from CancelProject (handler-side) and
+// from the fallback path in SendMessage when the curator is shut down.
+//
+// TODO(SKY-253/D9): both QueuedCuratorRequestsForProject and
+// MarkCuratorRequestCancelledIfActive run against *sql.DB without JWT
+// claims set. In multi-mode Postgres tf_app + RLS will hide the rows
+// from the SELECT and reject the UPDATE, leaving queued rows dangling
+// after a project-delete or shutdown. Must be routed through a
+// per-user synthetic-claims wrap (looping over requesting users) or
+// through admin-pool `...System` variants before multi-mode curator
+// ships. Identity-per-row is recoverable from curator_requests.creator_user_id;
+// the harder question is which pool (admin vs. per-user) attribution
+// belongs to for system-driven cancels.
 func (c *Curator) cancelQueuedRows(projectID, reason string) {
 	queued, err := db.QueuedCuratorRequestsForProject(c.database, projectID)
 	if err != nil {
@@ -200,7 +260,7 @@ func (c *Curator) getOrStartSession(projectID string) *projectSession {
 	session := &projectSession{
 		curator:   c,
 		projectID: projectID,
-		queue:     make(chan string, sessionQueueDepth),
+		queue:     make(chan queueItem, sessionQueueDepth),
 		ctx:       ctx,
 		stopAll:   cancel,
 		done:      make(chan struct{}),

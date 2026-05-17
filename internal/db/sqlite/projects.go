@@ -178,6 +178,17 @@ func (s *projectStore) Delete(ctx context.Context, orgID, id string) error {
 	return nil
 }
 
+func (s *projectStore) SetCuratorSessionID(ctx context.Context, orgID, projectID, sessionID string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	_, err := s.q.ExecContext(ctx, `
+		UPDATE projects SET curator_session_id = ?, updated_at = ?
+		WHERE id = ?
+	`, nullIfEmpty(sessionID), time.Now().UTC(), projectID)
+	return err
+}
+
 func (s *projectStore) BumpUpdatedAt(ctx context.Context, orgID, id string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err

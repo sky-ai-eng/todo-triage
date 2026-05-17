@@ -66,7 +66,12 @@ func (s *Server) handleCuratorSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	requestID, err := s.curator.SendMessage(projectID, content)
+	// SKY-298: pass the requesting user's identity explicitly so the
+	// per-project goroutine attributes every per-turn write
+	// accordingly. Today the local-mode defaults are hardcoded — the
+	// D9 handler sweep (SKY-253) will replace these with values
+	// extracted from request-scoped auth context.
+	requestID, err := s.curator.SendMessage(r.Context(), projectID, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, content)
 	if err != nil {
 		internalError(w, "curator", err)
 		return
