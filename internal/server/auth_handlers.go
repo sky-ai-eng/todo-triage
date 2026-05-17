@@ -24,6 +24,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	tfdb "github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/sessions"
 )
 
@@ -411,6 +412,20 @@ func (s *Server) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	claims := ClaimsFrom(r.Context())
 	if claims == nil {
+		writeUnauth(w)
+		return
+	}
+	// The local-mode shim in withSession injects a synthetic claim
+	// carrying LocalDefaultUserID when authDeps is nil — the body below
+	// reads public.users via tf.current_user_id(), both of which are
+	// Postgres-only and would 500 against local SQLite. Gating on the
+	// sentinel Subject (not on runmode) keeps the auth-flow tests
+	// working: they run runmode=local against a real Postgres harness
+	// with authDeps wired, so claims.Subject is a real GoTrue user UUID
+	// and the check falls through. The forthcoming handler-sweep PR
+	// will replace this with a SQLite-compatible local identity path
+	// returning the sentinel user + LocalDefaultOrgID membership.
+	if claims.Subject == runmode.LocalDefaultUserID {
 		writeUnauth(w)
 		return
 	}

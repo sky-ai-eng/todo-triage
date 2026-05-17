@@ -43,6 +43,27 @@ func TestWithSession_LocalShim_InjectsSentinels(t *testing.T) {
 	}
 }
 
+// TestHandleMe_LocalMode_Returns401 pins the regression: the shim
+// injects sentinel claims into every withSession-wrapped request,
+// which would otherwise let /api/me proceed into handleMe's
+// Postgres-only body (public.users + tf.current_user_id()) and 500
+// against local SQLite. handleMe must gate on runmode and 401 in
+// local mode to preserve the pre-shim behavior. The forthcoming
+// handler-sweep PR will replace the 401 with a SQLite-compatible
+// local identity path returning the sentinel user + sentinel org.
+func TestHandleMe_LocalMode_Returns401(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+
+	s := &Server{} // authDeps nil → shim injects sentinel claims
+
+	rec := httptest.NewRecorder()
+	s.withSession(http.HandlerFunc(s.handleMe)).ServeHTTP(rec, httptest.NewRequest("GET", "/api/me", nil))
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (handleMe must short-circuit in local mode to avoid Postgres-only query path)", rec.Code)
+	}
+}
+
 // TestWithSession_MultiMode_NilAuthDeps_PassesThroughWithoutClaims
 // pins the boot-race safety. SetAuthDeps lands after routes() in
 // multi mode — a request that races in during that window must NOT
