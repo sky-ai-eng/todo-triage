@@ -9,11 +9,11 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// TestRunner_IteratesActiveOrgs pins the SKY-312 outer-loop contract:
-// the runner enumerates every active org via OrgsStore.ListActiveSystem
-// and dispatches one classification pass per org. Pre-D9c the runner
-// hardcoded runmode.LocalDefaultOrgID and would silently skip
-// entities/projects in any non-sentinel org.
+// TestRunner_IteratesActiveOrgs pins the outer-loop contract: the
+// runner enumerates every active org via OrgsStore.ListActiveSystem
+// and dispatches one classification pass per org. A regression that
+// hardcoded the local-mode sentinel would silently skip entities/
+// projects in any non-sentinel org.
 //
 // SQLite's per-store assertLocalOrg gates prevent inserting entities or
 // projects under a non-sentinel org, so this test drives the loop with

@@ -9,11 +9,11 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// TestProfiler_Run_IteratesActiveOrgs pins the SKY-312 outer-loop
-// contract on the profiler: Run enumerates every active org via
+// TestProfiler_Run_IteratesActiveOrgs pins the outer-loop contract
+// on the profiler: Run enumerates every active org via
 // OrgsStore.ListActiveSystem and resolves each org's configured
-// repos inside the loop. Empty repo lists short-circuit before
-// any GitHub API call, so this test exercises the iteration without
+// repos inside the loop. Empty repo lists short-circuit before any
+// GitHub API call, so this test exercises the iteration without
 // needing a real github client.
 func TestProfiler_Run_IteratesActiveOrgs(t *testing.T) {
 	orgs := &fakeOrgsStore{ids: []string{"org-a", "org-b", "org-c"}}

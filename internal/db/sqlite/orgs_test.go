@@ -8,11 +8,12 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestOrgsStore_SQLite_ListActiveSystem_ReturnsSentinel pins the local-
-// mode behavior: the only active org is the runmode.LocalDefaultOrgID
-// sentinel seeded by the v1.11.0 baseline migration. SKY-312 callers
-// (poller, tracker, projectclassify, repoprofile) collapse their per-
-// org loop to N=1 against this row.
+// TestOrgsStore_SQLite_ListActiveSystem_ReturnsSentinel pins the
+// local-mode behavior: the only active org is the
+// runmode.LocalDefaultOrgID sentinel seeded by the v1.11.0 baseline
+// migration. Background-service callers (poller, tracker,
+// projectclassify, repoprofile) collapse their per-org loop to N=1
+// against this row.
 func TestOrgsStore_SQLite_ListActiveSystem_ReturnsSentinel(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)

@@ -19,7 +19,7 @@ type Runner struct {
 	database *sql.DB
 	entities db.EntityStore
 	projects db.ProjectStore
-	orgs     db.OrgsStore // SKY-312: enumerate active orgs per cycle
+	orgs     db.OrgsStore // enumerate active orgs per cycle
 	trigger  chan struct{}
 	stop     chan struct{}
 	mu       sync.Mutex

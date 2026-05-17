@@ -29,10 +29,15 @@ var localGitHubUserID = runmode.LocalDefaultUserID
 type Manager struct {
 	database *sql.DB
 	bus      *eventbus.Bus
-	tracker  *tracker.Tracker
-	users    db.UsersStore // SKY-264: source of the session user's github_username
-	repos    db.RepoStore  // SKY-288: configured-repo names for GitHub poller startup
-	orgs     db.OrgsStore  // SKY-312: enumerate active orgs at each poll tick
+	// tracker dependencies are held instead of a single Tracker instance
+	// because each poll cycle constructs one Tracker per active org —
+	// orgID is a per-tracker construction parameter, not a per-call
+	// argument. See the per-org loops in runGitHubCycle / runJiraCycle.
+	tasks    db.TaskStore
+	entities db.EntityStore
+	users    db.UsersStore // source of the session user's github_username
+	repos    db.RepoStore  // configured-repo names for GitHub poller startup
+	orgs     db.OrgsStore  // enumerate active orgs at each poll tick
 
 	// OnError fires when a poll cycle returns an error. Source is "github"
 	// or "jira". Wired from main to a toast helper so users see the
@@ -48,11 +53,22 @@ func NewManager(database *sql.DB, bus *eventbus.Bus, users db.UsersStore, tasks 
 	return &Manager{
 		database: database,
 		bus:      bus,
-		tracker:  tracker.New(database, bus, tasks, entities),
+		tasks:    tasks,
+		entities: entities,
 		users:    users,
 		repos:    repos,
 		orgs:     orgs,
 	}
+}
+
+// trackerForOrg builds a Tracker bound to the given tenant. Called
+// inside the per-org loops of runGitHubCycle / runJiraCycle so each
+// tracker emits events stamped with the correct OrgID and reads/
+// writes entities scoped to that tenant. Construction is cheap
+// (struct of method holders + store references) so per-cycle
+// allocation is fine.
+func (m *Manager) trackerForOrg(orgID string) *tracker.Tracker {
+	return tracker.New(m.database, m.bus, m.tasks, m.entities, orgID)
 }
 
 // reportError invokes the OnError callback if set. Centralized so adding
@@ -130,15 +146,13 @@ func (m *Manager) stopAll() {
 	}
 }
 
-// startGitHub launches the GitHub tracking loop.
-//
-// SKY-312: each tick iterates active orgs and dispatches one
-// RefreshGitHub call per org. Per-org repo lists and per-org user
-// identities are resolved inside the loop so a new org added between
-// ticks picks up on the next cycle without a poller restart. Local
-// mode collapses to N=1 (the synthetic sentinel org). Bounded
-// per-org concurrency is a future optimization — sequential is fine
-// for v1 multi-mode given the poll period (≥1 minute baseline).
+// startGitHub launches the GitHub tracking loop. Each tick iterates
+// active orgs and dispatches a per-org RefreshGitHub. Per-org repo
+// lists and per-org user identities are resolved inside the loop so a
+// new org added between ticks picks up on the next cycle without a
+// poller restart. Local mode collapses to N=1 (the synthetic sentinel
+// org). Bounded per-org concurrency is a future optimization —
+// sequential is fine given the poll period (≥1 minute baseline).
 func (m *Manager) startGitHub(cfg config.Config, creds auth.Credentials) {
 	if !cfg.GitHub.Ready(creds.GitHubPAT, creds.GitHubURL) {
 		log.Println("[github] credentials not configured, skipping tracker")
@@ -223,7 +237,8 @@ func (m *Manager) runGitHubCycle(client *ghclient.Client, userTeams []string) {
 		// "PR review requested from me". The localGitHubUserID
 		// sentinel resolves to that one user.
 		//
-		// Multi-mode replacement lives in two future tickets:
+		// TODO: future multi-mode work replaces this read in two
+		// stages:
 		//   - SKY-263 (D11): per-org GitHub App; the bot acts as the
 		//     App's installation identity, not a borrowed user PAT.
 		//     The "username" the poller threads downstream becomes
@@ -231,11 +246,9 @@ func (m *Manager) runGitHubCycle(client *ghclient.Client, userTeams []string) {
 		//     (ctx, orgID) rather than this users-table read.
 		//   - SKY-265 (D15): webhooks shrink polling pressure; the
 		//     comprehensive per-repo fetch + predicate-match-against-
-		//     org-members shape (see SKY-263 for the scaling concern)
-		//     only works if push-style delivery replaces the constant
-		//     poll. One-bot-per-team is the other escape hatch.
-		// Both are out of scope for D9c (SKY-312) which only
-		// handles the per-org outer loop.
+		//     org-members shape only works if push-style delivery
+		//     replaces the constant poll. One-bot-per-team is the
+		//     other escape hatch.
 		username, err := m.users.GetGitHubUsernameSystem(ctx, localGitHubUserID)
 		if err != nil {
 			log.Printf("[github] org %s: read users.github_username: %v", orgID, err)
@@ -244,22 +257,21 @@ func (m *Manager) runGitHubCycle(client *ghclient.Client, userTeams []string) {
 		if username == "" {
 			continue
 		}
-		if _, err := m.tracker.RefreshGitHub(orgID, client, username, userTeams, repos); err != nil {
+		if _, err := m.trackerForOrg(orgID).RefreshGitHub(client, username, userTeams, repos); err != nil {
 			log.Printf("[github] org %s: tracker error: %v", orgID, err)
 			m.reportError("github", err)
 		}
 	}
 }
 
-// startJira launches the Jira tracking loop.
-//
-// SKY-312: each tick iterates active orgs and dispatches one
-// RefreshJira call per org. Jira project rules are still process-
-// global today (sourced from cfg.Jira), so the per-org loop is
-// effectively a fan-out of the same project set across orgs — that
-// matches local-mode behavior (N=1, the synthetic sentinel org) and
-// keeps the multi-mode outer-loop shape symmetric with the GitHub
-// path. Per-org Jira project configuration is a future concern.
+// startJira launches the Jira tracking loop. Each tick iterates
+// active orgs and dispatches a per-org RefreshJira. Jira project
+// rules are still process-global today (sourced from cfg.Jira), so
+// the per-org loop is effectively a fan-out of the same project set
+// across orgs — that matches local-mode behavior (N=1, the synthetic
+// sentinel org) and keeps the multi-mode outer-loop shape symmetric
+// with the GitHub path. Per-org Jira project configuration is a
+// future concern.
 func (m *Manager) startJira(cfg config.Config, creds auth.Credentials) {
 	if !cfg.Jira.Ready(creds.JiraPAT, creds.JiraURL) {
 		log.Println("[jira] not fully configured, skipping tracker")
@@ -312,7 +324,7 @@ func (m *Manager) runJiraCycle(client *jiraclient.Client, baseURL string, projec
 		return
 	}
 	for _, orgID := range orgIDs {
-		if _, err := m.tracker.RefreshJira(orgID, client, baseURL, projects); err != nil {
+		if _, err := m.trackerForOrg(orgID).RefreshJira(client, baseURL, projects); err != nil {
 			log.Printf("[jira] org %s: tracker error: %v", orgID, err)
 			m.reportError("jira", err)
 		}

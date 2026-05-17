@@ -30,8 +30,8 @@ const (
 type Profiler struct {
 	gh       *github.Client
 	database *sql.DB
-	repos    db.RepoStore // SKY-288: profile reads + upserts go through the store
-	orgs     db.OrgsStore // SKY-312: iterate active orgs at the top of each profile run
+	repos    db.RepoStore // profile reads + upserts go through the store
+	orgs     db.OrgsStore // iterate active orgs at the top of each profile run
 	ws       *websocket.Hub
 }
 
@@ -48,10 +48,9 @@ type repoWithDocs struct {
 }
 
 // Run iterates active orgs and profiles each one's configured repos.
-// SKY-312 outer loop: previously took a pre-fetched repo list and
-// profiled them against a single hardcoded org sentinel; now resolves
-// the per-org repo list inside the loop so a new org added between
-// boot and the next forced re-profile picks up correctly. Local mode
+// Per-org outer loop: resolves the per-org repo list inside the loop
+// so a new org added between boot and the next forced re-profile
+// picks up correctly. Local mode
 // collapses to N=1 — the single runmode.LocalDefaultOrgID sentinel.
 //
 // If force is true, the TTL check is skipped (used for manual

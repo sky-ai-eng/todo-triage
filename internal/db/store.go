@@ -160,13 +160,13 @@ type Stores struct {
 	// orchestrator cleanup defers (no JWT-claims context).
 	RunWorktrees RunWorktreeStore
 
-	// Orgs owns the orgs table — the tenancy root. SKY-312 added
-	// this store so background services (poller, tracker,
-	// projectclassify, repoprofile) can iterate active orgs at the
-	// top of each cycle instead of hardcoding the runmode sentinel.
-	// Admin pool in Postgres — every caller is a boot-launched
-	// goroutine without JWT-claims context, and the iteration is by
-	// definition a cross-org system-service read.
+	// Orgs owns the orgs table — the tenancy root. Background
+	// services (poller, tracker, projectclassify, repoprofile)
+	// iterate active orgs through this store at the top of each
+	// cycle instead of hardcoding the runmode sentinel. Admin pool
+	// in Postgres — every caller is a boot-launched goroutine
+	// without JWT-claims context, and the iteration is by definition
+	// a cross-org system-service read.
 	Orgs OrgsStore
 
 	// Curator owns the curator-runtime tables (curator_requests,

@@ -9,9 +9,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// TestManager_RunGitHubCycle_IteratesActiveOrgs pins the SKY-312 outer-
-// loop contract on the poller: a single tick enumerates every active
-// org via OrgsStore.ListActiveSystem and dispatches per-org work.
+// TestManager_RunGitHubCycle_IteratesActiveOrgs pins the outer-loop
+// contract on the poller: a single tick enumerates every active org
+// via OrgsStore.ListActiveSystem and dispatches per-org work.
 //
 // To keep the test free of GitHub network round-trips, every fake
 // org's RepoStore returns an empty configured-names list — that path

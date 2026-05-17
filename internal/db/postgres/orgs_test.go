@@ -15,7 +15,7 @@ import (
 //   - returns ids in ascending order so per-org iteration is stable
 //     across poll cycles
 //
-// This is the contract the SKY-312 background-service callers (poller,
+// This is the contract the background-service callers (poller,
 // tracker, projectclassify, repoprofile) iterate at the top of each
 // cycle.
 func TestOrgsStore_Postgres_ListActiveSystem_ExcludesSoftDeleted(t *testing.T) {

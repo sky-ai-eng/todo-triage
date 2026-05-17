@@ -65,7 +65,7 @@ func New(conn *sql.DB) db.Stores {
 		RunWorktrees: newRunWorktreeStore(conn, conn),
 		// Orgs is admin-pool in Postgres; SQLite collapses to the one
 		// connection. Callers are background services iterating the
-		// active org set at the top of each cycle (SKY-312).
+		// active org set at the top of each cycle.
 		Orgs: newOrgsStore(conn),
 		// Curator: the goroutine wraps each turn in
 		// Stores.Tx.SyntheticClaimsWithTx so the tx-bound variant

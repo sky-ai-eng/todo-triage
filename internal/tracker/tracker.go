@@ -41,22 +41,29 @@ type Tracker struct {
 	bus      *eventbus.Bus
 	tasks    db.TaskStore   // SKY-283: tracker creates review_requested tasks during discovery + reconciles stale ones
 	entities db.EntityStore // SKY-284: entity lifecycle (find/create, snapshot, title/description, close/reactivate)
-	// orgID is the tenant this tracker emits events for. SKY-310 / D9a:
-	// every event the tracker publishes is stamped with this so the bus
-	// can route to org-scoped subscribers. Today there's one Tracker per
-	// process pinned to runmode.LocalDefaultOrgID; D9c lifts this to
-	// per-org loops.
+	// orgID is the tenant this tracker emits events and reads/writes
+	// entities for. Set at construction and stable for the Tracker's
+	// lifetime; the poller's per-org loop constructs a fresh Tracker
+	// per tenant per cycle. Local mode passes runmode.LocalDefaultOrgID;
+	// multi mode passes the iterated active org.
+	//
+	// TODO: a future GitHub-App-credentials change (see SKY-263) will
+	// also bundle the per-org GitHub client + bot username on this
+	// struct — today those are method parameters because credentials
+	// are process-global.
 	orgID string
 }
 
-// New creates a Tracker.
-func New(database *sql.DB, bus *eventbus.Bus, tasks db.TaskStore, entities db.EntityStore) *Tracker {
-	return &Tracker{database: database, bus: bus, tasks: tasks, entities: entities, orgID: runmode.LocalDefaultOrgID}
+// New creates a Tracker bound to one tenant. The poller's per-org
+// loop calls this once per active org per cycle; the resulting
+// Tracker handles all event-emission for that org and stamps every
+// published event with the tenant via publish() below.
+func New(database *sql.DB, bus *eventbus.Bus, tasks db.TaskStore, entities db.EntityStore, orgID string) *Tracker {
+	return &Tracker{database: database, bus: bus, tasks: tasks, entities: entities, orgID: orgID}
 }
 
 // publish stamps evt.OrgID with the tracker's configured tenant before
-// forwarding to the bus. Callers should funnel every Publish through
-// here so org-scoped subscribers (SKY-310 / D9a) see a tagged event.
+// forwarding to the bus so org-scoped subscribers see a tagged event.
 // A pre-set evt.OrgID is left intact so future callers stamping their
 // own org (carry-over, backfill in another tenant) override the
 // tracker's default.
@@ -74,11 +81,12 @@ func (t *Tracker) publish(evt domain.Event) {
 // match team-based review requests (where the PR's reviewRequests list
 // contains the team, not the user's individual login).
 //
-// orgID scopes every entity/task read + write to a single tenant.
-// The poller manager (SKY-312) iterates active orgs at the top of
-// each tick and calls this per org; in local mode that collapses to
-// the single runmode.LocalDefaultOrgID sentinel.
-func (t *Tracker) RefreshGitHub(orgID string, client *ghclient.Client, username string, userTeams, repos []string) (int, error) {
+// All entity/task reads and writes are scoped to the Tracker's
+// orgID (set at construction). In multi mode the poller's per-org
+// loop constructs one Tracker per active org per cycle; in local
+// mode there's one Tracker for the single synthetic tenant.
+func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, userTeams, repos []string) (int, error) {
+	orgID := t.orgID
 	startedAt := time.Now()
 	// Phase 1: Discovery — find new PRs and register as entities.
 	discovered, err := t.discoverGitHub(client, username, repos)
@@ -523,11 +531,12 @@ func (r JiraRules) doneMembersForKey(issueKey string) []string {
 // downstream against the assignee_in / reporter_in / commenter_in
 // allowlists.
 //
-// orgID scopes every entity read + write to a single tenant. SKY-312
-// — the poller manager iterates active orgs at the top of each tick
-// and calls this per org; in local mode that collapses to the single
-// runmode.LocalDefaultOrgID sentinel.
-func (t *Tracker) RefreshJira(orgID string, client *jiraclient.Client, baseURL string, projects JiraRules) (int, error) {
+// All entity reads/writes are scoped to the Tracker's orgID (set at
+// construction). In multi mode the poller's per-org loop constructs
+// one Tracker per active org per cycle; in local mode there's one
+// Tracker for the single synthetic tenant.
+func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, projects JiraRules) (int, error) {
+	orgID := t.orgID
 	startedAt := time.Now()
 	terminal := func(snap domain.JiraSnapshot) bool {
 		rule := projects.ForKey(extractProject(snap.Key))
