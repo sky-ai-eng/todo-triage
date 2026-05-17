@@ -58,9 +58,13 @@ func Handle(args []string) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: loading config: %v (proceeding with defaults)\n", err)
 	}
-	database := &db.DB{Conn: conn}
 	// exec always runs in local mode against SQLite — multi-mode agents
-	// never shell out to `triagefactory exec`.
+	// never shell out to `triagefactory exec` (SKY-303 will replace
+	// that path with an IPC client). Stores is the routing surface
+	// every subcommand uses post-SKY-302: ResolveRunIdentity reads the
+	// run via the admin pool, and the subcommand picks
+	// SyntheticClaimsWithTx (manual) or `...System` (event-triggered)
+	// based on the run's trigger_type.
 	stores := sqlite.New(conn)
 
 	cmd := args[0]
@@ -69,7 +73,7 @@ func Handle(args []string) {
 	switch cmd {
 	case "gh":
 		if isHelp(cmdArgs) {
-			gh.Handle(nil, nil, cmdArgs)
+			gh.Handle(nil, db.Stores{}, cmdArgs)
 			return
 		}
 		if creds.GitHubPAT == "" {
@@ -81,7 +85,7 @@ func Handle(args []string) {
 			baseURL = creds.GitHubURL
 		}
 		client := ghclient.NewClient(baseURL, creds.GitHubPAT)
-		gh.Handle(client, database, cmdArgs)
+		gh.Handle(client, stores, cmdArgs)
 
 	case "jira":
 		if isHelp(cmdArgs) {
@@ -99,13 +103,13 @@ func Handle(args []string) {
 		// No credentials needed — workspace acts on local DB + filesystem
 		// only. The agent's run identity flows through TRIAGE_FACTORY_RUN_ID,
 		// validated inside the subcommand.
-		workspace.Handle(database, cmdArgs)
+		workspace.Handle(stores, cmdArgs)
 
 	case "chain":
 		// No credentials needed — chain verdict only writes a row in
 		// run_artifacts keyed by TRIAGE_FACTORY_RUN_ID. The orchestrator
 		// reads it back to decide whether to proceed.
-		chain.Handle(stores.Chains, cmdArgs)
+		chain.Handle(stores, cmdArgs)
 
 	default:
 		fmt.Fprintf(os.Stderr, "unknown exec command: %s\nRun 'triagefactory exec --help' for usage.\n", cmd)

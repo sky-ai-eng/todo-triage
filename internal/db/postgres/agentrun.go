@@ -508,6 +508,7 @@ const pgRunColumns = `
 	COALESCE(r.result_summary, ''), COALESCE(r.session_id, ''),
 	COALESCE(r.actor_agent_id::text, ''),
 	COALESCE(r.trigger_type, ''),
+	COALESCE(r.creator_user_id::text, ''),
 	r.chain_run_id, r.chain_step_index,
 	(NULLIF(BTRIM(rm.agent_content, E' \t\n\r'), '') IS NULL) AS memory_missing
 `
@@ -874,7 +875,15 @@ func (s *agentRunStore) Messages(ctx context.Context, orgID, runID string) ([]do
 }
 
 func (s *agentRunStore) TokenTotals(ctx context.Context, orgID, runID string) (*domain.TokenTotals, error) {
-	row := s.q.QueryRowContext(ctx, `
+	return tokenTotals(ctx, s.q, orgID, runID)
+}
+
+func (s *agentRunStore) TokenTotalsSystem(ctx context.Context, orgID, runID string) (*domain.TokenTotals, error) {
+	return tokenTotals(ctx, s.admin, orgID, runID)
+}
+
+func tokenTotals(ctx context.Context, q queryer, orgID, runID string) (*domain.TokenTotals, error) {
+	row := q.QueryRowContext(ctx, `
 		SELECT COALESCE(MAX(model), ''),
 		       COALESCE(SUM(input_tokens), 0),
 		       COALESCE(SUM(output_tokens), 0),
@@ -980,7 +989,7 @@ func scanAgentRun(row *sql.Row, r *domain.AgentRun) error {
 	if err := row.Scan(
 		&r.ID, &r.TaskID, &r.Status, &r.Model, &r.StartedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &r.StopReason, &r.WorktreePath,
-		&r.ResultSummary, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &chainRunID, &chainStep,
+		&r.ResultSummary, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &chainRunID, &chainStep,
 		&r.MemoryMissing,
 	); err != nil {
 		return err
@@ -998,7 +1007,7 @@ func scanAgentRunRows(rows *sql.Rows, r *domain.AgentRun) error {
 	if err := rows.Scan(
 		&r.ID, &r.TaskID, &r.Status, &r.Model, &r.StartedAt, &completedAt,
 		&costUSD, &durationMs, &numTurns, &r.StopReason, &r.WorktreePath,
-		&r.ResultSummary, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &chainRunID, &chainStep,
+		&r.ResultSummary, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &chainRunID, &chainStep,
 		&r.MemoryMissing,
 	); err != nil {
 		return err

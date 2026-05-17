@@ -46,16 +46,16 @@ Usage notes:
     'list' to enumerate options before guessing.`
 
 // Handle dispatches workspace subcommands.
-func Handle(database *db.DB, args []string) {
+func Handle(stores db.Stores, args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
 		printHelp()
 		return
 	}
 	switch args[0] {
 	case "add":
-		runAdd(database, args[1:])
+		runAdd(stores, args[1:])
 	case "list":
-		runList(database, args[1:])
+		runList(stores, args[1:])
 	default:
 		exitErr("unknown workspace command: " + args[0])
 	}

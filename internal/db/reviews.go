@@ -132,4 +132,23 @@ type ReviewStore interface {
 	// the only difference is which Postgres pool the statement runs
 	// on; SQLite has one connection and the two variants collapse.
 	ByRunIDSystem(ctx context.Context, orgID, runID string) (*domain.PendingReview, error)
+
+	// --- Admin-pool variants for the cmd/exec event-triggered branch (SKY-302) ---
+	//
+	// The agent CLI subcommand `triagefactory exec gh ...` runs in
+	// the agent's subprocess and routes its writes via either
+	// SyntheticClaimsWithTx (manual runs, with the run's
+	// creator_user_id) or these `...System` admin-pool methods
+	// (event-triggered runs, where no user identity exists).
+	// Behavior matches the non-System variants verbatim; only the
+	// Postgres pool changes. SQLite collapses both since it has one
+	// connection.
+	CreateSystem(ctx context.Context, orgID string, r domain.PendingReview) error
+	GetSystem(ctx context.Context, orgID, reviewID string) (*domain.PendingReview, error)
+	DeleteSystem(ctx context.Context, orgID, reviewID string) error
+	LockSubmissionSystem(ctx context.Context, orgID, reviewID, body, event string) error
+	AddCommentSystem(ctx context.Context, orgID string, c domain.PendingReviewComment) error
+	UpdateCommentSystem(ctx context.Context, orgID, commentID, body string) error
+	DeleteCommentSystem(ctx context.Context, orgID, commentID string) error
+	ListCommentsSystem(ctx context.Context, orgID, reviewID string) ([]domain.PendingReviewComment, error)
 }

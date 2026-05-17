@@ -285,6 +285,16 @@ type AgentRunStore interface {
 	HasOtherActiveRunForTaskSystem(ctx context.Context, orgID, taskID, excludeRunID string) (bool, error)
 	InsertMessageSystem(ctx context.Context, orgID string, msg *domain.AgentMessage) (int64, error)
 	InsertYieldRequestSystem(ctx context.Context, orgID, runID string, req *domain.YieldRequest) (*domain.AgentMessage, error)
+
+	// TokenTotalsSystem mirrors TokenTotals but routes through the
+	// admin pool in Postgres. Consumed by agentmeta.Build, which
+	// formats the run-metadata footer from contexts that don't carry
+	// JWT claims (delegate-spawned agent subprocesses calling
+	// `triagefactory exec gh pr-create`, server post-approval
+	// submit paths). Adding the read on the admin pool keeps the
+	// footer-building utility from having to construct a synthetic-
+	// claims tx just to read one aggregate row.
+	TokenTotalsSystem(ctx context.Context, orgID, runID string) (*domain.TokenTotals, error)
 }
 
 // run_messages subtypes used by the SKY-139 yield-resume flow.

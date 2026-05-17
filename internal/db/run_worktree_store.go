@@ -84,4 +84,15 @@ type RunWorktreeStore interface {
 	// the corresponding DB row intact for the next sweep. Admin
 	// pool only; the only caller is the delegate goroutine.
 	DeleteByPathSystem(ctx context.Context, orgID, runID, path string) error
+
+	// --- Admin-pool variants for the cmd/exec event-triggered branch (SKY-302) ---
+	//
+	// `triagefactory exec workspace add` invoked by an event-triggered
+	// agent run has no user identity to wrap synthetic claims around,
+	// so its reservation reads/writes route through the admin pool
+	// here. Manual runs go through SyntheticClaimsWithTx + the
+	// non-System methods.
+	InsertSystem(ctx context.Context, orgID string, w domain.RunWorktree) (inserted bool, winningPath string, err error)
+	GetByRepoSystem(ctx context.Context, orgID, runID, repoID string) (*domain.RunWorktree, error)
+	DeleteByRepoSystem(ctx context.Context, orgID, runID, repoID string) error
 }
