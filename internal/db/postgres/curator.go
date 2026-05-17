@@ -129,13 +129,24 @@ func (s *curatorStore) InsertMessage(ctx context.Context, orgID string, msg *dom
 	if msg.CreatedAt.IsZero() {
 		msg.CreatedAt = time.Now().UTC()
 	}
+	// creator_user_id resolves from tf.current_user_id() set by
+	// SyntheticClaimsWithTx — same pattern every other app-pool
+	// store INSERT uses (projects, prompts, event_handlers, ...).
+	// The curator_messages_modify RLS WITH CHECK then gates on
+	// creator_user_id = tf.current_user_id(), so caller-supplied
+	// userID and policy-asserted current_user_id can't diverge.
+	// curator_messages.creator_user_id is NOT NULL with no DEFAULT
+	// in the Postgres baseline, so this binding is load-bearing —
+	// omitting it lets the INSERT fail RLS before the NOT NULL
+	// check fires, which is what the SKY-298 multi-user test
+	// originally tripped on.
 	var id int64
 	err := s.q.QueryRowContext(ctx, `
 		INSERT INTO curator_messages
-			(org_id, request_id, role, content, subtype, tool_calls, tool_call_id,
+			(org_id, creator_user_id, request_id, role, content, subtype, tool_calls, tool_call_id,
 			 is_error, metadata, model, input_tokens, output_tokens,
 			 cache_read_tokens, cache_creation_tokens, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6::jsonb, NULLIF($7, ''), $8,
+		VALUES ($1, tf.current_user_id(), $2, $3, $4, $5, $6::jsonb, NULLIF($7, ''), $8,
 		        $9::jsonb, NULLIF($10, ''), $11, $12, $13, $14, $15)
 		RETURNING id
 	`,
