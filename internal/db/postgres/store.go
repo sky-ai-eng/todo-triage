@@ -197,6 +197,11 @@ func New(admin, app *sql.DB) db.Stores {
 		// cleanup defers. org_id stays bound everywhere as defense
 		// in depth.
 		RunWorktrees: newRunWorktreeStore(app, admin),
+		// Orgs wires admin — see the OrgsStore interface comment for
+		// pool rationale. Background services iterate the active org
+		// set at boot/poll-tick; they have no JWT-claims context, and
+		// the iteration is by definition cross-org.
+		Orgs: newOrgsStore(admin),
 		// Curator wires the app pool. The per-project goroutine
 		// wraps each turn's writes in Tx.SyntheticClaimsWithTx
 		// under the requesting user's identity; the tx-bound
@@ -263,6 +268,7 @@ func NewForTx(tx *sql.Tx) db.TxStores {
 		Events:         newEventStore(tx, tx),
 		TaskMemory:     newTaskMemoryStore(tx, tx),
 		RunWorktrees:   newRunWorktreeStore(tx, tx),
+		Orgs:           newOrgsStore(tx),
 		Curator:        newCuratorStore(tx),
 	}
 }

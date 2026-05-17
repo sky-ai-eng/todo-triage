@@ -178,6 +178,12 @@ func (s *Store) txStoresFromTx(tx *sql.Tx, pending *db.PendingEventHooks) db.TxS
 		// writes commit autonomously, same shape Events /
 		// AgentRuns / TaskMemory use for their admin-pool halves.
 		RunWorktrees: newRunWorktreeStore(tx, s.admin),
+		// Orgs: tx-bound for shape parity. In practice OrgsStore is
+		// admin-pool by design (background-service iteration) and
+		// nothing inside WithTx legitimately calls ListActiveSystem,
+		// but composing it here keeps wiring drift impossible against
+		// the Stores bundle.
+		Orgs: newOrgsStore(tx),
 		// Curator: tx-bound — every method runs under the outer
 		// SyntheticClaimsWithTx's claims, which is exactly what
 		// curator_requests_modify / curator_messages_modify /

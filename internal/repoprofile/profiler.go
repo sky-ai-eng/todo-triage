@@ -15,7 +15,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/github"
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
@@ -32,13 +31,14 @@ type Profiler struct {
 	gh       *github.Client
 	database *sql.DB
 	repos    db.RepoStore // SKY-288: profile reads + upserts go through the store
+	orgs     db.OrgsStore // SKY-312: iterate active orgs at the top of each profile run
 	ws       *websocket.Hub
 }
 
 // NewProfiler creates a Profiler with the given GitHub client, DB handle,
-// repo store, and WS hub.
-func NewProfiler(gh *github.Client, database *sql.DB, repos db.RepoStore, ws *websocket.Hub) *Profiler {
-	return &Profiler{gh: gh, database: database, repos: repos, ws: ws}
+// repo store, orgs store, and WS hub.
+func NewProfiler(gh *github.Client, database *sql.DB, repos db.RepoStore, orgs db.OrgsStore, ws *websocket.Hub) *Profiler {
+	return &Profiler{gh: gh, database: database, repos: repos, orgs: orgs, ws: ws}
 }
 
 // repoWithDocs groups a repo profile with the documentation text to send to the LLM.
@@ -47,16 +47,56 @@ type repoWithDocs struct {
 	docs    string
 }
 
-// Run profiles the given repos (from config). For each, it fetches docs
-// (README.md, CLAUDE.md, AGENTS.md), then batches through Haiku for profiling.
-// If force is true, the TTL check is skipped (used for manual re-profile).
-func (p *Profiler) Run(ctx context.Context, repos []string, force bool) error {
+// Run iterates active orgs and profiles each one's configured repos.
+// SKY-312 outer loop: previously took a pre-fetched repo list and
+// profiled them against a single hardcoded org sentinel; now resolves
+// the per-org repo list inside the loop so a new org added between
+// boot and the next forced re-profile picks up correctly. Local mode
+// collapses to N=1 — the single runmode.LocalDefaultOrgID sentinel.
+//
+// If force is true, the TTL check is skipped (used for manual
+// re-profile triggered by a GitHub config change).
+//
+// Per-org errors are logged but do not abort the whole run. The
+// returned error is only non-nil if context is cancelled mid-flight;
+// individual-org failures degrade gracefully (row writes still happen
+// where possible, falls back to docs-only).
+func (p *Profiler) Run(ctx context.Context, force bool) error {
+	orgIDs, err := p.orgs.ListActiveSystem(ctx)
+	if err != nil {
+		return fmt.Errorf("list active orgs: %w", err)
+	}
+	for _, orgID := range orgIDs {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		repos, err := p.repos.ListConfiguredNamesSystem(ctx, orgID)
+		if err != nil {
+			log.Printf("[repoprofile] org %s: load configured repos: %v", orgID, err)
+			continue
+		}
+		if err := p.runOrg(ctx, orgID, repos, force); err != nil {
+			if ctx.Err() != nil {
+				return err
+			}
+			log.Printf("[repoprofile] org %s: %v", orgID, err)
+		}
+	}
+	return nil
+}
+
+// runOrg profiles one org's repos. Per-repo failures are logged and
+// the loop continues — partial progress is better than aborting the
+// whole batch on a transient GitHub API failure or a malformed repo
+// name. Cross-org repo dedup at the GitHub fetch layer (two orgs
+// both polling owner/repo doing two fetches) is a deferred concern
+// — local mode is N=1 so there's no immediate dedup pressure.
+func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, force bool) error {
 	if len(repos) == 0 {
-		log.Printf("[repoprofile] no repos configured, skipping")
 		return nil
 	}
 
-	log.Printf("[repoprofile] profiling %d configured repos", len(repos))
+	log.Printf("[repoprofile] org %s: profiling %d configured repos", orgID, len(repos))
 
 	// Resolve the clone protocol once for the whole run rather than
 	// re-loading config inside the per-repo loop. The setting can't
@@ -88,7 +128,7 @@ func (p *Profiler) Run(ctx context.Context, repos []string, force bool) error {
 
 		// Skip repos that were recently profiled (unless forced)
 		if !force {
-			existing, err := p.repos.GetSystem(ctx, runmode.LocalDefaultOrgID, name)
+			existing, err := p.repos.GetSystem(ctx, orgID, name)
 			if err != nil {
 				log.Printf("[repoprofile] %s: failed to check profile: %v", name, err)
 				continue
@@ -146,7 +186,7 @@ func (p *Profiler) Run(ctx context.Context, repos []string, force bool) error {
 		}
 
 		// Persist docs flags immediately so the UI can show them before profiling completes
-		if err := p.repos.UpsertSystem(ctx, runmode.LocalDefaultOrgID, prof); err != nil {
+		if err := p.repos.UpsertSystem(ctx, orgID, prof); err != nil {
 			log.Printf("[repoprofile] upsert %s (docs flags): %v", name, err)
 		}
 		if p.ws != nil {
@@ -194,7 +234,7 @@ func (p *Profiler) Run(ctx context.Context, repos []string, force bool) error {
 			toast.Warning(p.ws, fmt.Sprintf("Profiling failed for %s — rows saved without AI summary", strings.Join(repoNames, ", ")))
 			// Fallback: upsert without profile_text so the row at least exists.
 			for _, d := range batch {
-				if uErr := p.repos.UpsertSystem(ctx, runmode.LocalDefaultOrgID, d.profile); uErr != nil {
+				if uErr := p.repos.UpsertSystem(ctx, orgID, d.profile); uErr != nil {
 					log.Printf("[repoprofile] upsert %s (fallback): %v", d.profile.ID, uErr)
 				}
 			}
@@ -213,7 +253,7 @@ func (p *Profiler) Run(ctx context.Context, repos []string, force bool) error {
 				prof.ProfileText = text
 				prof.ProfiledAt = &now
 			}
-			if err := p.repos.UpsertSystem(ctx, runmode.LocalDefaultOrgID, prof); err != nil {
+			if err := p.repos.UpsertSystem(ctx, orgID, prof); err != nil {
 				log.Printf("[repoprofile] upsert %s: %v", prof.ID, err)
 				continue
 			}

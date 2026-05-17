@@ -15,7 +15,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 const (
@@ -74,7 +73,12 @@ func (t *Tracker) publish(evt domain.Event) {
 // is the "org/slug" list of teams the session user belongs to — used to
 // match team-based review requests (where the PR's reviewRequests list
 // contains the team, not the user's individual login).
-func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, userTeams, repos []string) (int, error) {
+//
+// orgID scopes every entity/task read + write to a single tenant.
+// The poller manager (SKY-312) iterates active orgs at the top of
+// each tick and calls this per org; in local mode that collapses to
+// the single runmode.LocalDefaultOrgID sentinel.
+func (t *Tracker) RefreshGitHub(orgID string, client *ghclient.Client, username string, userTeams, repos []string) (int, error) {
 	startedAt := time.Now()
 	// Phase 1: Discovery — find new PRs and register as entities.
 	discovered, err := t.discoverGitHub(client, username, repos)
@@ -98,7 +102,7 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, userTe
 		snap.NodeID = d.NodeID
 
 		sid := ghSourceID(snap.Repo, snap.Number)
-		entity, created, err := t.entities.FindOrCreateSystem(context.Background(), runmode.LocalDefaultOrgID, "github", sid, "pr", snap.Title, snap.URL)
+		entity, created, err := t.entities.FindOrCreateSystem(context.Background(), orgID, "github", sid, "pr", snap.Title, snap.URL)
 		if err != nil {
 			log.Printf("[tracker] error creating entity for %s: %v", sid, err)
 			continue
@@ -107,14 +111,14 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, userTe
 		if created {
 			// Seed the discovery snapshot.
 			snapJSON, _ := json.Marshal(snap)
-			if err := t.entities.UpdateSnapshotSystem(context.Background(), runmode.LocalDefaultOrgID, entity.ID, string(snapJSON)); err != nil {
+			if err := t.entities.UpdateSnapshotSystem(context.Background(), orgID, entity.ID, string(snapJSON)); err != nil {
 				log.Printf("[tracker] failed to seed snapshot for %s: %v", sid, err)
 			}
 			// If the PR is already terminal, mark the entity closed immediately
 			// so it doesn't sit in the active refresh set forever (Phase 3
 			// won't emit a merged/closed event because prev==curr).
 			if snap.Merged || snap.State == "CLOSED" || snap.State == "MERGED" {
-				if err := t.entities.MarkClosedSystem(context.Background(), runmode.LocalDefaultOrgID, entity.ID); err != nil {
+				if err := t.entities.MarkClosedSystem(context.Background(), orgID, entity.ID); err != nil {
 					log.Printf("[tracker] failed to mark entity %s closed on discovery: %v", sid, err)
 				}
 			} else if snap.Author != username && isReviewerMatch(snap.ReviewRequests, username, userTeams) {
@@ -140,12 +144,12 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, userTe
 		} else {
 			// Update title if changed.
 			if entity.Title != snap.Title {
-				_ = t.entities.UpdateTitleSystem(context.Background(), runmode.LocalDefaultOrgID, entity.ID, snap.Title)
+				_ = t.entities.UpdateTitleSystem(context.Background(), orgID, entity.ID, snap.Title)
 			}
 			// Reactivate if a previously-closed entity reappears as open
 			// (e.g., reopened PR).
 			if !snap.Merged && snap.State != "CLOSED" && snap.State != "MERGED" && entity.State == "closed" {
-				if reactivated, err := t.entities.ReactivateSystem(context.Background(), runmode.LocalDefaultOrgID, entity.ID); err != nil {
+				if reactivated, err := t.entities.ReactivateSystem(context.Background(), orgID, entity.ID); err != nil {
 					log.Printf("[tracker] error reactivating %s: %v", sid, err)
 				} else if reactivated {
 					log.Printf("[tracker] reactivated entity %s (reopened)", sid)
@@ -155,7 +159,7 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, userTe
 	}
 
 	// Phase 2: Refresh active entities.
-	entities, err := t.entities.ListActiveSystem(context.Background(), runmode.LocalDefaultOrgID, "github")
+	entities, err := t.entities.ListActiveSystem(context.Background(), orgID, "github")
 	if err != nil {
 		return 0, fmt.Errorf("list active github entities: %w", err)
 	}
@@ -204,7 +208,7 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, userTe
 			// review_requested tasks here. Entities proceeding to
 			// DiffPRSnapshots emit their own review_request_removed events.
 			if userTeams != nil && !isReviewerMatch(snap.ReviewRequests, username, userTeams) {
-				if stale, err := t.tasks.FindActiveByEntityAndTypeSystem(context.Background(), runmode.LocalDefaultOrg, e.ID, domain.EventGitHubPRReviewRequested); err == nil && len(stale) > 0 {
+				if stale, err := t.tasks.FindActiveByEntityAndTypeSystem(context.Background(), orgID, e.ID, domain.EventGitHubPRReviewRequested); err == nil && len(stale) > 0 {
 					meta, _ := json.Marshal(events.GitHubPRReviewRequestRemovedMetadata{
 						Author:   snap.Author,
 						Repo:     snap.Repo,
@@ -286,11 +290,11 @@ func (t *Tracker) RefreshGitHub(client *ghclient.Client, username string, userTe
 
 		// Update entity snapshot + title.
 		snapJSON, _ := json.Marshal(newSnap)
-		if err := t.entities.UpdateSnapshotSystem(context.Background(), runmode.LocalDefaultOrgID, item.entity.ID, string(snapJSON)); err != nil {
+		if err := t.entities.UpdateSnapshotSystem(context.Background(), orgID, item.entity.ID, string(snapJSON)); err != nil {
 			log.Printf("[tracker] error updating snapshot for %s: %v", item.entity.SourceID, err)
 		}
 		if item.entity.Title != newSnap.Title {
-			_ = t.entities.UpdateTitleSystem(context.Background(), runmode.LocalDefaultOrgID, item.entity.ID, newSnap.Title)
+			_ = t.entities.UpdateTitleSystem(context.Background(), orgID, item.entity.ID, newSnap.Title)
 		}
 
 		// Publish events to bus. Recording + routing happens downstream.
@@ -518,7 +522,12 @@ func (r JiraRules) doneMembersForKey(issueKey string) []string {
 // the snapshot (assignee_account_id) and predicate matching happens
 // downstream against the assignee_in / reporter_in / commenter_in
 // allowlists.
-func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, projects JiraRules) (int, error) {
+//
+// orgID scopes every entity read + write to a single tenant. SKY-312
+// — the poller manager iterates active orgs at the top of each tick
+// and calls this per org; in local mode that collapses to the single
+// runmode.LocalDefaultOrgID sentinel.
+func (t *Tracker) RefreshJira(orgID string, client *jiraclient.Client, baseURL string, projects JiraRules) (int, error) {
 	startedAt := time.Now()
 	terminal := func(snap domain.JiraSnapshot) bool {
 		rule := projects.ForKey(extractProject(snap.Key))
@@ -540,36 +549,36 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 
 	for _, state := range discovered {
 		snap := state.Snap
-		entity, created, err := t.entities.FindOrCreateSystem(context.Background(), runmode.LocalDefaultOrgID, "jira", snap.Key, "issue", snap.Summary, snap.URL)
+		entity, created, err := t.entities.FindOrCreateSystem(context.Background(), orgID, "jira", snap.Key, "issue", snap.Summary, snap.URL)
 		if err != nil {
 			log.Printf("[tracker] error creating entity for %s: %v", snap.Key, err)
 			continue
 		}
 		if created {
 			snapJSON, _ := json.Marshal(snap)
-			if err := t.entities.UpdateSnapshotSystem(context.Background(), runmode.LocalDefaultOrgID, entity.ID, string(snapJSON)); err != nil {
+			if err := t.entities.UpdateSnapshotSystem(context.Background(), orgID, entity.ID, string(snapJSON)); err != nil {
 				log.Printf("[tracker] failed to seed snapshot for %s: %v", snap.Key, err)
 			}
 			if state.Description != "" {
-				if err := t.entities.UpdateDescriptionSystem(context.Background(), runmode.LocalDefaultOrgID, entity.ID, state.Description); err != nil {
+				if err := t.entities.UpdateDescriptionSystem(context.Background(), orgID, entity.ID, state.Description); err != nil {
 					log.Printf("[tracker] failed to seed description for %s: %v", snap.Key, err)
 				}
 			}
 			if terminal(snap) {
-				if err := t.entities.MarkClosedSystem(context.Background(), runmode.LocalDefaultOrgID, entity.ID); err != nil {
+				if err := t.entities.MarkClosedSystem(context.Background(), orgID, entity.ID); err != nil {
 					log.Printf("[tracker] failed to mark entity %s closed on discovery: %v", snap.Key, err)
 				}
 			}
 		} else {
 			if entity.Title != snap.Summary {
-				_ = t.entities.UpdateTitleSystem(context.Background(), runmode.LocalDefaultOrgID, entity.ID, snap.Summary)
+				_ = t.entities.UpdateTitleSystem(context.Background(), orgID, entity.ID, snap.Summary)
 			}
 			if entity.Description != state.Description {
-				_ = t.entities.UpdateDescriptionSystem(context.Background(), runmode.LocalDefaultOrgID, entity.ID, state.Description)
+				_ = t.entities.UpdateDescriptionSystem(context.Background(), orgID, entity.ID, state.Description)
 			}
 			// Reactivate if a previously-closed issue reappears as open.
 			if !terminal(snap) && entity.State == "closed" {
-				if reactivated, err := t.entities.ReactivateSystem(context.Background(), runmode.LocalDefaultOrgID, entity.ID); err != nil {
+				if reactivated, err := t.entities.ReactivateSystem(context.Background(), orgID, entity.ID); err != nil {
 					log.Printf("[tracker] error reactivating %s: %v", snap.Key, err)
 				} else if reactivated {
 					log.Printf("[tracker] reactivated entity %s (reopened)", snap.Key)
@@ -579,7 +588,7 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 	}
 
 	// Phase 2: Refresh
-	entities, err := t.entities.ListActiveSystem(context.Background(), runmode.LocalDefaultOrgID, "jira")
+	entities, err := t.entities.ListActiveSystem(context.Background(), orgID, "jira")
 	if err != nil {
 		return 0, fmt.Errorf("list active jira entities: %w", err)
 	}
@@ -614,7 +623,7 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 			if err := json.Unmarshal([]byte(e.SnapshotJSON), &prevSnap); err != nil {
 				log.Printf("[tracker] corrupt jira snapshot for %s, reseeding: %v", e.SourceID, err)
 				snapJSON, _ := json.Marshal(newSnap)
-				_ = t.entities.UpdateSnapshotSystem(context.Background(), runmode.LocalDefaultOrgID, e.ID, string(snapJSON))
+				_ = t.entities.UpdateSnapshotSystem(context.Background(), orgID, e.ID, string(snapJSON))
 				continue
 			}
 		}
@@ -626,11 +635,11 @@ func (t *Tracker) RefreshJira(client *jiraclient.Client, baseURL string, project
 		events := DiffJiraSnapshots(prevSnap, newSnap, e.ID, projects.doneMembersForKey(newSnap.Key))
 
 		snapJSON, _ := json.Marshal(newSnap)
-		if err := t.entities.UpdateSnapshotSystem(context.Background(), runmode.LocalDefaultOrgID, e.ID, string(snapJSON)); err != nil {
+		if err := t.entities.UpdateSnapshotSystem(context.Background(), orgID, e.ID, string(snapJSON)); err != nil {
 			log.Printf("[tracker] error updating jira snapshot for %s: %v", e.SourceID, err)
 		}
 		if e.Title != newSnap.Summary {
-			_ = t.entities.UpdateTitleSystem(context.Background(), runmode.LocalDefaultOrgID, e.ID, newSnap.Summary)
+			_ = t.entities.UpdateTitleSystem(context.Background(), orgID, e.ID, newSnap.Summary)
 		}
 		// Description intentionally not updated here — batchFetchJira
 		// excludes the description field to save bandwidth, so newState's
