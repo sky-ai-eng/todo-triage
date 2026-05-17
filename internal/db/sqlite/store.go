@@ -63,6 +63,10 @@ func New(conn *sql.DB) db.Stores {
 		// connection so the dual-pool constructor collapses; the
 		// `...System` variants forward to the non-System bodies.
 		RunWorktrees: newRunWorktreeStore(conn, conn),
+		// Orgs is admin-pool in Postgres; SQLite collapses to the one
+		// connection. Callers are background services iterating the
+		// active org set at the top of each cycle.
+		Orgs: newOrgsStore(conn),
 		// Curator: the goroutine wraps each turn in
 		// Stores.Tx.SyntheticClaimsWithTx so the tx-bound variant
 		// (composed inside the tx.go runTx body) is what handles

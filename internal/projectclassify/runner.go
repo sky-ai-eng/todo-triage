@@ -7,7 +7,6 @@ import (
 	"sync"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // Runner manages the project-classification background loop. Mirrors
@@ -20,17 +19,19 @@ type Runner struct {
 	database *sql.DB
 	entities db.EntityStore
 	projects db.ProjectStore
+	orgs     db.OrgsStore // enumerate active orgs per cycle
 	trigger  chan struct{}
 	stop     chan struct{}
 	mu       sync.Mutex
 	running  bool
 }
 
-func NewRunner(database *sql.DB, entities db.EntityStore, projects db.ProjectStore) *Runner {
+func NewRunner(database *sql.DB, entities db.EntityStore, projects db.ProjectStore, orgs db.OrgsStore) *Runner {
 	return &Runner{
 		database: database,
 		entities: entities,
 		projects: projects,
+		orgs:     orgs,
 		trigger:  make(chan struct{}, 1),
 		stop:     make(chan struct{}),
 	}
@@ -86,18 +87,34 @@ func (r *Runner) run(ctx context.Context) {
 		r.mu.Unlock()
 	}()
 
-	entities, err := r.entities.ListUnclassifiedSystem(ctx, runmode.LocalDefaultOrgID)
+	orgIDs, err := r.orgs.ListActiveSystem(ctx)
 	if err != nil {
-		log.Printf("[classify] list unclassified entities: %v", err)
+		log.Printf("[classify] list active orgs: %v", err)
+		return
+	}
+	for _, orgID := range orgIDs {
+		r.runOrg(ctx, orgID)
+	}
+}
+
+// runOrg classifies one org's unclassified entities against its
+// projects. Per-org errors are logged and the loop continues — a
+// transient failure on one org shouldn't block classification on
+// other orgs in the cycle. Local mode collapses to N=1 (the
+// runmode.LocalDefaultOrgID sentinel) so behavior is unchanged.
+func (r *Runner) runOrg(ctx context.Context, orgID string) {
+	entities, err := r.entities.ListUnclassifiedSystem(ctx, orgID)
+	if err != nil {
+		log.Printf("[classify] org %s: list unclassified entities: %v", orgID, err)
 		return
 	}
 	if len(entities) == 0 {
 		return
 	}
 
-	projects, err := r.projects.ListSystem(ctx, runmode.LocalDefaultOrgID)
+	projects, err := r.projects.ListSystem(ctx, orgID)
 	if err != nil {
-		log.Printf("[classify] list projects: %v", err)
+		log.Printf("[classify] org %s: list projects: %v", orgID, err)
 		return
 	}
 
@@ -107,14 +124,14 @@ func (r *Runner) run(ctx context.Context) {
 		// project-creation popup is the path to retro-assign these once
 		// projects exist.
 		for _, e := range entities {
-			if err := r.entities.AssignProjectSystem(ctx, runmode.LocalDefaultOrgID, e.ID, nil, ""); err != nil {
-				log.Printf("[classify] stamp classified_at for %s: %v", e.ID, err)
+			if err := r.entities.AssignProjectSystem(ctx, orgID, e.ID, nil, ""); err != nil {
+				log.Printf("[classify] org %s: stamp classified_at for %s: %v", orgID, e.ID, err)
 			}
 		}
 		return
 	}
 
-	log.Printf("[classify] classifying %d entities against %d projects", len(entities), len(projects))
+	log.Printf("[classify] org %s: classifying %d entities against %d projects", orgID, len(entities), len(projects))
 
 	assigned := 0
 	skipped := 0
@@ -142,11 +159,11 @@ func (r *Runner) run(ctx context.Context) {
 			}
 			log.Printf("[classify] %s unassigned (best score: %d, threshold: %d)", e.ID, best, ConfidenceThreshold)
 		}
-		if err := r.entities.AssignProjectSystem(ctx, runmode.LocalDefaultOrgID, e.ID, winner, rationale); err != nil {
+		if err := r.entities.AssignProjectSystem(ctx, orgID, e.ID, winner, rationale); err != nil {
 			log.Printf("[classify] assign %s: %v", e.ID, err)
 		}
 	}
-	log.Printf("[classify] cycle complete: %d/%d assigned, %d retried-next-cycle", assigned, len(entities), skipped)
+	log.Printf("[classify] org %s: cycle complete: %d/%d assigned, %d retried-next-cycle", orgID, assigned, len(entities), skipped)
 }
 
 // allErrored returns true iff there's at least one vote and every vote

@@ -615,7 +615,7 @@ func main() {
 	// discovered entities against existing projects via per-project
 	// Haiku quorum vote. Sticky — only fires on entities with
 	// classified_at IS NULL, so re-polls don't re-classify.
-	classifier := projectclassify.NewRunner(database, stores.Entities, stores.Projects)
+	classifier := projectclassify.NewRunner(database, stores.Entities, stores.Projects, stores.Orgs)
 	classifier.Start()
 	log.Println("[classify] project classifier started (model: haiku)")
 	// System-service profile (D9a): kicked by any tenant's poll
@@ -640,7 +640,7 @@ func main() {
 		errorThrottleMu sync.Mutex
 		lastErrorToast  = map[string]time.Time{}
 	)
-	pollerMgr := poller.NewManager(database, bus, stores.Users, stores.Tasks, stores.Entities, stores.Repos)
+	pollerMgr := poller.NewManager(database, bus, stores.Users, stores.Tasks, stores.Entities, stores.Repos, stores.Orgs)
 	pollerMgr.OnError = func(source string, err error) {
 		errorThrottleMu.Lock()
 		if last, ok := lastErrorToast[source]; ok && time.Since(last) < errorToastMinInterval {
@@ -777,9 +777,8 @@ func main() {
 
 			// Re-profile, then signal ready and restart all pollers
 			go func() {
-				profiler := repoprofile.NewProfiler(ghClient, database, stores.Repos, wsHub)
-				repos, _ := stores.Repos.ListConfiguredNamesSystem(context.Background(), runmode.LocalDefaultOrgID)
-				if err := profiler.Run(context.Background(), repos, true); err != nil {
+				profiler := repoprofile.NewProfiler(ghClient, database, stores.Repos, stores.Orgs, wsHub)
+				if err := profiler.Run(context.Background(), true); err != nil {
 					log.Printf("[repoprofile] profiling failed: %v", err)
 				}
 				profileGate.Signal()
@@ -884,9 +883,8 @@ func main() {
 
 		// Profile repos, then signal ready, start pollers, and trigger scoring
 		go func() {
-			profiler := repoprofile.NewProfiler(ghClient, database, stores.Repos, wsHub)
-			repos, _ := stores.Repos.ListConfiguredNamesSystem(context.Background(), runmode.LocalDefaultOrgID)
-			if err := profiler.Run(context.Background(), repos, false); err != nil {
+			profiler := repoprofile.NewProfiler(ghClient, database, stores.Repos, stores.Orgs, wsHub)
+			if err := profiler.Run(context.Background(), false); err != nil {
 				log.Printf("[repoprofile] initial profiling failed: %v", err)
 			}
 			profileGate.Signal()
