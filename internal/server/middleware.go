@@ -13,6 +13,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	tfdb "github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/sessions"
 )
 
@@ -93,14 +94,31 @@ type authDeps struct {
 // nil at wrap time would leave the wrapper inert for the entire process
 // lifetime even after deps land.
 //
-// Local-mode behavior: when authDeps stays nil, the wrapper passes the
-// request through without setting any claim in context. Downstream
-// handlers (/api/me) detect the missing claim and write 401, which is
-// the right answer for a local-mode caller hitting a multi-mode-only
-// endpoint.
+// Local-mode behavior: when authDeps stays nil AND the process booted
+// in ModeLocal, the wrapper injects sentinel identity values into the
+// request context — a synthetic *verify.Claims carrying
+// runmode.LocalDefaultUserID as Subject, and ctxKeyOrgID =
+// runmode.LocalDefaultOrgID. Handlers then read identity uniformly via
+// ClaimsFrom + OrgIDFrom without branching on mode. The "local equals
+// multi at N=1" framing: handler code structure stays identical in
+// both modes; local mode just threads the sentinel rows everywhere a
+// real org/user UUID would otherwise flow.
+//
+// Multi-mode with nil authDeps is treated as a transient boot state
+// (SetAuthDeps lands after routes() registers handlers) and falls
+// through to the prior pass-through behavior. Downstream handlers that
+// require real claims (e.g. /api/me) detect the missing claim and 401;
+// masquerading as a sentinel-authed multi-mode request would be
+// strictly worse than 401.
 func (s *Server) withSession(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.authDeps == nil {
+			if runmode.Current() == runmode.ModeLocal {
+				ctx := context.WithValue(r.Context(), ctxKeyClaims, &verify.Claims{Subject: runmode.LocalDefaultUserID})
+				ctx = context.WithValue(ctx, ctxKeyOrgID, runmode.LocalDefaultOrgID)
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
 			next.ServeHTTP(w, r)
 			return
 		}
